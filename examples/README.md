@@ -19,7 +19,7 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 ## Callables and generics
 
 - `callables.ds` — named fns and capturing closures through fn-typed parameters, fn-typed returns as factories, trailing blocks, and fn collections over the scalar callable words.
-- `combinators.ds` — map, filter, and reduce staging their lambda as one Fn word and reentering the dispatcher per element.
+- `combinators.ds` — map, filter, and reduce staging their lambda as one Fn word and reentering the dispatcher per element; the @std list pair (zip, enumerate) as bodied generic library fns.
 - `generic_dispatch.ds` — transitive evidence: `impl[t: shows] tells for list[t]` lowers once and the concrete site stages the serving body's whole evidence area.
 - `trait_defaults.ds` — defaulted parameters across every call spelling, the trait the member default's single authority and the impl block its inherent member's.
 

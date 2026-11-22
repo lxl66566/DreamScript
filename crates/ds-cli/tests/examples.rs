@@ -91,7 +91,8 @@ fn combinators_run_their_lambdas_reentrantly() {
     // the dispatcher per element: map and filter answer fresh lists,
     // reduce folds (an empty list would answer its init), partition
     // splits into its two-list total at the call site, and the
-    // block-body println interleaves in element order
+    // block-body println interleaves in element order; the @std list
+    // pair (zip, enumerate) answers as the bodied generic library fns
     assert_eq!(
         run_ok(ds().arg("run").arg(example("combinators.ds"))),
         "doubled 5 2 10
@@ -104,6 +105,7 @@ visiting 5
 traced 10 50
 sum 15 joined alphabeta
 split 3 2
+zip 3 enum 2 5
 0
 "
     );

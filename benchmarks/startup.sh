@@ -36,7 +36,7 @@
 #
 # The ds interpreter is the release CLI, resolved exactly like run.sh:
 # DS_BIN wins, else <repo>/target/release/ds(.exe). Build it first with
-#   CARGO_TARGET_DIR=<shared target> cargo build -p ds-cli --release
+#   cargo build -p ds-cli --release
 
 set -u
 
@@ -91,7 +91,7 @@ esac
 [ "$runs" -gt 0 ] || usage
 
 # ---- ds binary ----------------------------------------------------------------
-# DS_BIN wins, else the repo's shared target dir (release/ds.exe on
+# DS_BIN wins, else the repo's target dir (release/ds.exe on
 # Windows, release/ds elsewhere) — same resolution as run.sh.
 
 ds_bin=""
@@ -106,7 +106,7 @@ else
     done
 fi
 if [ -z "$ds_bin" ]; then
-    echo "startup.sh: no ds binary (set DS_BIN or build: CARGO_TARGET_DIR=<target> cargo build -p ds-cli --release)" >&2
+    echo "startup.sh: no ds binary (set DS_BIN or build: cargo build -p ds-cli --release)" >&2
     exit 1
 fi
 

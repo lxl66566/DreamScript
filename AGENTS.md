@@ -53,4 +53,4 @@
 6. 如果有全局性的强约束，请更新进 AGNETS.md，不要太长。
 7. 所有架构/表示级裁决只考虑长远影响，不因短期迁移阵痛否决终局正确的方案。
 8. 使用多 subagent 并行开发时，nextest 等操作需要严格限制 job 数（例如 -j 4），避免 OOM。
-9. 并行 worktree 各用私有 target 目录，禁止共享，否则同一 package id 的产物互相覆盖、clean 互相删除。若 Windows 则规范位置：Dev Drive `V:` 下按 `仓库名/lane` 两级命名（`V:/targets/<repo>/<lane>`），各 worktree 用私有 `.cargo/config.toml`（`.git/info/exclude` 已排除 `.cargo/`）指向它；磁盘去重靠同卷 ReFS 块克隆（kache 编译缓存）。Dev Drive/VHDX/挂载等机器本地配置只属于 Windows 机器，禁止写进仓库
+9. 并行 worktree 各用私有 target 目录，禁止共享，否则同一 package id 的产物互相覆盖、clean 互相删除。

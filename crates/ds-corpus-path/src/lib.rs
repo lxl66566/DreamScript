@@ -1,20 +1,18 @@
 //! Run-time resolution of the `conformance/` corpus for test binaries.
 //!
-//! The workspace shares one `CARGO_TARGET_DIR` across git worktrees, so a
-//! test binary can outlive the worktree it was built in and then be served
-//! fresh from another lane, its compile-time `env!("CARGO_MANIFEST_DIR")`
+//! A test binary can outlive the worktree it was built in and then be
+//! served from another checkout, its compile-time `env!("CARGO_MANIFEST_DIR")`
 //! path dangling into the deleted checkout. Callers resolve the corpus at
 //! run time instead: the compile-time checkout first (a live lane judges
-//! its own corpus), then a walk up from the test binary (the shared target
-//! dir sits under a checkout root, so the walk reaches that root's corpus).
+//! its own corpus), then a walk up from the test binary (a target dir inside
+//! a checkout sits under that root, so the walk reaches its corpus).
 
 use std::path::{Path, PathBuf};
 
 /// The repository's `conformance/` directory, resolved at run time.
 ///
 /// Panics when neither the compile-time checkout nor any ancestor directory
-/// of the running binary holds the corpus (a `CARGO_TARGET_DIR` placed
-/// outside every checkout).
+/// of the running binary holds the corpus (a target dir outside every checkout).
 #[must_use]
 pub fn dir() -> PathBuf {
     resolve("../../conformance")

@@ -137,7 +137,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 ```
 
-The cargo-fuzz targets live in the separate `fuzz/` workspace (e.g. `cargo fuzz run fuzz_parse`); `benchmarks/run.sh` checks and times a release build against the other interpreters under POSIX sh. Parallel worktrees each keep a private target dir — a shared one overwrites same-package artifacts across lanes.
+The cargo-fuzz targets live in the separate `fuzz/` workspace (e.g. `cargo fuzz run fuzz_parse`); `benchmarks/run.sh` checks and times a release build against the other interpreters under POSIX sh.
 
 ## Documentation
 

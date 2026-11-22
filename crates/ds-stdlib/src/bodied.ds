@@ -8,9 +8,50 @@
 // imports stay bound through the linked surface. The ordering pair is
 // the first family (the library-boundary round): the float and
 // ord-generic spellings ride the later linked-surface rounds.
+//
+// The FP combinator family: the list transforms as plain generic
+// library fns. A generic body stages values only through the shapes it
+// can lower — tuples over the variable (a static word span) and the
+// native-backed seams — never through a bare type-variable word: a var
+// binding, a cons call, or a member push over the variable has no
+// static runtime kind, and an indexed or first read answers a union
+// member over the variable, all refusing at lowering. The builders
+// append through the concat member over a one-element literal, never
+// the push member: a dot-call's free tier prefers the flat name first,
+// so a user's private `push` declaration shadows the member call inside
+// these bodies and trips the file privacy refusal. zip pairs by the
+// nested scan whose inner guard is a catchall match (an `if` guarding a
+// type-variable-carrying write refuses at the branch reconcile; the
+// match spelling lowers). take, drop, flat_map, scan, and compose wait
+// behind the seams above (their residuals ride todo item 81).
 pub fn max (a: int, b: int) -> int {
   if a < b { b } else { a }
 }
 pub fn min (a: int, b: int) -> int {
   if a < b { a } else { b }
+}
+pub fn enumerate[t] (xs: list[t]) -> list[(int, t)] {
+  var out = list[(int, t)]()
+  var i: int = 0
+  for x in xs {
+    out = out.concat([(i, x)])
+    i += 1
+  }
+  out
+}
+pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
+  var out = list[(t, r)]()
+  var i: int = 0
+  for x in xs {
+    var j: int = 0
+    for y in ys {
+      match i - j {
+        0 => { out = out.concat([(x, y)]) }
+        _ => {}
+      }
+      j += 1
+    }
+    i += 1
+  }
+  out
 }

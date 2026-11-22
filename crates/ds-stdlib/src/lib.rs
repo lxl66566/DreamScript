@@ -176,7 +176,8 @@ pub const STD_MEMBERS_SOURCE: &str = include_str!("std_members.ds");
 /// The `@std` bodied members' file name inside the default package: the
 /// migrated declarations whose bodies are plain ds source over
 /// word-shaped atoms — the ordering pair (`max`/`min`) the
-/// library-boundary round landed, the later bodied migrations' home.
+/// library-boundary round landed, the list pair (`enumerate`/`zip`) the
+/// FP surface round — the later bodied migrations' home.
 pub const BODIED_FILE: &str = "std/bodied.ds";
 
 /// The `@std` bodied members' text: the one shape a linked call surface
@@ -470,6 +471,8 @@ mod tests {
             "wait",
             "time",
             "parse_json",
+            "enumerate",
+            "zip",
         ] {
             assert!(package.lookup_value(name).is_some(), "`{name}` is ambient");
         }
@@ -773,6 +776,12 @@ mod tests {
                 "`{name}` lives in the @std bodied file as a bodied member"
             );
         }
+        for name in ["enumerate", "zip"] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "`{name}` lives in the @std bodied file as a combinator"
+            );
+        }
         assert!(
             pkg_package.lookup_type("json").is_some(),
             "`json` lives in the @std json face beside the core"
@@ -815,6 +824,12 @@ mod tests {
             assert!(
                 core_package.lookup_value(name).is_none(),
                 "`{name}` left the shrunk core (the extern and the bodied pair both)"
+            );
+        }
+        for name in ["enumerate", "zip"] {
+            assert!(
+                core_package.lookup_value(name).is_none(),
+                "`{name}` left the shrunk core (the @std bodied file's own source)"
             );
         }
         assert!(
@@ -885,6 +900,12 @@ mod tests {
                 "the session composition keeps the bare `{name}`"
             );
         }
+        for name in ["enumerate", "zip"] {
+            assert!(
+                session_package.lookup_value(name).is_some(),
+                "the session composition keeps the bare combinator `{name}`"
+            );
+        }
         assert!(
             session_package.lookup_value("parse_json").is_some(),
             "the session composition keeps the bare `parse_json` (the face composed back)"
@@ -930,6 +951,12 @@ mod tests {
             assert!(
                 merged_package.lookup_value(name).is_some(),
                 "the merged reading keeps the bodied `{name}` (namespace-identical)"
+            );
+        }
+        for name in ["enumerate", "zip"] {
+            assert!(
+                merged_package.lookup_value(name).is_some(),
+                "the merged reading keeps the combinator `{name}` (namespace-identical)"
             );
         }
         assert!(

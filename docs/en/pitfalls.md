@@ -4,7 +4,7 @@ Invariants and lessons that prevent breakage, split into boards by area. Each en
 
 | Board | Covers | Read it when |
 |---|---|---|
-| `pitfalls/coordination.md` | Parallel agents and the shared cargo target dir, CI gate mechanics, corpus header discipline and goldens. | You run parallel agents, touch the workspace `Cargo.toml`, or a gate fails in a way that smells like staleness. |
+| `pitfalls/coordination.md` | Parallel agent lanes, CI gate mechanics, corpus header discipline and goldens. | You run parallel agents, touch the workspace `Cargo.toml`, or a gate fails in a way that smells like staleness. |
 | `pitfalls/front-end.md` | Scanner, grammar, diagnostics, packages and modules. | You change `ds-lex`, `ds-parse`, `ds-diag`, `ds-pkg`. |
 | `pitfalls/language-surface.md` | Ruled spellings that are easy to drift from. | You add or rename surface syntax. |
 | `pitfalls/lowering.md` | Lowering and typechecking invariants that a green unit test does not catch. | You change `ds-check`, `ds-lower`, or a uop shape. |

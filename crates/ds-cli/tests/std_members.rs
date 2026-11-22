@@ -10,6 +10,12 @@
 //! and a package compile over a std-declaring graph keeps the
 //! boundary the migration left: the ambient band is the shrunk core,
 //! a bare use an unknown name, the linked import the binding face.
+//! The FP combinator round (todo item 81) rides the same pins: the
+//! landed list pair are bodied members of the same file, so the bare
+//! spellings run through a script session while the linked import
+//! keeps the generic-head refusal until its crossing round (the take,
+//! drop, and flat_map shapes wait on the ambient splice's
+//! lowering-time-records seam, their residuals on todo item 81).
 
 use std::{
     env, fs,
@@ -365,6 +371,93 @@ fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
         text(&out.stdout),
         concat!("HI THERE hi there true\n", "yo there\n", "0\n",),
         "the string face answers over the link"
+    );
+    fs::remove_dir_all(&linked).expect("the temp tree removes");
+}
+
+/// The FP combinator round's program text: the landed list pair
+/// (`enumerate`, `zip`) through the bare spellings and the UFCS dot
+/// forms, the empty and shorter-side edges included.
+const COMBINATORS_MAIN: &str = concat!(
+    "fn main() -> int {\n",
+    "  const xs = [1, 2, 3, 4, 5]\n",
+    "  const pairs = zip(xs, [\"a\", \"b\"])\n",
+    "  const shorter = zip([7, 8], [\"x\", \"y\", \"z\"])\n",
+    "  const words = [\"alpha\", \"beta\", \"gamma\"]\n",
+    "  const enumd = enumerate(words)\n",
+    "  println(\"zip ${pairs.len()} ${shorter.len()} enum ${enumd.len()} \
+     ${xs.enumerate().len()}\")\n",
+    "  println(\"edge ${zip(xs, list[int]()).len()} ${enumerate(list[int]()).len()}\")\n",
+    "  0\n",
+    "}\n",
+);
+const COMBINATORS_OUT: &str = concat!("zip 2 2 enum 3 5\n", "edge 0 0\n", "0\n",);
+
+/// The landed pair runs cold and serves warm under the same answer:
+/// the script session composes the bodied file back beside the shrunk
+/// core (the implicit resolution over the implicit `@std` graph), the
+/// generic bodies lowering as ambient bodies through the seams their
+/// shapes cover.
+#[test]
+fn the_bare_list_pair_runs_through_a_bare_script() {
+    let file = script("combinators", COMBINATORS_MAIN);
+    let entry = file.to_str().expect("temp path is UTF-8");
+    let cold = run(&["run", entry]);
+    assert_eq!(
+        cold.status.code(),
+        Some(0),
+        "the cold run exits 0: {}",
+        text(&cold.stderr)
+    );
+    assert_eq!(text(&cold.stdout), COMBINATORS_OUT, "the cold run answers");
+    let warm = run(&["run", entry]);
+    assert_eq!(warm.status.code(), Some(0), "the warm run exits 0");
+    assert_eq!(
+        text(&warm.stdout),
+        COMBINATORS_OUT,
+        "the warm run answers identically"
+    );
+    fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
+}
+
+/// The landed pair's linked-surface boundary over a std-declaring graph:
+/// the bare use is an unknown name over the shrunk core, and the linked
+/// import keeps the generic-head refusal (a type-argumented signature
+/// rides the entry faces alone until its crossing round) — the same
+/// seam the string face's list-returning pair keeps.
+#[test]
+fn a_std_declared_root_refuses_the_combinator_link() {
+    let bare = write_root("comb-core", &std_manifest(), &[(
+        "app.ds",
+        "fn main() -> int {\n  zip([1, 2], [\"a\"])\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&bare)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the bare use over the core refuses"
+    );
+    assert!(
+        text(&out.stderr).contains("unknown name `zip`"),
+        "the refusal names the missing member: {}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(&bare).expect("the temp tree removes");
+
+    let linked = write_root("comb-link", &std_manifest(), &[(
+        "app.ds",
+        "import @std (zip)\n\nfn main() -> int {\n  zip([1, 2], [\"a\"]).len()\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&linked)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the linked import refuses the generic head"
+    );
+    assert!(
+        text(&out.stderr).contains("DS4021"),
+        "the refusal is the linked-surface's head seam: {}",
+        text(&out.stderr)
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }

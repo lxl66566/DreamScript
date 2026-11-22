@@ -11,7 +11,7 @@
 #                              meta line first (date plus the interpreter
 #                              versions), so a saved file is self-describing.
 # The ds interpreter is the release CLI: build it first with
-#   CARGO_TARGET_DIR=<shared target> cargo build -p ds-cli --release
+#   cargo build -p ds-cli --release
 # and point DS_BIN at the binary when it is not at <repo>/target/release/ds.
 # Every ds invocation forces the cold path (`--no-cache`): the suite
 # measured the full pipeline before the script-mode dsmod cache existed,
@@ -36,7 +36,7 @@ fi
 
 # ---- interpreters ------------------------------------------------------------
 
-# The release ds binary: DS_BIN wins, else the repo's shared target dir
+# The release ds binary: DS_BIN wins, else the repo's target dir
 # (release/ds.exe on Windows, release/ds elsewhere).
 ds_bin=""
 if [ -n "${DS_BIN:-}" ]; then
@@ -149,7 +149,7 @@ fi
 # silent SKIP here would leave every ds kernel unmeasured with the run
 # still green.
 if [ -z "$ds_bin" ]; then
-    echo "run.sh: no ds binary (set DS_BIN or build: CARGO_TARGET_DIR=<target> cargo build -p ds-cli --release)" >&2
+    echo "run.sh: no ds binary (set DS_BIN or build: cargo build -p ds-cli --release)" >&2
     exit 1
 fi
 
