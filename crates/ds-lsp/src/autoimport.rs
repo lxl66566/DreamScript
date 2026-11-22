@@ -9,12 +9,14 @@
 //! while a registration over the shrunk core (a declaring graph's
 //! ambient) carries none of them and the table serves the offers alone,
 //! each member joining the answer as its own item. The table is the
-//! tree's own sources resolved beside the core — the reserved package's
-//! members are a toolchain constant like the ambient itself, never a
-//! served dep artifact. The visibility gate is the checker's own export
-//! predicate ([`ds_check::Vis::exported`], the same one an `@std` import
-//! selection validates against): a private or `pub(pkg)` name is never
-//! a candidate, so no offer ever imports one.
+//! tree's own sources — the package's member file resolved beside the
+//! core, and the migrated json and string faces composed into the @std
+//! bundle's core member (their free seam calls stay same-file there) —
+//! the reserved package's members are a toolchain constant like the
+//! ambient itself, never a served dep artifact. The visibility gate is
+//! the checker's own export predicate ([`ds_check::Vis::exported`], the
+//! same one an `@std` import selection validates against): a private or
+//! `pub(pkg)` name is never a candidate, so no offer ever imports one.
 //!
 //! The edit merges into a plain `@std` row when the file carries one — a
 //! selection appended after the last entry, or a selection list added to
@@ -163,17 +165,24 @@ struct StdMember {
 }
 
 /// The `@std` package's own members from the tree's sources, built once
-/// per process: the members' file resolved beside the shrunk core — the
-/// reserved package's own compile shape — keeping its exported defs
-/// alone. The session's in-process knowledge of the reserved package,
-/// mirroring the ambient's own-parse precedent: a served dep artifact
-/// never feeds the tier.
+/// per process: the members' file resolved beside the shrunk core, and
+/// the migrated json and string faces read out of the bundle's own
+/// compile shape — the reserved package's own registrations. The
+/// session's in-process knowledge of the reserved package, mirroring
+/// the ambient's own-parse precedent: a served dep artifact never feeds
+/// the tier.
 fn std_members() -> &'static [StdMember] {
     static MEMBERS: LazyLock<Vec<StdMember>> = LazyLock::new(|| {
-        exported_std_members(
+        let mut members = exported_std_members(
             ds_stdlib::AMBIENT_CORE_SOURCE,
             ds_stdlib::STD_MEMBERS_SOURCE,
-        )
+        );
+        members.extend(exported_face_members(
+            ds_stdlib::AMBIENT_CORE_SOURCE,
+            ds_stdlib::BUNDLE_CORE_SOURCE,
+            ds_stdlib::CODEC_SOURCE,
+        ));
+        members
     });
     &MEMBERS
 }
@@ -194,6 +203,36 @@ fn exported_std_members(core: &str, members: &str) -> Vec<StdMember> {
     package
         .defs()
         .filter(|def| def.span.file == members_file && def.vis.exported())
+        .map(|def| StdMember {
+            name: def.name.clone(),
+            kind: def.kind,
+        })
+        .collect()
+}
+
+/// The migrated faces' exported members: the json and string faces ride
+/// composed into the @std bundle's core member (the json face's free
+/// calls into the core's private collection externs stay same-file with
+/// them, and its driver impls name the codec face's traits), so their
+/// names read out of the bundle's own compile shape — `composed` (the
+/// bundle core, beginning with `core` verbatim) resolved beside the
+/// codec file, the exported defs past the core's own extent alone, the
+/// boundary the composing separator sits at. The same export gate and
+/// the same generation-side failure discipline as the pair shape above.
+fn exported_face_members(core: &str, composed: &str, codec: &str) -> Vec<StdMember> {
+    let mut files = Files::new();
+    let composed_file = files.add_source(ds_stdlib::AMBIENT_FILE, composed);
+    let codec_file = files.add_source(ds_stdlib::CODEC_FILE, codec);
+    let composed_ast = ds_parse::parse(&files, composed_file).expect("the bundle core parses");
+    let codec_ast = ds_parse::parse(&files, codec_file).expect("the codec face parses");
+    let (package, _, diags) = ds_check::resolve_package(&[composed_ast, codec_ast]);
+    assert!(diags.is_empty(), "the composed shape resolves: {diags:?}");
+    let boundary = u32::try_from(core.len()).expect("the core fits u32 byte offsets");
+    package
+        .defs()
+        .filter(|def| {
+            def.span.file == composed_file && def.span.start > boundary && def.vis.exported()
+        })
         .map(|def| StdMember {
             name: def.name.clone(),
             kind: def.kind,
@@ -408,6 +447,80 @@ mod tests {
             ("response", DefKind::Struct),
             ("urls", DefKind::Const),
         ]);
+        // The table the tier reads composes the members' file with the
+        // migrated faces: every half's names ride it.
+        let names: Vec<&str> = std_members()
+            .iter()
+            .map(|member| member.name.as_str())
+            .collect();
+        for name in ["urls", "parse_json", "to_upper", "replace"] {
+            assert!(names.contains(&name), "`{name}` rides the table");
+        }
+    }
+
+    #[test]
+    fn the_std_members_table_carries_the_composed_faces() {
+        // The migrated json and string faces: every exported name, kinds
+        // and all, read out of the bundle's own compile shape — the
+        // table's composed half, source order within the faces. The json
+        // face's bodied declarations are const-of-lambda bindings (F2),
+        // the string face's extern entries fns.
+        let members = exported_face_members(
+            ds_stdlib::AMBIENT_CORE_SOURCE,
+            ds_stdlib::BUNDLE_CORE_SOURCE,
+            ds_stdlib::CODEC_SOURCE,
+        );
+        let rows: Vec<(&str, DefKind)> = members
+            .iter()
+            .map(|member| (member.name.as_str(), member.kind))
+            .collect();
+        assert_eq!(rows, [
+            ("parse_json", DefKind::Const),
+            ("to_json", DefKind::Const),
+            ("json_member", DefKind::Const),
+            ("json_as_int", DefKind::Const),
+            ("json_as_float", DefKind::Const),
+            ("json_as_bool", DefKind::Const),
+            ("json_as_string", DefKind::Const),
+            ("json_as_array", DefKind::Const),
+            ("json_as_object", DefKind::Const),
+            ("json_as_byte", DefKind::Const),
+            ("json_as_u32", DefKind::Const),
+            ("json_as_char", DefKind::Const),
+            ("json_as_bytes", DefKind::Const),
+            ("json_of_byte", DefKind::Const),
+            ("json_of_u32", DefKind::Const),
+            ("json_of_char", DefKind::Const),
+            ("json_of_bytes", DefKind::Const),
+            ("join", DefKind::Fn),
+            ("trim", DefKind::Fn),
+            ("parse_int", DefKind::Fn),
+            ("parse_float", DefKind::Fn),
+            ("split", DefKind::Fn),
+            ("substring", DefKind::Fn),
+            ("to_upper", DefKind::Fn),
+            ("to_lower", DefKind::Fn),
+            ("char_at", DefKind::Fn),
+            ("contains", DefKind::Fn),
+            ("index_of", DefKind::Fn),
+            ("replace", DefKind::Fn),
+        ]);
+    }
+
+    #[test]
+    fn the_faces_table_reads_past_the_core_boundary_alone() {
+        // The boundary is the whole filter's core half: a composed core
+        // whose tail carries one exported and one private face member
+        // answers the exported tail name alone — the core's own names
+        // stay out (the spans never pass the boundary) and the
+        // unexported tail name with them (the gate).
+        let core = "pub tag int\nfn core_helper() -> int {\n  1\n}\n";
+        let tail = "fn face_helper() -> int {\n  1\n}\npub fn face_call(n: int) -> int { n }\n";
+        let composed = format!("{core}\n{tail}");
+        let codec = "pub trait enc {\nfn e(self) -> int\n}\n";
+        let members = exported_face_members(core, &composed, codec);
+        let names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
+        assert_eq!(names, ["face_call"]);
     }
 
     #[test]

@@ -3026,12 +3026,47 @@ mod tests {
             items.iter().all(|item| item.label != "row"),
             "an already-selected member offers nothing: {items:?}"
         );
+        // The migrated string face's member offers the same way: the
+        // face's names left the shrunk core, so the table's composed
+        // half serves each behind any prefix it matches.
+        let file = open(
+            &mut session,
+            "e.ds",
+            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
+        );
+        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the string face's member offers");
+        let edits = item
+            .additional_text_edits
+            .as_ref()
+            .expect("the offer imports");
+        assert_eq!(edits[0].new_text, "import @std (to_upper)\n\n");
+        // The json face's members ride the same half.
+        let file = open(
+            &mut session,
+            "f.ds",
+            "fn probe() -> string {\n  parse_js(\"[]\")\n}\n",
+        );
+        let items = session.completion(file, 1, 10).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "parse_json")
+            .expect("the json face's member offers");
+        assert_eq!(
+            item.additional_text_edits
+                .as_ref()
+                .expect("the offer imports")[0]
+                .new_text,
+            "import @std (parse_json)\n\n"
+        );
         // The ambient's own members keep their offers over the core: the
         // composed set's ambient half. `concat` is the representative —
         // the core string face's own seam, still core-owned after the
-        // string face's migration (the migrated spellings stay unoffered
-        // over a core-shaped registration until the LSP gains implicit
-        // resolution, the same state the json face's names ride).
+        // string face's migration offered through the members' table
+        // above.
         let file = open(
             &mut session,
             "d.ds",
