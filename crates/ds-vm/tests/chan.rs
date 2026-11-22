@@ -19,6 +19,9 @@
 //!   `chan_new` refuses a bound below one.
 //! - cancellation: a channel-parked child under a sibling's first failure is cut at the
 //!   resume-shaped point, the boundary reporting it `Cancelled`.
+//! - the eager start: a spawned-but-unentered nursery child runs while its joiner parks on the
+//!   empty channel's recv (the in-language nursery block's own child the only sender), and a first
+//!   child's trap stays contained to the boundary while the later sibling's send still lands.
 
 use ds_vm::{
     ChildOutcome, Const, ConstFuncRef, FrameAnswer, FunctionDef, JoinOutcome, ModuleRegistry,
@@ -29,7 +32,10 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
-    native::{BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAN_SEND},
+    native::{
+        BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAN_SEND, BUILTIN_NURSERY_JOIN,
+        BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
+    },
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -508,4 +514,204 @@ fn a_channel_parked_child_is_cut_under_a_siblings_first_failure() {
         },
         other => panic!("a failed join: {other:?}"),
     }
+}
+
+/// The eager-start fixtures' pool: the channel seams, the nursery seams,
+/// the join, the payload, and the spawnees' function words.
+fn eager_pool() -> Vec<Const> {
+    vec![
+        builtin(BUILTIN_CHAN_NEW),      // k0
+        builtin(BUILTIN_CHAN_SEND),     // k1
+        builtin(BUILTIN_CHAN_RECV),     // k2
+        builtin(BUILTIN_NURSERY_OPEN),  // k3
+        builtin(BUILTIN_NURSERY_SPAWN), // k4
+        builtin(BUILTIN_NURSERY_JOIN),  // k5
+        Const::I64(77),                 // k6: the sent payload
+    ]
+}
+
+fn eager_ref(index: u32) -> Const {
+    Const::FuncRef(ConstFuncRef::Named {
+        module: "ch".into(),
+        func: index,
+    })
+}
+
+fn eager_def(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    pool: Vec<Const>,
+    body: &[Uop],
+) -> FunctionDef {
+    FunctionDef {
+        name: name.into(),
+        layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
+        pool,
+        code: assemble(body).expect("fixture body encodes"),
+    }
+}
+
+/// `(ch: Ref) -> int`: one send of 77 — the waker the joiner parks on.
+fn eager_sender_def() -> FunctionDef {
+    eager_def("eager_sender", &[Ref, Raw, Raw], 1, 2, eager_pool(), &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(6) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 2,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+/// `() -> int`: an immediate division by zero — the first failure.
+fn eager_trapper_def() -> FunctionDef {
+    eager_def(
+        "eager_trapper",
+        &[I64, I64],
+        0,
+        0,
+        vec![Const::I64(1), Const::I64(0)],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Kimm { dst: 0, kidx: k(0) },
+            Uop::Kimm { dst: 1, kidx: k(1) },
+            Uop::DivI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// `(cap: int) -> int`: the in-language nursery block — open the
+/// nursery, spawn `trapper` first when staged (the first failure in
+/// spawn order), then the sender closure (the channel its one capture),
+/// park on the empty channel's recv, then the debug join answering the
+/// failed-children count. The joiner's recv alone never wakes: only the
+/// eagerly started children do.
+fn eager_main_def(trapper: Option<u32>) -> FunctionDef {
+    let mut pool = eager_pool();
+    let spawn_trapper: &[Uop] = if let Some(idx) = trapper {
+        pool.push(eager_ref(idx)); // k7: the trapper's scalar word
+        pool.push(eager_ref(0)); // k8: the sender's word for the closure
+        &[
+            Uop::Kconst { dst: 2, kidx: k(7) },
+            Uop::Mov { dst: 5, src: 0 },
+            Uop::Mov { dst: 6, src: 2 },
+            Uop::Call {
+                callee: k(4),
+                nargs: 2,
+            },
+        ]
+    } else {
+        pool.push(eager_ref(0)); // k7: the sender's word for the closure
+        &[]
+    };
+    let sender_kidx = k(7 + u16::from(trapper.is_some()));
+    let mut body = vec![
+        Uop::Funcf { frame_slots: 7 },
+        // chan_new(cap): the channel word lands on overlay word 5
+        Uop::Mov { dst: 5, src: 0 },
+        Uop::Call {
+            callee: k(0),
+            nargs: 1,
+        },
+        Uop::Mov { dst: 1, src: 5 },
+        // the open: the nursery id lands on word 5
+        Uop::Call {
+            callee: k(3),
+            nargs: 0,
+        },
+        Uop::Mov { dst: 0, src: 5 },
+    ];
+    body.extend_from_slice(spawn_trapper);
+    body.extend_from_slice(&[
+        // the sender closure over the channel, then its spawn
+        Uop::Kconst {
+            dst: 2,
+            kidx: sender_kidx,
+        },
+        Uop::Mov { dst: 5, src: 1 },
+        Uop::ClosureNew {
+            dst: 3,
+            func: 2,
+            n: 1,
+        },
+        Uop::Mov { dst: 5, src: 0 },
+        Uop::Mov { dst: 6, src: 3 },
+        Uop::Call {
+            callee: k(4),
+            nargs: 2,
+        },
+        // the joiner parks on the empty channel
+        Uop::Mov { dst: 5, src: 1 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        Uop::Mov { dst: 4, src: 5 },
+        // the scope-exit join: the failed-children count answers
+        Uop::Mov { dst: 5, src: 0 },
+        Uop::Call {
+            callee: k(5),
+            nargs: 1,
+        },
+        Uop::AddI64 {
+            dst: 4,
+            lhs: 4,
+            rhs: 5,
+        },
+        Uop::Ret { src: 4 },
+    ]);
+    eager_def(
+        "eager_main",
+        &[I64, Ref, SlotType::Fn, Ref, Raw, Raw, Raw],
+        1,
+        2,
+        pool,
+        &body,
+    )
+}
+/// The eagerly started child wakes its own parked joiner: the main fiber
+/// parks on an empty channel's recv, and only the spawned-but-unentered
+/// child's send can wake it — the executor starts the Ready child while
+/// the joiner parks instead of deadlocking on the stall guard.
+#[test]
+fn an_eagerly_started_child_wakes_its_own_parked_joiner() {
+    let mut vm = Vm::new(registry(vec![eager_sender_def(), eager_main_def(None)]));
+    let answer = vm
+        .run("ch", "eager_main", &[Value::I64(1)])
+        .expect("the eagerly started child woke its joiner");
+    assert_eq!(
+        answer,
+        FrameAnswer::one(Value::I64(77)),
+        "the parked recv answered the child's send beside the clean count"
+    );
+}
+
+/// The eager containment: a first child that traps while the joiner
+/// parks is the nursery's first failure — the boundary counts it, the
+/// host run never sees the trap — and the later sibling's straight-line
+/// send still lands, so the woken recv answers beside the trapped count.
+#[test]
+fn an_eager_childs_trap_is_contained_and_counted_at_the_join() {
+    let mut vm = Vm::new(registry(vec![
+        eager_sender_def(),
+        eager_trapper_def(),
+        eager_main_def(Some(1)),
+    ]));
+    let answer = vm
+        .run("ch", "eager_main", &[Value::I64(1)])
+        .expect("the trapped child contained, the joiner woke anyway");
+    assert_eq!(
+        answer,
+        FrameAnswer::one(Value::I64(78)),
+        "the recv answered 77 beside the boundary's trapped count 1"
+    );
 }

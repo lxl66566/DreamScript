@@ -1097,6 +1097,18 @@ pub(crate) enum ExecutorStep {
     HostAnswer(FrameAnswer),
 }
 
+/// The eager pass's outcome over one started child.
+enum EagerPass {
+    /// Nothing left to start.
+    Idle,
+    /// One child drove to a park or a death (its outcome ledgered); the
+    /// scan continues before the executor waits.
+    Drove,
+    /// The drive ended on the host fiber's death: its answer ends the
+    /// host drive.
+    Host(FrameAnswer),
+}
+
 /// A native answer's head word — the word the switch payload delivers
 /// onto the parked call site (the full answer overlays after the
 /// switch).
@@ -5788,13 +5800,37 @@ impl Vm {
     /// The single-thread executor's continuation after a drive went
     /// quiet on a world park (the 2026-11-21 ruling: the drive runs the
     /// next ready fiber, FIFO): enter the next woken fiber, and when
-    /// nothing is ready, wait on the reactor. `HostAnswer` surfaces
-    /// `host_fiber`'s own completion (the root drive's program answer,
-    /// a resumed fiber's answer); any other completed orphan crosses to
-    /// the host here and the executor keeps going.
+    /// nothing is ready, eagerly start the parked joiner's own Ready
+    /// nursery children (a spawned-but-unentered child otherwise runs
+    /// only under its join drive), and when nothing is runnable, wait on
+    /// the reactor. `HostAnswer` surfaces `host_fiber`'s own completion
+    /// (the root drive's program answer, a resumed fiber's answer); any
+    /// other completed orphan crosses to the host here and the executor
+    /// keeps going.
     pub(crate) fn executor_continue(&mut self, host_fiber: FiberId) -> Result<ExecutorStep, Trap> {
         loop {
             while let Some(fiber) = self.sched.pop_ready() {
+                // the executor's own children drive contained: a child's
+                // trap is its nursery's first failure, reported at the
+                // boundary like a sweep's drive reports it
+                if fiber != host_fiber && self.owned_parked_child(fiber) {
+                    match self.enter_woken(fiber) {
+                        Ok(Woken::Step(step)) => {
+                            if let Some(answer) = self.drive_owned_child(step, host_fiber)? {
+                                return Ok(ExecutorStep::HostAnswer(answer));
+                            }
+                        },
+                        // the completed span rides the nursery ledger,
+                        // and a quiet entry was cut elsewhere — the
+                        // sweep's own woken-child discard
+                        Ok(Woken::Completed(_) | Woken::Quiet) => {},
+                        Err(trap) => {
+                            self.host_release();
+                            self.trap_child(fiber, &trap);
+                        },
+                    }
+                    continue;
+                }
                 match self.enter_woken(fiber)? {
                     Woken::Step(step) => return Ok(ExecutorStep::Continue(step)),
                     Woken::Completed(answer) => {
@@ -5811,7 +5847,125 @@ impl Vm {
                     Woken::Quiet => {},
                 }
             }
+            match self.eager_start(host_fiber)? {
+                EagerPass::Idle => {},
+                // a child drove to a park or a death: rescan before the
+                // wait — its wake may have queued a fiber, and later
+                // Ready siblings still stand
+                EagerPass::Drove => continue,
+                EagerPass::Host(answer) => {
+                    return Ok(ExecutorStep::HostAnswer(answer));
+                },
+            }
             self.wait_world()?;
+        }
+    }
+
+    /// Whether the open nursery `nursery`'s owner is a live parked
+    /// fiber: the in-language block's joiner itself waits (a world op, a
+    /// channel op, an in-language resume, a host suspension), so its
+    /// children are the executor's to start. A dead owner's children
+    /// release cold at the release doors without ever running.
+    fn owner_parked(&self, nursery: &Nursery) -> bool {
+        nursery.owner.is_some_and(|owner| {
+            self.pool
+                .get(owner.index())
+                .is_some_and(|slot| !matches!(slot.state, FiberState::Running | FiberState::Dead))
+        })
+    }
+
+    /// Whether `fiber` is a nursery child the executor owns while its
+    /// joiner parks: nobody resumed it in-language, and the open nursery
+    /// it belongs to has a live parked owner. The host-supervised root
+    /// nursery (no owner) keeps its children for the host's explicit
+    /// join drive.
+    fn owned_parked_child(&self, fiber: FiberId) -> bool {
+        self.pool.get(fiber.index()).is_some_and(|slot| {
+            slot.resumer.is_none()
+                && slot.nursery.is_some_and(|id| {
+                    self.nurseries.get(id.index()).is_some_and(|nursery| {
+                        nursery.state == NurseryState::Open && self.owner_parked(nursery)
+                    })
+                })
+        })
+    }
+
+    /// The next Ready child of an open parked-owner nursery, in nursery
+    /// slot order then spawn order — the eager start's scan.
+    fn eager_ready_child(&self) -> Option<FiberId> {
+        for (slot, nursery) in self.nurseries.iter().enumerate() {
+            if nursery.state != NurseryState::Open || !self.owner_parked(nursery) {
+                continue;
+            }
+            let id = NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"));
+            for &child in &nursery.children {
+                if self.pool[child.index()].nursery == Some(id)
+                    && self.pool[child.index()].state == FiberState::Ready
+                {
+                    return Some(child);
+                }
+            }
+        }
+        None
+    }
+
+    /// Starts one Ready child — the first entry runs the spawn arguments,
+    /// the dropped payload the switch convention — and drives it under
+    /// the contained pass; the pass answers whether anything started.
+    fn eager_start(&mut self, host_fiber: FiberId) -> Result<EagerPass, Trap> {
+        let Some(child) = self.eager_ready_child() else {
+            return Ok(EagerPass::Idle);
+        };
+        let step = self.switch_in(child, Value::Tag(PLATFORM_NONE));
+        match self.drive_owned_child(step, host_fiber)? {
+            Some(answer) => Ok(EagerPass::Host(answer)),
+            None => Ok(EagerPass::Drove),
+        }
+    }
+
+    /// One owned child's drive, sweep-shaped: the child's world parks
+    /// register their waits, its traps ledger into its nursery and raise
+    /// the flag exactly like a sweep's drive (the boundary reports them,
+    /// the host drive never sees one), a cross-nursery join drains
+    /// through the interlock machinery, and a death discards the drive's
+    /// answer — the nursery ledger holds the span the boundary collects.
+    /// The host drive answers its own fiber alone, so a child's step
+    /// never leaves this pass for the host loop; `Some` answers the host
+    /// fiber's death value, `Err` its own trap.
+    fn drive_owned_child(
+        &mut self,
+        step: (Active, CodePc),
+        host_fiber: FiberId,
+    ) -> Result<Option<FrameAnswer>, Trap> {
+        let (active, pc) = step;
+        match self.drive_step(active, pc) {
+            StepFlow::Quiet => Ok(None),
+            StepFlow::Interlock(req) => match self.drive_interlock::<false>(req, usize::MAX) {
+                Ok(DriveOutcome::WorldPark(park)) => {
+                    if let ParkKind::World(wait) = park.kind {
+                        self.register_wait(park.fiber, wait);
+                    }
+                    Ok(None)
+                },
+                Ok(DriveOutcome::Died(answer)) => {
+                    if self.current == host_fiber {
+                        return Ok(Some(answer));
+                    }
+                    Ok(None)
+                },
+                Ok(DriveOutcome::Yielded(_)) => Ok(None),
+                Ok(DriveOutcome::Interlock(_) | DriveOutcome::Frame(_)) => {
+                    unreachable!("the interlock loop drains its own frames")
+                },
+                Err((trap, _at)) => {
+                    if self.current == host_fiber {
+                        return Err(trap);
+                    }
+                    self.host_release();
+                    self.trap_child(self.current, &trap);
+                    Ok(None)
+                },
+            },
         }
     }
 

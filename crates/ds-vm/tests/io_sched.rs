@@ -19,6 +19,9 @@
 //!   answer as the run's own result.
 //! - a full send buffer parks too: the writer drains what fits, parks on the remainder, and the
 //!   peer's draining wakes it to completion.
+//! - the eager start: a spawned-but-unentered nursery child runs while its joiner parks on a world
+//!   op — the in-language nursery block's child feeds the parked recv's wake, its own send the
+//!   signal the joiner's peer writes behind, the sockets ordering the handshake with no clock.
 //! - no reactor installed: the identical program keeps the blocking semantics (the embedder's
 //!   platform choice, never a language fact).
 
@@ -37,6 +40,7 @@ use ds_vm::{
         uop::Uop,
     },
     assemble,
+    native::{BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN},
     platform::{
         Capability, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform, STD_NAME,
     },
@@ -49,6 +53,13 @@ fn k(idx: u16) -> ConstIdx {
 fn platform(index: u32) -> Const {
     Const::FuncRef(ConstFuncRef::Named {
         module: STD_NAME.into(),
+        func: index,
+    })
+}
+
+fn builtin_ref(index: u32) -> Const {
+    Const::FuncRef(ConstFuncRef::Named {
+        module: "builtin".into(),
         func: index,
     })
 }
@@ -517,4 +528,129 @@ fn trap_child_def() -> FunctionDef {
             Uop::Ret { src: 0 },
         ],
     )
+}
+
+/// The eager-start fixtures' pool: the net seams beside the nursery
+/// seams, the recv cap, the child's go bytes, and the sender's word.
+fn eager_pool(sender: u32) -> Vec<Const> {
+    vec![
+        platform(OP_NET_CONNECT),           // k0
+        platform(OP_NET_SEND),              // k1
+        platform(OP_NET_RECV),              // k2
+        platform(OP_NET_CLOSE),             // k3
+        Const::I64(4096),                   // k4: net_recv max_bytes
+        Const::Str("go".into()),            // k5: the child's signal
+        builtin_ref(BUILTIN_NURSERY_OPEN),  // k6
+        builtin_ref(BUILTIN_NURSERY_SPAWN), // k7
+        builtin_ref(BUILTIN_NURSERY_JOIN),  // k8
+        Const::FuncRef(ConstFuncRef::Named {
+            module: "io".into(),
+            func: sender,
+        }), // k9: the sender's function word
+    ]
+}
+
+/// `(conn: int) -> int`: one send of the go bytes on the child's own
+/// connection — the signal the parked joiner's wake rides behind.
+fn eager_sender_def() -> FunctionDef {
+    def_pool(
+        "eager_sender",
+        &[I64, Ref, Raw, Raw],
+        1,
+        2,
+        eager_pool(1),
+        &[
+            Uop::Funcf { frame_slots: 4 },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Kstr { dst: 3, kidx: k(5) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )
+}
+
+/// `(conn_a: int, conn_b: int) -> string`: the in-language nursery block
+/// — open, spawn the sender closure (conn_b its one capture), park on
+/// conn_a's recv, then the debug join. Nothing feeds conn_a until the
+/// spawned-but-unentered child runs, so the parked joiner wakes only
+/// through the eager start.
+fn eager_main_def() -> FunctionDef {
+    def_pool(
+        "eager_main",
+        &[I64, I64, I64, SlotType::Fn, Ref, Ref, Raw, Raw],
+        2,
+        2,
+        eager_pool(1),
+        &[
+            Uop::Funcf { frame_slots: 8 },
+            // the open: the nursery id lands on overlay word 6
+            Uop::Call {
+                callee: k(6),
+                nargs: 0,
+            },
+            Uop::Mov { dst: 2, src: 6 },
+            // the sender closure over conn_b, then its spawn
+            Uop::Kconst { dst: 3, kidx: k(9) },
+            Uop::Mov { dst: 6, src: 1 },
+            Uop::ClosureNew {
+                dst: 4,
+                func: 3,
+                n: 1,
+            },
+            Uop::Mov { dst: 6, src: 2 },
+            Uop::Mov { dst: 7, src: 4 },
+            Uop::Call {
+                callee: k(7),
+                nargs: 2,
+            },
+            // the joiner parks on conn_a's recv
+            Uop::Mov { dst: 6, src: 0 },
+            Uop::Kimm { dst: 7, kidx: k(4) },
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 5, src: 7 },
+            // the scope-exit join: the failed-children count answers
+            Uop::Mov { dst: 6, src: 2 },
+            Uop::Call {
+                callee: k(8),
+                nargs: 1,
+            },
+            Uop::Ret { src: 5 },
+        ],
+    )
+}
+
+/// The eagerly started child feeds the parked joiner's world wake: the
+/// joiner parks on a recv whose peer writes only behind the child's own
+/// send, the sockets themselves ordering the handshake — no clock, no
+/// external network, the 30s runaway bound alone covering a failure.
+#[test]
+fn an_eagerly_started_child_feeds_the_parked_joiners_wake() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), eager_sender_def(), eager_main_def()]);
+    let (conn_a, peer_a) = connect(&mut vm, &listener, &addr);
+    let (conn_b, peer_b) = connect(&mut vm, &listener, &addr);
+    let feeder = thread::spawn(move || {
+        let mut peer_a = peer_a;
+        let mut peer_b = peer_b;
+        // the child's go lands first, then the joiner's wake writes
+        let mut go = [0; 2];
+        peer_b.read_exact(&mut go).expect("the child's go lands");
+        assert_eq!(&go, b"go", "the eagerly started child signalled");
+        peer_a.write_all(b"late data").expect("the wake writes");
+        peer_a.flush().expect("the wake flushes");
+    });
+    let answer = vm
+        .run("io", "eager_main", &[
+            Value::I64(conn_a),
+            Value::I64(conn_b),
+        ])
+        .expect("the eagerly started child fed the parked recv");
+    assert_eq!(answer_string(&vm, &answer), "late data");
+    feeder.join().expect("feeder lands");
 }
