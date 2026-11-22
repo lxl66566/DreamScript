@@ -139,7 +139,9 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 ///   it), and `http_get`.
 /// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read) and the parking
 ///   `sleep` (the 2026-11-21 timer ruling).
-/// * `proc`: the CLI process surface — string argv, the environment read, and process spawn.
+/// * `proc`: the CLI process surface — string argv, the environment read, process spawn (the piped
+///   capture half answering the linear `proc_handle` over the idempotent `proc_close` seam), and
+///   the `exit(code)` host member's seam.
 ///
 /// The table is built on first read and shared: a consumer that must own
 /// one clones it.
@@ -354,6 +356,11 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("net_listen", error | world)
         .with("net_accept", error | world)
         .with("net_listener_close", world)
+        .with("proc_spawn", error | world)
+        .with("proc_write", error | world)
+        .with("proc_read", error | world)
+        .with("proc_wait", error | world)
+        .with("proc_close", world)
         .with("http_get", error | world)
         .with("open_file", error | world)
         .with("read_raw", error | world)
@@ -382,9 +389,9 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 ///
 /// * `error`: failure handed to the caller — the parse and IO readers.
 /// * `world`: the world-touching capability surface — IO, the file and net handle faces (the reads
-///   and connects fallible, the idempotent close seams total — `close_raw`, `net_close`, and
-///   `net_listener_close`), the clock, printing (stdout, stderr, stdin), and the process face
-///   (argv, the environment read, process spawn).
+///   and connects fallible, the idempotent close seams total — `close_raw`, `net_close`,
+///   `net_listener_close`, and `proc_close`), the clock, printing (stdout, stderr, stdin), and the
+///   process face (argv, the environment read, process spawn, the piped capture rows).
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 /// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
 ///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
@@ -457,6 +464,10 @@ mod tests {
             "net_listen",
             "accept",
             "close_listener",
+            "proc_spawn",
+            "write",
+            "read_out",
+            "wait",
             "time",
             "parse_json",
         ] {
@@ -479,6 +490,7 @@ mod tests {
             "file_handle",
             "net_handle",
             "net_listener",
+            "proc_handle",
         ] {
             assert!(package.lookup_type(name).is_some(), "`{name}` is ambient");
         }

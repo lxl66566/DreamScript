@@ -377,7 +377,7 @@ fn parked_siblings_overlap_their_waits_and_join_in_spawn_order() {
             assert_eq!(answer_string(&vm, &alpha), "alpha", "spawn order");
             assert_eq!(answer_string(&vm, &beta), "beta", "spawn order");
         },
-        other => panic!("the join failed: {other:?}"),
+        other @ ds_vm::JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
     }
     // the serialized twin needs both sleeps back to back (a 2*wait
     // floor), while a parallel suite can overshoot a writer thread's
@@ -426,7 +426,7 @@ fn a_cancelled_nursery_cuts_its_world_parked_child() {
     let failing = vm
         .spawn_fiber_in(nursery, "io", "trap_child", &[])
         .expect("the failing child spawns");
-    assert!(parked != failing);
+    assert_ne!(parked, failing);
     let joined = vm.join_nursery(nursery).expect("the join lands");
     match joined {
         ds_vm::JoinOutcome::Failed(outcomes) => {
@@ -442,7 +442,7 @@ fn a_cancelled_nursery_cuts_its_world_parked_child() {
                 outcomes[1]
             );
         },
-        other => panic!("the boundary reported {other:?}"),
+        other @ ds_vm::JoinOutcome::Joined(_) => panic!("the boundary reported {other:?}"),
     }
     drop(peer);
 }

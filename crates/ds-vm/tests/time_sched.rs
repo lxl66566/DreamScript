@@ -258,7 +258,7 @@ fn parked_sleep_siblings_overlap_their_waits() {
                 );
             }
         },
-        other => panic!("the join failed: {other:?}"),
+        other @ ds_vm::JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
     }
     assert!(
         elapsed < 2 * wait,
@@ -313,7 +313,7 @@ fn a_cancelled_nursery_cuts_its_sleeping_child() {
     let failing = vm
         .spawn_fiber_in(nursery, "io", "trap_child", &[])
         .expect("the failing child spawns");
-    assert!(parked != failing);
+    assert_ne!(parked, failing);
     let started = Instant::now();
     let joined = vm.join_nursery(nursery).expect("the join lands");
     assert!(
@@ -335,7 +335,7 @@ fn a_cancelled_nursery_cuts_its_sleeping_child() {
                 outcomes[1]
             );
         },
-        other => panic!("the boundary reported {other:?}"),
+        other @ ds_vm::JoinOutcome::Joined(_) => panic!("the boundary reported {other:?}"),
     }
 }
 

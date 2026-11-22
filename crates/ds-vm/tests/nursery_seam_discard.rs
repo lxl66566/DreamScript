@@ -109,7 +109,7 @@ fn a_boundary_join_drains_the_discarded_completed_answer() {
             // (slot 4): the hand parent takes the channel's discard
             // discipline — one dec of the delivered Ref, the lowered
             // statement's own shape — before answering
-            Inst::Rc(RcOp::Dec { src: 4 }).into(),
+            Inst::Rc(RcOp::Dec { src: 4 }),
             Uop::Kimm { dst: 4, kidx: k(4) }.into(),
             Uop::Ret { src: 4 }.into(),
         ],

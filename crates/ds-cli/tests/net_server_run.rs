@@ -87,9 +87,8 @@ fn late_peer(port: u16) -> thread::JoinHandle<Vec<u8>> {
                 let mut got = 0;
                 while got < echoed.len() {
                     match sock.read(&mut echoed[got..]) {
-                        Ok(0) => break,
+                        Ok(0) | Err(_) => break,
                         Ok(n) => got += n,
-                        Err(_) => break,
                     }
                 }
                 echoed.truncate(got);

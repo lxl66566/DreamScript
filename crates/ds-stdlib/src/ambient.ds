@@ -635,3 +635,47 @@ pub fn accept (l: net_listener) -> net_handle {
 pub fn close_listener (l: net_listener) -> () {
   net_listener_close(l.lid)
 }
+
+// The process face's capture half: the same discipline as the other
+// handle faces over the package-owned linear `proc_handle`, whose one
+// inline word is the process table's key. `proc_spawn` answers this
+// type directly — the total spelling for the same reason every
+// deinit-carrying handle keeps it (a union member holding one
+// refuses), so a failed spawn prints the io error line and halts —
+// and the child's standard input and output ride pipes, so `write`
+// hands the child input (the pipe stays open across calls; the write
+// row carries no stdin-close seam) while `read_out` takes its
+// captured output, one read of at most the requested bytes, the empty
+// string the pipe's orderly end. `wait` answers the child's exit
+// status (a child ended without a status code answering -1,
+// `proc_run`'s convention) and answers it idempotently, and the
+// deinit closes the handle: a still-running child is killed and
+// reaped, so a dropped binding never leaks a child, and `proc_close`
+// is idempotent because the deinit may fire on a handle the owner
+// already closed. The rows block the calling fiber like `proc_run`'s
+// own wait. The handlers read the id word out the way `send`/`recv`
+// do (a native call cannot borrow a deinit-carrying argument), and
+// the fallible rows answer the io_err union, binding their answer
+// before returning it the same way (a tail call to a fallible native
+// refuses).
+pub struct proc_handle: ~Copyable {
+  id: int
+  deinit { proc_close(self.id) }
+}
+pub extern fn proc_spawn (cmd: string, args: list[string]) -> proc_handle
+pub extern fn proc_write (pid: int, data: string) -> () | io_err
+pub extern fn proc_read (pid: int, max_bytes: int) -> string | io_err
+pub extern fn proc_wait (pid: int) -> int | io_err
+pub extern fn proc_close (pid: int) -> ()
+pub fn write (p: proc_handle, data: string) -> () | io_err {
+  const sent = proc_write(p.id, data)
+  sent
+}
+pub fn read_out (p: proc_handle, max_bytes: int) -> string | io_err {
+  const captured = proc_read(p.id, max_bytes)
+  captured
+}
+pub fn wait (p: proc_handle) -> int | io_err {
+  const status = proc_wait(p.id)
+  status
+}

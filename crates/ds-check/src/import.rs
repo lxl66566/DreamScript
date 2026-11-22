@@ -1256,9 +1256,7 @@ mod tests {
             ),
             "a linear enum carries its move-discipline bit"
         );
-        for refused in ["pair"] {
-            assert_eq!(enum_fact(refused), None, "{refused} carries no fact");
-        }
+        assert_eq!(enum_fact("pair"), None, "pair carries no fact");
         assert_eq!(
             case_fact("lone", "wide"),
             None,

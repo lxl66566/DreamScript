@@ -330,8 +330,10 @@ fn run_until_bound(
     for _ in 0..8 {
         let port = free_port();
         let mut vm = make();
-        let argv = args(port, &mut vm);
-        let answer = vm.run("server", entry, &argv).expect("the fixture runs");
+        let call_args = args(port, &mut vm);
+        let answer = vm
+            .run("server", entry, &call_args)
+            .expect("the fixture runs");
         if answer_string(&vm, &answer).starts_with(&format!("net_listen 127.0.0.1:{port}")) {
             continue;
         }

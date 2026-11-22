@@ -5352,6 +5352,10 @@ impl Vm {
     /// registration belongs to the driver that owns the executor
     /// moment — the host executor loop, a nursery drive, or the
     /// refusal of a driver that cannot schedule.
+    // the Result shape mirrors park_world_tail and the drive-step
+    // outcomes its call sites fold: the park family keeps one
+    // signature
+    #[allow(clippy::unnecessary_wraps)]
     fn park_world(
         &mut self,
         active: &Active,
@@ -5405,8 +5409,8 @@ impl Vm {
         let caller_row = self.callinfo[caller_at].module;
         let caller_func = self.callinfo[caller_at].func;
         let caller_fp = self.callinfo[caller_at].fp;
-        let caller_fn = &self.registry.pinned(caller_row).functions()[caller_func as usize];
-        let code_len = code_len_u32(caller_fn.code.len());
+        let caller_entry = &self.registry.pinned(caller_row).functions()[caller_func as usize];
+        let code_len = code_len_u32(caller_entry.code.len());
         if meta.return_pc.0 >= code_len {
             return Err((
                 Trap::InvalidPc {
@@ -5416,7 +5420,7 @@ impl Vm {
                 pc,
             ));
         }
-        let restore = (caller_fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
+        let restore = (caller_fp + caller_entry.layout.frame_size() as usize).max(fp + 2);
         self.stack.truncate(restore);
         self.callinfo
             .pop()
@@ -5724,7 +5728,7 @@ impl Vm {
             self.reactor = Some(installed);
             match polled {
                 Ok(()) => {
-                    let drained: Vec<_> = events.drain(..).collect();
+                    let drained = std::mem::take(&mut events);
                     for event in drained {
                         self.complete_wait(event.token, Some(event));
                     }
@@ -5793,7 +5797,7 @@ impl Vm {
         }
         let f = &self.registry.pinned(active.version).functions()[active.func as usize];
         let fp = self.callinfo[self.callinfo.len() - 1].fp;
-        overlay_native(result, &mut self.stack, &f.layout, fp).map_err(|trap| trap)?;
+        overlay_native(result, &mut self.stack, &f.layout, fp)?;
         Ok(Woken::Step((active, pc)))
     }
 
@@ -6793,8 +6797,9 @@ impl Vm {
         };
         let driven = match self.execute_host_step::<false>(active, CodePc(0), boundary) {
             Ok(DriveOutcome::Frame(value)) => Ok(value),
-            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_))
-            | Ok(DriveOutcome::WorldPark(_)) => Err(Trap::ReentrancyRefused),
+            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_) | DriveOutcome::WorldPark(_)) => {
+                Err(Trap::ReentrancyRefused)
+            },
             Ok(DriveOutcome::Interlock(_)) => {
                 unreachable!("the step drains every interlock before returning")
             },

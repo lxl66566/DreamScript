@@ -2221,7 +2221,7 @@ fn comptime_reflection_reads_a_linked_type() {
 fn the_linked_type_receiver_seam_refuses_at_the_check() {
     let (work, pkg_id) = shapes_fixtures("shapes-seams");
     let root_manifest = shapes_root_manifest(&pkg_id);
-    for (tag, source, refused) in [(
+    let (tag, source, refused) = (
         "linked-receiver-member",
         concat!(
             "import @shapes (cell)\n",
@@ -2231,19 +2231,18 @@ fn the_linked_type_receiver_seam_refuses_at_the_check() {
             "}\n",
         ),
         "type `cell` carries no member `len`",
-    )] {
-        let root = write_root(&work, &root_manifest, source);
-        let entry = root.join("app.ds");
-        let entry = entry.to_str().expect("temp path is UTF-8");
-        let (ok, out, err) = ds(&["run", entry]);
-        assert!(!ok, "the {tag} seam refuses");
-        assert_eq!(out, "");
-        assert!(
-            err.contains(refused),
-            "the {tag} refusal names its seam (stderr: {err})"
-        );
-        fs::remove_dir_all(&root).expect("the temp tree removes");
-    }
+    );
+    let root = write_root(&work, &root_manifest, source);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the {tag} seam refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains(refused),
+        "the {tag} refusal names its seam (stderr: {err})"
+    );
+    fs::remove_dir_all(&root).expect("the temp tree removes");
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 

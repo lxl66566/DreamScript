@@ -3893,6 +3893,8 @@ pub struct OutputSink {
     /// The listener table of the net natives' server half
     /// (`crate::net`).
     listeners: crate::net::Listeners,
+    /// The process table of the capture half's natives (`crate::proc`).
+    procs: crate::proc::Procs,
     /// The file-handle table of the fsys natives (`crate::fsys`).
     files: crate::fsys::Files,
 }
@@ -3929,6 +3931,7 @@ impl OutputSink {
             argv: Vec::new(),
             net: Connections::default(),
             listeners: crate::net::Listeners::default(),
+            procs: crate::proc::Procs::default(),
             files: crate::fsys::Files::default(),
         }
     }
@@ -3979,6 +3982,11 @@ impl OutputSink {
     /// The listener table of the net natives' server half.
     pub(crate) fn listeners(&mut self) -> &mut crate::net::Listeners {
         &mut self.listeners
+    }
+
+    /// The process table of the capture half's natives.
+    pub(crate) fn procs(&mut self) -> &mut crate::proc::Procs {
+        &mut self.procs
     }
 
     /// The file-handle table of the fsys natives (`crate::fsys`).
@@ -4465,7 +4473,7 @@ pub(crate) fn sleep_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let nanos = i64_arg(args, 0)?;
-    let span = Duration::from_nanos(nanos.max(0) as u64);
+    let span = Duration::from_nanos(nanos.max(0).cast_unsigned());
     if out.net().parking() {
         let deadline = Instant::now() + span;
         return Ok(NativeResult::Park(crate::sched::WorldWait::sleep(deadline)));

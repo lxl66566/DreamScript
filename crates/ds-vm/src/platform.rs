@@ -52,8 +52,9 @@ pub enum Capability {
     /// https-routing `http_get` body.
     Tls,
     /// The process surface (the CLI process surface, ruled 2026-11-21):
-    /// string argv, the environment read, process spawn, and the
-    /// `exit(code)` host member's seam.
+    /// string argv, the environment read, process spawn (the piped
+    /// capture half and its linear `proc_handle`), and the `exit(code)`
+    /// host member's seam.
     Proc,
 }
 
@@ -160,9 +161,25 @@ pub const OP_NET_ACCEPT: u32 = 27;
 /// `net_listener_close`: net (the raw idempotent-close seam the
 /// `net_listener` deinit pairs with, `net_close`'s contract).
 pub const OP_NET_LISTENER_CLOSE: u32 = 28;
+/// `proc_spawn`: proc (spawns one child over pipes, answers the
+/// linear `proc_handle`'s word; the ambient's total spelling pairs
+/// with the fallible span on the printing-halt path).
+pub const OP_PROC_SPAWN: u32 = 29;
+/// `proc_write`: proc (writes the child's stdin pipe, the unit span
+/// on success).
+pub const OP_PROC_WRITE: u32 = 30;
+/// `proc_read`: proc (reads the child's captured stdout, one read of
+/// at most the requested bytes).
+pub const OP_PROC_READ: u32 = 31;
+/// `proc_wait`: proc (waits for the child, answers its exit status
+/// idempotently).
+pub const OP_PROC_WAIT: u32 = 32;
+/// `proc_close`: proc (the raw idempotent-close seam the `proc_handle`
+/// deinit pairs with — kills and reaps a still-running child).
+pub const OP_PROC_CLOSE: u32 = 33;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 29;
+pub const OP_COUNT: u32 = 34;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -209,6 +226,11 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "net_listen", capability: Capability::Net,     params: &[SlotType::Ref, SlotType::I64], result_words: 2, func: net::net_listen_fn },
     Op { name: "net_accept",  capability: Capability::Net,     params: &[SlotType::I64],       result_words: 2, func: net::net_accept_fn },
     Op { name: "net_listener_close", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_listener_close_fn },
+    Op { name: "proc_spawn", capability: Capability::Proc, params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::proc::proc_spawn_fn },
+    Op { name: "proc_write", capability: Capability::Proc, params: &[SlotType::I64, SlotType::Ref], result_words: 2, func: crate::proc::proc_write_fn },
+    Op { name: "proc_read", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_fn },
+    Op { name: "proc_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_wait_fn },
+    Op { name: "proc_close", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_fn },
 ];
 
 macro_rules! unserved {
@@ -252,6 +274,11 @@ unserved!(unserved_op_25 at 25);
 unserved!(unserved_op_26 at 26);
 unserved!(unserved_op_27 at 27);
 unserved!(unserved_op_28 at 28);
+unserved!(unserved_op_29 at 29);
+unserved!(unserved_op_30 at 30);
+unserved!(unserved_op_31 at 31);
+unserved!(unserved_op_32 at 32);
+unserved!(unserved_op_33 at 33);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -263,7 +290,8 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_16, unserved_op_17, unserved_op_18, unserved_op_19,
     unserved_op_20, unserved_op_21, unserved_op_22, unserved_op_23,
     unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
-    unserved_op_28,
+    unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
+    unserved_op_32, unserved_op_33,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -427,7 +455,17 @@ mod tests {
             OPS[OP_NET_LISTENER_CLOSE as usize].capability,
             Capability::Net
         );
-        assert_eq!(OPS.len(), 29);
+        assert_eq!(OPS[OP_PROC_SPAWN as usize].name, "proc_spawn");
+        assert_eq!(OPS[OP_PROC_SPAWN as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_WRITE as usize].name, "proc_write");
+        assert_eq!(OPS[OP_PROC_WRITE as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_READ as usize].name, "proc_read");
+        assert_eq!(OPS[OP_PROC_READ as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_WAIT as usize].name, "proc_wait");
+        assert_eq!(OPS[OP_PROC_WAIT as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_CLOSE as usize].name, "proc_close");
+        assert_eq!(OPS[OP_PROC_CLOSE as usize].capability, Capability::Proc);
+        assert_eq!(OPS.len(), 34);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -477,6 +515,18 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses proc");
         }
         for index in [
+            OP_PROC_SPAWN,
+            OP_PROC_WRITE,
+            OP_PROC_READ,
+            OP_PROC_WAIT,
+            OP_PROC_CLOSE,
+        ] {
+            assert!(
+                !console.serves(index),
+                "a console platform refuses the capture half"
+            );
+        }
+        for index in [
             OP_NET_CONNECT,
             OP_NET_SEND,
             OP_NET_RECV,
@@ -490,7 +540,7 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 29);
+        assert_eq!(table.len(), 34);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }
@@ -531,6 +581,11 @@ mod tests {
             OP_ENV,
             OP_PROC_RUN,
             OP_EXIT,
+            OP_PROC_SPAWN,
+            OP_PROC_WRITE,
+            OP_PROC_READ,
+            OP_PROC_WAIT,
+            OP_PROC_CLOSE,
         ] {
             assert!(
                 !embed.serves(index),

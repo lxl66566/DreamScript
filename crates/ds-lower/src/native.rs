@@ -905,6 +905,64 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 28,
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
+    Native {
+        // the capture half: `proc_spawn` answers the two-word span
+        // (the piped child's handle word on success, the io error
+        // class on failure), while the ambient declares the total
+        // spelling over the deinit-carrying `proc_handle` — the
+        // printing-halt pairing `net_listen` keeps, a failed spawn
+        // halting on the io error line
+        name: "proc_spawn",
+        module: NativeModule::Platform,
+        index: 29,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        name: "proc_write",
+        module: NativeModule::Platform,
+        index: 30,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,      // the inert unit word
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        name: "proc_read",
+        module: NativeModule::Platform,
+        index: 31,
+        shape: NativeShape::Fallible {
+            payload: SlotType::Ref,      // the captured output
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        name: "proc_wait",
+        module: NativeModule::Platform,
+        index: 32,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,      // the child's exit status
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        // the raw idempotent-close seam (the `proc_handle` deinit pairs
+        // with it — kills and reaps a still-running child)
+        name: "proc_close",
+        module: NativeModule::Platform,
+        index: 33,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.

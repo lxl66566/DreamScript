@@ -215,7 +215,7 @@ fn a_parked_recv_wakes_through_the_siblings_send() {
                 "the sender's unit"
             );
         },
-        other => panic!("a clean join: {other:?}"),
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
 }
 
@@ -292,7 +292,7 @@ fn a_parked_sender_refills_from_the_receivers_drain() {
                 "both payloads crossed in order, the parked one refilled into the freed slot"
             );
         },
-        other => panic!("a clean join: {other:?}"),
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
 }
 
@@ -330,7 +330,7 @@ fn an_entry_frame_tail_recv_parks_and_completes_with_the_delivered_word() {
                 "the sentinel park completed with the delivered word as the fiber's answer"
             );
         },
-        other => panic!("a clean join: {other:?}"),
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
 }
 
@@ -416,7 +416,7 @@ fn a_childs_own_heap_string_crosses_through_the_channel() {
                 "the foreign payload read back content-equal on the receiving heap"
             );
         },
-        other => panic!("a clean join: {other:?}"),
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
 }
 
@@ -512,7 +512,7 @@ fn a_channel_parked_child_is_cut_under_a_siblings_first_failure() {
                 outcomes[1]
             );
         },
-        other => panic!("a failed join: {other:?}"),
+        other @ JoinOutcome::Joined(_) => panic!("a failed join: {other:?}"),
     }
 }
 

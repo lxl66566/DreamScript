@@ -2405,6 +2405,9 @@ impl<'a> FnLower<'a, '_, '_> {
     /// the staged types without emitting the Kimm stores — the tail
     /// transfer path re-stages every word past the exit claims, and a
     /// claim's overlay window would clobber words staged before it.
+    // the inputs are the call's identity, the staging vec, and both
+    // routing flags: one flat list where each parameter names a fact
+    #[allow(clippy::too_many_arguments)]
     fn stage_generic_evidence(
         &mut self,
         generic: &'static GenericNative,

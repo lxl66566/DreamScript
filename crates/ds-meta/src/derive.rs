@@ -3047,6 +3047,10 @@ fn type_keyed_decode(mint: &mut Mint, recv: &Expr, source: &str) -> Expr {
 /// element read per position into a fresh accumulator, the element read
 /// keyed by the element's own type (an element shape spelling no read
 /// refusing at the attribute).
+// the inputs are the field's element shape, the reads' source and
+// binder counter, and the refusal vocabulary: one flat list where
+// each parameter names a fact
+#[allow(clippy::too_many_arguments)]
 fn list_read(
     element: &Type,
     source: &str,
@@ -3178,7 +3182,7 @@ fn enum_decode_body(
             let chain = name_chain(decl, &binder, mint, fail)
                 .expect("a non-empty enum with no payloaded case carries one");
             let tail = fail_block(mint, fail);
-            Some(shape_probe(mint, "dec_string", binder, chain, tail))
+            Some(shape_probe(mint, "dec_string", &binder, chain, tail))
         },
         [only] => {
             let arm = Expr::Block(case_decode_arm(only, "v", mint, &mut fresh, fail, diags)?);
@@ -3194,10 +3198,10 @@ fn enum_decode_body(
             };
             let binder = fresh_binder(&mut fresh, "g");
             let fail_tail = fail_block(mint, fail);
-            let tail = shape_probe(mint, read, binder, arm, fail_tail);
+            let tail = shape_probe(mint, read, &binder, arm, fail_tail);
             let string_binder = fresh_binder(&mut fresh, "s");
             match name_chain(decl, &string_binder, mint, fail) {
-                Some(chain) => Some(shape_probe(mint, "dec_string", string_binder, chain, tail)),
+                Some(chain) => Some(shape_probe(mint, "dec_string", &string_binder, chain, tail)),
                 None => Some(tail),
             }
         },
@@ -3205,7 +3209,7 @@ fn enum_decode_body(
             let probe = payload_probe(many, mint, &mut fresh, fail, diags)?;
             let binder = fresh_binder(&mut fresh, "s");
             match name_chain(decl, &binder, mint, fail) {
-                Some(chain) => Some(shape_probe(mint, "dec_string", binder, chain, probe)),
+                Some(chain) => Some(shape_probe(mint, "dec_string", &binder, chain, probe)),
                 None => Some(probe),
             }
         },
@@ -3226,12 +3230,12 @@ fn fail_block(mint: &mut Mint, fail: &str) -> Expr {
 /// `parse_err` narrow falling to `rest`, the arm over the success. The
 /// decode's shape dispatch — the driver face's own reads carry it, so
 /// no json case name appears here.
-fn shape_probe(mint: &mut Mint, read: &str, binder: String, arm: Expr, rest: Expr) -> Expr {
+fn shape_probe(mint: &mut Mint, read: &str, binder: &str, arm: Expr, rest: Expr) -> Expr {
     let doc = path_expr("v", mint.span());
     let read = member_call(doc, read, Vec::new(), mint);
     let cond = Expr::Is {
         span: mint.span(),
-        expr: Box::new(path_expr(&binder, mint.span())),
+        expr: Box::new(path_expr(binder, mint.span())),
         ty: Box::new(name_type(mint, "parse_err")),
     };
     let probe = Expr::If {
@@ -3246,7 +3250,7 @@ fn shape_probe(mint: &mut Mint, read: &str, binder: String, arm: Expr, rest: Exp
     };
     Expr::Block(BlockExpr {
         span: mint.span(),
-        stmts: vec![local(mint, &binder, read, false), expr_stmt(probe)],
+        stmts: vec![local(mint, binder, read, false), expr_stmt(probe)],
         trailing_trivia: Vec::new(),
     })
 }
@@ -4207,23 +4211,6 @@ fn parse_err_expr(mint: &mut Mint) -> Expr {
             }),
             value: int_answer(mint, "0"),
         }],
-        trailing: None,
-    }
-}
-
-/// A free-fn call over minted spans.
-fn fn_call(mint: &mut Mint, name: &str, args: Vec<Expr>) -> Expr {
-    Expr::Call {
-        span: mint.span(),
-        callee: Box::new(path_expr(name, mint.span())),
-        args: args
-            .into_iter()
-            .map(|value| CallArg {
-                span: mint.span(),
-                name: None,
-                value,
-            })
-            .collect(),
         trailing: None,
     }
 }

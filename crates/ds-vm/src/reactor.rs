@@ -173,7 +173,7 @@ impl Epoll {
             data: token,
         };
         // SAFETY: the plain ctl call; `event` outlives the call.
-        if unsafe { epoll_imp::epoll_ctl(self.epfd, op, fd, &mut event) } < 0 {
+        if unsafe { epoll_imp::epoll_ctl(self.epfd, op, fd, &raw mut event) } < 0 {
             return Err(ReactorError(format!(
                 "epoll_ctl: {}",
                 std::io::Error::last_os_error()
@@ -225,7 +225,7 @@ impl Reactor for Epoll {
             let err = std::io::Error::last_os_error();
             if !matches!(
                 err.raw_os_error(),
-                Some(2) | Some(9) // ENOENT: never registered; EBADF: already closed
+                Some(2 | 9) // ENOENT: never registered; EBADF: already closed
             ) {
                 return Err(ReactorError(format!("epoll_ctl: {err}")));
             }
@@ -249,6 +249,9 @@ impl Reactor for Epoll {
             None => -1,
         };
         // SAFETY: the plain wait call; `raw` holds the answers.
+        // maxevents names the 64-slot batch's own length, a fixed small
+        // bound the wait cannot exceed
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let n = unsafe {
             epoll_imp::epoll_wait(
                 self.epfd,
@@ -266,6 +269,9 @@ impl Reactor for Epoll {
             }
             return Err(ReactorError(format!("epoll_wait: {err}")));
         }
+        // a negative count was refused above, so the widening keeps
+        // every remaining answer
+        #[allow(clippy::cast_sign_loss)]
         for event in &raw[..n as usize] {
             events.push(TokenEvent {
                 token: event.data,
