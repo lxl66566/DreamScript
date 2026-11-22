@@ -56,9 +56,20 @@
 //! readable), the wake performing the accept and registering the
 //! accepted stream like a connecting one. Blocking stays the
 //! embedder's platform choice: no reactor installed, the natives below
-//! block exactly as before. `net_connect` and the `http_get` exchanges
-//! keep their bounded blocking waits (std cannot open a non-connecting
-//! socket), the remaining boundary of the 2026-11-21 ruling.
+//! block exactly as before. `net_connect` and the plain `http_get`
+//! exchange park too (the 2026-11-23 ruling): std cannot open a
+//! non-connecting socket, so the parked connect rides the raw OS
+//! socket — libc's own `socket`/`fcntl(O_NONBLOCK)`/`connect` and
+//! completion probe over no socket library, the epoll driver's
+//! OS-own-symbols precedent — the writability interest parked on, the
+//! wake probing completion and registering the stream like any other
+//! handle. The plain fetch rides the same staged machine (connect,
+//! request drain, response reads to the close), a step per wake; the
+//! https exchange keeps the rustls tier's blocking transport (its
+//! session steers its own wants-read/wants-write discipline, a
+//! transport rework riding the tls round), and a non-Linux host keeps
+//! the blocking twin under any reactor until its driver round owns the
+//! raw seam.
 //!
 //! # Caps
 //!
@@ -131,6 +142,17 @@ pub(crate) struct Connections {
     /// non-blocking, and `net_recv`/`net_send` answer park requests on
     /// a would-block instead of blocking the thread.
     parking: bool,
+    /// The in-progress raw connects, keyed by the pre-minted handle ids
+    /// their completion registers under (the fd and the address it
+    /// dials closing with the row — the parked connect's own storage,
+    /// the linux driver's machine; the wake's completion probe dials
+    /// the address a second time).
+    #[cfg(target_os = "linux")]
+    connecting: Vec<(i64, std::os::fd::OwnedFd, std::net::SocketAddr)>,
+    /// The parked plain-http exchanges, keyed by their own minted ids
+    /// (the staged connect plus the request/response buffers).
+    #[cfg(target_os = "linux")]
+    fetches: Vec<(i64, Fetch)>,
 }
 
 impl Default for Connections {
@@ -141,6 +163,10 @@ impl Default for Connections {
             timeout: NET_TIMEOUT,
             tls: None,
             parking: false,
+            #[cfg(target_os = "linux")]
+            connecting: Vec::new(),
+            #[cfg(target_os = "linux")]
+            fetches: Vec::new(),
         }
     }
 }
@@ -153,6 +179,215 @@ pub(crate) enum NetAttempt<T> {
     Done(Result<T, io::Error>),
     /// The op would block — the caller parks (the reactor owns the wait).
     Park,
+}
+
+/// One started connect's outcome: the attempt that ran to an immediate
+/// completion (loopback often connects at once), or the row that stands
+/// in progress — the park's registration key.
+#[derive(Debug)]
+pub(crate) enum NetConnectStart {
+    /// The connect ran: the registered handle on success, the failure
+    /// otherwise.
+    Done(Result<i64, io::Error>),
+    /// The connect stands in progress: the pending row's id.
+    Pending(i64),
+}
+
+/// One parked plain-http exchange's wake outcome: the direction the
+/// next step watches (the wait stands, its interest re-aimed and its
+/// bound re-armed), or the finished exchange — the body, or the
+/// failure the class mapping reads its class off.
+#[derive(Debug)]
+pub(crate) enum FetchWake {
+    /// The machine advanced as far as the readiness took it; `watch`
+    /// names the direction the next step waits on.
+    Pending { watch: crate::reactor::Direction },
+    /// The exchange answered: the body after the header terminator, or
+    /// the failure (the transport closed either way).
+    Done(Result<String, io::Error>),
+}
+
+/// One parked plain-http exchange's machine: the staged connect (the
+/// same row [`Connections::start_connect`] answers), the request bytes
+/// still to write, and the response bytes read so far. The transport
+/// is the machine's own — a connection id no binding owns, closed when
+/// the exchange answers and closed by the table's drop if the VM goes
+/// away first.
+#[derive(Debug)]
+struct Fetch {
+    /// The transport: the pending connect's row first, the registered
+    /// connection once connected.
+    conn: i64,
+    /// Whether the connect completed and the transport registered.
+    connected: bool,
+    /// The request bytes still to write.
+    out: Vec<u8>,
+    /// The response bytes read so far.
+    seen: Vec<u8>,
+}
+
+/// The raw OS socket binding of the parked connect (the 2026-11-23
+/// ruling): libc's own symbols — `socket`, `fcntl(O_NONBLOCK)`,
+/// `connect`, and the completion probe — over no socket library, the
+/// epoll driver's OS-own-symbols precedent. The parked connect is the
+/// linux driver's own this round; a non-linux host keeps the blocking
+/// twin under any reactor, riding the kqueue/IOCP driver rounds.
+#[cfg(target_os = "linux")]
+mod raw_sock {
+    use std::{
+        ffi::c_int,
+        io,
+        net::SocketAddr,
+        os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
+    };
+
+    // the kernel ABI constants: address families, the stream socket
+    // kind with its exec-closed flag, the fcntl command and the
+    // non-blocking flag, the option level and name, the in-progress
+    // errno — stable ABI values, not headers
+    pub const AF_INET: c_int = 2;
+    pub const AF_INET6: c_int = 10;
+    pub const SOCK_STREAM: c_int = 1;
+    pub const SOCK_CLOEXEC: c_int = 0o2_000_000;
+    pub const F_SETFL: c_int = 4;
+    pub const O_NONBLOCK: c_int = 0o4000;
+    pub const EINPROGRESS: c_int = 115;
+    pub const EISCONN: c_int = 106;
+    pub const EALREADY: c_int = 114;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct SockAddrIn {
+        pub family: u16,
+        pub port: u16,
+        pub addr: [u8; 4],
+        pub zero: [u8; 8],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct SockAddrIn6 {
+        pub family: u16,
+        pub port: u16,
+        pub flowinfo: u32,
+        pub addr: [u8; 16],
+        pub scope_id: u32,
+    }
+
+    /// The sockaddr the two families address; only written, then passed
+    /// by pointer to the one call that reads it.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub union SockAddr {
+        pub v4: SockAddrIn,
+        pub v6: SockAddrIn6,
+    }
+
+    unsafe extern "C" {
+        fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+        #[link_name = "connect"]
+        fn sys_connect(fd: c_int, addr: *const SockAddr, len: u32) -> c_int;
+    }
+
+    /// One address's sockaddr and its length, filled per family.
+    fn fill(addr: &SocketAddr) -> (SockAddr, u32) {
+        match addr {
+            SocketAddr::V4(a) => (
+                SockAddr {
+                    v4: SockAddrIn {
+                        family: u16::try_from(AF_INET).expect("the v4 family fits u16"),
+                        port: a.port().to_be(),
+                        addr: a.ip().octets(),
+                        zero: [0; 8],
+                    },
+                },
+                16,
+            ),
+            SocketAddr::V6(a) => (
+                SockAddr {
+                    v6: SockAddrIn6 {
+                        family: u16::try_from(AF_INET6).expect("the v6 family fits u16"),
+                        port: a.port().to_be(),
+                        flowinfo: 0,
+                        addr: a.ip().octets(),
+                        scope_id: a.scope_id(),
+                    },
+                },
+                28,
+            ),
+        }
+    }
+
+    /// Opens one exec-closed, non-blocking TCP socket of `family`.
+    pub fn open_stream(family: c_int) -> io::Result<OwnedFd> {
+        // SAFETY: the plain socket call; a negative answer is the OS
+        // refusal, a nonnegative one the fd the owned handle adopts
+        let fd = unsafe { socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the fd is owned from here; the flag call only flips
+        // its blocking disposition
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: the plain fcntl flag call
+        if unsafe { fcntl(fd, F_SETFL, O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(owned)
+    }
+
+    /// Starts one non-blocking connect: `Ok(true)` the attempt stands
+    /// in progress (the wake probes its completion), `Ok(false)` it
+    /// connected at once, `Err` the immediate refusal.
+    pub fn start_connect(fd: &OwnedFd, addr: &SocketAddr) -> io::Result<bool> {
+        let (sockaddr, len) = fill(addr);
+        // SAFETY: the plain connect call over the stack address; the
+        // union was just written with the family the address names
+        let rc = unsafe { sys_connect(fd.as_raw_fd(), &raw const sockaddr, len) };
+        if rc == 0 {
+            return Ok(false);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(EINPROGRESS) {
+            return Ok(true);
+        }
+        Err(err)
+    }
+
+    /// The pending connect's completion probe: a second connect reads
+    /// the attempt's own state — 0 or EISCONN connected, EALREADY
+    /// still pending, any other errno the failure the attempt met.
+    /// The textbook probe is getsockopt(SO_ERROR), but a host mediating
+    /// socket calls through a security broker can leave the errno
+    /// queue polluted (EPERM reported on a connected socket), and the
+    /// second connect asks the socket's own state, not the queue.
+    pub fn connect_done(fd: &OwnedFd, addr: &SocketAddr) -> io::Result<bool> {
+        let (sockaddr, len) = fill(addr);
+        // SAFETY: the plain connect call over the stack address; the
+        // union was just written with the family the address names
+        let rc = unsafe { sys_connect(fd.as_raw_fd(), &raw const sockaddr, len) };
+        if rc == 0 {
+            return Ok(false);
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(EISCONN) => Ok(false),
+            Some(EALREADY) => Ok(true),
+            _ => Err(err),
+        }
+    }
+}
+
+/// Adopts one raw fd into the std stream it names (the parked
+/// connect's completion): the fd's non-blocking disposition lives on
+/// the open file description, so the stream keeps it.
+#[cfg(target_os = "linux")]
+fn fd_into_stream(fd: std::os::fd::OwnedFd) -> TcpStream {
+    use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+    // SAFETY: the fd is owned and closed exactly once — adopted by the
+    // stream that takes it over
+    unsafe { TcpStream::from_raw_fd(fd.into_raw_fd()) }
 }
 
 impl Connections {
@@ -292,6 +527,272 @@ impl Connections {
         }
         #[cfg(not(any(unix, windows)))]
         {
+            None
+        }
+    }
+
+    /// Starts one non-blocking connect over the raw OS socket (the
+    /// 2026-11-23 ruling): the addresses resolve, the first that either
+    /// connects at once or stands in progress wins, and an immediate
+    /// refusal falls to the next address with the last failure the
+    /// report. [`NetConnectStart::Pending`] names the connecting row
+    /// the park's completion reads — the id pre-minted, so the wake
+    /// registers the stream under the very id the parked caller saw.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_connect(&mut self, host: &str, port: u16) -> NetConnectStart {
+        let addrs = match (host, port).to_socket_addrs() {
+            Ok(addrs) => addrs.collect::<Vec<_>>(),
+            Err(err) => return NetConnectStart::Done(Err(err)),
+        };
+        let mut last = io::Error::new(ErrorKind::NotFound, "no address resolved");
+        for addr in addrs {
+            let family = if addr.is_ipv4() { raw_sock::AF_INET } else { raw_sock::AF_INET6 };
+            let fd = match raw_sock::open_stream(family) {
+                Ok(fd) => fd,
+                Err(err) => {
+                    last = err;
+                    continue;
+                },
+            };
+            match raw_sock::start_connect(&fd, &addr) {
+                // connected at once: adopt and register like any other
+                // handle (the parking flag keeps the stream honest)
+                Ok(false) => {
+                    let stream = fd_into_stream(fd);
+                    return NetConnectStart::Done(Ok(self.register(stream)));
+                },
+                // in progress: the row owns the fd and the address,
+                // the pre-minted id the wake registers under
+                Ok(true) => {
+                    let conn = self.next_id;
+                    self.next_id = conn + 1;
+                    self.connecting.push((conn, fd, addr));
+                    return NetConnectStart::Pending(conn);
+                },
+                // the refusal falls to the next address; the fd's drop
+                // closes the attempt
+                Err(err) => last = err,
+            }
+        }
+        NetConnectStart::Done(Err(last))
+    }
+
+    /// One parked connect's completion probe: the wake the writability
+    /// reports dials the row's address a second time — connected (the
+    /// raw fd adopted into the stream registered under the row's id),
+    /// still pending (a spurious wake, the wait standing), or the
+    /// errno the attempt met.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn connect_wake(&mut self, conn: i64) -> NetAttempt<i64> {
+        let Some(at) = self.connecting.iter().position(|(id, ..)| *id == conn) else {
+            return NetAttempt::Done(Err(unknown(conn)));
+        };
+        let done = raw_sock::connect_done(&self.connecting[at].1, &self.connecting[at].2);
+        match done {
+            Ok(true) => NetAttempt::Park,
+            Ok(false) => {
+                let (conn, fd, _) = self.connecting.remove(at);
+                let stream = fd_into_stream(fd);
+                self.adopt(conn, stream);
+                NetAttempt::Done(Ok(conn))
+            },
+            Err(err) => {
+                self.connecting.remove(at);
+                NetAttempt::Done(Err(err))
+            },
+        }
+    }
+
+    /// Registers `stream` under the pre-minted id the pending connect
+    /// parked with (the mint advanced past the id at park time, so the
+    /// slot is fresh by construction).
+    fn adopt(&mut self, conn: i64, stream: TcpStream) {
+        if self.parking {
+            let _ = stream.set_nonblocking(true);
+        }
+        self.streams.push((conn, stream));
+    }
+
+    /// Drops one pending connect's row, the raw fd closing with it —
+    /// the parked-IO cancellation's cleanup, total over an unknown id
+    /// (the wait's every other end door rides the same release).
+    pub(crate) fn cancel_connect(&mut self, conn: i64) {
+        #[cfg(target_os = "linux")]
+        self.connecting.retain(|(id, ..)| *id != conn);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = conn;
+        }
+    }
+
+    /// The OS-level handle of one pending connect's raw socket, the
+    /// park's registration key; `None` for an unknown row (and on the
+    /// hosts that keep the blocking twin — no row ever stands there).
+    pub(crate) fn raw_connect_handle(&mut self, conn: i64) -> Option<crate::reactor::IoHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let fd = self
+                .connecting
+                .iter()
+                .find(|(id, ..)| *id == conn)
+                .map(|(_, fd, _)| fd)?;
+            Some(crate::reactor::IoHandle(
+                u64::try_from(fd.as_raw_fd()).ok()?,
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = conn;
+            None
+        }
+    }
+
+    /// Starts one parked plain-http exchange: the staged connect plus
+    /// the request bytes, answering the fetch row's id. The machine
+    /// rides the same connect discipline `net_connect` parks on; every
+    /// later step advances at the wakes.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_fetch(
+        &mut self,
+        host: &str,
+        port: u16,
+        request: String,
+    ) -> Result<i64, io::Error> {
+        let (conn, connected) = match self.start_connect(host, port) {
+            NetConnectStart::Done(Ok(conn)) => (conn, true),
+            NetConnectStart::Done(Err(err)) => return Err(err),
+            NetConnectStart::Pending(row) => (row, false),
+        };
+        let fetch = self.next_id;
+        self.next_id = fetch + 1;
+        self.fetches.push((fetch, Fetch {
+            conn,
+            connected,
+            out: request.into_bytes(),
+            seen: Vec::new(),
+        }));
+        Ok(fetch)
+    }
+
+    /// Advances one parked exchange as far as the readiness takes it,
+    /// the OS's own would-block answers the stage gates (the event is
+    /// advisory, the probes the truth): the connect probe first, then
+    /// the request drain, then the response reads to the peer's close
+    /// — the same close-delimited round the blocking exchange runs.
+    /// The linux driver's own machine; the other hosts never mint the
+    /// wait.
+    pub(crate) fn fetch_wake(&mut self, fetch: i64) -> FetchWake {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(at) = self.fetches.iter().position(|(id, _)| *id == fetch) else {
+                return FetchWake::Done(Err(unknown_fetch(fetch)));
+            };
+            // the row comes out for the step: the probes below borrow
+            // the whole table (the try_* twins are this table's own)
+            let (_, mut machine) = self.fetches.remove(at);
+            if !machine.connected {
+                match self.connect_wake(machine.conn) {
+                    NetAttempt::Park => {
+                        self.fetches.push((fetch, machine));
+                        return FetchWake::Pending {
+                            watch: crate::reactor::Direction::Write,
+                        };
+                    },
+                    NetAttempt::Done(Err(err)) => return FetchWake::Done(Err(err)),
+                    NetAttempt::Done(Ok(conn)) => {
+                        machine.conn = conn;
+                        machine.connected = true;
+                    },
+                }
+            }
+            if !machine.out.is_empty() {
+                match self.try_send(machine.conn, &mut machine.out) {
+                    NetAttempt::Park => {
+                        self.fetches.push((fetch, machine));
+                        return FetchWake::Pending {
+                            watch: crate::reactor::Direction::Write,
+                        };
+                    },
+                    NetAttempt::Done(Err(err)) => {
+                        self.close(machine.conn);
+                        return FetchWake::Done(Err(err));
+                    },
+                    NetAttempt::Done(Ok(())) => {},
+                }
+            }
+            loop {
+                match self.try_recv(machine.conn, HTTP_CHUNK) {
+                    NetAttempt::Park => {
+                        self.fetches.push((fetch, machine));
+                        return FetchWake::Pending {
+                            watch: crate::reactor::Direction::Read,
+                        };
+                    },
+                    NetAttempt::Done(Err(err)) => {
+                        self.close(machine.conn);
+                        return FetchWake::Done(Err(err));
+                    },
+                    // the peer's close ends the exchange
+                    NetAttempt::Done(Ok(bytes)) if bytes.is_empty() => {
+                        self.close(machine.conn);
+                        return FetchWake::Done(finish_response(&machine.seen));
+                    },
+                    NetAttempt::Done(Ok(bytes)) => {
+                        machine.seen.extend_from_slice(&bytes);
+                        if machine.seen.len() > NET_CAP {
+                            self.close(machine.conn);
+                            return FetchWake::Done(Err(io::Error::other(
+                                "response exceeds the 1 MiB cap",
+                            )));
+                        }
+                    },
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
+            FetchWake::Done(Err(io::Error::other(
+                "the parked exchange is the linux driver's own",
+            )))
+        }
+    }
+
+    /// Drops one parked exchange (a cancel, a deadline — the row's
+    /// transport closing with it), total over an unknown id.
+    pub(crate) fn cancel_fetch(&mut self, fetch: i64) {
+        #[cfg(target_os = "linux")]
+        if let Some(at) = self.fetches.iter().position(|(id, _)| *id == fetch) {
+            let (_, machine) = self.fetches.remove(at);
+            if machine.connected {
+                self.close(machine.conn);
+            } else {
+                self.cancel_connect(machine.conn);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
+        }
+    }
+
+    /// The OS-level handle of one parked exchange's transport — the
+    /// registered stream's fd once connected, the pending connect's raw
+    /// fd first — the park's registration key.
+    pub(crate) fn raw_fetch_handle(&mut self, fetch: i64) -> Option<crate::reactor::IoHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            let (_, machine) = self.fetches.iter().find(|(id, _)| *id == fetch)?;
+            if machine.connected {
+                self.raw_handle(machine.conn)
+            } else {
+                self.raw_connect_handle(machine.conn)
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
             None
         }
     }
@@ -512,6 +1013,21 @@ impl Listeners {
             .map(|(_, listener)| listener)
             .ok_or_else(|| unknown_listener(lid))
     }
+
+    /// The bound listener's local address rendered "host:port" — the
+    /// port-0 bind's report. Total: an unknown handle answers the
+    /// empty string (the face's member never reaches it with a dead
+    /// binding, the idempotent-close precedent's inert answer).
+    #[must_use]
+    pub(crate) fn local_addr(&mut self, lid: i64) -> String {
+        match self.listener(lid) {
+            Ok(listener) => listener
+                .local_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        }
+    }
 }
 
 /// The "unknown connection" error, shared by every handle lookup.
@@ -522,6 +1038,12 @@ fn unknown(conn: i64) -> io::Error {
 /// The "unknown listener" error, shared by every listener lookup.
 fn unknown_listener(lid: i64) -> io::Error {
     io::Error::other(format!("unknown listener {lid}"))
+}
+
+/// The "unknown fetch" error: a parked exchange's row is gone (its
+/// wait already ended through another door).
+fn unknown_fetch(fetch: i64) -> io::Error {
+    io::Error::other(format!("unknown fetch {fetch}"))
 }
 
 /// Renders a timed-out wait as its own detail instead of the OS's
@@ -686,10 +1208,17 @@ where
             Err(err) => return Err(normalize(err, timeout)),
         }
     }
-    let Some(at) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
+    finish_response(&response)
+}
+
+/// The response's decode, the blocking exchange's and the parked
+/// machine's shared finish: the body after the header terminator,
+/// refused without the terminator or past the cap.
+fn finish_response(seen: &[u8]) -> Result<String, io::Error> {
+    let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
         return Err(io::Error::other("malformed response: no header terminator"));
     };
-    String::from_utf8(response[at + 4..].to_owned())
+    String::from_utf8(seen[at + 4..].to_owned())
         .map_err(|_| io::Error::other("invalid UTF-8 in the response body"))
 }
 
@@ -711,6 +1240,34 @@ pub(crate) fn net_connect_fn(
             "port out of range",
         ));
     };
+    let target = format!("{host}:{port}");
+    // the parked twin (the 2026-11-23 ruling): a reactor owns
+    // readiness, so the connect rides the raw OS socket —
+    // non-blocking, EINPROGRESS parked on the writability the
+    // completion reports, SO_ERROR the wake's probe. The linux
+    // driver's own; a non-linux host keeps the blocking twin under any
+    // reactor until its driver round owns the raw seam.
+    #[cfg(target_os = "linux")]
+    {
+        if out.net().parking() {
+            return match out.net().start_connect(&host, port) {
+                NetConnectStart::Done(Ok(conn)) => Ok(ok(Value::I64(conn))),
+                NetConnectStart::Done(Err(err)) => Ok(net_err(
+                    heaps,
+                    NetClass::of(&err),
+                    "net_connect",
+                    &target,
+                    &err.to_string(),
+                )),
+                NetConnectStart::Pending(conn) => {
+                    let deadline = std::time::Instant::now() + out.net().timeout();
+                    Ok(NativeResult::Park(crate::sched::WorldWait::connect(
+                        conn, target, deadline,
+                    )))
+                },
+            };
+        }
+    }
     match out.net().open(&host, port) {
         Ok(stream) => {
             let id = out.net().register(stream);
@@ -720,7 +1277,7 @@ pub(crate) fn net_connect_fn(
             heaps,
             NetClass::of(&err),
             "net_connect",
-            &format!("{host}:{port}"),
+            &target,
             &err.to_string(),
         )),
     }
@@ -953,6 +1510,21 @@ pub(crate) fn net_listener_close_fn(
     Ok(NativeResult::Word(Value::I64(0)))
 }
 
+/// `net_local_addr(lid: int) -> string`: the bound listener's local
+/// address ("host:port") — the raw seam the ds-source `local_addr`
+/// handler reads the id word out to call, the port-0 bind's report
+/// (the face's one address op).
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn net_local_addr_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let lid = i64_arg(args, 0)?;
+    let addr = out.listeners().local_addr(lid);
+    Ok(NativeResult::Word(heaps.new_str(addr)))
+}
+
 /// `http_get(url: string) -> string | net_err`: the plain body a
 /// tls-omitting host serves — HTTP/1.0 over TCP only, an `https://` URL
 /// answered by the unprovided-capability `net_err`. See the module docs
@@ -964,6 +1536,16 @@ pub(crate) fn http_get_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    // the plain exchange rides the parked machine under a reactor (the
+    // staged connect `net_connect` parks on); https keeps the tls
+    // tier's own body
+    #[cfg(target_os = "linux")]
+    {
+        let (scheme, rest) = scheme_of(&url);
+        if out.net().parking() && matches!(scheme, Scheme::Http) {
+            return parked_plain_fetch(heaps, out, rest, &url);
+        }
+    }
     let (scheme, rest) = scheme_of(&url);
     let fetched = match scheme {
         Scheme::Http => plain_fetch(out, rest),
@@ -992,6 +1574,43 @@ fn plain_fetch(out: &mut OutputSink, rest: &str) -> Result<String, io::Error> {
     let timeout = net.timeout();
     let mut stream = net.open(&host, port)?;
     exchange(&mut stream, &request(&authority, &path), timeout)
+}
+
+/// The parked plain-fetch entry both fetch bodies share (the plain
+/// `http_get` and the tls routing body's http leg): the URL's pieces
+/// resolve, the staged connect and the request bytes form the exchange
+/// machine, and the wakes (or the deadline) answer — an immediate
+/// start failure here, everything else through the scheduler.
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn parked_plain_fetch(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    rest: &str,
+    url: &str,
+) -> Result<NativeResult, Trap> {
+    let (host, port, authority, path) = match split_target(rest) {
+        Ok(parts) => parts,
+        Err(detail) => return Ok(net_err(heaps, NetClass::Other, "http_get", url, &detail)),
+    };
+    let request = request(&authority, &path);
+    match out.net().start_fetch(&host, port, request) {
+        Ok(fetch) => {
+            let deadline = std::time::Instant::now() + out.net().timeout();
+            Ok(NativeResult::Park(crate::sched::WorldWait::fetch(
+                fetch,
+                url.to_owned(),
+                deadline,
+            )))
+        },
+        Err(err) => Ok(net_err(
+            heaps,
+            NetClass::of(&err),
+            "http_get",
+            url,
+            &err.to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1125,6 +1744,113 @@ mod tests {
                 actual: SlotType::I64,
             })
         );
+    }
+
+    /// The parked connect's raw machine (the 2026-11-23 ruling): a
+    /// loopback connect either completes at once or stands in progress
+    /// with the wake's SO_ERROR probe finishing it — the registered
+    /// handle live either way — and a refused port answers its class
+    /// without any park surviving. The retry loop is the test's own
+    /// poll: an in-progress connect on loopback completes in
+    /// milliseconds, and the machine's own caller (the reactor) polls
+    /// the same way.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_raw_connect_machine_registers_through_either_door() {
+        let mut conns = Connections::default();
+        conns.enable_parking();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let addr = listener.local_addr().expect("local address");
+        let conn = match conns.start_connect(&addr.ip().to_string(), addr.port()) {
+            NetConnectStart::Done(Ok(conn)) => conn,
+            NetConnectStart::Pending(conn) => {
+                let mut answered = None;
+                for _ in 0..500 {
+                    match conns.connect_wake(conn) {
+                        NetAttempt::Park => std::thread::sleep(Duration::from_millis(1)),
+                        wake @ NetAttempt::Done(_) => {
+                            answered = Some(wake);
+                            break;
+                        },
+                    }
+                }
+                match answered.expect("the loopback connect completes") {
+                    NetAttempt::Done(Ok(done)) => {
+                        assert_eq!(done, conn, "the wake registers under the row's id");
+                        conn
+                    },
+                    other => panic!("the parked wake answered wrong: {other:?}"),
+                }
+            },
+            other @ NetConnectStart::Done(_) => {
+                panic!("a live listener's connect: {other:?}")
+            },
+        };
+        // the registered handle carries data: the accepted peer reads
+        // what the machine's connection wrote
+        let mut pending = b"ping".to_vec();
+        match conns.try_send(conn, &mut pending) {
+            NetAttempt::Done(Ok(())) => {},
+            other => panic!("the fresh loopback buffer takes the ping: {other:?}"),
+        }
+        let (mut peer, _) = listener.accept().expect("the peer accepts");
+        let mut got = [0; 4];
+        peer.read_exact(&mut got).expect("the peer reads the ping");
+        assert_eq!(&got, b"ping");
+        conns.close(conn);
+        conns.cancel_connect(conn);
+        assert!(conns.raw_connect_handle(conn).is_none(), "the row is gone");
+
+        // a refused port: the listener dropped, the machine answers the
+        // refused class through whichever door the OS picks
+        drop(peer);
+        let port = addr.port();
+        let mut refused = None;
+        match conns.start_connect("127.0.0.1", port) {
+            NetConnectStart::Done(Err(err)) => refused = Some(err),
+            NetConnectStart::Pending(row) => {
+                for _ in 0..500 {
+                    match conns.connect_wake(row) {
+                        NetAttempt::Park => std::thread::sleep(Duration::from_millis(1)),
+                        NetAttempt::Done(Err(err)) => {
+                            refused = Some(err);
+                            break;
+                        },
+                        NetAttempt::Done(Ok(conn)) => {
+                            // a parallel test re-bound the port: not a
+                            // refused probe, the live-listener leg above
+                            // already covered that door
+                            conns.close(conn);
+                            break;
+                        },
+                    }
+                }
+            },
+            NetConnectStart::Done(Ok(conn)) => conns.close(conn),
+        }
+        if let Some(err) = refused {
+            assert_eq!(NetClass::of(&err), NetClass::Refused, "the class: {err}");
+        }
+    }
+
+    /// The local-address op: a port-0 bind reports its bound address
+    /// ("host:port", a real port), and the unknown handle answers the
+    /// inert empty string (the total seam's answer).
+    #[test]
+    fn the_listener_reports_its_local_address() {
+        let mut listeners = Listeners::default();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let bound = listener.local_addr().expect("local address");
+        let lid = listeners.register(listener);
+        let addr = listeners.local_addr(lid);
+        let port = addr.rsplit(':').next().unwrap_or_default();
+        assert_eq!(
+            port.parse::<u16>().expect("the rendered port"),
+            bound.port(),
+            "the port-0 bind reports its bound port: {addr}"
+        );
+        assert!(addr.starts_with("127.0.0.1:"), "the rendering: {addr}");
+        assert_eq!(listeners.local_addr(9), "", "the unknown handle is inert");
     }
 
     /// The server half's spans: a port out of range answers the refused

@@ -5467,13 +5467,16 @@ impl Vm {
     /// `WorldParked` state until a wake moves it to the run queue.
     pub(crate) fn register_wait(&mut self, fiber: FiberId, wait: WorldWait) {
         let op = wait.op_name();
-        let conn = wait.conn().map(|conn| conn.to_string()).unwrap_or_default();
+        let target = wait.target();
         let deadline = wait.deadline();
         // the wait's IO interest resolves through the table its handle
         // names: the connection table for the data ops, the listener
-        // table for the accept
+        // table for the accept, the pending-connect row for a parked
+        // connect, the exchange machine's own transport for a fetch
         let handle = match &wait {
             WorldWait::Accept { listener, .. } => self.out.listeners().raw_handle(*listener),
+            WorldWait::Connect { conn, .. } => self.out.net().raw_connect_handle(*conn),
+            WorldWait::Fetch { fetch, .. } => self.out.net().raw_fetch_handle(*fetch),
             _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
         };
         let token = self.sched.mint();
@@ -5486,7 +5489,7 @@ impl Vm {
             };
             if let Err(err) = registered {
                 let result = self.complete_in_store(fiber, |heaps| {
-                    crate::net::net_err(heaps, crate::net::NetClass::Refused, op, &conn, &err.0)
+                    crate::net::net_err(heaps, crate::net::NetClass::Refused, op, &target, &err.0)
                 });
                 self.sched.waits.insert(token, WaitEntry {
                     fiber,
@@ -5519,12 +5522,25 @@ impl Vm {
             .map(|(token, _)| *token)
             .collect();
         for token in tokens {
-            if let Some(entry) = self.sched.waits.remove(&token)
-                && let Some(handle) = entry.handle
-                && let Some(installed) = self.reactor.as_mut()
-            {
-                let _ = installed.driver().deregister(handle);
+            if let Some(entry) = self.sched.waits.remove(&token) {
+                self.release_wait_resources(&entry.wait);
+                if let Some(handle) = entry.handle
+                    && let Some(installed) = self.reactor.as_mut()
+                {
+                    let _ = installed.driver().deregister(handle);
+                }
             }
+        }
+    }
+
+    /// Releases the OS resource one ended wait's stage owned: a parked
+    /// connect's raw socket and a parked exchange's transport — every
+    /// other shape parks on a row its handle's own table already owns.
+    fn release_wait_resources(&mut self, wait: &WorldWait) {
+        match wait {
+            WorldWait::Connect { conn, .. } => self.out.net().cancel_connect(*conn),
+            WorldWait::Fetch { fetch, .. } => self.out.net().cancel_fetch(*fetch),
+            _ => {},
         }
     }
 
@@ -5541,6 +5557,7 @@ impl Vm {
         {
             let _ = installed.driver().deregister(handle);
         }
+        self.release_wait_resources(&entry.wait);
         let fiber = entry.fiber;
         if self.pool[fiber.index()].state == FiberState::WorldParked {
             self.pool[fiber.index()].state = FiberState::Suspended;
@@ -5567,11 +5584,7 @@ impl Vm {
             self.finish_wait(token, NativeResult::Word(Value::I64(0)));
             return;
         }
-        let conn = entry
-            .wait
-            .conn()
-            .map(|conn| conn.to_string())
-            .unwrap_or_default();
+        let target = entry.wait.target();
         let op = entry.wait.op_name();
         if entry.wait.deadline() <= Instant::now() {
             let bound = self.out.net().timeout();
@@ -5580,7 +5593,7 @@ impl Vm {
                     heaps,
                     crate::net::NetClass::Timeout,
                     op,
-                    &conn,
+                    &target,
                     &format!("timed out after {bound:?}"),
                 )
             });
@@ -5605,7 +5618,7 @@ impl Vm {
                         let class = crate::net::NetClass::of(&err);
                         let detail = err.to_string();
                         self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                            crate::net::net_err(heaps, class, op, &target, &detail)
                         })
                     },
                     // spurious: the readiness was consumed elsewhere,
@@ -5625,7 +5638,7 @@ impl Vm {
                         let class = crate::net::NetClass::of(&err);
                         let detail = err.to_string();
                         self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                            crate::net::net_err(heaps, class, op, &target, &detail)
                         })
                     },
                     // partial drain: the remainder keeps the wait, its
@@ -5658,12 +5671,71 @@ impl Vm {
                         let class = crate::net::NetClass::of(&err);
                         let detail = err.to_string();
                         self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                            crate::net::net_err(heaps, class, op, &target, &detail)
                         })
                     },
                     // spurious: the pending connection was consumed
                     // elsewhere, the wait stands for the next poll
                     crate::net::NetAttempt::Park => return,
+                }
+            },
+            // the raw socket's completion: the writable (or errored)
+            // wake probes SO_ERROR — connected registering the stream
+            // under the pending row's id, the errno it holds the
+            // failure — still-in-progress a spurious wake the wait
+            // stands over
+            WorldWait::Connect { conn: id, .. } => {
+                let Some(event) = ready.filter(|event| event.write || event.read) else {
+                    return;
+                };
+                let _ = event;
+                match self.out.net().connect_wake(id) {
+                    crate::net::NetAttempt::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
+                    crate::net::NetAttempt::Done(Err(err)) => {
+                        let class = crate::net::NetClass::of(&err);
+                        let detail = err.to_string();
+                        self.complete_in_store(fiber, |heaps| {
+                            crate::net::net_err(heaps, class, op, &target, &detail)
+                        })
+                    },
+                    crate::net::NetAttempt::Park => return,
+                }
+            },
+            // the plain exchange's machine: the OS probes gate the
+            // stages (the event advisory), a pending step re-aiming
+            // the standing interest at its next direction and re-arming
+            // the bound — the per-op bound the blocking twin's socket
+            // timeouts keep, step-grained
+            WorldWait::Fetch { fetch, .. } => {
+                let _ = ready;
+                match self.out.net().fetch_wake(fetch) {
+                    crate::net::FetchWake::Done(Ok(body)) => {
+                        self.complete_in_store(fiber, |heaps| crate::net::ok(heaps.new_str(body)))
+                    },
+                    crate::net::FetchWake::Done(Err(err)) => {
+                        let class = crate::net::NetClass::of(&err);
+                        let detail = err.to_string();
+                        self.complete_in_store(fiber, |heaps| {
+                            crate::net::net_err(heaps, class, op, &target, &detail)
+                        })
+                    },
+                    crate::net::FetchWake::Pending { watch } => {
+                        let deadline = Instant::now() + self.out.net().timeout();
+                        if let Some(live) = self.sched.waits.get_mut(&token)
+                            && let WorldWait::Fetch {
+                                deadline: armed, ..
+                            } = &mut live.wait
+                        {
+                            *armed = deadline;
+                        }
+                        self.sched.arm(deadline, token);
+                        if let Some(installed) = self.reactor.as_mut()
+                            && let Some(handle) = entry.handle
+                        {
+                            let _ = installed.driver().register(handle, watch, token);
+                        }
+                        return;
+                    },
                 }
             },
         };
@@ -5746,18 +5818,14 @@ impl Vm {
                             continue;
                         }
                         let detail = format!("reactor: {}", err.0);
-                        let conn = entry
-                            .wait
-                            .conn()
-                            .map(|conn| conn.to_string())
-                            .unwrap_or_default();
+                        let target = entry.wait.target();
                         let op = entry.wait.op_name();
                         let result = self.complete_in_store(entry.fiber, |heaps| {
                             crate::net::net_err(
                                 heaps,
                                 crate::net::NetClass::Refused,
                                 op,
-                                &conn,
+                                &target,
                                 &detail,
                             )
                         });

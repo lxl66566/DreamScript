@@ -359,6 +359,7 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("net_listen", error | world)
         .with("net_accept", error | world)
         .with("net_listener_close", world)
+        .with("net_local_addr", world)
         .with("proc_spawn", error | world)
         .with("proc_write", error | world)
         .with("proc_read", error | world)
@@ -471,6 +472,7 @@ mod tests {
             "net_listen",
             "accept",
             "close_listener",
+            "local_addr",
             "proc_spawn",
             "write",
             "read_out",

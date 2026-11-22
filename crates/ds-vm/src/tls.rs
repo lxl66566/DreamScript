@@ -17,7 +17,11 @@
 //!
 //! The blocking discipline is the net ops' own ([`crate::net`]): every
 //! wait rides the connection table's bounded socket timeouts, a
-//! blocking foreign call pinning its fiber.
+//! blocking foreign call pinning its fiber. The plain leg parks under
+//! an installed reactor like every other net op (linux this round);
+//! the rustls leg stays blocking under any reactor — the session's
+//! own wants-read/wants-write steering needs a parked transport seam,
+//! the narrowed residual.
 
 use std::{
     io::{self, Read, Write},
@@ -68,6 +72,18 @@ pub(crate) fn http_get_tls_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    // the plain leg rides the parked exchange under a reactor (the
+    // staged connect `net_connect` parks on); the rustls tier keeps
+    // its blocking transport — the session steers its own
+    // wants-read/wants-write discipline mid-handshake, a transport
+    // rework this round narrows rather than fakes
+    #[cfg(target_os = "linux")]
+    {
+        let (scheme, rest) = net::scheme_of(&url);
+        if out.net().parking() && matches!(scheme, Scheme::Http) {
+            return net::parked_plain_fetch(heaps, out, rest, &url);
+        }
+    }
     match fetch(out, &url, false) {
         Ok(body) => Ok(net::ok(heaps.new_str(body))),
         Err(err) => Ok(net::net_err(

@@ -42,7 +42,8 @@ use ds_vm::{
     assemble,
     native::{BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN},
     platform::{
-        Capability, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform, STD_NAME,
+        Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform,
+        STD_NAME,
     },
 };
 
@@ -221,6 +222,28 @@ fn send_probe_def() -> FunctionDef {
         },
         Uop::Ret { src: 2 },
     ])
+}
+
+/// `(url: string) -> string`: one plain `http_get` — the parked
+/// exchange probe (the staged connect, the request drain, the response
+/// reads to the close).
+fn fetch_child_def() -> FunctionDef {
+    def_pool(
+        "fetch_child",
+        &[Ref, Raw, Raw],
+        1,
+        2,
+        vec![platform(OP_HTTP_GET)],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )
 }
 
 /// One scheduled connect over a fresh accepted peer, answering the
@@ -407,6 +430,46 @@ fn a_parked_recv_wakes_at_its_deadline_with_the_timeout_span() {
     let text = answer_string(&vm, &answer);
     assert!(text.contains("timed out"), "the timeout message: {text}");
     drop(peer);
+}
+
+/// A parked plain fetch wakes through its whole machine: the staged
+/// connect, the request drain, and the response reads to the server's
+/// close — the body after the header terminator delivered at the
+/// parked call site, the same answer the blocking twin answers.
+#[test]
+fn a_parked_plain_fetch_answers_the_local_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let addr = listener.local_addr().expect("local address");
+    // the local HTTP peer: one accept, the request read to its blank
+    // line, then the close-delimited response (the peer's own exit the
+    // close the machine reads)
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("the server accepts");
+        sock.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("timeout");
+        let mut seen = vec![0; 1024];
+        let mut got = 0;
+        while got < seen.len() {
+            match sock.read(&mut seen[got..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    got += n;
+                    if seen[..got].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                },
+            }
+        }
+        sock.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nhello parked fetch")
+            .expect("the server writes");
+    });
+    let mut vm = scheduled_vm(vec![fetch_child_def()]);
+    let url = vm.intern_str(&format!("http://127.0.0.1:{}/hello", addr.port()));
+    let answer = vm
+        .run("io", "fetch_child", &[url])
+        .expect("the parked fetch lands");
+    assert_eq!(answer_string(&vm, &answer), "hello parked fetch");
+    server.join().expect("the server lands");
 }
 
 /// Parked-IO cancellation: a sibling's trap raises the flag, and the

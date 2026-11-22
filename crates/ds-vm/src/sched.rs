@@ -55,6 +55,28 @@ pub enum WorldWait {
     /// connection's handle, the stream registering into the connection
     /// table like a connecting one.
     Accept { listener: i64, deadline: Instant },
+    /// `net_connect(host, port)`: the raw socket's in-progress connect
+    /// (the 2026-11-23 ruling) — the writability wake probes
+    /// `SO_ERROR`, connected registering the stream under the pending
+    /// row's id, a spurious wake leaving the wait standing; the row's
+    /// fd releases with the wait whichever door ends it. `target`
+    /// carries the "host:port" the error spans name (no table key
+    /// renders it).
+    Connect {
+        conn: i64,
+        target: String,
+        deadline: Instant,
+    },
+    /// `http_get(url)`'s plain exchange: the staged connect, the
+    /// request drain, and the response reads to the peer's close — one
+    /// machine advancing a step per wake, each step's readiness
+    /// re-aiming the interest and re-arming the bound; `target`
+    /// carries the URL the error spans name.
+    Fetch {
+        fetch: i64,
+        target: String,
+        deadline: Instant,
+    },
     /// `sleep(nanos)`: the timer-only wait — no IO interest, no
     /// deregistration target, the wheel's own firing IS the
     /// completion, answering the unit word (the time face's op, the
@@ -98,6 +120,30 @@ impl WorldWait {
         Self::Accept { listener, deadline }
     }
 
+    /// A connect wait's constructor: the pending connect's row id, the
+    /// "host:port" the error spans name, and the configured net
+    /// timeout restated as the deadline.
+    #[must_use]
+    pub fn connect(conn: i64, target: String, deadline: Instant) -> Self {
+        Self::Connect {
+            conn,
+            target,
+            deadline,
+        }
+    }
+
+    /// A fetch wait's constructor: the exchange machine's row id, the
+    /// URL the error spans name, and the first stage's bound (every
+    /// later step re-arming it).
+    #[must_use]
+    pub fn fetch(fetch: i64, target: String, deadline: Instant) -> Self {
+        Self::Fetch {
+            fetch,
+            target,
+            deadline,
+        }
+    }
+
     /// The wait's deadline.
     #[must_use]
     pub fn deadline(&self) -> Instant {
@@ -105,21 +151,37 @@ impl WorldWait {
             Self::Recv { deadline, .. }
             | Self::Send { deadline, .. }
             | Self::Accept { deadline, .. }
+            | Self::Connect { deadline, .. }
+            | Self::Fetch { deadline, .. }
             | Self::Sleep { deadline } => *deadline,
         }
     }
 
-    /// The handle id the wait names (its error-span target), `None`
-    /// for the timer-only wait. A recv or send names a connection; an
-    /// accept names the listener (its IO interest resolves through the
-    /// listener table, not the connection table — the registration
-    /// site dispatches on the shape).
+    /// The handle id the wait names, `None` when no table key names
+    /// the wait. A recv or send names a connection; an accept names
+    /// the listener; a connect names its pending row; a fetch's
+    /// transport stays inside its machine (the registration site
+    /// resolves it there) and the sleep names nothing. The
+    /// error-span's target rendering is [`WorldWait::target`]'s own.
     #[must_use]
     pub fn conn(&self) -> Option<i64> {
         match self {
-            Self::Recv { conn, .. } | Self::Send { conn, .. } => Some(*conn),
+            Self::Recv { conn, .. } | Self::Send { conn, .. } | Self::Connect { conn, .. } => {
+                Some(*conn)
+            },
             Self::Accept { listener, .. } => Some(*listener),
-            Self::Sleep { .. } => None,
+            Self::Fetch { .. } | Self::Sleep { .. } => None,
+        }
+    }
+
+    /// The wait's error-span target: the "host:port" or URL the
+    /// machine waits name (no table key renders it), the handle id
+    /// every table-keyed wait answers instead.
+    #[must_use]
+    pub fn target(&self) -> String {
+        match self {
+            Self::Connect { target, .. } | Self::Fetch { target, .. } => target.clone(),
+            _ => self.conn().map(|conn| conn.to_string()).unwrap_or_default(),
         }
     }
 
@@ -129,7 +191,10 @@ impl WorldWait {
     pub fn direction(&self) -> Option<Direction> {
         match self {
             Self::Recv { .. } | Self::Accept { .. } => Some(Direction::Read),
-            Self::Send { .. } => Some(Direction::Write),
+            // a connect parks on the writability its completion
+            // reports; a fetch starts at its connect-or-write stage,
+            // the machine re-aiming the interest at its later steps
+            Self::Send { .. } | Self::Connect { .. } | Self::Fetch { .. } => Some(Direction::Write),
             Self::Sleep { .. } => None,
         }
     }
@@ -142,6 +207,8 @@ impl WorldWait {
             Self::Recv { .. } => "net_recv",
             Self::Send { .. } => "net_send",
             Self::Accept { .. } => "net_accept",
+            Self::Connect { .. } => "net_connect",
+            Self::Fetch { .. } => "http_get",
             Self::Sleep { .. } => "time_sleep",
         }
     }

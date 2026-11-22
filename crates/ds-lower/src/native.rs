@@ -994,6 +994,15 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 36,
         shape: NativeShape::Checked,
     },
+    Native {
+        // the bound listener's local address, the port-0 bind's report
+        // (the ds-source `local_addr` handler over the raw seam) — a
+        // total string word like `args`
+        name: "net_local_addr",
+        module: NativeModule::Platform,
+        index: 37,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.

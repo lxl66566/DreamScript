@@ -160,6 +160,8 @@ pub const OP_NET_LISTEN: u32 = 26;
 pub const OP_NET_ACCEPT: u32 = 27;
 /// `net_listener_close`: net (the raw idempotent-close seam the
 /// `net_listener` deinit pairs with, `net_close`'s contract).
+/// `net_local_addr`: net (the bound listener's local address, the
+/// port-0 bind's report).
 pub const OP_NET_LISTENER_CLOSE: u32 = 28;
 /// `proc_spawn`: proc (spawns one child over pipes, answers the
 /// linear `proc_handle`'s word; the ambient's total spelling pairs
@@ -186,9 +188,12 @@ pub const OP_PROC_READ_ERR: u32 = 35;
 /// `proc_try_wait`: proc (polls the child without blocking — the
 /// already-reaped status under the ok member, none while it runs).
 pub const OP_PROC_TRY_WAIT: u32 = 36;
+/// `net_local_addr`: net (the bound listener's local address, the
+/// port-0 bind's report — the `net_listener` face's one address op).
+pub const OP_NET_LOCAL_ADDR: u32 = 37;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 37;
+pub const OP_COUNT: u32 = 38;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -243,6 +248,7 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "proc_close_in", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_in_fn },
     Op { name: "proc_read_err", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_err_fn },
     Op { name: "proc_try_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_try_wait_fn },
+    Op { name: "net_local_addr", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_local_addr_fn },
 ];
 
 macro_rules! unserved {
@@ -294,6 +300,7 @@ unserved!(unserved_op_33 at 33);
 unserved!(unserved_op_34 at 34);
 unserved!(unserved_op_35 at 35);
 unserved!(unserved_op_36 at 36);
+unserved!(unserved_op_37 at 37);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -307,7 +314,7 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
     unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
     unserved_op_32, unserved_op_33, unserved_op_34, unserved_op_35,
-    unserved_op_36,
+    unserved_op_36, unserved_op_37,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -467,6 +474,8 @@ mod tests {
             OPS[OP_NET_LISTENER_CLOSE as usize].name,
             "net_listener_close"
         );
+        assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].name, "net_local_addr");
+        assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].capability, Capability::Net);
         assert_eq!(
             OPS[OP_NET_LISTENER_CLOSE as usize].capability,
             Capability::Net
@@ -487,7 +496,7 @@ mod tests {
         assert_eq!(OPS[OP_PROC_READ_ERR as usize].capability, Capability::Proc);
         assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].name, "proc_try_wait");
         assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].capability, Capability::Proc);
-        assert_eq!(OPS.len(), 37);
+        assert_eq!(OPS.len(), OP_COUNT as usize);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -565,7 +574,7 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 37);
+        assert_eq!(table.len(), OP_COUNT as usize);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }

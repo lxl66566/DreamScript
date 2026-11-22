@@ -621,7 +621,8 @@ pub fn close_conn (h: net_handle) -> () {
 // closes the listener (a binding dropped without an explicit
 // close_listener still ends clean), and `net_listener_close` is
 // idempotent because the deinit may fire on a handle the owner already
-// closed.
+// closed. `local_addr` answers the bound address, the port-0 bind's
+// report (the face's one address op, total over the live handle).
 pub struct net_listener: ~Copyable {
   lid: int
   deinit { net_listener_close(self.lid) }
@@ -629,12 +630,22 @@ pub struct net_listener: ~Copyable {
 pub extern fn net_listen (host: string, port: int) -> net_listener
 pub extern fn net_accept (lid: int) -> net_handle
 pub extern fn net_listener_close (lid: int) -> ()
+pub extern fn net_local_addr (lid: int) -> string
 pub fn accept (l: net_listener) -> net_handle {
   const conn = net_accept(l.lid)
   conn
 }
 pub fn close_listener (l: net_listener) -> () {
   net_listener_close(l.lid)
+}
+// The listener's one address op: the bound local address rendered
+// "host:port", the port-0 bind's report (a port-0 listener is the one
+// way a source hands its bound port back). Total like the close seam —
+// the member never reaches a dead binding (the handle's linearity owns
+// that), the raw seam's unknown-handle answer the inert empty string.
+pub fn local_addr (l: net_listener) -> string {
+  const addr = net_local_addr(l.lid)
+  addr
 }
 
 // The process face's capture half: the same discipline as the other
