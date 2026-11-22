@@ -18,7 +18,11 @@
 // (std/json.ds, the serialization substrate's interim step), composed
 // back after this core for every reading that does not declare the
 // dep, so the two stay namespace-identical while the migration runs.
-// The net face rides the file face's shape: the `net_handle` struct
+// The string face is the same shape again (std/strings.ds): the pure
+// string operations left as extern entries naming the builtin
+// natives, composed back after the json face, while the core string
+// face stays here (`str`, `concat`, the sort key and content hash,
+// the codepoint pair). The net face rides the file face's shape: the `net_handle` struct
 // below is the package's own linear connection handle, `net_connect`
 // answers it directly, and the ds-source `send`/`recv`/`close_conn`
 // handlers read its id word out to the raw `net_send`/`net_recv`/
@@ -28,10 +32,11 @@
 // no table answers was the dead-name footgun this surface shed.
 // The library-boundary un-merge's first slice: this file is the shrunk
 // core — the members that migrated to the reserved @std package's own
-// source (std_members.ds, the demo residue) left it, and the merged
-// ambient every undeclaring registration serves composes that member
-// file back after this one, so the two readings stay namespace-identical
-// while the migration runs.
+// source (std_members.ds, the demo residue, beside the json and string
+// faces' own files) left it, and the merged ambient every undeclaring
+// registration serves composes that member file back after this one,
+// so the two readings stay namespace-identical while the migration
+// runs.
 
 // The default platform (H5, E1): the `ds` CLI is this platform's
 // provider, and the checker verifies the package's world usage stays
@@ -404,14 +409,9 @@ pub extern fn byte_list (b: bytes) -> list[byte]
 pub extern fn byte_at (b: bytes, i: int) -> byte | none
 pub extern fn utf8_encode (s: string) -> bytes
 pub extern fn utf8_decode (b: bytes) -> string | utf8_err
-// The one separator type both ways: `split` slices per its char and
-// `join` renders the neighbors around it. An empty-separator fold has
-// no spelling through the pair, so it composes in ds source.
-pub extern fn join (parts: list[string], sep: char) -> string
+// The generic count over the free tier's instance table [H3]: one
+// spelling for `s.len()` and `xs.len()` alike.
 pub extern fn len[t] (xs: t) -> int
-pub extern fn trim (s: string) -> string
-pub extern fn parse_int (s: string) -> int | parse_err
-pub extern fn parse_float (s: string) -> float | parse_err
 // The float math family (the 2026-11-21 pure-builtin round): IEEE f64
 // semantics over the float type, total by construction — no operand
 // shape traps (a negative sqrt answers NaN). `atan2` takes (y, x), the
@@ -425,29 +425,17 @@ pub extern fn floor (x: float) -> float
 pub extern fn ceil (x: float) -> float
 pub extern fn pow (base: float, exp: float) -> float
 pub extern fn abs (x: float) -> float
-pub extern fn split (s: string, sep: char) -> list[string]
-// The checked slice (B8): the chars between the two positions, none
-// outside `0 <= start <= end` and the string's char count — never
-// clamping and never a trap.
-pub extern fn substring (s: string, start: int, end: int) -> string | none
+// The core string face's own concatenation seam: the `+` and `+=`
+// spellings lower through it beside the interpolation's STRCAT, the
+// free spelling the F3 receiver fallback routes `xs.concat(ys)`'s
+// member-name twin behind, and the bytes show body below calls it —
+// the core body's same-file call pins it here. The pure string
+// operations over the face (the checked slice and char read, the
+// case pair, the separator pair, the search family, the parses) are
+// the @std string face's own source (std/strings.ds), composed back
+// after the json face for every reading that does not declare the
+// dep.
 pub extern fn concat (a: string, b: string) -> string
-pub extern fn to_upper (s: string) -> string
-pub extern fn to_lower (s: string) -> string
-// The checked char read (B8): the char at the position, none outside
-// the string's range — the old total spelling answered the empty
-// string instead.
-pub extern fn char_at (s: string, i: int) -> char | none
-// The string search family (the 2026-11-21 pure-builtin round):
-// `contains` answers the membership read, the empty needle always
-// occurring; `index_of` answers the first occurrence's char index
-// (substring's indexing, so the answer composes with the checked
-// slice), a miss none and the empty needle index 0; `replace` swaps
-// every non-overlapping occurrence in one left-to-right pass, the
-// inserted text never re-scanned, the empty needle inserting `with` at
-// every char boundary.
-pub extern fn contains (haystack: string, needle: string) -> bool
-pub extern fn index_of (haystack: string, needle: string) -> int | none
-pub extern fn replace (haystack: string, needle: string, with: string) -> string
 // The codepoint pair, the @std json face's one native seam beside the
 // width bridges below: scalar-width UTF-8 encoding is not expressible
 // in ds source, so the escape decoder builds its one-scalar strings

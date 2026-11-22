@@ -598,6 +598,9 @@ async fn completion_answers_members_types_and_ranking() {
 
         // The typed prefix ranks the answer: the exact prefix first, the
         // word-boundary match next, the substring after, the rest last.
+        // `trap` and `trim` share the exact `tr` prefix — their relative
+        // order follows the ambient's declaration order, which a
+        // composed-tail migration moves.
         send(&mut client, &completion(5, 13, 4)).await;
         let reply = expect(&mut client, Wanted::Id(5)).await;
         let items = reply["result"].as_array().expect("completion answers a list");
@@ -608,8 +611,8 @@ async fn completion_answers_members_types_and_ranking() {
                 .position(|got| *got == name)
                 .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
         };
-        assert_eq!(labels[0], "trim", "{labels:?}");
         assert!(idx("trim") < idx("str"), "prefix ahead of substring: {labels:?}");
+        assert!(idx("trap") < idx("str"), "prefix ahead of substring: {labels:?}");
         assert!(idx("str") < idx("pick"), "substring ahead of the rest: {labels:?}");
 
         // A dot over an unresolved expression answers the ordinary scope

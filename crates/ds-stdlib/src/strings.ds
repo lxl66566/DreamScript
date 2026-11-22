@@ -1,0 +1,44 @@
+// The @std string face: the pure string operations that left the
+// ambient core as the reserved package's own source (the
+// library-boundary round). Every declaration here names a builtin core
+// native the lowering routes by name at the callee resolution seam, so
+// the package owns the spelling while the engine owns the seam. The
+// face rides composed into the @std bundle's core member (beside the
+// json face, whose free calls into this face stay same-file with it)
+// and into both ambient readings — the entry script session's and the
+// merged source's — keeping the bare spellings and the UFCS forms
+// (`s.trim()`, `"42".parse_int()`) alive while the migration runs. The
+// core string face stays ambient-owned: `str`, the `concat` seam the
+// interpolation and `+` spellings lower through, the sort key and
+// content hash (`str_compare`, `str_hash`) the derive families read,
+// and the `char_of`/`code_of` codepoint pair.
+
+// The one separator type both ways: `split` slices per its char and
+// `join` renders the neighbors around it. An empty-separator fold has
+// no spelling through the pair, so it composes in ds source.
+pub extern fn join (parts: list[string], sep: char) -> string
+pub extern fn trim (s: string) -> string
+pub extern fn parse_int (s: string) -> int | parse_err
+pub extern fn parse_float (s: string) -> float | parse_err
+pub extern fn split (s: string, sep: char) -> list[string]
+// The checked slice (B8): the chars between the two positions, none
+// outside `0 <= start <= end` and the string's char count — never
+// clamping and never a trap.
+pub extern fn substring (s: string, start: int, end: int) -> string | none
+pub extern fn to_upper (s: string) -> string
+pub extern fn to_lower (s: string) -> string
+// The checked char read (B8): the char at the position, none outside
+// the string's range — the old total spelling answered the empty
+// string instead.
+pub extern fn char_at (s: string, i: int) -> char | none
+// The string search family (the 2026-11-21 pure-builtin round):
+// `contains` answers the membership read, the empty needle always
+// occurring; `index_of` answers the first occurrence's char index
+// (substring's indexing, so the answer composes with the checked
+// slice), a miss none and the empty needle index 0; `replace` swaps
+// every non-overlapping occurrence in one left-to-right pass, the
+// inserted text never re-scanned, the empty needle inserting `with` at
+// every char boundary.
+pub extern fn contains (haystack: string, needle: string) -> bool
+pub extern fn index_of (haystack: string, needle: string) -> int | none
+pub extern fn replace (haystack: string, needle: string, with: string) -> string

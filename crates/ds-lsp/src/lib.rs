@@ -2488,11 +2488,13 @@ mod tests {
                 .position(|got| *got == name)
                 .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
         };
-        // The ambient's `trim` carries the exact prefix; the underscore
-        // boundary match follows; the substring match follows that; the
-        // non-matching rest answers last.
-        assert_eq!(labels[0], "trim", "{labels:?}");
+        // The ambient's `trim` and `trap` carry the exact prefix — the
+        // two ranking ahead of the underscore boundary match in either
+        // order (their relative order follows the ambient's declaration
+        // order, which a composed-tail migration moves); the substring
+        // match follows that; the non-matching rest answers last.
         assert!(idx("trim") < idx("my_trim"), "{labels:?}");
+        assert!(idx("trap") < idx("my_trim"), "{labels:?}");
         assert!(idx("my_trim") < idx("extra"), "{labels:?}");
         assert!(idx("extra") < idx("other"), "{labels:?}");
     }
@@ -3025,23 +3027,27 @@ mod tests {
             "an already-selected member offers nothing: {items:?}"
         );
         // The ambient's own members keep their offers over the core: the
-        // composed set's ambient half.
+        // composed set's ambient half. `concat` is the representative —
+        // the core string face's own seam, still core-owned after the
+        // string face's migration (the migrated spellings stay unoffered
+        // over a core-shaped registration until the LSP gains implicit
+        // resolution, the same state the json face's names ride).
         let file = open(
             &mut session,
             "d.ds",
-            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
+            "fn probe() -> string {\n  conc(\"x\")\n}\n",
         );
-        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let items = session.completion(file, 1, 6).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "concat")
             .expect("the ambient member answers");
         assert_eq!(
             item.additional_text_edits
                 .as_ref()
                 .expect("the offer imports")[0]
                 .new_text,
-            "import @std (to_upper)\n\n"
+            "import @std (concat)\n\n"
         );
     }
 

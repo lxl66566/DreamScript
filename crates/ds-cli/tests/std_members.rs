@@ -1,13 +1,15 @@
-//! The max/min migration's end-to-end pins (the library-boundary round,
-//! todo item 53): the ordering pair left the ambient core as the @std
-//! package's first bodied members (the word-shaped int signature a
-//! linked call binds), the entry surfaces keep the bare spellings alive
-//! (the run path's script sessions composing the bodied members back
-//! beside the core, the dev script rounds and the REPL serving the
-//! merged composition — the implicit resolution while the migration
-//! runs), and a package compile over a std-declaring graph keeps the
-//! boundary the migration left: the ambient band is the shrunk core, a
-//! bare use an unknown name, the linked import the binding face.
+//! The library-boundary round's end-to-end pins (todo item 53): the
+//! ordering pair left the ambient core as the @std package's first
+//! bodied members (the word-shaped int signature a linked call binds)
+//! and the pure string operations left it as the @std string face
+//! (each declaration naming the builtin core native the lowering
+//! routes by name), the entry surfaces keep the bare spellings alive
+//! (the run path's script sessions composing the faces back beside
+//! the core, the dev script rounds and the REPL serving the merged
+//! composition — the implicit resolution while the migration runs),
+//! and a package compile over a std-declaring graph keeps the
+//! boundary the migration left: the ambient band is the shrunk core,
+//! a bare use an unknown name, the linked import the binding face.
 
 use std::{
     env, fs,
@@ -243,6 +245,126 @@ fn a_std_declared_root_refuses_bare_and_binds_the_link() {
         text(&out.stdout),
         "9 3\n0\n",
         "the bodied pair answers over the link"
+    );
+    fs::remove_dir_all(&linked).expect("the temp tree removes");
+}
+
+/// The string face's program text: the bare and UFCS spellings over the
+/// migrated surface — the trim and case pair, the separator pair, the
+/// checked slice and char read, the search family, and the parses with
+/// their `parse_err` unions extracted through the err handler.
+const STRINGS_MAIN: &str = concat!(
+    "fn main() -> int {\n",
+    "  const t = \"  Hello World  \".trim()\n",
+    "  println(\"${t}\")\n",
+    "  println(\"${to_upper(t)} ${to_lower(t)}\")\n",
+    "  println(join(t.split(' '), '-'))\n",
+    "  println(substring(t, 0, 5).unwrap_or(\"none\"))\n",
+    "  println(\"${char_at(t, 1).unwrap_or('?')}\")\n",
+    "  println(\"${contains(t, \"World\")} ${index_of(t, \"World\").err((_: none) => -1)}\")\n",
+    "  println(replace(t, \"World\", \"There\"))\n",
+    "  println(\"${parse_int(\"42\").err((_: parse_err) => 0)} ",
+    "${parse_float(\"3.5\").err((_: parse_err) => 0.0)}\")\n",
+    "  0\n",
+    "}\n",
+);
+const STRINGS_OUT: &str = concat!(
+    "Hello World\n",
+    "HELLO WORLD hello world\n",
+    "Hello-World\n",
+    "Hello\n",
+    "e\n",
+    "true 6\n",
+    "Hello There\n",
+    "42 3.5\n",
+    "0\n",
+);
+
+/// The bare spellings of the @std string face run through a bare
+/// script's session (the face composed back beside the core), cold and
+/// warm under the same answer.
+#[test]
+fn the_bare_string_face_runs_through_a_bare_script() {
+    let file = script("strings", STRINGS_MAIN);
+    let entry = file.to_str().expect("temp path is UTF-8");
+    let cold = run(&["run", entry]);
+    assert_eq!(
+        cold.status.code(),
+        Some(0),
+        "the cold run exits 0: {}",
+        text(&cold.stderr)
+    );
+    assert_eq!(
+        text(&cold.stdout),
+        STRINGS_OUT,
+        "the cold run answers the face"
+    );
+    let warm = run(&["run", entry]);
+    assert_eq!(warm.status.code(), Some(0), "the warm run exits 0");
+    assert_eq!(
+        text(&warm.stdout),
+        STRINGS_OUT,
+        "the warm run answers identically"
+    );
+    fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
+}
+
+/// The std-declared root keeps the boundary over the string face too: a
+/// bare use over the shrunk core refuses as an unknown name, while the
+/// linked import binds the face's extern entries and the calls route to
+/// the builtin natives by name.
+#[test]
+fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
+    // the bare spelling refuses over the core
+    let bare = write_root("strings-core", &std_manifest(), &[(
+        "app.ds",
+        "fn main() -> int {\n  trim(\"  hi  \")\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&bare)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the bare use over the core refuses"
+    );
+    assert!(
+        text(&out.stderr).contains("unknown name `trim`"),
+        "the refusal names the missing member: {}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(&bare).expect("the temp tree removes");
+
+    // the linked import binds the string face's scalar-word extern
+    // entries: the package owns the spellings while the builtin
+    // natives keep the seams, the calls routing by name exactly as the
+    // ambient's own declarations did. The union-returning spellings
+    // (`substring`, `char_at`, `index_of`, the parses) keep the
+    // linked-surface's tag-seam refusal and the list-returning pair
+    // (`split`/`join`) the generic-head refusal, both riding the
+    // entry faces alone until their crossing rounds
+    let linked = write_root("strings-link", &std_manifest(), &[(
+        "app.ds",
+        concat!(
+            "import @std (trim, to_upper, to_lower, contains, replace)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const t = trim(\"  hi there  \")\n",
+            "  println(\"${to_upper(t)} ${to_lower(t)} ${contains(t, \"there\")}\")\n",
+            "  println(replace(t, \"hi\", \"yo\"))\n",
+            "  0\n",
+            "}\n",
+        ),
+    )]);
+    let out = run(&["run", &entry_of(&linked)]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the linked run exits 0: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        text(&out.stdout),
+        concat!("HI THERE hi there true\n", "yo there\n", "0\n",),
+        "the string face answers over the link"
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
