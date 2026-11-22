@@ -392,6 +392,23 @@ fn pub_import_selects_the_reexported_surface_through_the_middle_package() {
 }
 
 #[test]
+fn race_combinators_answer_in_arrival_order() {
+    // the @std race pair over the plan-time mint seam: firstof and
+    // interleave compose as ambient members — the caller-built thunk
+    // list (non-capturing scalar lambdas) feeding one delivery channel
+    // bound to the race's size, one spawned child per thunk receiving
+    // its callable into a local binding, the join-all boundary
+    // draining after every child completed so the channel's FIFO
+    // answers in arrival order (the fast thunk wins whatever its list
+    // position); sum is the reduce-based fold over the hosted callable
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("race.ds"))),
+        "first 2\narrival 2 1\nsum 10\n0\n",
+        "the race answers by arrival, and the fold folds"
+    );
+}
+
+#[test]
 fn schema_builds_its_table_at_comptime() {
     // The comptime witness (G1, G2): schema(page) and cases(tone)
     // evaluate on the fenced VM at compile time over the declared

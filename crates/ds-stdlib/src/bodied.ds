@@ -23,11 +23,30 @@
 // nested scan whose inner guard is a catchall match (an `if` guarding a
 // type-variable-carrying write refuses at the branch reconcile; the
 // match spelling lowers). take, drop, flat_map, scan, and compose wait
-// behind the seams above (their residuals ride todo item 81). The two
-// seam proofs: `incremented` hosts a CALLG lambda argument (the
-// filter/map/reduce seam) and `joined` hosts a `spawn` expression
-// (the firstof/interleave seam) — both lowering-time records inside
-// the ambient the plan-time mint discovery admits into the splice.
+// behind the seams above (their residuals ride todo item 81); take,
+// drop, and flat_map are unblocked by the plan-time mint seam and wait
+// on the library round's phasing alone.
+//
+// The race combinators over the timer capability: the caller builds the
+// thunk list (non-capturing scalar lambdas alone — a closure cannot
+// inhabit a collection element), and one spawned child per index finds
+// its own thunk by a linear scan whose guard is the int match (the
+// quadratic zip scan's own spelling): a spawned body cannot capture a
+// callable binding, a call through a call result is a computed callee,
+// a callable word cannot ride a channel payload (the send's element
+// proof refuses an unproven callable), the member `get` is shadowable
+// by a user's private declaration (the dot-call's free tier prefers
+// the flat name first, the file privacy refusal), and the private
+// `list_get` seam is cross-file inside the @std package — so the
+// iteration binding, held and called inside the child's own frame
+// alone, is the one shape that composes everywhere — racing the answer
+// into the bounded answers channel; the join-all boundary drains after every
+// child completed — the channel's FIFO is the arrival order.
+// `firstof` answers the first arrival; `interleave` collects in
+// arrival order. The empty race traps the channel's zero-bound
+// refusal, and a wider-than-one-word answer refuses at the call's
+// one-word instantiation. `sum` is the fold spelling over reduce's
+// hosted callable (the CALLG lambda seam).
 pub fn max (a: int, b: int) -> int {
   if a < b { b } else { a }
 }
@@ -43,15 +62,50 @@ pub fn enumerate[t] (xs: list[t]) -> list[(int, t)] {
   }
   out
 }
-pub fn incremented (xs: list[int]) -> list[int] {
-  xs.map((x: int) => x + 1)
+pub fn sum (xs: list[int]) -> int {
+  xs.reduce(0, (a: int, x: int) => a + x)
 }
-pub fn joined (n: int) -> list[int] | net_err {
+pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
+  const answers = chan[t](len(thunks))
   nursery {
-    for i in 0..n {
-      spawn { i }
+    for i in 0..len(thunks) {
+      spawn {
+        var seen: int = 0
+        for x in thunks {
+          match seen - i {
+            0 => { answers.send(x()) }
+            _ => {}
+          }
+          seen += 1
+        }
+      }
     }
   }
+  answers.recv()
+}
+pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
+  const answers = chan[t](len(thunks))
+  nursery {
+    for i in 0..len(thunks) {
+      spawn {
+        var seen: int = 0
+        for x in thunks {
+          match seen - i {
+            0 => { answers.send(x()) }
+            _ => {}
+          }
+          seen += 1
+        }
+      }
+    }
+  }
+  var out = list[t]()
+  var j = 0
+  while j < len(thunks) {
+    out = out.concat([answers.recv()])
+    j += 1
+  }
+  out
 }
 pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
   var out = list[(t, r)]()

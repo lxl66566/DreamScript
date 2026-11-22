@@ -1,0 +1,28 @@
+// The @std race combinators over the timer capability and the bounded
+// channel: the caller builds the thunk list (non-capturing scalar
+// lambdas alone), one spawned child per thunk receives its callable
+// into a local binding and races the answer into the bounded answers
+// channel, and the join-all boundary drains after every child
+// completed — the channel's FIFO answering in arrival order, so the
+// fast thunk wins whatever its list position. `sum` is the @std
+// reduce-based fold over the hosted callable (the CALLG lambda seam).
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = xs.get(i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn main() -> () {
+  const race: list[fn() -> int] = [
+    () => { sleep(200000000)
+      1
+    },
+    () => { sleep(10000000)
+      2
+    },
+  ]
+  println("first ${firstof(race)}")
+  const all = interleave(race)
+  println("arrival ${at(all, 0)} ${at(all, 1)}")
+  println("sum ${sum([1, 2, 3, 4])}")
+}

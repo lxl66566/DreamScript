@@ -466,7 +466,7 @@ const _ = nursery {
 }
 ```
 
-Cancellation is nursery-scoped and cooperative: an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight, and teardown walks the kept frames with each deinit firing exactly once, `defer` (scope-exit sugar, non-normative; it parses with no lowering yet) in teardown. The timer capability is landed — `time()` the wall clock, `mono()` monotonic nanoseconds against a process-fixed origin (differences measure elapsed), `sleep(nanos)` parking the calling fiber — while the `timeout`/`firstof`/`interleave` combinators over it stay queued library work; supervision is a library pattern.
+Cancellation is nursery-scoped and cooperative: an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight, and teardown walks the kept frames with each deinit firing exactly once, `defer` (scope-exit sugar, non-normative; it parses with no lowering yet) in teardown. The timer capability is landed — `time()` the wall clock, `mono()` monotonic nanoseconds against a process-fixed origin (differences measure elapsed), `sleep(nanos)` parking the calling fiber — `firstof(thunks)` answers the first arrival of a raced thunk list and `interleave(thunks)` collects in arrival order — both @std library combinators over the timer capability and the bounded channel; `timeout` stays queued on the value-reflection seam; supervision is a library pattern.
 
 ## The runtime
 
