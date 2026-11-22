@@ -77,6 +77,19 @@ pub enum WorldWait {
         target: String,
         deadline: Instant,
     },
+    /// `http_get`/`https_get`'s TLS exchange: the staged connect, the
+    /// rustls handshake, the request's records, and the response reads
+    /// to the session's end — the session's own wants-read/wants-write
+    /// steering mapped onto readiness interests, one step of the
+    /// machine per wake (each step re-aiming the interest and re-arming
+    /// the bound); `op` names the op the error spans carry (the
+    /// routing body or the direct op), `target` the URL.
+    TlsFetch {
+        fetch: i64,
+        op: &'static str,
+        target: String,
+        deadline: Instant,
+    },
     /// `sleep(nanos)`: the timer-only wait — no IO interest, no
     /// deregistration target, the wheel's own firing IS the
     /// completion, answering the unit word (the time face's op, the
@@ -144,6 +157,19 @@ impl WorldWait {
         }
     }
 
+    /// A TLS fetch wait's constructor: the machine's row id, the op
+    /// name its error spans carry, the URL the spans name, and the
+    /// first stage's bound (every later step re-arming it).
+    #[must_use]
+    pub fn tls_fetch(fetch: i64, op: &'static str, target: String, deadline: Instant) -> Self {
+        Self::TlsFetch {
+            fetch,
+            op,
+            target,
+            deadline,
+        }
+    }
+
     /// The wait's deadline.
     #[must_use]
     pub fn deadline(&self) -> Instant {
@@ -153,6 +179,7 @@ impl WorldWait {
             | Self::Accept { deadline, .. }
             | Self::Connect { deadline, .. }
             | Self::Fetch { deadline, .. }
+            | Self::TlsFetch { deadline, .. }
             | Self::Sleep { deadline } => *deadline,
         }
     }
@@ -170,7 +197,7 @@ impl WorldWait {
                 Some(*conn)
             },
             Self::Accept { listener, .. } => Some(*listener),
-            Self::Fetch { .. } | Self::Sleep { .. } => None,
+            Self::Fetch { .. } | Self::TlsFetch { .. } | Self::Sleep { .. } => None,
         }
     }
 
@@ -180,7 +207,9 @@ impl WorldWait {
     #[must_use]
     pub fn target(&self) -> String {
         match self {
-            Self::Connect { target, .. } | Self::Fetch { target, .. } => target.clone(),
+            Self::Connect { target, .. }
+            | Self::Fetch { target, .. }
+            | Self::TlsFetch { target, .. } => target.clone(),
             _ => self.conn().map(|conn| conn.to_string()).unwrap_or_default(),
         }
     }
@@ -194,7 +223,10 @@ impl WorldWait {
             // a connect parks on the writability its completion
             // reports; a fetch starts at its connect-or-write stage,
             // the machine re-aiming the interest at its later steps
-            Self::Send { .. } | Self::Connect { .. } | Self::Fetch { .. } => Some(Direction::Write),
+            Self::Send { .. }
+            | Self::Connect { .. }
+            | Self::Fetch { .. }
+            | Self::TlsFetch { .. } => Some(Direction::Write),
             Self::Sleep { .. } => None,
         }
     }
@@ -209,6 +241,7 @@ impl WorldWait {
             Self::Accept { .. } => "net_accept",
             Self::Connect { .. } => "net_connect",
             Self::Fetch { .. } => "http_get",
+            Self::TlsFetch { op, .. } => op,
             Self::Sleep { .. } => "time_sleep",
         }
     }

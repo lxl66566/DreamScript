@@ -17,11 +17,12 @@
 //!
 //! The blocking discipline is the net ops' own ([`crate::net`]): every
 //! wait rides the connection table's bounded socket timeouts, a
-//! blocking foreign call pinning its fiber. The plain leg parks under
-//! an installed reactor like every other net op (linux this round);
-//! the rustls leg stays blocking under any reactor — the session's
-//! own wants-read/wants-write steering needs a parked transport seam,
-//! the narrowed residual.
+//! blocking foreign call pinning its fiber. Both legs park under an
+//! installed reactor (linux this round): the plain leg through the
+//! staged exchange machine, the rustls leg through the parked twin
+//! below — the session is a synchronous state machine, so the
+//! transport drives it a step per readiness wake, the session's own
+//! wants-write/wants-read naming the interest each step watches.
 
 use std::{
     io::{self, Read, Write},
@@ -72,16 +73,18 @@ pub(crate) fn http_get_tls_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    // the plain leg rides the parked exchange under a reactor (the
-    // staged connect `net_connect` parks on); the rustls tier keeps
-    // its blocking transport — the session steers its own
-    // wants-read/wants-write discipline mid-handshake, a transport
-    // rework this round narrows rather than fakes
+    // both legs ride their parked machines under a reactor (the staged
+    // connect `net_connect` parks on): the plain exchange its own, the
+    // rustls session the tls tier's readiness-driven twin
     #[cfg(target_os = "linux")]
     {
         let (scheme, rest) = net::scheme_of(&url);
-        if out.net().parking() && matches!(scheme, Scheme::Http) {
-            return net::parked_plain_fetch(heaps, out, rest, &url);
+        if out.net().parking() {
+            match scheme {
+                Scheme::Http => return net::parked_plain_fetch(heaps, out, rest, &url),
+                Scheme::Https => return parked_tls_fetch(heaps, out, rest, &url, "http_get"),
+                Scheme::Other => {},
+            }
         }
     }
     match fetch(out, &url, false) {
@@ -107,6 +110,13 @@ pub(crate) fn https_get_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let url = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    #[cfg(target_os = "linux")]
+    {
+        let (scheme, rest) = net::scheme_of(&url);
+        if out.net().parking() && matches!(scheme, Scheme::Https) {
+            return parked_tls_fetch(heaps, out, rest, &url, "https_get");
+        }
+    }
     match fetch(out, &url, true) {
         Ok(body) => Ok(net::ok(heaps.new_str(body))),
         Err(err) => Ok(net::net_err(
@@ -175,6 +185,267 @@ impl Write for CloseTolerant {
 
     fn flush(&mut self) -> io::Result<()> {
         self.0.flush()
+    }
+}
+
+/// The parked TLS exchange's machine (the tls round of the 2026-11-23
+/// connect ruling): the rustls session over the staged connect's
+/// transport, one `step` per readiness wake. The session is a
+/// synchronous state machine — `wants_write` names encrypted bytes it
+/// owes the socket, `wants_read` ciphertext it awaits, and its
+/// plaintext buffers apply their own backpressure (`wants_read` going
+/// false while received plaintext stands undrained) — so the parked
+/// transport maps the session's own wants onto epoll interests: each
+/// wake runs the session against the non-blocking socket until the OS
+/// answers would-block, the answer naming the direction the next wake
+/// watches. The request stages through the session's writer (bytes
+/// staged mid-handshake ride the post-handshake records), the response
+/// plaintext drains through the reader between the ciphertext reads,
+/// and the peer's TCP close ends the exchange the blocking twin's
+/// close-tolerant way — the finish reading the body after the header
+/// terminator, never an error.
+#[derive(Debug)]
+pub(crate) struct TlsFetch {
+    /// The transport: the pending connect's row first, the registered
+    /// connection once connected.
+    pub(crate) conn: i64,
+    /// Whether the connect completed and the transport registered.
+    pub(crate) connected: bool,
+    /// The rustls session, the machine's own state.
+    session: ClientConnection,
+    /// The request bytes still to stage through the session's writer.
+    out: Vec<u8>,
+    /// The response plaintext read so far.
+    seen: Vec<u8>,
+}
+
+impl TlsFetch {
+    /// The machine's construction (the row's storage the connection
+    /// table owns, `net::start_tls_fetch`).
+    pub(crate) fn new(conn: i64, connected: bool, session: ClientConnection, out: Vec<u8>) -> Self {
+        Self {
+            conn,
+            connected,
+            session,
+            out,
+            seen: Vec::new(),
+        }
+    }
+}
+
+/// Advances one parked TLS exchange as far as the readiness takes it:
+/// the staged connect's probe first, then the session loop — drain
+/// what the session owes the socket, feed what it awaits, stage the
+/// request, drain the plaintext — until the OS answers would-block
+/// (the interest named) or the exchange answers. Every terminal runs
+/// the same finish the plain machine and the blocking twin share.
+pub(crate) fn step(machine: &mut TlsFetch, net: &mut net::Connections) -> net::FetchWake {
+    use crate::reactor::Direction;
+    // the connect stage: the plain machine's own probe
+    if !machine.connected {
+        match net.connect_wake(machine.conn) {
+            net::NetAttempt::Park => {
+                return net::FetchWake::Pending {
+                    watch: Direction::Write,
+                }
+            },
+            net::NetAttempt::Done(Err(err)) => return net::FetchWake::Done(Err(err)),
+            net::NetAttempt::Done(Ok(conn)) => {
+                machine.conn = conn;
+                machine.connected = true;
+            },
+        }
+    }
+    loop {
+        // the session's outgoing bytes — handshake flights first, then
+        // the request's records — drain to the socket before anything
+        // else (the session buffers nothing it could send)
+        while machine.session.wants_write() {
+            let sock = match net.stream(machine.conn) {
+                Ok(sock) => sock,
+                Err(err) => return net::FetchWake::Done(Err(err)),
+            };
+            match machine.session.write_tls(sock) {
+                Ok(0) => {
+                    return net::FetchWake::Done(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the transport closed under the session",
+                    )))
+                },
+                Ok(_) => {},
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return net::FetchWake::Pending {
+                        watch: Direction::Write,
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+                Err(err) => return net::FetchWake::Done(Err(err)),
+            }
+        }
+        // the handshake awaits the peer's flights
+        if machine.session.is_handshaking() {
+            // mid-handshake with neither want naming work is the
+            // session's own backpressure state; the read interest is
+            // the safe wait, level-triggered readiness correcting a
+            // wrong guess at the next poll
+            if !machine.session.wants_read() {
+                return net::FetchWake::Pending {
+                    watch: Direction::Read,
+                };
+            }
+            if let Some(wake) = read_once(machine, net) {
+                return wake;
+            }
+            continue;
+        }
+        // the request stages through the writer once the handshake
+        // allows application data (a partial staging re-drains the
+        // records it encrypted, the writer's buffer bounded)
+        if !machine.out.is_empty() {
+            let took = match machine.session.writer().write(&machine.out) {
+                Ok(took) => took,
+                Err(err) => return net::FetchWake::Done(Err(err)),
+            };
+            if took == 0 && !machine.session.wants_write() {
+                return net::FetchWake::Done(Err(io::Error::other(
+                    "the session accepted no request bytes",
+                )));
+            }
+            machine.out.drain(..took);
+            if machine.out.is_empty()
+                && let Err(err) = machine.session.writer().flush()
+            {
+                return net::FetchWake::Done(Err(err));
+            }
+            continue;
+        }
+        // the response: ciphertext in while the session awaits it, the
+        // plaintext drained between the reads (draining is what arms
+        // the next read — the backpressure state above)
+        if machine.session.wants_read() {
+            if let Some(wake) = read_once(machine, net) {
+                return wake;
+            }
+            continue;
+        }
+        loop {
+            let mut chunk = [0; net::HTTP_CHUNK];
+            match machine.session.reader().read(&mut chunk) {
+                // the clean close: the session received close_notify
+                // and its plaintext is drained
+                Ok(0) => {
+                    return net::FetchWake::Done(net::finish_response(&machine.seen));
+                },
+                Ok(n) => {
+                    machine.seen.extend_from_slice(&chunk[..n]);
+                    if machine.seen.len() > net::NET_CAP {
+                        return net::FetchWake::Done(Err(io::Error::other(
+                            "response exceeds the 1 MiB cap",
+                        )));
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                // the peer's close without close_notify: the blocking
+                // twin's CloseTolerant mapping, the orderly finish
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    return net::FetchWake::Done(net::finish_response(&machine.seen));
+                },
+                Err(err) => return net::FetchWake::Done(Err(err)),
+            }
+        }
+    }
+}
+
+/// One ciphertext read attempt: `None` the read made progress (the
+/// caller loops), `Some` the wake that ends or parks the step. A TCP
+/// EOF answers the close-tolerant finish — the blocking twin maps the
+/// session's UnexpectedEof to the orderly close, and the parked twin
+/// reads the socket's own EOF the same way; a TLS protocol failure
+/// carries the InvalidData wrap rustls's own `complete_io` gives it
+/// (the net class mapping folds it into the `net_other` floor).
+fn read_once(machine: &mut TlsFetch, net: &mut net::Connections) -> Option<net::FetchWake> {
+    use crate::reactor::Direction;
+    let sock = match net.stream(machine.conn) {
+        Ok(sock) => sock,
+        Err(err) => return Some(net::FetchWake::Done(Err(err))),
+    };
+    match machine.session.read_tls(sock) {
+        Ok(0) => Some(net::FetchWake::Done(net::finish_response(&machine.seen))),
+        Ok(_) => match machine.session.process_new_packets() {
+            Err(err) => Some(net::FetchWake::Done(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                err,
+            )))),
+            Ok(_) => None,
+        },
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Some(net::FetchWake::Pending {
+            watch: Direction::Read,
+        }),
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => None,
+        Err(err) => Some(net::FetchWake::Done(Err(err))),
+    }
+}
+
+/// The parked TLS-fetch entry both tls bodies share (the routing
+/// `http_get` and the direct `https_get`): the URL's pieces resolve,
+/// the rustls session builds over the configured client, and the
+/// staged connect plus the pre-staged request form the exchange
+/// machine — the wakes (or the deadline) answering, an immediate
+/// failure here answered as its own error span exactly the blocking
+/// body's message.
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
+fn parked_tls_fetch(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    rest: &str,
+    url: &str,
+    op: &'static str,
+) -> Result<NativeResult, Trap> {
+    let (host, port, authority, path) = match net::split_target(rest) {
+        Ok(parts) => parts,
+        Err(detail) => return Ok(net::net_err(heaps, net::NetClass::Other, op, url, &detail)),
+    };
+    let config = out.net().tls_config();
+    let Ok(name) = ServerName::try_from(host.clone()) else {
+        return Ok(net::net_err(
+            heaps,
+            net::NetClass::Other,
+            op,
+            url,
+            "invalid server name in the URL",
+        ));
+    };
+    let session = match ClientConnection::new(config, name) {
+        Ok(session) => session,
+        Err(err) => {
+            return Ok(net::net_err(
+                heaps,
+                net::NetClass::Other,
+                op,
+                url,
+                &err.to_string(),
+            ))
+        },
+    };
+    let request = net::request(&authority, &path).into_bytes();
+    match out.net().start_tls_fetch(&host, port, session, request) {
+        Ok(fetch) => {
+            let deadline = std::time::Instant::now() + out.net().timeout();
+            Ok(NativeResult::Park(crate::sched::WorldWait::tls_fetch(
+                fetch,
+                op,
+                url.to_owned(),
+                deadline,
+            )))
+        },
+        Err(err) => Ok(net::net_err(
+            heaps,
+            net::NetClass::of(&err),
+            op,
+            url,
+            &err.to_string(),
+        )),
     }
 }
 

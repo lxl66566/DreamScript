@@ -64,12 +64,12 @@
 //! OS-own-symbols precedent — the writability interest parked on, the
 //! wake probing completion and registering the stream like any other
 //! handle. The plain fetch rides the same staged machine (connect,
-//! request drain, response reads to the close), a step per wake; the
-//! https exchange keeps the rustls tier's blocking transport (its
-//! session steers its own wants-read/wants-write discipline, a
-//! transport rework riding the tls round), and a non-Linux host keeps
-//! the blocking twin under any reactor until its driver round owns the
-//! raw seam.
+//! request drain, response reads to the close), a step per wake, and
+//! the https exchange rides the tls tier's parked twin — the rustls
+//! session itself driven a step per readiness wake over the same
+//! staged connect (its wants-write/wants-read naming the interest each
+//! step watches); a non-Linux host keeps the blocking twins under any
+//! reactor until its driver round owns the raw seam.
 //!
 //! # Caps
 //!
@@ -117,8 +117,9 @@ pub const NET_CAP: usize = 1024 * 1024;
 /// The default HTTP port when a URL names none.
 const HTTP_PORT: u16 = 80;
 
-/// The read size of the `http_get` response loop.
-const HTTP_CHUNK: usize = 8192;
+/// The read size of the `http_get` response loop (both the blocking
+/// exchange and the parked machines' plaintext drains).
+pub(crate) const HTTP_CHUNK: usize = 8192;
 
 /// The poll interval of the blocking accept's bounded wait (std's
 /// listener carries no OS accept timeout, so the non-blocking socket
@@ -153,6 +154,11 @@ pub(crate) struct Connections {
     /// (the staged connect plus the request/response buffers).
     #[cfg(target_os = "linux")]
     fetches: Vec<(i64, Fetch)>,
+    /// The parked TLS exchanges, keyed by their own minted ids (the
+    /// staged connect plus the rustls session machine of
+    /// [`crate::tls`], the transport this table owns).
+    #[cfg(target_os = "linux")]
+    tls_fetches: Vec<(i64, crate::tls::TlsFetch)>,
 }
 
 impl Default for Connections {
@@ -167,6 +173,8 @@ impl Default for Connections {
             connecting: Vec::new(),
             #[cfg(target_os = "linux")]
             fetches: Vec::new(),
+            #[cfg(target_os = "linux")]
+            tls_fetches: Vec::new(),
         }
     }
 }
@@ -797,6 +805,105 @@ impl Connections {
         }
     }
 
+    /// Starts one parked TLS exchange: the staged connect plus the
+    /// rustls session the caller built over its pinned client, the
+    /// request bytes pre-staged into the machine. The connect
+    /// discipline is the plain fetch's own; the session advances at
+    /// the wakes ([`crate::tls`]'s machine).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_tls_fetch(
+        &mut self,
+        host: &str,
+        port: u16,
+        session: rustls::ClientConnection,
+        request: Vec<u8>,
+    ) -> Result<i64, io::Error> {
+        let (conn, connected) = match self.start_connect(host, port) {
+            NetConnectStart::Done(Ok(conn)) => (conn, true),
+            NetConnectStart::Done(Err(err)) => return Err(err),
+            NetConnectStart::Pending(row) => (row, false),
+        };
+        let fetch = self.next_id;
+        self.next_id = fetch + 1;
+        self.tls_fetches.push((
+            fetch,
+            crate::tls::TlsFetch::new(conn, connected, session, request),
+        ));
+        Ok(fetch)
+    }
+
+    /// Advances one parked TLS exchange as far as the readiness takes
+    /// it: the connect probe first, then the session's own
+    /// wants-read/wants-write steering the machine's steps (the TLS
+    /// tier's driving, [`crate::tls`]). A pending step answers the
+    /// direction the next wake watches; a finished exchange releases
+    /// the transport either way.
+    pub(crate) fn tls_fetch_wake(&mut self, fetch: i64) -> FetchWake {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(at) = self.tls_fetches.iter().position(|(id, _)| *id == fetch) else {
+                return FetchWake::Done(Err(unknown_fetch(fetch)));
+            };
+            // the row comes out for the step: the session machine
+            // drives the transport through this table's own lookups
+            let (_, mut machine) = self.tls_fetches.remove(at);
+            let wake = crate::tls::step(&mut machine, self);
+            if matches!(wake, FetchWake::Pending { .. }) {
+                self.tls_fetches.push((fetch, machine));
+            } else if machine.connected {
+                self.close(machine.conn);
+            } else {
+                self.cancel_connect(machine.conn);
+            }
+            wake
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
+            FetchWake::Done(Err(io::Error::other(
+                "the parked TLS exchange is the linux driver's own",
+            )))
+        }
+    }
+
+    /// Drops one parked TLS exchange (a cancel, a deadline — the row's
+    /// transport and session closing with it), total over an unknown id.
+    pub(crate) fn cancel_tls_fetch(&mut self, fetch: i64) {
+        #[cfg(target_os = "linux")]
+        if let Some(at) = self.tls_fetches.iter().position(|(id, _)| *id == fetch) {
+            let (_, machine) = self.tls_fetches.remove(at);
+            if machine.connected {
+                self.close(machine.conn);
+            } else {
+                self.cancel_connect(machine.conn);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
+        }
+    }
+
+    /// The OS-level handle of one parked TLS exchange's transport —
+    /// the registered stream's fd once connected, the pending connect's
+    /// raw fd first — the park's registration key.
+    pub(crate) fn raw_tls_fetch_handle(&mut self, fetch: i64) -> Option<crate::reactor::IoHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            let (_, machine) = self.tls_fetches.iter().find(|(id, _)| *id == fetch)?;
+            if machine.connected {
+                self.raw_handle(machine.conn)
+            } else {
+                self.raw_connect_handle(machine.conn)
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = fetch;
+            None
+        }
+    }
+
     /// Installs this table's read/write timeouts on `stream`.
     fn bounded(&self, stream: TcpStream) -> io::Result<TcpStream> {
         stream.set_read_timeout(Some(self.timeout))?;
@@ -805,7 +912,7 @@ impl Connections {
     }
 
     /// The stream of handle `conn`.
-    fn stream(&mut self, conn: i64) -> io::Result<&mut TcpStream> {
+    pub(crate) fn stream(&mut self, conn: i64) -> io::Result<&mut TcpStream> {
         self.streams
             .iter_mut()
             .find(|(id, _)| *id == conn)
@@ -1214,7 +1321,7 @@ where
 /// The response's decode, the blocking exchange's and the parked
 /// machine's shared finish: the body after the header terminator,
 /// refused without the terminator or past the cap.
-fn finish_response(seen: &[u8]) -> Result<String, io::Error> {
+pub(crate) fn finish_response(seen: &[u8]) -> Result<String, io::Error> {
     let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") else {
         return Err(io::Error::other("malformed response: no header terminator"));
     };

@@ -5488,6 +5488,7 @@ impl Vm {
             WorldWait::Accept { listener, .. } => self.out.listeners().raw_handle(*listener),
             WorldWait::Connect { conn, .. } => self.out.net().raw_connect_handle(*conn),
             WorldWait::Fetch { fetch, .. } => self.out.net().raw_fetch_handle(*fetch),
+            WorldWait::TlsFetch { fetch, .. } => self.out.net().raw_tls_fetch_handle(*fetch),
             _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
         };
         let token = self.sched.mint();
@@ -5551,6 +5552,7 @@ impl Vm {
         match wait {
             WorldWait::Connect { conn, .. } => self.out.net().cancel_connect(*conn),
             WorldWait::Fetch { fetch, .. } => self.out.net().cancel_fetch(*fetch),
+            WorldWait::TlsFetch { fetch, .. } => self.out.net().cancel_tls_fetch(*fetch),
             _ => {},
         }
     }
@@ -5574,6 +5576,39 @@ impl Vm {
             self.pool[fiber.index()].state = FiberState::Suspended;
             self.sched.deliveries.insert(fiber, result);
             self.sched.push_ready(fiber);
+        }
+    }
+
+    /// Re-arms one staged machine's pending step (a fetch exchange,
+    /// plain or tls): the bound resets to the step-grained deadline the
+    /// blocking twin's socket timeouts keep, and the standing interest
+    /// re-aims at the direction the machine named.
+    fn rearm_step(
+        &mut self,
+        token: u64,
+        handle: Option<crate::reactor::IoHandle>,
+        watch: crate::reactor::Direction,
+    ) {
+        let deadline = Instant::now() + self.out.net().timeout();
+        if let Some(live) = self.sched.waits.get_mut(&token)
+            && let WorldWait::Fetch {
+                deadline: armed, ..
+            } = &mut live.wait
+        {
+            *armed = deadline;
+        }
+        if let Some(live) = self.sched.waits.get_mut(&token)
+            && let WorldWait::TlsFetch {
+                deadline: armed, ..
+            } = &mut live.wait
+        {
+            *armed = deadline;
+        }
+        self.sched.arm(deadline, token);
+        if let Some(installed) = self.reactor.as_mut()
+            && let Some(handle) = handle
+        {
+            let _ = installed.driver().register(handle, watch, token);
         }
     }
 
@@ -5611,145 +5646,155 @@ impl Vm {
             self.finish_wait(token, result);
             return;
         }
-        let result = match entry.wait {
-            // the timer-only wait completed at its own arm above; the
-            // arm keeps this match total
-            WorldWait::Sleep { .. } => unreachable!("the sleep completed at its own arm"),
-            WorldWait::Recv { conn: id, max, .. } => {
-                let Some(event) = ready.filter(|event| event.read) else {
-                    return;
-                };
-                let _ = event;
-                match self.out.net().try_recv(id, max) {
-                    crate::net::NetAttempt::Done(Ok(bytes)) => self
-                        .complete_in_store(fiber, |heaps| {
-                            crate::net::recv_answer(heaps, id, bytes)
-                        }),
-                    crate::net::NetAttempt::Done(Err(err)) => {
-                        let class = crate::net::NetClass::of(&err);
-                        let detail = err.to_string();
-                        self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &target, &detail)
-                        })
-                    },
-                    // spurious: the readiness was consumed elsewhere,
-                    // the wait stands for the next poll
-                    crate::net::NetAttempt::Park => return,
-                }
-            },
-            WorldWait::Send {
-                conn: id, mut data, ..
-            } => {
-                if !ready.is_some_and(|event| event.write) {
-                    return;
-                }
-                match self.out.net().try_send(id, &mut data) {
-                    crate::net::NetAttempt::Done(Ok(())) => crate::net::ok(Value::I64(0)),
-                    crate::net::NetAttempt::Done(Err(err)) => {
-                        let class = crate::net::NetClass::of(&err);
-                        let detail = err.to_string();
-                        self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &target, &detail)
-                        })
-                    },
-                    // partial drain: the remainder keeps the wait, its
-                    // level-triggered readiness reporting again once
-                    // the buffer takes more
-                    crate::net::NetAttempt::Park => {
-                        if let Some(live) = self.sched.waits.get_mut(&token)
-                            && let WorldWait::Send { data: pending, .. } = &mut live.wait
-                        {
-                            *pending = data;
-                        }
+        let result =
+            match entry.wait {
+                // the timer-only wait completed at its own arm above; the
+                // arm keeps this match total
+                WorldWait::Sleep { .. } => unreachable!("the sleep completed at its own arm"),
+                WorldWait::Recv { conn: id, max, .. } => {
+                    let Some(event) = ready.filter(|event| event.read) else {
                         return;
-                    },
-                }
-            },
-            WorldWait::Accept { listener, .. } => {
-                let Some(event) = ready.filter(|event| event.read) else {
-                    return;
-                };
-                let _ = event;
-                match self.out.listeners().try_accept(listener) {
-                    // the accepted stream registers like a connecting
-                    // one, so the parked wake answers the connection
-                    // handle the caller's net_handle pairs with
-                    crate::net::NetAttempt::Done(Ok(stream)) => {
-                        let conn = self.out.net().register(stream);
-                        crate::net::ok(Value::I64(conn))
-                    },
-                    crate::net::NetAttempt::Done(Err(err)) => {
-                        let class = crate::net::NetClass::of(&err);
-                        let detail = err.to_string();
-                        self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &target, &detail)
-                        })
-                    },
-                    // spurious: the pending connection was consumed
-                    // elsewhere, the wait stands for the next poll
-                    crate::net::NetAttempt::Park => return,
-                }
-            },
-            // the raw socket's completion: the writable (or errored)
-            // wake probes SO_ERROR — connected registering the stream
-            // under the pending row's id, the errno it holds the
-            // failure — still-in-progress a spurious wake the wait
-            // stands over
-            WorldWait::Connect { conn: id, .. } => {
-                let Some(event) = ready.filter(|event| event.write || event.read) else {
-                    return;
-                };
-                let _ = event;
-                match self.out.net().connect_wake(id) {
-                    crate::net::NetAttempt::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
-                    crate::net::NetAttempt::Done(Err(err)) => {
-                        let class = crate::net::NetClass::of(&err);
-                        let detail = err.to_string();
-                        self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &target, &detail)
-                        })
-                    },
-                    crate::net::NetAttempt::Park => return,
-                }
-            },
-            // the plain exchange's machine: the OS probes gate the
-            // stages (the event advisory), a pending step re-aiming
-            // the standing interest at its next direction and re-arming
-            // the bound — the per-op bound the blocking twin's socket
-            // timeouts keep, step-grained
-            WorldWait::Fetch { fetch, .. } => {
-                let _ = ready;
-                match self.out.net().fetch_wake(fetch) {
-                    crate::net::FetchWake::Done(Ok(body)) => {
-                        self.complete_in_store(fiber, |heaps| crate::net::ok(heaps.new_str(body)))
-                    },
-                    crate::net::FetchWake::Done(Err(err)) => {
-                        let class = crate::net::NetClass::of(&err);
-                        let detail = err.to_string();
-                        self.complete_in_store(fiber, |heaps| {
-                            crate::net::net_err(heaps, class, op, &target, &detail)
-                        })
-                    },
-                    crate::net::FetchWake::Pending { watch } => {
-                        let deadline = Instant::now() + self.out.net().timeout();
-                        if let Some(live) = self.sched.waits.get_mut(&token)
-                            && let WorldWait::Fetch {
-                                deadline: armed, ..
-                            } = &mut live.wait
-                        {
-                            *armed = deadline;
-                        }
-                        self.sched.arm(deadline, token);
-                        if let Some(installed) = self.reactor.as_mut()
-                            && let Some(handle) = entry.handle
-                        {
-                            let _ = installed.driver().register(handle, watch, token);
-                        }
+                    };
+                    let _ = event;
+                    match self.out.net().try_recv(id, max) {
+                        crate::net::NetAttempt::Done(Ok(bytes)) => self
+                            .complete_in_store(fiber, |heaps| {
+                                crate::net::recv_answer(heaps, id, bytes)
+                            }),
+                        crate::net::NetAttempt::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        // spurious: the readiness was consumed elsewhere,
+                        // the wait stands for the next poll
+                        crate::net::NetAttempt::Park => return,
+                    }
+                },
+                WorldWait::Send {
+                    conn: id, mut data, ..
+                } => {
+                    if !ready.is_some_and(|event| event.write) {
                         return;
-                    },
-                }
-            },
-        };
+                    }
+                    match self.out.net().try_send(id, &mut data) {
+                        crate::net::NetAttempt::Done(Ok(())) => crate::net::ok(Value::I64(0)),
+                        crate::net::NetAttempt::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        // partial drain: the remainder keeps the wait, its
+                        // level-triggered readiness reporting again once
+                        // the buffer takes more
+                        crate::net::NetAttempt::Park => {
+                            if let Some(live) = self.sched.waits.get_mut(&token)
+                                && let WorldWait::Send { data: pending, .. } = &mut live.wait
+                            {
+                                *pending = data;
+                            }
+                            return;
+                        },
+                    }
+                },
+                WorldWait::Accept { listener, .. } => {
+                    let Some(event) = ready.filter(|event| event.read) else {
+                        return;
+                    };
+                    let _ = event;
+                    match self.out.listeners().try_accept(listener) {
+                        // the accepted stream registers like a connecting
+                        // one, so the parked wake answers the connection
+                        // handle the caller's net_handle pairs with
+                        crate::net::NetAttempt::Done(Ok(stream)) => {
+                            let conn = self.out.net().register(stream);
+                            crate::net::ok(Value::I64(conn))
+                        },
+                        crate::net::NetAttempt::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        // spurious: the pending connection was consumed
+                        // elsewhere, the wait stands for the next poll
+                        crate::net::NetAttempt::Park => return,
+                    }
+                },
+                // the raw socket's completion: the writable (or errored)
+                // wake probes SO_ERROR — connected registering the stream
+                // under the pending row's id, the errno it holds the
+                // failure — still-in-progress a spurious wake the wait
+                // stands over
+                WorldWait::Connect { conn: id, .. } => {
+                    let Some(event) = ready.filter(|event| event.write || event.read) else {
+                        return;
+                    };
+                    let _ = event;
+                    match self.out.net().connect_wake(id) {
+                        crate::net::NetAttempt::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
+                        crate::net::NetAttempt::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        crate::net::NetAttempt::Park => return,
+                    }
+                },
+                // the plain exchange's machine: the OS probes gate the
+                // stages (the event advisory), a pending step re-aiming
+                // the standing interest at its next direction and re-arming
+                // the bound — the per-op bound the blocking twin's socket
+                // timeouts keep, step-grained
+                WorldWait::Fetch { fetch, .. } => {
+                    let _ = ready;
+                    match self.out.net().fetch_wake(fetch) {
+                        crate::net::FetchWake::Done(Ok(body)) => self
+                            .complete_in_store(fiber, |heaps| crate::net::ok(heaps.new_str(body))),
+                        crate::net::FetchWake::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        crate::net::FetchWake::Pending { watch } => {
+                            self.rearm_step(token, entry.handle, watch);
+                            return;
+                        },
+                    }
+                },
+                // the TLS exchange's machine: the same staged discipline,
+                // the session's own wants naming the direction each step
+                // watches next (the wake runs the session against the
+                // non-blocking socket until it would block, so the event's
+                // own directions carry no extra truth the machine lacks)
+                WorldWait::TlsFetch { fetch, .. } => {
+                    let _ = ready;
+                    match self.out.net().tls_fetch_wake(fetch) {
+                        crate::net::FetchWake::Done(Ok(body)) => self
+                            .complete_in_store(fiber, |heaps| crate::net::ok(heaps.new_str(body))),
+                        crate::net::FetchWake::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        crate::net::FetchWake::Pending { watch } => {
+                            self.rearm_step(token, entry.handle, watch);
+                            return;
+                        },
+                    }
+                },
+            };
         self.finish_wait(token, result);
     }
 
