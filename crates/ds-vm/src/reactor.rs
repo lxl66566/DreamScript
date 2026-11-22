@@ -122,12 +122,44 @@ mod epoll_imp {
     pub const EPOLLOUT: u32 = 0x004;
     pub const EPOLL_CLOEXEC: c_int = 0x80000;
 
+    /// The kernel's epoll_event is `__attribute__((packed))`: 12 bytes,
+    /// the u64 data word at offset 4. A natural-alignment repr(C)
+    /// `{u32, u64}` puts its data at offset 8 and strides 16 bytes, so
+    /// the kernel's packed writes and the reader's aligned reads
+    /// disagree about where the token lives: a single-event batch
+    /// reads its token from bytes that happen to hold it, but every
+    /// earlier event of a multi-event batch has the NEXT event's
+    /// kernel-written bits land in its data word's high half — a token
+    /// the wait table never minted, its wake silently dropped. The
+    /// three-u32 spelling keeps the 12-byte stride with no packed
+    /// field references: the data word assembles from its halves.
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct EpollEvent {
         pub events: u32,
-        pub data: u64,
+        pub data_lo: u32,
+        pub data_hi: u32,
     }
+
+    impl EpollEvent {
+        // the halves are the layout itself: packing a u64 token into the
+        // kernel's offset-4 word splits it at 32 bits by construction
+        #[allow(clippy::cast_possible_truncation)]
+        pub fn new(events: u32, data: u64) -> Self {
+            Self {
+                events,
+                data_lo: data as u32,
+                data_hi: (data >> 32) as u32,
+            }
+        }
+
+        pub fn data(&self) -> u64 {
+            u64::from(self.data_lo) | (u64::from(self.data_hi) << 32)
+        }
+    }
+
+    // the ABI contract this file stands on: one packed event, 12 bytes
+    const _: () = assert!(size_of::<EpollEvent>() == 12);
 
     unsafe extern "C" {
         pub fn epoll_create1(flags: c_int) -> c_int;
@@ -168,10 +200,7 @@ impl Epoll {
     ) -> Result<(), ReactorError> {
         let fd = i32::try_from(handle.0)
             .map_err(|_| ReactorError(format!("handle {} is no fd", handle.0)))?;
-        let mut event = epoll_imp::EpollEvent {
-            events,
-            data: token,
-        };
+        let mut event = epoll_imp::EpollEvent::new(events, token);
         // SAFETY: the plain ctl call; `event` outlives the call.
         if unsafe { epoll_imp::epoll_ctl(self.epfd, op, fd, &raw mut event) } < 0 {
             return Err(ReactorError(format!(
@@ -239,7 +268,7 @@ impl Reactor for Epoll {
         events: &mut Vec<TokenEvent>,
     ) -> Result<(), ReactorError> {
         events.clear();
-        let mut raw = [epoll_imp::EpollEvent { events: 0, data: 0 }; 64];
+        let mut raw = [epoll_imp::EpollEvent::new(0, 0); 64];
         let millis = match timeout {
             // the deadline wheel hands finite distances; epoll's own
             // rounding of a sub-millisecond remainder up to 1ms is the
@@ -274,7 +303,7 @@ impl Reactor for Epoll {
         #[allow(clippy::cast_sign_loss)]
         for event in &raw[..n as usize] {
             events.push(TokenEvent {
-                token: event.data,
+                token: event.data(),
                 read: event.events & epoll_imp::EPOLLIN != 0,
                 write: event.events & epoll_imp::EPOLLOUT != 0,
             });
@@ -381,6 +410,46 @@ mod tests {
             .expect("poll");
         assert!(events.is_empty(), "no interest stands");
         drop(acceptor);
+    }
+
+    /// A multi-event batch reports every token exactly: the kernel's
+    /// packed epoll_event writes 12 bytes per event, so an aligned
+    /// reader's earlier tokens once absorbed the next event's bits as
+    /// their high half — a token the wait table never minted, its wake
+    /// silently dropped (the parked-IO wake loss under load, fixed
+    /// 2026-11-23). Two simultaneously-readable fds pin the contract.
+    #[test]
+    fn a_multi_event_batch_reports_every_token_exactly() {
+        let (mut dialer_a, acceptor_a) = pair();
+        let (mut dialer_b, acceptor_b) = pair();
+        acceptor_a.set_nonblocking(true).expect("nonblocking");
+        acceptor_b.set_nonblocking(true).expect("nonblocking");
+        let mut reactor = Epoll::new().expect("epoll set");
+        reactor
+            .register(handle(&acceptor_a), Direction::Read, 11)
+            .expect("register a");
+        reactor
+            .register(handle(&acceptor_b), Direction::Read, 0x7000_0002)
+            .expect("register b");
+        dialer_a.write_all(b"a").expect("a writes");
+        dialer_b.write_all(b"b").expect("b writes");
+        let _ = dialer_a.flush();
+        let _ = dialer_b.flush();
+        let mut events = Vec::new();
+        reactor
+            .poll(Some(Duration::from_millis(500)), &mut events)
+            .expect("poll");
+        assert_eq!(events.len(), 2, "both fds report in the one batch");
+        let tokens: Vec<u64> = events.iter().map(|event| event.token).collect();
+        // the high-bit token makes any bit-spill pollution loud: the
+        // old layout folded the other event's EPOLLIN into token 11
+        assert!(
+            tokens.contains(&11) && tokens.contains(&0x7000_0002),
+            "exact tokens, got {tokens:?}"
+        );
+        for event in &events {
+            assert!(event.read);
+        }
     }
 
     /// The blocking wait: a poll with no timeout answers the event the
