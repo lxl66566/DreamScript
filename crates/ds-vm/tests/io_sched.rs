@@ -1,0 +1,520 @@
+//! The IO scheduler e2e (the 2026-11-21 scheduler rulings): hand-
+//! assembled programs over the std platform's net face, a VM with a
+//! reactor installed, and local listeners — hermetic, no external
+//! network. What the fixtures pin:
+//!
+//! - park-on-world-op: a `net_recv` with no data parks the calling fiber (the drive never blocks),
+//!   the peer's write wakes it through the reactor, and the completed op's answer lands at the
+//!   parked call site — the same answer the blocking twin answers.
+//! - the drive runs the next ready fiber: two nursery children both parked on their own connections
+//!   complete under one join, their waits overlapping (the serialized blocking twin would take
+//!   twice the wait), the answers collected in spawn order.
+//! - the deadline: a parked recv with no data wakes at its configured bound answering the timeout
+//!   error span — the bounded-wait discipline restated over the wheel.
+//! - parked-IO cancellation: a sibling's trap raises the flag and the drive's next sweep cuts the
+//!   world-parked child at the resume-shaped point — its reactor interest deregistered, the
+//!   boundary reporting `Cancelled` beside the failing `Trapped`.
+//! - tail-position parks: a helper whose tail call is the recv parks through the frame pop and
+//!   lands its answer on the caller, and the entry frame's own tail park delivers the completed
+//!   answer as the run's own result.
+//! - a full send buffer parks too: the writer drains what fits, parks on the remainder, and the
+//!   peer's draining wakes it to completion.
+//! - no reactor installed: the identical program keeps the blocking semantics (the embedder's
+//!   platform choice, never a language fact).
+
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+    time::{Duration, Instant},
+};
+
+use ds_vm::{
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    abi::{
+        ConstIdx, FrameLayout, SlotType,
+        SlotType::{I64, Raw, Ref},
+        uop::Uop,
+    },
+    assemble,
+    platform::{
+        Capability, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform, STD_NAME,
+    },
+};
+
+fn k(idx: u16) -> ConstIdx {
+    ConstIdx(idx)
+}
+
+fn platform(index: u32) -> Const {
+    Const::FuncRef(ConstFuncRef::Named {
+        module: STD_NAME.into(),
+        func: index,
+    })
+}
+
+fn nb_ref(index: u32) -> Const {
+    Const::FuncRef(ConstFuncRef::Named {
+        module: "io".into(),
+        func: index,
+    })
+}
+
+/// The shared pool: the four handle natives, then the recv cap.
+fn pool() -> Vec<Const> {
+    vec![
+        platform(OP_NET_CONNECT), // k0
+        platform(OP_NET_SEND),    // k1
+        platform(OP_NET_RECV),    // k2
+        platform(OP_NET_CLOSE),   // k3
+        Const::I64(4096),         // k4: net_recv max_bytes
+    ]
+}
+
+fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
+    def_pool(name, slots, params, args, pool(), body)
+}
+
+fn def_pool(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    pool: Vec<Const>,
+    body: &[Uop],
+) -> FunctionDef {
+    FunctionDef {
+        name: name.into(),
+        layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
+        pool,
+        code: assemble(body).expect("fixture body encodes"),
+    }
+}
+
+/// A local listener answering its address and the accepted peer's writer
+/// half: the test's transport.
+fn listener() -> (TcpListener, std::net::SocketAddr) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let addr = listener.local_addr().expect("local address");
+    (listener, addr)
+}
+
+/// One accepted peer (the writer side the fixture's connection talks to).
+fn accept(listener: &TcpListener) -> std::net::TcpStream {
+    listener.accept().expect("acceptor accepted").0
+}
+
+fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
+    let mut reg = ModuleRegistry::new();
+    reg.install_platform(Platform::new("std", &[
+        Capability::Net,
+        Capability::Console,
+    ]));
+    reg.install(ModuleVersion::new("io", defs).expect("valid fixture module"));
+    reg
+}
+
+/// A VM over `defs` with the platform's reactor installed (the parking
+/// discipline) and a captured sink.
+fn scheduled_vm(defs: Vec<FunctionDef>) -> Vm {
+    let mut vm = Vm::new(registry(defs));
+    vm.capture_output();
+    // the wake family's runaway bound, not any test's semantics: a
+    // machine carrying several parallel compile lanes starves writer
+    // threads past the tens of seconds, and a deadline that fires there
+    // answers the timeout sentinel instead of the written bytes — kept
+    // under nextest's slow-terminate line so the assertion survives
+    vm.set_net_timeout(Duration::from_secs(90));
+    if let Some(reactor) = ds_vm::reactor::platform_default() {
+        vm.install_reactor(reactor);
+    }
+    vm
+}
+
+/// `(host: string, port: int) -> int`: connect and answer the handle —
+/// the fixture's Rust-side staging step.
+fn connect_def() -> FunctionDef {
+    def("connect", &[Ref, I64, Raw, Raw], 2, 2, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 2, src: 0 },
+        Uop::Mov { dst: 3, src: 1 },
+        Uop::Call {
+            callee: k(0),
+            nargs: 2,
+        },
+        Uop::Ret { src: 3 },
+    ])
+}
+
+/// `(conn: int) -> string`: one recv, the payload (or the failure span's
+/// message word) answered — the parking probe.
+fn recv_child_def() -> FunctionDef {
+    def("recv_child", &[I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(4) },
+        Uop::Call {
+            callee: k(2),
+            nargs: 2,
+        },
+        Uop::Ret { src: 2 },
+    ])
+}
+
+/// `(conn: int) -> string`: the entry frame's own tail call is the recv
+/// — the entry-frame park (the final-delivery sentinel).
+fn recv_tail_entry_def() -> FunctionDef {
+    def("recv_tail_entry", &[I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(4) },
+        Uop::Callt {
+            callee: k(2),
+            nargs: 2,
+        },
+    ])
+}
+
+/// `(conn: int) -> string`: call `recv_tail_entry` plainly, answer its
+/// word — the parked helper's answer landing on this caller.
+fn recv_tail_caller_def() -> FunctionDef {
+    def_pool(
+        "recv_tail_caller",
+        &[I64, Raw, Raw, Raw],
+        1,
+        2,
+        vec![nb_ref(2)],
+        &[
+            Uop::Funcf { frame_slots: 4 },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 3 },
+        ],
+    )
+}
+
+/// `(conn: int, data: string) -> word`: one send of `data` on the
+/// staged handle — the send-park probe (the payload is 1 MiB, far past
+/// any socket buffer, with a peer that drains late).
+fn send_probe_def() -> FunctionDef {
+    def("send_probe", &[I64, Ref, Raw, Raw], 2, 2, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 2, src: 0 },
+        Uop::Mov { dst: 3, src: 1 },
+        Uop::Call {
+            callee: k(1),
+            nargs: 2,
+        },
+        Uop::Ret { src: 2 },
+    ])
+}
+
+/// One scheduled connect over a fresh accepted peer, answering the
+/// handle and the peer.
+fn connect(
+    vm: &mut Vm,
+    listener: &TcpListener,
+    addr: &std::net::SocketAddr,
+) -> (i64, std::net::TcpStream) {
+    // the listener's backlog holds the connection: the VM connects
+    // first, the peer accepts after (an accept before the connect
+    // would deadlock the one thread that drives the VM)
+    let host = vm.intern_str(&addr.ip().to_string());
+    let port = i64::from(addr.port());
+    let answer = vm
+        .run("io", "connect", &[host, Value::I64(port)])
+        .expect("connect lands");
+    let conn = match answer.as_slice() {
+        [Value::I64(conn)] => *conn,
+        other => panic!("connect answered no handle: {other:?}"),
+    };
+    (conn, accept(listener))
+}
+
+/// The payload word of one answer, read as its string.
+fn answer_string(vm: &Vm, answer: &FrameAnswer) -> String {
+    let [Value::Ref(id)] = answer.as_slice() else {
+        panic!("the answer is a string ref, got {answer:?}");
+    };
+    let id = *id;
+    vm.objects_of(id)
+        .str_at(id.id())
+        .expect("the answer names a string")
+        .to_owned()
+}
+
+/// A parked recv wakes on the peer's write: the answer is the written
+/// bytes, delivered at the parked call site — the blocking twin's own
+/// answer, through the reactor.
+#[test]
+fn a_parked_recv_wakes_on_the_peers_write() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def()]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        let mut peer = peer;
+        peer.write_all(b"late data").expect("peer writes");
+        peer.flush().expect("peer flushes");
+        peer
+    });
+    let answer = vm
+        .run("io", "recv_child", &[Value::I64(conn)])
+        .expect("the parked recv lands");
+    assert_eq!(answer_string(&vm, &answer), "late data");
+    let peer = writer.join().expect("writer lands");
+    drop(peer);
+}
+
+/// The entry frame's own tail park: the entry function's tail call is
+/// the recv, the run parks with the final-delivery sentinel, and the
+/// completed answer surfaces as the run's own result.
+#[test]
+fn the_entry_frames_tail_park_delivers_the_runs_answer() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_tail_entry_def()]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        let mut peer = peer;
+        peer.write_all(b"entry tail").expect("peer writes");
+        peer
+    });
+    let answer = vm
+        .run("io", "recv_tail_entry", &[Value::I64(conn)])
+        .expect("the entry tail park lands");
+    // the tail native's root answer is its whole span (tag + payload),
+    // the blocking twin's own shape
+    let words = answer.as_slice();
+    assert!(
+        matches!(
+            words.first(),
+            Some(Value::Tag(ds_vm::native::PLATFORM_IO_OK))
+        ),
+        "the entry tail answered {words:?}"
+    );
+    let payload = FrameAnswer::one(words[1]);
+    assert_eq!(answer_string(&vm, &payload), "entry tail");
+    drop(writer.join().expect("writer lands"));
+}
+
+/// A helper's tail park pops its frame and lands the answer on the
+/// caller's overlay — the parked twin of the native tail return.
+#[test]
+fn a_helper_tail_park_lands_on_its_caller() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![
+        connect_def(),
+        recv_child_def(),
+        recv_tail_entry_def(),
+        recv_tail_caller_def(),
+    ]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        let mut peer = peer;
+        peer.write_all(b"helper tail").expect("peer writes");
+        peer
+    });
+    let answer = vm
+        .run("io", "recv_tail_caller", &[Value::I64(conn)])
+        .expect("the helper tail park lands");
+    assert_eq!(answer_string(&vm, &answer), "helper tail");
+    drop(writer.join().expect("writer lands"));
+}
+
+/// Two nursery children both parked on their own connections complete
+/// under one join with their waits overlapped — the serialized blocking
+/// twin needs both waits back to back, the scheduler needs the longer
+/// one alone. The answers collect in spawn order.
+#[test]
+fn parked_siblings_overlap_their_waits_and_join_in_spawn_order() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def()]);
+    let (conn_a, peer_a) = connect(&mut vm, &listener, &addr);
+    let (conn_b, peer_b) = connect(&mut vm, &listener, &addr);
+    let wait = Duration::from_millis(250);
+    let writer = |peer: std::net::TcpStream, tag: &'static str| {
+        thread::spawn(move || {
+            thread::sleep(wait);
+            let mut peer = peer;
+            peer.write_all(tag.as_bytes()).expect("peer writes");
+            peer
+        })
+    };
+    let writer_a = writer(peer_a, "alpha");
+    let writer_b = writer(peer_b, "beta");
+    let nursery = vm.open_root_nursery();
+    let a = vm
+        .spawn_fiber_in(nursery, "io", "recv_child", &[Value::I64(conn_a)])
+        .expect("child a spawns");
+    let b = vm
+        .spawn_fiber_in(nursery, "io", "recv_child", &[Value::I64(conn_b)])
+        .expect("child b spawns");
+    assert!(a != b, "two children, two slots");
+    let started = Instant::now();
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    let elapsed = started.elapsed();
+    match joined {
+        ds_vm::JoinOutcome::Joined(answers) => {
+            assert_eq!(answers.len(), 2, "both children landed");
+            let alpha = answers[0].clone();
+            let beta = answers[1].clone();
+            assert_eq!(answer_string(&vm, &alpha), "alpha", "spawn order");
+            assert_eq!(answer_string(&vm, &beta), "beta", "spawn order");
+        },
+        other => panic!("the join failed: {other:?}"),
+    }
+    // the serialized twin needs both sleeps back to back (a 2*wait
+    // floor), while a parallel suite can overshoot a writer thread's
+    // sleep in wall time — the bound tolerates one wait of overshoot
+    assert!(
+        elapsed < 3 * wait,
+        "the waits overlapped ({elapsed:?} vs {:?} serialized)",
+        2 * wait
+    );
+    drop(writer_a.join().expect("writer a lands"));
+    drop(writer_b.join().expect("writer b lands"));
+}
+
+/// A parked recv with no data wakes at its configured bound answering
+/// the timeout error span — the bounded-wait discipline over the wheel.
+#[test]
+fn a_parked_recv_wakes_at_its_deadline_with_the_timeout_span() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def()]);
+    vm.set_net_timeout(Duration::from_millis(150));
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let answer = vm
+        .run("io", "recv_child", &[Value::I64(conn)])
+        .expect("the deadline wake lands");
+    // the fixture answers the span's payload word; the timeout's message
+    // names the wait it drew
+    let text = answer_string(&vm, &answer);
+    assert!(text.contains("timed out"), "the timeout message: {text}");
+    drop(peer);
+}
+
+/// Parked-IO cancellation: a sibling's trap raises the flag, and the
+/// drive's next sweep cuts the world-parked child at the
+/// resume-shaped point — its interest deregistered, the boundary
+/// reporting `Cancelled` beside the failing `Trapped`.
+#[test]
+fn a_cancelled_nursery_cuts_its_world_parked_child() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def(), trap_child_def()]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    // the peer never writes: the child parks with no wake but the cut
+    let nursery = vm.open_root_nursery();
+    let parked = vm
+        .spawn_fiber_in(nursery, "io", "recv_child", &[Value::I64(conn)])
+        .expect("the parked child spawns");
+    let failing = vm
+        .spawn_fiber_in(nursery, "io", "trap_child", &[])
+        .expect("the failing child spawns");
+    assert!(parked != failing);
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    match joined {
+        ds_vm::JoinOutcome::Failed(outcomes) => {
+            assert_eq!(outcomes.len(), 2);
+            assert!(
+                matches!(outcomes[0], ds_vm::ChildOutcome::Cancelled),
+                "the parked child cut: {:?}",
+                outcomes[0]
+            );
+            assert!(
+                matches!(outcomes[1], ds_vm::ChildOutcome::Trapped(_)),
+                "the failing child trapped: {:?}",
+                outcomes[1]
+            );
+        },
+        other => panic!("the boundary reported {other:?}"),
+    }
+    drop(peer);
+}
+
+/// A full send buffer parks too: the writer drains what fits, parks on
+/// the remainder, and the peer's late draining wakes it to completion —
+/// 1 MiB across one send call.
+#[test]
+fn a_full_send_buffer_fills_and_drains_across_the_park() {
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), send_probe_def()]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let total = 1024 * 1024;
+    let reader = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        let mut peer = peer;
+        let mut buf = [0; 16384];
+        let mut got = 0;
+        while got < total {
+            let n = peer.read(&mut buf).expect("peer reads");
+            assert!(n > 0, "the peer saw an orderly close early");
+            got += n;
+        }
+        got
+    });
+    let data = "x".repeat(total);
+    let data_arg = vm.intern_str(&data);
+    let answer = vm
+        .run("io", "send_probe", &[Value::I64(conn), data_arg])
+        .expect("the parked send lands");
+    // the send probe answers the span's tag word: the shared success
+    // marker of every fallible native
+    assert!(
+        matches!(
+            answer.as_slice().first(),
+            Some(Value::Tag(ds_vm::native::PLATFORM_IO_OK))
+        ),
+        "the send answered {:?}",
+        answer.as_slice()
+    );
+    assert_eq!(reader.join().expect("reader lands"), total);
+    let _ = conn;
+}
+
+/// No reactor installed: the identical parking shape keeps the blocking
+/// semantics and answers the same — the embedder's platform choice.
+#[test]
+fn without_a_reactor_the_same_program_blocks_and_lands() {
+    let (listener, addr) = listener();
+    let mut vm = Vm::new(registry(vec![connect_def(), recv_child_def()]));
+    vm.capture_output();
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        let mut peer = peer;
+        peer.write_all(b"blocking twin").expect("peer writes");
+        peer
+    });
+    let answer = vm
+        .run("io", "recv_child", &[Value::I64(conn)])
+        .expect("the blocking recv lands");
+    assert_eq!(answer_string(&vm, &answer), "blocking twin");
+    drop(writer.join().expect("writer lands"));
+}
+
+/// The `()` trap child for the cancellation fixture: 1/0.
+fn trap_child_def() -> FunctionDef {
+    def_pool(
+        "trap_child",
+        &[I64, I64],
+        0,
+        0,
+        vec![Const::I64(1), Const::I64(0)],
+        &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Kimm { dst: 0, kidx: k(0) },
+            Uop::Kimm { dst: 1, kidx: k(1) },
+            Uop::DivI64 {
+                dst: 0,
+                lhs: 0,
+                rhs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}

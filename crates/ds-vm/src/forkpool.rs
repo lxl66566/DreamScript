@@ -157,6 +157,12 @@ fn run_on_worker(vm: &mut Vm, cargo: ForkCargo) -> ForkReturn {
             Ok(DriveOutcome::Interlock(_)) => {
                 unreachable!("execute_host_step drains interlocks before returning")
             },
+            // the pool's purity contract: the world surface never
+            // reaches a worker, so a world park cannot arise — the
+            // world call refused before it ever tried the op
+            Ok(DriveOutcome::WorldPark(_)) => {
+                unreachable!("a pooled child never touches the world")
+            },
             Err((trap, _at)) => {
                 // the trapped child keeps its frames: the host's death
                 // walk fires the hooks and drains the ledger, exactly

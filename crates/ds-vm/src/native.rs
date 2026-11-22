@@ -945,6 +945,15 @@ pub enum NativeResult {
         /// The assembly or fold stage the join runs.
         stage: ForkStage,
     },
+    /// A world op's park request (the 2026-11-21 scheduler ruling): the
+    /// op would block, so the calling fiber parks instead — the drive
+    /// registers the wait, runs the next ready fiber, and the reactor's
+    /// readiness (or the wait's deadline) completes the op and delivers
+    /// its answer at the parked site. Only a net native parked on a
+    /// VM with a reactor installed answers it; the parking site and
+    /// the drivers that register or refuse the wait live in
+    /// `crate::vm`.
+    Park(crate::sched::WorldWait),
 }
 
 impl NativeResult {
@@ -953,7 +962,11 @@ impl NativeResult {
     pub fn word(self) -> Option<Value> {
         match self {
             Self::Word(v) => Some(v),
-            Self::Tag { .. } | Self::Span { .. } | Self::Total { .. } | Self::Fork { .. } => None,
+            Self::Tag { .. }
+            | Self::Span { .. }
+            | Self::Total { .. }
+            | Self::Fork { .. }
+            | Self::Park(_) => None,
         }
     }
 
@@ -969,6 +982,9 @@ impl NativeResult {
             // site instead, and the CALLTG site refuses the fork before
             // its body runs
             Self::Fork { .. } => unreachable!("a park request never overlays"),
+            // a world park never overlays either: the wake delivers the
+            // completed op's answer at the resume point
+            Self::Park(_) => unreachable!("a world park never overlays"),
         }
     }
 }

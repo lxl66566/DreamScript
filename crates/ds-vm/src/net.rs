@@ -41,6 +41,22 @@
 //! A hostile host cannot hang the interpreter: a socket that never
 //! answers yields `net_err` "timed out after ...".
 //!
+//! # Parking discipline (the 2026-11-21 scheduler ruling)
+//!
+//! Installing a reactor on the VM ([`crate::Vm::install_reactor`]) flips
+//! the registered-connection surface to non-blocking and the two data
+//! natives to parking: `net_recv`/`net_send` attempt the op once
+//! non-blocking and, when it would block, answer a park request the
+//! dispatcher registers with the scheduler — the fiber parks, the drive
+//! runs the next ready fiber, and the reactor's readiness (or the same
+//! configured timeout, restated as the wait's deadline) completes the op
+//! and delivers its answer at the parked site. Blocking stays the
+//! embedder's platform choice: no reactor installed, the natives below
+//! block exactly as before. The parking surface is the handle face alone
+//! this round — `net_connect` and the `http_get` exchanges keep their
+//! bounded blocking waits (std cannot open a non-connecting socket), a
+//! boundary the item 76 server round revisits.
+//!
 //! # Caps
 //!
 //! One `net_recv` reads at most `max_bytes` bytes, clamped to the 1 MiB
@@ -102,6 +118,11 @@ pub(crate) struct Connections {
     /// The pinned TLS client of a host or test that overrides the
     /// webpki-rooted default ([`crate::tls`]); `None` serves the default.
     tls: Option<Arc<rustls::ClientConfig>>,
+    /// Whether the parking discipline owns the data natives: a reactor
+    /// installed on the VM flips this, new registrations go
+    /// non-blocking, and `net_recv`/`net_send` answer park requests on
+    /// a would-block instead of blocking the thread.
+    parking: bool,
 }
 
 impl Default for Connections {
@@ -111,8 +132,18 @@ impl Default for Connections {
             next_id: 0,
             timeout: NET_TIMEOUT,
             tls: None,
+            parking: false,
         }
     }
+}
+
+/// One non-blocking attempt's outcome: the completed (or failed) op, or
+/// the would-block the caller parks on.
+pub(crate) enum NetAttempt<T> {
+    /// The op ran: its result, success or failure.
+    Done(Result<T, io::Error>),
+    /// The op would block — the caller parks (the reactor owns the wait).
+    Park,
 }
 
 impl Connections {
@@ -156,10 +187,104 @@ impl Connections {
 
     /// Registers `stream` and answers its handle. Used by `net_connect`.
     pub(crate) fn register(&mut self, stream: TcpStream) -> i64 {
+        if self.parking {
+            // the reactor owns readiness: a registered socket answers
+            // would-block to the thread, never a block — the flag's
+            // whole job at registration time
+            let _ = stream.set_nonblocking(true);
+        }
         let id = self.next_id;
         self.next_id = id + 1;
         self.streams.push((id, stream));
         id
+    }
+
+    /// Flips the data natives to the parking discipline (a reactor was
+    /// installed on the VM): registered sockets go non-blocking now and
+    /// at every later registration.
+    pub(crate) fn enable_parking(&mut self) {
+        self.parking = true;
+        for (_, stream) in &mut self.streams {
+            let _ = stream.set_nonblocking(true);
+        }
+    }
+
+    /// Whether the data natives park (a reactor is installed).
+    pub(crate) fn parking(&self) -> bool {
+        self.parking
+    }
+
+    /// One non-blocking read attempt on handle `conn`: at most `max`
+    /// bytes, one read (the empty vec the orderly close), `Park` when
+    /// the socket would block. The parked twin of [`Connections::recv`].
+    pub(crate) fn try_recv(&mut self, conn: i64, max: usize) -> NetAttempt<Vec<u8>> {
+        let timeout = self.timeout;
+        let Ok(stream) = self.stream(conn) else {
+            return NetAttempt::Done(Err(unknown(conn)));
+        };
+        let _ = stream.set_nonblocking(true);
+        let mut buf = vec![0; max];
+        match stream.read(&mut buf) {
+            Ok(n) => {
+                buf.truncate(n);
+                NetAttempt::Done(Ok(buf))
+            },
+            Err(err) if err.kind() == ErrorKind::WouldBlock => NetAttempt::Park,
+            Err(err) => NetAttempt::Done(Err(normalize(err, timeout))),
+        }
+    }
+
+    /// One non-blocking write attempt on handle `conn`, draining `data`
+    /// as far as the socket buffer takes it: the loop stops at the first
+    /// would-block with the remainder kept in `data` (level-triggered
+    /// readiness reports again once the buffer drains), `Park` while
+    /// bytes remain. The parked twin of [`Connections::send`].
+    pub(crate) fn try_send(&mut self, conn: i64, data: &mut Vec<u8>) -> NetAttempt<()> {
+        let timeout = self.timeout;
+        let Ok(stream) = self.stream(conn) else {
+            return NetAttempt::Done(Err(unknown(conn)));
+        };
+        let _ = stream.set_nonblocking(true);
+        let mut sent = 0;
+        while sent < data.len() {
+            match stream.write(&data[sent..]) {
+                Ok(0) => {
+                    return NetAttempt::Done(Err(io::Error::other("the socket accepted no bytes")))
+                },
+                Ok(n) => sent += n,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) => return NetAttempt::Done(Err(normalize(err, timeout))),
+            }
+        }
+        if sent > 0 {
+            data.drain(..sent);
+        }
+        if data.is_empty() { NetAttempt::Done(Ok(())) } else { NetAttempt::Park }
+    }
+
+    /// The OS-level handle of one registered connection, the reactor's
+    /// registration key; `None` for an unknown handle (the caller's
+    /// park then rides its deadline alone).
+    pub(crate) fn raw_handle(&mut self, conn: i64) -> Option<crate::reactor::IoHandle> {
+        let stream = self.stream(conn).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Some(crate::reactor::IoHandle(
+                u64::try_from(stream.as_raw_fd()).ok()?,
+            ))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            Some(crate::reactor::IoHandle(
+                u64::try_from(stream.as_raw_socket()).ok()?,
+            ))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            None
+        }
     }
 
     /// Installs this table's read/write timeouts on `stream`.
@@ -425,6 +550,28 @@ pub(crate) fn net_send_fn(
 ) -> Result<NativeResult, Trap> {
     let conn = i64_arg(args, 0)?;
     let data = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
+    if out.net().parking() {
+        // the parking discipline: drain what the buffer takes now, park
+        // on the remainder (the staged bytes copied once; the frame's
+        // own word keeps its count where it stood)
+        let mut pending = data.into_bytes();
+        return match out.net().try_send(conn, &mut pending) {
+            NetAttempt::Done(Ok(())) => Ok(ok(Value::I64(0))),
+            NetAttempt::Done(Err(err)) => Ok(net_err(
+                heaps,
+                NetClass::of(&err),
+                "net_send",
+                &conn.to_string(),
+                &err.to_string(),
+            )),
+            NetAttempt::Park => {
+                let deadline = std::time::Instant::now() + out.net().timeout();
+                Ok(NativeResult::Park(crate::sched::WorldWait::send(
+                    conn, pending, deadline,
+                )))
+            },
+        };
+    }
     match out.net().send(conn, data.as_bytes()) {
         // the payload word is the inert unit word, like write_file's
         Ok(()) => Ok(ok(Value::I64(0))),
@@ -457,10 +604,29 @@ pub(crate) fn net_recv_fn(
             "max_bytes must be positive",
         ));
     }
-    let bytes = match out
-        .net()
-        .recv(conn, usize::try_from(max).unwrap_or(NET_CAP).min(NET_CAP))
-    {
+    let max = usize::try_from(max).unwrap_or(NET_CAP).min(NET_CAP);
+    if out.net().parking() {
+        // the parking discipline: one non-blocking attempt, the
+        // would-block answered as the park request (the scheduler owns
+        // the wait, the deadline the same configured bound)
+        return match out.net().try_recv(conn, max) {
+            NetAttempt::Done(Ok(bytes)) => Ok(recv_answer(heaps, conn, bytes)),
+            NetAttempt::Done(Err(err)) => Ok(net_err(
+                heaps,
+                NetClass::of(&err),
+                "net_recv",
+                &conn.to_string(),
+                &err.to_string(),
+            )),
+            NetAttempt::Park => {
+                let deadline = std::time::Instant::now() + out.net().timeout();
+                Ok(NativeResult::Park(crate::sched::WorldWait::recv(
+                    conn, max, deadline,
+                )))
+            },
+        };
+    }
+    let bytes = match out.net().recv(conn, max) {
         Ok(bytes) => bytes,
         Err(err) => {
             return Ok(net_err(
@@ -472,17 +638,23 @@ pub(crate) fn net_recv_fn(
             ))
         },
     };
-    // a string native answers a string: mid-code-point truncation and
-    // binary protocols surface as errors, not as silently mangled text
+    Ok(recv_answer(heaps, conn, bytes))
+}
+
+/// `net_recv`'s answer shape, shared by the blocking path and the
+/// parked wake's completion: a string native answers a string, so
+/// mid-code-point truncation and binary protocols surface as errors,
+/// not as silently mangled text.
+pub(crate) fn recv_answer(heaps: &mut Heaps, conn: i64, bytes: Vec<u8>) -> NativeResult {
     match String::from_utf8(bytes) {
-        Ok(text) => Ok(ok(heaps.new_str(text))),
-        Err(_) => Ok(net_err(
+        Ok(text) => ok(heaps.new_str(text)),
+        Err(_) => net_err(
             heaps,
             NetClass::Refused,
             "net_recv",
             &conn.to_string(),
             "invalid UTF-8 in the received bytes",
-        )),
+        ),
     }
 }
 

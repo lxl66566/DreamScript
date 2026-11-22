@@ -80,6 +80,17 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     // the process arguments stage on the VM once, the `args()` op
     // reading them verbatim whatever the entry
     prepared.vm.set_argv(args.args.clone());
+    // The 2026-11-21 scheduler ruling's CLI half: `ds run` installs the
+    // platform's reactor, so the std platform's net face parks on a
+    // would-block instead of blocking the drive — the single-thread
+    // executor runs the next ready fiber and the reactor bridges the
+    // gap (the epoll driver on Linux, the tier-1 host; a host with no
+    // driver keeps the blocking natives, blocking semantics staying the
+    // embedder's choice). The REPL and dev hosts keep blocking this
+    // round: their splice-park host loops predate the executor seam.
+    if let Some(reactor) = ds_vm::reactor::platform_default() {
+        prepared.vm.install_reactor(reactor);
+    }
     resolve_and_run(&mut prepared, &args.entry)
 }
 
@@ -770,6 +781,10 @@ fn describe_trap(trap: &Trap) -> String {
             .to_owned(),
         Trap::OutOfFuel => "a budgeted drive ran past its step limit (the comptime fence's cap; a \
                             run drive carries none)"
+            .to_owned(),
+        Trap::SchedulerDeadlock => "the IO scheduler found nothing runnable and nothing able to \
+                                    wake (every fiber parked on a wait no reactor interest and no \
+                                    deadline answers)"
             .to_owned(),
     }
 }

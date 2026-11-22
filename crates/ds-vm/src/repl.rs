@@ -63,7 +63,7 @@ use crate::{
     native::BUILTIN_REPL_PARK,
     nursery::NurseryState,
     value::{Value, Word},
-    vm::{Active, CallInfo, DriveOutcome, FrameAnswer, Vm},
+    vm::{Active, CallInfo, DriveOutcome, ExecutorStep, FrameAnswer, Vm},
 };
 
 /// Why [`splice_park`] cannot rewrite a module.
@@ -615,6 +615,33 @@ impl Vm {
                         self.host_delivery(value);
                     }
                     return Ok(ReplOutcome::Died(answer));
+                },
+                // a world park under the REPL drive: the wait registers
+                // and the executor's continuation answers it (the REPL
+                // installs no reactor by default, so this arm serves a
+                // reactor-installing embedder alone)
+                Ok(DriveOutcome::WorldPark(req)) => {
+                    self.register_wait(req.fiber, req.wait);
+                    match self.executor_continue(FIBER_ROOT) {
+                        Ok(ExecutorStep::Continue((a, p))) => {
+                            active = a;
+                            pc = p;
+                        },
+                        Ok(ExecutorStep::HostAnswer(answer)) => {
+                            self.host_release();
+                            for value in answer.as_slice() {
+                                self.host_delivery(value);
+                            }
+                            return Ok(ReplOutcome::Died(answer));
+                        },
+                        Err(trap) => {
+                            self.trap_pc = Some(pc);
+                            self.host_release();
+                            self.trap_child(self.current, &trap);
+                            self.trap_delivery(&trap);
+                            return Err(trap);
+                        },
+                    }
                 },
                 // a host-level drive passes no boundary and answers no
                 // reentry frame

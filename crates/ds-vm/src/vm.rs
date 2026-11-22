@@ -63,6 +63,7 @@ use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
     sync::Arc,
+    time::Instant,
 };
 
 use ds_abi::{
@@ -84,6 +85,8 @@ use crate::{
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
     object::{Heaps, Objects},
     program::{Const, ConstFuncRef, ConstKind},
+    reactor::Reactor,
+    sched::{SchedState, WaitEntry, WorldWait},
     value::{ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word},
 };
 
@@ -356,6 +359,13 @@ pub enum Trap {
     /// suspend, so the drive refuses instead of corrupting the frame
     /// chain; the frames stay for [`Vm::backtrace`].
     ReentrancyRefused,
+    /// The IO scheduler found nothing runnable and nothing waiting (the
+    /// 2026-11-21 scheduler ruling's stall guard): every fiber is parked
+    /// on a world op that no reactor interest and no deadline can
+    /// answer — a contradiction, since a park registers one or the
+    /// other, so this trap names a scheduler bug, never a program
+    /// shape.
+    SchedulerDeadlock,
     /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
     /// payload is the error value's whole word span — word 0 the
     /// failing member's tag, the rest its payload words in declaration
@@ -904,6 +914,40 @@ pub(crate) enum DriveOutcome {
     /// joiner. Never the Rust stack — program nesting depth must cost
     /// heap, not stack.
     Interlock(InterlockRequest),
+    /// The current fiber parked on a world op (the 2026-11-21 scheduler
+    /// ruling): the op would block, the fiber parks with a resume
+    /// point, and the driver that owns the executor moment registers
+    /// the wait and runs the next ready fiber — the host executor
+    /// (`root_drive`'s scheduling loop) or a nursery drive (its next
+    /// child, the reactor bridging the gap when nothing is runnable).
+    /// A driver that cannot schedule (the hosted native loop) refuses
+    /// the park instead, exactly its other non-returning refusals.
+    WorldPark(WorldParkRequest),
+}
+
+/// The installed reactor behind a Debug-transparent name (the driver's
+/// own identity is all a debug render can honestly say).
+struct InstalledReactor(Box<dyn Reactor>);
+
+impl std::fmt::Debug for InstalledReactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstalledReactor").finish_non_exhaustive()
+    }
+}
+
+impl InstalledReactor {
+    /// The driver behind the wrapper.
+    fn driver(&mut self) -> &mut dyn Reactor {
+        self.0.as_mut()
+    }
+}
+
+/// One world op's park request: the parked fiber and the pending op.
+pub(crate) struct WorldParkRequest {
+    /// The fiber that parked (the drive ended on it).
+    pub(crate) fiber: FiberId,
+    /// What it waits for — the scheduler's registration payload.
+    pub(crate) wait: WorldWait,
 }
 
 /// A parked joiner's pending nursery drive: the join/boundary seam parked
@@ -1002,6 +1046,56 @@ enum StepFlow {
     Quiet,
     /// The driven fiber parked at a cross-nursery join.
     Interlock(InterlockRequest),
+}
+
+/// One woken fiber's entry outcome for the executor loops.
+enum Woken {
+    /// The fiber continues here (its own next instruction, or its
+    /// resumer's continuation after it completed into one).
+    Step((Active, CodePc)),
+    /// The fiber completed at its entry frame with no live resumer:
+    /// the answer is the drive's death value.
+    Completed(FrameAnswer),
+    /// Nothing entered (the fiber was cut or released between its wake
+    /// and its entry — its death already handled by whoever cut it).
+    Quiet,
+}
+
+/// The executor loop's continuation after a quiet drive.
+pub(crate) enum ExecutorStep {
+    /// The next fiber to drive, and where.
+    Continue((Active, CodePc)),
+    /// The host fiber's own answer crossed (the program's or the
+    /// resumed fiber's) — the drive ends with it.
+    HostAnswer(FrameAnswer),
+}
+
+/// A native answer's head word — the word the switch payload delivers
+/// onto the parked call site (the full answer overlays after the
+/// switch).
+fn native_head_word(result: &NativeResult) -> Value {
+    match result {
+        NativeResult::Word(value) => *value,
+        NativeResult::Tag { tag, .. } | NativeResult::Span { tag, .. } => Value::Tag(*tag),
+        NativeResult::Total { words } => words.first().copied().unwrap_or(Value::I64(0)),
+        NativeResult::Fork { .. } | NativeResult::Park(_) => {
+            unreachable!("a park request never delivers")
+        },
+    }
+}
+
+/// A native answer's whole-span death value — the completion channel's
+/// shape (the parked entry-frame tail park's final delivery).
+fn frame_answer_of(result: NativeResult) -> FrameAnswer {
+    match result {
+        NativeResult::Word(value) => FrameAnswer::one(value),
+        NativeResult::Tag { tag, payload } => FrameAnswer::tagged(tag, &[payload]),
+        NativeResult::Span { tag, payload } => FrameAnswer::tagged(tag, &payload),
+        NativeResult::Total { words } => FrameAnswer::many(words),
+        NativeResult::Fork { .. } | NativeResult::Park(_) => {
+            unreachable!("a park request never delivers")
+        },
+    }
 }
 
 /// Which seam parked a joiner, and how a consumed nursery's outcomes become
@@ -2098,6 +2192,9 @@ fn overlay_native(
         NativeResult::Word(value) => {
             stack[word_of(fp, start, body_len)] = Word::Slot(value);
         },
+        // a park request never overlays: the site parked, the wake
+        // delivering the completed answer there instead
+        NativeResult::Park(_) => unreachable!("a world park never overlays"),
         NativeResult::Tag { tag, payload } => {
             debug_assert!(caller.arg_area_len() >= 2, "width pre-checked");
             stack[word_of(fp, start, body_len)] = Word::Slot(Value::Tag(tag));
@@ -2534,6 +2631,14 @@ pub struct Vm {
     /// run that answers every fork sequentially through the gate's
     /// fallback reads zero).
     fork_pool_drives: usize,
+    /// The installed reactor (the 2026-11-21 scheduler ruling): `None`
+    /// keeps the blocking natives — blocking semantics stay an
+    /// embedder's platform choice, never a language fact. The box rides
+    /// a Debug-transparent wrapper so `Vm`'s own derive stands.
+    reactor: Option<InstalledReactor>,
+    /// The IO scheduler's tables: the wait register, the deadline
+    /// wheel, the FIFO run queue, and the wake deliveries.
+    sched: SchedState,
 }
 
 /// The caller identity a call-site resolution carries: the running
@@ -2669,6 +2774,8 @@ impl Vm {
             fuel: 0,
             fork_pool: false,
             fork_pool_drives: 0,
+            reactor: None,
+            sched: SchedState::default(),
         }
     }
 
@@ -2693,6 +2800,19 @@ impl Vm {
     /// trap, the pool's purity contract.
     pub fn enable_fork_pool(&mut self) {
         self.fork_pool = true;
+    }
+
+    /// Installs the reactor and flips the net face's data natives to
+    /// the parking discipline (the 2026-11-21 scheduler ruling, the E1
+    /// capability seam's runtime half): `net_recv`/`net_send` answer
+    /// park requests on a would-block, the drive runs the next ready
+    /// fiber, and readiness or the configured deadline completes the
+    /// parked op — single-thread executor, the multi-thread fiber
+    /// executor ruled post-1.0. A host that installs nothing keeps the
+    /// blocking natives: the same source, the embedder's choice.
+    pub fn install_reactor(&mut self, reactor: Box<dyn Reactor>) {
+        self.out.net().enable_parking();
+        self.reactor = Some(InstalledReactor(reactor));
     }
 
     /// Interns a string into the root fiber's heap and hands back its
@@ -3617,8 +3737,34 @@ impl Vm {
             });
         }
         self.pool[fiber.index()].resumer = None; // the host resumes
-        let (active, pc) = self.switch_in(fiber, payload);
-        let outcome = self.execute_host_step::<false>(active, pc, usize::MAX);
+        let (mut active, mut pc) = self.switch_in(fiber, payload);
+        let outcome = loop {
+            match self.execute_host_step::<false>(active, pc, usize::MAX) {
+                // a world park under a host resume: the wait registers
+                // and the executor's continuation answers it — the host
+                // called a synchronous face, so the drive blocks on the
+                // reactor like any blocking native would, the fiber
+                // never blocking the world out
+                Ok(DriveOutcome::WorldPark(req)) => {
+                    self.register_wait(req.fiber, req.wait);
+                    match self.executor_continue(fiber) {
+                        Ok(ExecutorStep::Continue((a, p))) => {
+                            active = a;
+                            pc = p;
+                        },
+                        Ok(ExecutorStep::HostAnswer(answer)) => {
+                            self.host_release();
+                            for value in answer.as_slice() {
+                                self.host_delivery(value);
+                            }
+                            break Ok(DriveOutcome::Died(answer));
+                        },
+                        Err(trap) => break Err((trap, pc)),
+                    }
+                },
+                other => break other,
+            }
+        };
         self.host_release();
         match outcome {
             Ok(DriveOutcome::Died(answer)) => {
@@ -3644,6 +3790,11 @@ impl Vm {
             Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
             Ok(DriveOutcome::Interlock(_)) => {
                 unreachable!("the step drains every interlock before returning")
+            },
+            // the drive loop above drained every world park into the
+            // executor's continuation before breaking its outcome out
+            Ok(DriveOutcome::WorldPark(_)) => {
+                unreachable!("the drive loop drained every world park")
             },
             Err((trap, at)) => {
                 self.trap_pc = Some(at);
@@ -3701,6 +3852,10 @@ impl Vm {
     /// resume point, staged callable words through the swap re-check —
     /// before the Dead marking returns the slot to the spawn-reuse set.
     fn release_pooled_fiber(&mut self, fiber: FiberId) {
+        // a fiber parked on the world releases its reactor interest
+        // first (the parked-IO cancellation discipline): the reactor
+        // never reports into a released slot
+        self.cancel_wait(fiber);
         self.fire_teardown_hooks(fiber, &[]);
         self.drain_claims(fiber);
         self.reclaim_fiber_kstr_rows(fiber);
@@ -4076,6 +4231,14 @@ impl Vm {
             Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => StepFlow::Quiet,
             Ok(DriveOutcome::Frame(_)) => unreachable!("a host drive answers no reentry frame"),
             Ok(DriveOutcome::Interlock(req)) => StepFlow::Interlock(req),
+            // a child parked on a world op: the drive registers the
+            // wait and moves on — the next child, or the reactor's
+            // wait when every child stands parked (the pass loop in
+            // `drive_frame_children`)
+            Ok(DriveOutcome::WorldPark(req)) => {
+                self.register_wait(req.fiber, req.wait);
+                StepFlow::Quiet
+            },
             Err((trap, _at)) => {
                 self.host_release();
                 self.trap_child(self.current, &trap);
@@ -4220,68 +4383,137 @@ impl Vm {
         if self.fork_pool && self.try_fork_pool(frame) {
             return None;
         }
-        while frame.cursor < frame.children.len() {
-            let child = frame.children[frame.cursor];
-            // a reused slot belongs to another nursery: the child died and
-            // was ledgered before its slot was recycled
-            if self.pool[child.index()].nursery != Some(frame.nursery) {
-                frame.cursor += 1;
-                continue;
-            }
-            while self.pool[child.index()].state != FiberState::Dead {
-                if !self.pool[child.index()].resumable() {
-                    break; // interrupted mid-trap (already ledgered)
-                }
-                // The resume is preemption-shaped [E2, E5]: a child parked
-                // at a suspension it chose (a control call) or one the
-                // host's request injected sits at a park, so the bounce
-                // under the nursery's raised cancel flag delivers the cut
-                // instead of resuming — the driver-side twin of the
-                // backward-branch preemption point, and the only bound on a
-                // child that parks with no taken backward jump left between
-                // parks (a park inside a tail loop would otherwise bounce
-                // forever; the CALLT pc-reset is deliberately not a
-                // preemption point). A Ready child is a first entry, not a
-                // resume: its straight-line work still lands [E5].
-                let step = if matches!(
-                    self.pool[child.index()].state,
-                    FiberState::Suspended | FiberState::Preempted
-                ) && self.nurseries[frame.nursery.index()].cancelled
-                {
-                    // enter, then die at the resume point: cancel_current
-                    // fires the kept-frame deinits (the cancel-cut door)
-                    // and delivers the sentinel to the child's resumer,
-                    // whose continuation the drive then runs
-                    self.switch_in(child, Value::Tag(PLATFORM_NONE));
-                    self.cancel_current()
-                } else {
-                    Some(self.switch_in(child, Value::Tag(PLATFORM_NONE)))
-                };
-                let Some((active, pc)) = step else {
+        // The pass loop: one sweep drives every child it can (in spawn
+        // order, each to death or a park), and a sweep that ends with
+        // live children left — all standing world-parked (the 2026-11-21
+        // scheduler ruling: the drive ran the next ready fiber, and
+        // nothing is ready) — waits on the reactor before the next
+        // sweep. Once a sibling parks on a world op the relative order
+        // of sibling observables is unspecified (ruled), so re-sweeping
+        // in spawn order per wake is one fair interleaving of many.
+        loop {
+            while frame.cursor < frame.children.len() {
+                let child = frame.children[frame.cursor];
+                // a reused slot belongs to another nursery: the child died and
+                // was ledgered before its slot was recycled
+                if self.pool[child.index()].nursery != Some(frame.nursery) {
+                    frame.cursor += 1;
                     continue;
-                };
-                if let StepFlow::Interlock(req) = self.drive_step(active, pc) {
-                    return Some(req);
                 }
+                // a dead child's sweep slot (its death walk already
+                // ran on the sweep that drove it)
+                if self.pool[child.index()].state == FiberState::Dead {
+                    frame.cursor += 1;
+                    continue;
+                }
+                while self.pool[child.index()].state != FiberState::Dead {
+                    let state = self.pool[child.index()].state;
+                    let cancelled = self.nurseries[frame.nursery.index()].cancelled;
+                    // A woken child's entry delivers the completed op's
+                    // staged answer at its parked site (the scheduler's
+                    // wake), exactly the join answer delivery's shape.
+                    //
+                    // Otherwise the resume is preemption-shaped [E2, E5]:
+                    // a child parked at a suspension it chose (a control
+                    // call) or one the host's request injected sits at a
+                    // park, so the bounce under the nursery's raised
+                    // cancel flag delivers the cut instead of resuming —
+                    // the driver-side twin of the backward-branch
+                    // preemption point, and the only bound on a child that
+                    // parks with no taken backward jump left between parks
+                    // (a park inside a tail loop would otherwise bounce
+                    // forever; the CALLT pc-reset is deliberately not a
+                    // preemption point). A world-parked child — waiting or
+                    // woken — under the flag is cut the same way, its
+                    // reactor interest deregistered first (the ruling's
+                    // parked-IO cancellation: the sentinel at the
+                    // resume-shaped point, the reactor never reporting
+                    // into a cut fiber). A Ready child is a first entry,
+                    // not a resume: its straight-line work still lands
+                    // [E5].
+                    let step = if cancelled
+                        && matches!(
+                            state,
+                            FiberState::Suspended | FiberState::Preempted | FiberState::WorldParked
+                        ) {
+                        // enter, then die at the resume point: cancel_current
+                        // fires the kept-frame deinits (the cancel-cut door)
+                        // and delivers the sentinel to the child's resumer,
+                        // whose continuation the drive then runs
+                        self.cancel_wait(child);
+                        self.switch_in(child, Value::Tag(PLATFORM_NONE));
+                        self.cancel_current()
+                    } else if state == FiberState::WorldParked {
+                        break; // waiting on the world, a later sweep owns it
+                    } else if !self.pool[child.index()].resumable() {
+                        break; // interrupted mid-trap (already ledgered)
+                    } else if self.sched.deliveries.contains_key(&child) {
+                        // the sweep enters the woken child itself: its
+                        // run-queue entry goes with it (a stale entry
+                        // would answer the executor's wait forever)
+                        self.sched.take_ready(child);
+                        match self.enter_woken(child) {
+                            Ok(Woken::Step(step)) => Some(step),
+                            // a completed-or-cut woken child: the ledger
+                            // or the cut already wrote its outcome, the
+                            // sweep's death check below finishes it
+                            Ok(Woken::Completed(_) | Woken::Quiet) => None,
+                            Err(trap) => {
+                                self.host_release();
+                                self.trap_child(child, &trap);
+                                None
+                            },
+                        }
+                    } else {
+                        Some(self.switch_in(child, Value::Tag(PLATFORM_NONE)))
+                    };
+                    let Some((active, pc)) = step else {
+                        continue;
+                    };
+                    if let StepFlow::Interlock(req) = self.drive_step(active, pc) {
+                        return Some(req);
+                    }
+                }
+                // the child's death walk completes here: a trapped child keeps
+                // its frames until now, then its slot is released. The deinit
+                // pass fires the kept frames' hooks first (E5: teardown walks
+                // frames running deinits), holding the delivery's payload
+                // back; then every other claim the kept frames own is
+                // released, routed to each word's own heap (the one
+                // cross-heap count channel of a death [E5]). A
+                // world-parked child skips the walk — its frames still
+                // stand for the wake.
+                match self.pool[child.index()].state {
+                    FiberState::Dead | FiberState::WorldParked => {},
+                    _ => {
+                        let held = self.nurseries[frame.nursery.index()]
+                            .outcome(child)
+                            .as_ref()
+                            .map(Self::payload_words)
+                            .unwrap_or_default();
+                        self.child_death_walk(child, &held, frame.joiner.map(|(fiber, _)| fiber));
+                    },
+                }
+                frame.cursor += 1;
             }
-            // the child's death walk completes here: a trapped child keeps
-            // its frames until now, then its slot is released. The deinit
-            // pass fires the kept frames' hooks first (E5: teardown walks
-            // frames running deinits), holding the delivery's payload
-            // back; then every other claim the kept frames own is
-            // released, routed to each word's own heap (the one
-            // cross-heap count channel of a death [E5])
-            if self.pool[child.index()].state != FiberState::Dead {
-                let held = self.nurseries[frame.nursery.index()]
-                    .outcome(child)
-                    .as_ref()
-                    .map(Self::payload_words)
-                    .unwrap_or_default();
-                self.child_death_walk(child, &held, frame.joiner.map(|(fiber, _)| fiber));
+            // the sweep is done: waiting children keep the frame open.
+            // Under the raised cancel flag the next sweep cuts them —
+            // no reactor wait stands between a first failure and its
+            // siblings' cut (the 2026-11-12 amendment's parked-IO
+            // extension); otherwise the reactor owns the gap (a stall
+            // guard failure raises the flag, the honest degenerate)
+            let waiting = frame.children.iter().any(|&child| {
+                self.pool[child.index()].nursery == Some(frame.nursery)
+                    && self.pool[child.index()].state == FiberState::WorldParked
+            });
+            if !waiting {
+                return None;
             }
-            frame.cursor += 1;
+            if !self.nurseries[frame.nursery.index()].cancelled && self.wait_world().is_err() {
+                self.nurseries[frame.nursery.index()].cancelled = true;
+            }
+            frame.cursor = 0;
         }
-        None
     }
 
     /// Consumes a driven nursery — the in-flight mark down, the slot Dead,
@@ -5044,6 +5276,413 @@ impl Vm {
         fiber.state = FiberState::Suspended;
     }
 
+    /// Parks the running fiber on a world op at a plain `CALL` site
+    /// (the 2026-11-21 scheduler ruling): the resume point is the
+    /// instruction after the call, the completed op's answer delivered
+    /// there when the scheduler wakes the fiber. The wait's
+    /// registration belongs to the driver that owns the executor
+    /// moment — the host executor loop, a nursery drive, or the
+    /// refusal of a driver that cannot schedule.
+    fn park_world(
+        &mut self,
+        active: &Active,
+        pc: CodePc,
+        wait: WorldWait,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
+        self.park_current(active, CodePc(pc.0 + 1));
+        let fiber = self.current;
+        self.pool[fiber.index()].state = FiberState::WorldParked;
+        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }))
+    }
+
+    /// Parks the running fiber on a world op at a `CALLT` site: the
+    /// native tail call never reuses a frame, so its parked twin pops
+    /// the frame exactly as the ret below would — without delivering a
+    /// value — and parks in the caller's context at the pending
+    /// return, the wake's answer overlaying the caller's argument area
+    /// where the ret would have written it. The entry frame's own tail
+    /// park parks with the sentinel resume point (the entry frame's
+    /// never-read return pc): the wake completes the fiber with the
+    /// delivered answer instead of resuming it. A hosted reentry
+    /// boundary frame refuses — its Rust-side loop cannot suspend, the
+    /// same refusal every other non-returning hosted outcome takes.
+    fn park_world_tail(
+        &mut self,
+        active: &Active,
+        pc: CodePc,
+        boundary: usize,
+        wait: WorldWait,
+    ) -> Result<DriveOutcome, (Trap, CodePc)> {
+        let fp = self.callinfo[self.callinfo.len() - 1].fp;
+        let meta = match self.stack[fp] {
+            Word::Meta(m) => m,
+            Word::Slot(_) => return Err((Trap::MetaWordCorrupt { fp }, pc)),
+        };
+        if boundary != usize::MAX && self.callinfo.len() == boundary && meta.return_pc.0 == u32::MAX
+        {
+            return Err((Trap::ReentrancyRefused, pc));
+        }
+        self.arena_frame_close(fp);
+        if self.callinfo.len() == 1 {
+            // the entry frame's return is pending on the world: the
+            // sentinel resume point marks the final delivery — the wake
+            // completes the fiber with the delivered answer
+            self.park_current(active, CodePc(u32::MAX));
+            let fiber = self.current;
+            self.pool[fiber.index()].state = FiberState::WorldParked;
+            return Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }));
+        }
+        let caller_at = self.callinfo.len() - 2;
+        let caller_row = self.callinfo[caller_at].module;
+        let caller_func = self.callinfo[caller_at].func;
+        let caller_fp = self.callinfo[caller_at].fp;
+        let caller_fn = &self.registry.pinned(caller_row).functions()[caller_func as usize];
+        let code_len = code_len_u32(caller_fn.code.len());
+        if meta.return_pc.0 >= code_len {
+            return Err((
+                Trap::InvalidPc {
+                    pc: meta.return_pc.0,
+                    code_len,
+                },
+                pc,
+            ));
+        }
+        let restore = (caller_fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
+        self.stack.truncate(restore);
+        self.callinfo
+            .pop()
+            .expect("a caller entry stands below the returning frame");
+        let caller = Active {
+            version: caller_row,
+            func: caller_func,
+        };
+        self.park_current(&caller, meta.return_pc);
+        let fiber = self.current;
+        self.pool[fiber.index()].state = FiberState::WorldParked;
+        Ok(DriveOutcome::WorldPark(WorldParkRequest { fiber, wait }))
+    }
+
+    /// Runs one completion step against a parked fiber's OWN store: the
+    /// slot's store swaps into the context for the step and back (the
+    /// switch-in ownership dance without the rest of a switch), so an
+    /// allocation the completion makes — the answer string, the error
+    /// message — lands in the store its `Ref` word names. The context
+    /// is released whenever the scheduler runs (`wait_world` releases
+    /// it on entry), so the pool slots hold every fiber's true store.
+    fn complete_in_store<T>(&mut self, fiber: FiberId, run: impl FnOnce(&mut Heaps<'_>) -> T) -> T {
+        debug_assert!(
+            !self.ctx_live || self.current == fiber,
+            "the scheduler runs over released contexts"
+        );
+        std::mem::swap(&mut self.objects, &mut self.pool[fiber.index()].objects);
+        let mut heaps = Heaps::new(
+            fiber,
+            &mut self.objects,
+            &mut self.pool,
+            &mut self.claims,
+            true,
+        );
+        let answer = run(&mut heaps);
+        std::mem::swap(&mut self.objects, &mut self.pool[fiber.index()].objects);
+        answer
+    }
+
+    /// Registers one world park with the scheduler: the token minted,
+    /// the interest registered with the reactor (a registration refusal
+    /// wakes the fiber at once with the refusal as its own error
+    /// class), the deadline armed on the wheel. The fiber keeps its
+    /// `WorldParked` state until a wake moves it to the run queue.
+    pub(crate) fn register_wait(&mut self, fiber: FiberId, wait: WorldWait) {
+        let op = wait.op_name();
+        let conn = wait.conn().to_string();
+        let deadline = wait.deadline();
+        let direction = wait.direction();
+        let handle = self.out.net().raw_handle(wait.conn());
+        let token = self.sched.mint();
+        if let Some(handle) = handle {
+            let registered = match self.reactor.as_mut() {
+                Some(installed) => installed.driver().register(handle, direction, token),
+                None => Err(crate::reactor::ReactorError(
+                    "no reactor installed".to_owned(),
+                )),
+            };
+            if let Err(err) = registered {
+                let result = self.complete_in_store(fiber, |heaps| {
+                    crate::net::net_err(heaps, crate::net::NetClass::Refused, op, &conn, &err.0)
+                });
+                self.sched.waits.insert(token, WaitEntry {
+                    fiber,
+                    wait,
+                    handle: None,
+                });
+                self.finish_wait(token, result);
+                return;
+            }
+        }
+        self.sched.arm(deadline, token);
+        self.sched.waits.insert(token, WaitEntry {
+            fiber,
+            wait,
+            handle,
+        });
+    }
+
+    /// Drops every wait one fiber owns (a nursery's cancel cut, a
+    /// release door): the reactor interest deregisters first — the
+    /// ruling's parked-IO cancellation — then the table row and any
+    /// staged delivery go; stale timer entries drop lazily on pop.
+    fn cancel_wait(&mut self, fiber: FiberId) {
+        self.sched.deliveries.remove(&fiber);
+        let tokens: Vec<u64> = self
+            .sched
+            .waits
+            .iter()
+            .filter(|(_, entry)| entry.fiber == fiber)
+            .map(|(token, _)| *token)
+            .collect();
+        for token in tokens {
+            if let Some(entry) = self.sched.waits.remove(&token)
+                && let Some(handle) = entry.handle
+                && let Some(installed) = self.reactor.as_mut()
+            {
+                let _ = installed.driver().deregister(handle);
+            }
+        }
+    }
+
+    /// Resolves one wait with `result`: the table row and its reactor
+    /// interest drop, the answer stages as the fiber's wake delivery,
+    /// and the fiber — still `WorldParked` — moves to `Suspended` on
+    /// the run queue in wake order.
+    fn finish_wait(&mut self, token: u64, result: NativeResult) {
+        let Some(entry) = self.sched.waits.remove(&token) else {
+            return;
+        };
+        if let Some(handle) = entry.handle
+            && let Some(installed) = self.reactor.as_mut()
+        {
+            let _ = installed.driver().deregister(handle);
+        }
+        let fiber = entry.fiber;
+        if self.pool[fiber.index()].state == FiberState::WorldParked {
+            self.pool[fiber.index()].state = FiberState::Suspended;
+            self.sched.deliveries.insert(fiber, result);
+            self.sched.push_ready(fiber);
+        }
+    }
+
+    /// Attempts one wait's completion: the deadline answers the timeout
+    /// span, an fd readiness runs the op's non-blocking completion
+    /// against the parked fiber's own store, a spurious wake (wrong
+    /// direction, or the readiness already consumed) leaves the wait
+    /// standing, and a partial send keeps its remainder waiting. No
+    /// trap path: every failure is the op's own error span.
+    fn complete_wait(&mut self, token: u64, ready: Option<crate::reactor::TokenEvent>) {
+        let Some(entry) = self.sched.waits.get(&token).cloned() else {
+            return;
+        };
+        let fiber = entry.fiber;
+        let conn = entry.wait.conn().to_string();
+        let op = entry.wait.op_name();
+        if entry.wait.deadline() <= Instant::now() {
+            let bound = self.out.net().timeout();
+            let result = self.complete_in_store(fiber, |heaps| {
+                crate::net::net_err(
+                    heaps,
+                    crate::net::NetClass::Timeout,
+                    op,
+                    &conn,
+                    &format!("timed out after {bound:?}"),
+                )
+            });
+            self.finish_wait(token, result);
+            return;
+        }
+        let result = match entry.wait {
+            WorldWait::Recv { conn: id, max, .. } => {
+                let Some(event) = ready.filter(|event| event.read) else {
+                    return;
+                };
+                let _ = event;
+                match self.out.net().try_recv(id, max) {
+                    crate::net::NetAttempt::Done(Ok(bytes)) => self
+                        .complete_in_store(fiber, |heaps| {
+                            crate::net::recv_answer(heaps, id, bytes)
+                        }),
+                    crate::net::NetAttempt::Done(Err(err)) => {
+                        let class = crate::net::NetClass::of(&err);
+                        let detail = err.to_string();
+                        self.complete_in_store(fiber, |heaps| {
+                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                        })
+                    },
+                    // spurious: the readiness was consumed elsewhere,
+                    // the wait stands for the next poll
+                    crate::net::NetAttempt::Park => return,
+                }
+            },
+            WorldWait::Send {
+                conn: id, mut data, ..
+            } => {
+                if !ready.is_some_and(|event| event.write) {
+                    return;
+                }
+                match self.out.net().try_send(id, &mut data) {
+                    crate::net::NetAttempt::Done(Ok(())) => crate::net::ok(Value::I64(0)),
+                    crate::net::NetAttempt::Done(Err(err)) => {
+                        let class = crate::net::NetClass::of(&err);
+                        let detail = err.to_string();
+                        self.complete_in_store(fiber, |heaps| {
+                            crate::net::net_err(heaps, class, op, &conn, &detail)
+                        })
+                    },
+                    // partial drain: the remainder keeps the wait, its
+                    // level-triggered readiness reporting again once
+                    // the buffer takes more
+                    crate::net::NetAttempt::Park => {
+                        if let Some(live) = self.sched.waits.get_mut(&token)
+                            && let WorldWait::Send { data: pending, .. } = &mut live.wait
+                        {
+                            *pending = data;
+                        }
+                        return;
+                    },
+                }
+            },
+        };
+        self.finish_wait(token, result);
+    }
+
+    /// The single-thread executor's wait: fire every expired deadline,
+    /// then — while nothing is runnable — poll the reactor with the
+    /// distance to the nearest deadline as the timeout, completing
+    /// whatever the events answer. The context releases first (the
+    /// pool slots hold every fiber's true store while the scheduler
+    /// runs). A reactor refusal fails every standing wait with its own
+    /// refusal span, so the program surfaces the failure through its
+    /// error channel; the stall guard answers
+    /// [`Trap::SchedulerDeadlock`] when nothing is runnable and
+    /// nothing can wake.
+    fn wait_world(&mut self) -> Result<(), Trap> {
+        let mut events = Vec::new();
+        loop {
+            self.host_release();
+            let now = Instant::now();
+            for token in self.sched.pop_expired(now) {
+                if self.sched.waits.contains_key(&token) {
+                    self.complete_wait(token, None);
+                }
+            }
+            if self.sched.has_ready() {
+                return Ok(());
+            }
+            if !self.sched.can_wake() {
+                return Err(Trap::SchedulerDeadlock);
+            }
+            let Some(mut installed) = self.reactor.take() else {
+                return Err(Trap::SchedulerDeadlock);
+            };
+            let timeout = self
+                .sched
+                .next_deadline()
+                .map(|at| at.saturating_duration_since(now));
+            let polled = installed.driver().poll(timeout, &mut events);
+            self.reactor = Some(installed);
+            match polled {
+                Ok(()) => {
+                    let drained: Vec<_> = events.drain(..).collect();
+                    for event in drained {
+                        self.complete_wait(event.token, Some(event));
+                    }
+                },
+                Err(err) => {
+                    let tokens: Vec<u64> = self.sched.waits.keys().copied().collect();
+                    for token in tokens {
+                        let Some(entry) = self.sched.waits.get(&token).cloned() else {
+                            continue;
+                        };
+                        let detail = format!("reactor: {}", err.0);
+                        let conn = entry.wait.conn().to_string();
+                        let op = entry.wait.op_name();
+                        let result = self.complete_in_store(entry.fiber, |heaps| {
+                            crate::net::net_err(
+                                heaps,
+                                crate::net::NetClass::Refused,
+                                op,
+                                &conn,
+                                &detail,
+                            )
+                        });
+                        self.finish_wait(token, result);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Enters one woken fiber: the staged answer's head word rides the
+    /// switch payload, the whole answer overlays the parked call site,
+    /// and the fiber continues. The sentinel resume point (an entry
+    /// frame's pending tail park) instead completes the fiber with the
+    /// delivered answer — its nursery ledgered, its resumer (or the
+    /// host) taking the delivery. `Quiet` answers a fiber that cannot
+    /// be entered (already cut, or its delivery gone with the cut).
+    fn enter_woken(&mut self, fiber: FiberId) -> Result<Woken, Trap> {
+        let Some(result) = self.sched.deliveries.remove(&fiber) else {
+            return Ok(Woken::Quiet);
+        };
+        if !self.pool[fiber.index()].resumable() {
+            return Ok(Woken::Quiet);
+        }
+        let final_delivery = self.pool[fiber.index()]
+            .resume
+            .as_ref()
+            .is_some_and(|resume| resume.pc.0 == u32::MAX);
+        let head = native_head_word(&result);
+        let (active, pc) = self.switch_in(fiber, head);
+        if final_delivery {
+            let answer = frame_answer_of(result);
+            return Ok(match self.complete_current_span(&answer) {
+                Some((a, at)) => Woken::Step((a, at)),
+                None => Woken::Completed(answer),
+            });
+        }
+        let f = &self.registry.pinned(active.version).functions()[active.func as usize];
+        let fp = self.callinfo[self.callinfo.len() - 1].fp;
+        overlay_native(result, &mut self.stack, &f.layout, fp).map_err(|trap| trap)?;
+        Ok(Woken::Step((active, pc)))
+    }
+
+    /// The single-thread executor's continuation after a drive went
+    /// quiet on a world park (the 2026-11-21 ruling: the drive runs the
+    /// next ready fiber, FIFO): enter the next woken fiber, and when
+    /// nothing is ready, wait on the reactor. `HostAnswer` surfaces
+    /// `host_fiber`'s own completion (the root drive's program answer,
+    /// a resumed fiber's answer); any other completed orphan crosses to
+    /// the host here and the executor keeps going.
+    pub(crate) fn executor_continue(&mut self, host_fiber: FiberId) -> Result<ExecutorStep, Trap> {
+        loop {
+            while let Some(fiber) = self.sched.pop_ready() {
+                match self.enter_woken(fiber)? {
+                    Woken::Step(step) => return Ok(ExecutorStep::Continue(step)),
+                    Woken::Completed(answer) => {
+                        if fiber == host_fiber {
+                            return Ok(ExecutorStep::HostAnswer(answer));
+                        }
+                        // an orphan's completion: the answer crosses to
+                        // the host, the executor keeps its fiber
+                        self.host_release();
+                        for value in answer.as_slice() {
+                            self.host_delivery(value);
+                        }
+                    },
+                    Woken::Quiet => {},
+                }
+            }
+            self.wait_world()?;
+        }
+    }
+
     /// Parks the running fiber at a fork-join CALLG site: the
     /// combinator's spawn phase ran (the children stand in `nursery`),
     /// and the join runs on the interlock stack — the request's frame
@@ -5628,6 +6267,33 @@ impl Vm {
                     active = a;
                     pc = p;
                 },
+                // the drive went quiet on a world park: register the
+                // wait, then the single-thread executor's continuation —
+                // the next ready fiber (FIFO), the reactor's wait
+                // bridging the gap when nothing is runnable
+                Ok(DriveOutcome::WorldPark(req)) => {
+                    self.register_wait(req.fiber, req.wait);
+                    match self.executor_continue(FIBER_ROOT) {
+                        Ok(ExecutorStep::Continue((a, p))) => {
+                            active = a;
+                            pc = p;
+                        },
+                        Ok(ExecutorStep::HostAnswer(answer)) => {
+                            self.host_release();
+                            for value in answer.as_slice() {
+                                self.host_delivery(value);
+                            }
+                            return Ok(answer);
+                        },
+                        Err(trap) => {
+                            self.trap_pc = Some(pc);
+                            self.host_release();
+                            self.trap_child(self.current, &trap);
+                            self.trap_delivery(&trap);
+                            return Err(trap);
+                        },
+                    }
+                },
                 Ok(DriveOutcome::Frame(_)) => {
                     unreachable!("a host drive answers no reentry frame")
                 },
@@ -5839,7 +6505,8 @@ impl Vm {
         };
         let driven = match self.execute_host_step::<false>(active, CodePc(0), boundary) {
             Ok(DriveOutcome::Frame(value)) => Ok(value),
-            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_)) => Err(Trap::ReentrancyRefused),
+            Ok(DriveOutcome::Died(_) | DriveOutcome::Yielded(_))
+            | Ok(DriveOutcome::WorldPark(_)) => Err(Trap::ReentrancyRefused),
             Ok(DriveOutcome::Interlock(_)) => {
                 unreachable!("the step drains every interlock before returning")
             },
@@ -8123,6 +8790,16 @@ impl Vm {
                                         fp,
                                     )
                                     .map_err(|e| (e, pc))?;
+                                    // a world op's would-block parks the
+                                    // calling fiber instead of blocking
+                                    // the drive — the resume point is
+                                    // the instruction after the call
+                                    let result = match result {
+                                        NativeResult::Park(wait) => {
+                                            return self.park_world(&active, pc, wait)
+                                        },
+                                        other => other,
+                                    };
                                     overlay_native(result, &mut self.stack, &f.layout, fp)
                                         .map_err(|e| (e, pc))?;
                                     pc.0 += 1;
@@ -8250,6 +8927,16 @@ impl Vm {
                                 )
                             },
                         };
+                        // a world op's would-block parks the calling
+                        // fiber instead of blocking the drive — the
+                        // frame pops as the ret below would, the wake's
+                        // answer delivering at the pending return
+                        let result = match result {
+                            NativeResult::Park(wait) => {
+                                return self.park_world_tail(&active, pc, boundary, wait)
+                            },
+                            other => other,
+                        };
                         // the answer's whole word span rides a
                         // boundary return (the hosted seam's result
                         // channel); every other outcome keeps its
@@ -8262,6 +8949,11 @@ impl Vm {
                             // reaches them)
                             NativeResult::Fork { .. } => {
                                 unreachable!("a plain native never parks")
+                            },
+                            // intercepted above: the park returned
+                            // before this match ever ran
+                            NativeResult::Park(_) => {
+                                unreachable!("a world park returned before the match")
                             },
                             NativeResult::Tag { tag, payload } => {
                                 if self.callinfo.len() > 1 {
@@ -9051,6 +9743,12 @@ impl Vm {
                             // body runs (the is_fork_join check above)
                             NativeResult::Fork { .. } => {
                                 unreachable!("the tail site refuses a fork request first")
+                            },
+                            // the generic builtins are pure: a world op
+                            // lives behind the platform table's plain
+                            // call sites, never the generic dispatch
+                            NativeResult::Park(_) => {
+                                unreachable!("a generic builtin never parks")
                             },
                             NativeResult::Tag { tag, payload } => {
                                 if self.callinfo.len() > 1 {

@@ -79,6 +79,17 @@ pub enum FiberState {
     /// branch decides the same; no call site stands, so a resume drops
     /// its payload instead of writing an overlay word.
     Preempted,
+    /// Parked on a world op (the 2026-11-21 scheduler ruling): the op
+    /// would block, so the fiber parks with a resume point shaped like
+    /// `Suspended`'s (after the op for a plain call, the pending
+    /// return's continuation for a tail call), but only the scheduler
+    /// wakes it — the readiness (or the wait's deadline) completes the
+    /// op, stages the answer, and moves the fiber back to `Suspended`
+    /// on the run queue. Not resumable by the ordinary drive
+    /// discipline: a nursery's cancel cut takes it through
+    /// deregistration first, delivering the cancel sentinel at the
+    /// resume-shaped point.
+    WorldParked,
     /// Ran to completion (entry-frame RET or HALT); its pool slot is
     /// spawn-reusable.
     Dead,
