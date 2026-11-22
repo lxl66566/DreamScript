@@ -47,6 +47,18 @@
 // refusal, and a wider-than-one-word answer refuses at the call's
 // one-word instantiation. `sum` is the fold spelling over reduce's
 // hosted callable (the CALLG lambda seam).
+//
+// The pooled pair: par_map/par_reduce are library members over the
+// fork-join engine seams, one private bodiless generic extern each
+// (fork_map/fork_reduce, the native the engine routes by name — the
+// same engine-identity key the collection externs in the core hold)
+// whose one-line bodies pass their arguments through, so the pooled
+// CALLG dispatch rides inside the library body and the sequential
+// contract and the byte-identical pool answers carry over unchanged.
+// The free generic body's one-word instantiation boundary binds the
+// fold's init parameter to one-word element types through this
+// spelling (the multi-word fold keeps its seam-level coverage until the
+// generic-body staging seam widens, todo item 81's residuals).
 pub fn max (a: int, b: int) -> int {
   if a < b { b } else { a }
 }
@@ -122,4 +134,12 @@ pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
     i += 1
   }
   out
+}
+extern fn fork_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn fork_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+pub fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r] {
+  fork_map(xs, f)
+}
+pub fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t {
+  fork_reduce(xs, init, f)
 }

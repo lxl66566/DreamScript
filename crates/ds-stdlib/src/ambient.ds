@@ -547,8 +547,6 @@ pub extern fn http_get (url: string) -> string
 // The json face (`json`, `parse_json`, `to_json`, the typed readers)
 // is the @std package's own member, std/json.ds beside this core.
 pub extern fn cancel[t] (e: t) -> ()
-pub extern fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
-pub extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 // The E4 extraction family: calls type locally against the checked
 // receiver (unwrap_or's fallback is eager, unwrap_or_else's lambda runs
 // only on the none side), composed with `?` for early exits.

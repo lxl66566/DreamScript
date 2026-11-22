@@ -136,8 +136,9 @@ pub enum QueryKey {
     /// provides. The `PackageId` is the package grain, like
     /// [`QueryKey::Resolve`].
     PlatformCheck(PackageId),
-    /// The pooled-body check of one package (E3): every
-    /// `par_map`/`par_reduce` call's callable hunted for the worker-diverging
+    /// The pooled-body check of one package (E3): every pooled call's
+    /// (the @std `par_map`/`par_reduce` library fns, recognized by
+    /// resolved member identity) callable hunted for the worker-diverging
     /// members over the [`QueryKey::Analyzed`] value's own bundle. The
     /// `PackageId` is the package grain, like [`QueryKey::Resolve`].
     PooledCheck(PackageId),

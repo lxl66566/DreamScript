@@ -85,8 +85,8 @@
 //! | 44    | `nursery_cancel (e: tag + payload words) -> unit` (control seam; `cancel`, variadic) |
 //! | 45    | `join (parts: list[string], sep: string) -> string` |
 //! | 46    | `partition[t] (xs: list, f: fn(t) -> bool) -> two list refs` (generic; CALLG, reentrant, the tag-less two-word total) |
-//! | 47    | `par_map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, fork-join) |
-//! | 48    | `par_reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, fork-join) |
+//! | 47    | `fork_map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, fork-join; the @std `par_map` library fn's engine seam) |
+//! | 48    | `fork_reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, fork-join; the @std `par_reduce` library fn's engine seam) |
 //! | 49    | `total_compare (a, b: float) -> int` |
 //! | 50    | `str_compare (a, b: string) -> int` |
 //! | 51    | `char_compare (a, b: char) -> int` |
@@ -286,7 +286,10 @@
 //!
 //! # The fork-join combinators (indices 47-48)
 //!
-//! `par_map` [E3, the parked-CALLG fork-join]: the combinator body is
+//! The engine seams behind the @std `par_map`/`par_reduce` library
+//! fns (the ds-source spellings live in the @std bodied member; these
+//! natives are what their bodies call). `fork_map` [E3, the parked-CALLG
+//! fork-join]: the combinator body is
 //! spawn-only — fork is one spawned child per element applying the
 //! callable under a fresh nursery, the callable's own function entered
 //! with the element's whole inline span, the spawn copy-in acquiring
@@ -551,9 +554,9 @@ pub const BUILTIN_NURSERY_CANCEL: u32 = 44;
 /// one fresh string object.
 pub const BUILTIN_JOIN: u32 = 45;
 
-/// `par_map[t, r](xs: list, f: fn) -> list` (generic; E3's fork-join
-/// combinator, the parked-CALLG slice: fork is one spawned child per
-/// element through the nursery substrate — the callable's own function
+/// `fork_map[t, r](xs: list, f: fn) -> list` (generic; E3's fork-join
+/// combinator seam behind the @std `par_map` library fn, the parked-CALLG slice: fork is one
+/// spawned child per element through the nursery substrate — the callable's own function
 /// entered with the element's whole inline span — and join parks the
 /// CALLG site through the interlock drive, so the answers assemble in
 /// input order and the first failure cancels the siblings and re-raises
@@ -561,9 +564,9 @@ pub const BUILTIN_JOIN: u32 = 45;
 /// CALLG-addressed).
 pub const BUILTIN_PAR_MAP: u32 = 47;
 
-/// `par_reduce[t](xs: list, init: t, f: fn(t, t) -> t) -> t` (generic;
-/// E3's fork-join fold, the parked-CALLG slice: the left data
-/// dependency chains one spawned child per element — the callable's
+/// `fork_reduce[t](xs: list, init: t, f: fn(t, t) -> t) -> t` (generic;
+/// E3's fork-join fold seam behind the @std `par_reduce` library fn, the parked-CALLG slice: the
+/// left data dependency chains one spawned child per element — the callable's
 /// own function entered with the running accumulator and the element,
 /// the seam's chain state carrying the fold between per-step joins —
 /// so the reduction applies strictly in input order [E5's first-failure
@@ -2516,7 +2519,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         func: partition_generic_fn,
     }),
     (BUILTIN_MODULE, BUILTIN_PAR_MAP, GenericFunction {
-        name: "par_map",
+        name: "fork_map",
         params: &[SlotType::Ref, SlotType::Fn],
         staging: Staging::Fixed,
         evidence: 2,
@@ -2528,7 +2531,7 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         // list `Ref` and the trailing callable word (reduce's interior
         // staging); the result floor is the one-word fold, the answer's
         // whole span riding the tag-less total
-        name: "par_reduce",
+        name: "fork_reduce",
         params: &[SlotType::Ref, SlotType::Fn],
         staging: Staging::Interior,
         evidence: 1,
@@ -4536,8 +4539,8 @@ mod tests {
             (BUILTIN_FILTER, "filter", 1, 1),
             (BUILTIN_REDUCE, "reduce", 1, 1),
             (BUILTIN_PARTITION, "partition", 1, 2),
-            (BUILTIN_PAR_MAP, "par_map", 2, 1),
-            (BUILTIN_PAR_REDUCE, "par_reduce", 1, 1),
+            (BUILTIN_PAR_MAP, "fork_map", 2, 1),
+            (BUILTIN_PAR_REDUCE, "fork_reduce", 1, 1),
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "{name}'s slot");
             let body = resolve_generic(BUILTIN_MODULE, index)

@@ -511,10 +511,11 @@ pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryVa
     }))
 }
 
-/// The package's pooled-body refusal (E3): every
-/// `par_map`/`par_reduce` call's callable argument hunted for the
-/// worker-diverging members — the sibling-addressing fiber control
-/// natives and the world surface — over the analyzed bundle, with the
+/// The package's pooled-body refusal (E3): every pooled call's (the
+/// @std `par_map`/`par_reduce` library fns, recognized by resolved
+/// member identity) callable argument hunted for the worker-diverging
+/// members — the sibling-addressing fiber control natives and the
+/// world surface — over the analyzed bundle, with the
 /// declared-row table the effects pass reads (a callee whose declared row
 /// carries `world` refuses). Package grain like `resolve` — the
 /// dependency is the analyzed value alone, and the declared rows are

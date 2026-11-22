@@ -178,7 +178,9 @@ pub const STD_MEMBERS_SOURCE: &str = include_str!("std_members.ds");
 /// migrated declarations whose bodies are plain ds source over
 /// word-shaped atoms — the ordering pair (`max`/`min`) the
 /// library-boundary round landed, the list pair (`enumerate`/`zip`) the
-/// FP surface round — the later bodied migrations' home.
+/// FP surface round, and the pooled pair (`par_map`/`par_reduce`) the
+/// fork-join migration over its private engine seams — the later bodied
+/// migrations' home.
 pub const BODIED_FILE: &str = "std/bodied.ds";
 
 /// The `@std` bodied members' text: the one shape a linked call surface
@@ -484,6 +486,8 @@ mod tests {
             "parse_json",
             "enumerate",
             "zip",
+            "par_map",
+            "par_reduce",
         ] {
             assert!(package.lookup_value(name).is_some(), "`{name}` is ambient");
         }
@@ -793,6 +797,12 @@ mod tests {
                 "`{name}` lives in the @std bodied file as a combinator"
             );
         }
+        for name in ["par_map", "par_reduce"] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "`{name}` lives in the @std bodied file as the pooled pair"
+            );
+        }
         assert!(
             pkg_package.lookup_type("json").is_some(),
             "`json` lives in the @std json face beside the core"
@@ -841,6 +851,12 @@ mod tests {
             assert!(
                 core_package.lookup_value(name).is_none(),
                 "`{name}` left the shrunk core (the @std bodied file's own source)"
+            );
+        }
+        for name in ["par_map", "par_reduce", "fork_map", "fork_reduce"] {
+            assert!(
+                core_package.lookup_value(name).is_none(),
+                "`{name}` left the shrunk core (the pooled pair rides the @std bodied file)"
             );
         }
         assert!(
@@ -917,6 +933,12 @@ mod tests {
                 "the session composition keeps the bare combinator `{name}`"
             );
         }
+        for name in ["par_map", "par_reduce"] {
+            assert!(
+                session_package.lookup_value(name).is_some(),
+                "the session composition keeps the bare pooled `{name}`"
+            );
+        }
         assert!(
             session_package.lookup_value("parse_json").is_some(),
             "the session composition keeps the bare `parse_json` (the face composed back)"
@@ -968,6 +990,12 @@ mod tests {
             assert!(
                 merged_package.lookup_value(name).is_some(),
                 "the merged reading keeps the combinator `{name}` (namespace-identical)"
+            );
+        }
+        for name in ["par_map", "par_reduce"] {
+            assert!(
+                merged_package.lookup_value(name).is_some(),
+                "the merged reading keeps the pooled `{name}` (namespace-identical)"
             );
         }
         assert!(

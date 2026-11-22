@@ -1,4 +1,5 @@
-//! The `par_reduce` lowering seam end to end [E3]: the fold call site
+//! The `fork_reduce` engine-seam lowering end to end [E3] (the seam
+//! the @std `par_reduce` library fn's body calls): the fold call site
 //! lowers to CALLG — one site staging (list, init, callable) plus the
 //! one List evidence word — and the module round-trips through the
 //! writer and loader and folds on the VM. A capturing closure callable
@@ -108,7 +109,7 @@ fn the_callg_stages_the_list_init_callable_and_one_evidence_word() {
                     key: FuncRefKey::Native("builtin".into()),
                     func: native::BUILTIN_PAR_REDUCE,
                 },
-                "the callee addresses the generic par_reduce slot"
+                "the callee addresses the generic fork_reduce slot"
             );
             // the one List evidence word rides the staged span's end
             let Some(Inst::Uop(ds_abi::Uop::Kimm { kidx, .. })) =
@@ -163,12 +164,12 @@ tag string
 struct list[t]
 
 extern fn println (s: string) -> ()
-extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn fork_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 
 fn main() -> () {
   const xs = [1, 2, 3]
   const bias = 10
-  const sum = xs.par_reduce(0, (a: int, b: int) => a + b + bias)
+  const sum = xs.fork_reduce(0, (a: int, b: int) => a + b + bias)
   println("sum ${sum}")
 }
 "#;
@@ -222,7 +223,7 @@ struct pair { left: int, right: int }
 struct list[t]
 
 extern fn println (s: string) -> ()
-extern fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+extern fn fork_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 
 fn step(a: pair, b: pair) -> pair {
   pair { left: a.left * 10 + b.left, right: a.right + b.right }
@@ -234,7 +235,7 @@ fn main() -> () {
     pair { left: 2, right: 2 },
     pair { left: 3, right: 3 },
   ]
-  const folded = xs.par_reduce(pair { left: 0, right: 0 }, step)
+  const folded = xs.fork_reduce(pair { left: 0, right: 0 }, step)
   println("folded ${folded.left} ${folded.right}")
 }
 "#;

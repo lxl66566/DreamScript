@@ -18,8 +18,10 @@
 //! struct-typed fields and payloads, whole-span union equality (member
 //! values against the union from either side, a unit-tag mirror, and a
 //! match binder comparing its member's value), and the fork-join
-//! combinators: `par_map` (a capturing closure callable and a named
-//! multi-word-answer callable, an empty-list leg) and `par_reduce`
+//! combinators: the fork-join engine seams `fork_map`/`fork_reduce`
+//! (the spellings the @std `par_map`/`par_reduce` library fns call):
+//! `fork_map` (a capturing closure callable and a named
+//! multi-word-answer callable, an empty-list leg) and `fork_reduce`
 //! (a scalar closure fold, a string fold, the whole-span accumulator
 //! fold over a struct-typed init, and an empty-input init
 //! passthrough), and the CALL_GENERIC round's free generic fn
@@ -1003,7 +1005,7 @@ impl Gen<'_> {
         // par_map with a capturing closure callable
         let shifted = self.name("shifted");
         self.line(&format!(
-            "const {shifted} = {xs}.par_map((x: int) => x * {k} + {bias_name})"
+            "const {shifted} = {xs}.fork_map((x: int) => x * {k} + {bias_name})"
         ));
         self.line(&format!(
             "println(\"head ${{at_int({shifted}, 0)}} len ${{len({shifted})}}\")"
@@ -1014,7 +1016,7 @@ impl Gen<'_> {
         // par_map with a named callable answering a struct-typed span
         let (wide, first) = (self.name("wide"), self.name("first"));
         let idx = self.s.below(4);
-        self.line(&format!("const {wide} = {xs}.par_map(both)"));
+        self.line(&format!("const {wide} = {xs}.fork_map(both)"));
         self.line(&format!("const {first} = pair_at({wide}, {idx})"));
         self.line(&format!(
             "println(\"first ${{{first}.left}} ${{{first}.right}} len ${{len({wide})}}\")"
@@ -1027,7 +1029,7 @@ impl Gen<'_> {
             elems[idx] * 3
         ));
         if self.s.roll(2) {
-            self.line("println(\"empty ${len(list[int]().par_map(both))}\")");
+            self.line("println(\"empty ${len(list[int]().fork_map(both))}\")");
             self.drawn.par_map += 1;
             self.answer("empty 0");
         }
@@ -1035,7 +1037,7 @@ impl Gen<'_> {
         let init = self.lit(100);
         let sum = self.name("sum");
         self.line(&format!(
-            "const {sum} = {xs}.par_reduce({init}, (a: int, b: int) => a + b + {bias_name})"
+            "const {sum} = {xs}.fork_reduce({init}, (a: int, b: int) => a + b + {bias_name})"
         ));
         self.line(&format!("println(\"sum ${{{sum}}}\")"));
         self.drawn.par_reduce += 1;
@@ -1053,7 +1055,7 @@ impl Gen<'_> {
             words[0], words[1], words[2]
         ));
         self.line(&format!(
-            "const {joined} = {words_name}.par_reduce(\"\", (a: string, b: string) => a + b)"
+            "const {joined} = {words_name}.fork_reduce(\"\", (a: string, b: string) => a + b)"
         ));
         self.line(&format!("println(\"joined ${{{joined}}}\")"));
         self.drawn.par_reduce += 1;
@@ -1062,8 +1064,8 @@ impl Gen<'_> {
         if self.s.roll(2) {
             let passthru = self.lit(50);
             self.line(&format!(
-                "println(\"passthru ${{list[int]().par_reduce({passthru}, (a: int, b: int) => a + \
-                 b)}}\")"
+                "println(\"passthru ${{list[int]().fork_reduce({passthru}, (a: int, b: int) => a \
+                 + b)}}\")"
             ));
             self.drawn.par_reduce += 1;
             self.answer(&format!("passthru {passthru}"));
@@ -1078,7 +1080,7 @@ impl Gen<'_> {
             .join(", ");
         self.line(&format!("const {pairs_name}: list[pair] = [{rows}]"));
         self.line(&format!(
-            "const {folded} = {pairs_name}.par_reduce(pair {{ left: 0, right: 0 }}, (a: pair, b: \
+            "const {folded} = {pairs_name}.fork_reduce(pair {{ left: 0, right: 0 }}, (a: pair, b: \
              pair) => pair {{ left: a.left * 10 + b.left + {bias_name}, right: a.right + b.right \
              }})"
         ));
@@ -1993,8 +1995,8 @@ pub fn generate(data: &[u8]) -> Program {
          map[k, v]\n\nenum grade {\n  plain\n  scored(int)\n}\n\nenum mark {\n  word(string)\n  \
          empty\n}\n\nenum shape {\n  dot\n  at(pt)\n}\n\nextern fn println (s: string) -> \
          ()\nextern fn bytes_of (xs: list[byte]) -> bytes\nextern fn len[t] (xs: list[t]) -> \
-         int\nextern fn list_get[t] (xs: list[t], i: int) -> t | none\nextern fn par_map[t, r] \
-         (xs: list[t], f: fn(t) -> r) -> list[r]\nextern fn par_reduce[t] (xs: list[t], init: t, \
+         int\nextern fn list_get[t] (xs: list[t], i: int) -> t | none\nextern fn fork_map[t, r] \
+         (xs: list[t], f: fn(t) -> r) -> list[r]\nextern fn fork_reduce[t] (xs: list[t], init: t, \
          f: fn(t, t) -> t) -> t\nextern fn map_new[k, v] () -> map[k, v]\nextern fn map_set[k, v] \
          (m: mut map[k, v], key: k, value: v) -> ()\n\n",
     );

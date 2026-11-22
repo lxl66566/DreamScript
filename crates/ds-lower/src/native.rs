@@ -1297,15 +1297,18 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         instances: &[BuiltinInstance::List],
     },
     GenericNative {
-        // the constraint list is [t, r] like `map`'s — two evidence
-        // words recording the receiver's list instance — and the
-        // callable is the callable-defaulted `Fn` word like the hosted
+        // the fork-join engine seam behind the @std `par_map` library
+        // fn (its bodied member calls this seam; the combinator's
+        // user-facing spelling lives in the ds-source package); the
+        // constraint list is [t, r] like `map`'s — two evidence words
+        // recording the receiver's list instance — and the callable is
+        // the callable-defaulted `Fn` word like the hosted
         // combinators': the fork spawns the callable's own function per
         // element (a closure's body, the capture block staged per
         // spawn), its answer the whole span the spawned child's
         // completion carries, the width the callable's checker-proved
         // signature
-        name: "par_map",
+        name: "fork_map",
         module: NativeModule::Builtin,
         index: 47,
         evidence: 2,
@@ -1330,13 +1333,14 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         instances: &[BuiltinInstance::List],
     },
     GenericNative {
-        // reduce's interior staging over the fork: the init's whole
-        // word span stages between the leading list `Ref` and the
-        // trailing callable word, the fold chains one spawned child per
-        // element answering the next accumulator whole (the callable
-        // the callable-defaulted `Fn` word, its checker-proved answer
-        // width the fold's own)
-        name: "par_reduce",
+        // the fork-join fold's engine seam behind the @std `par_reduce`
+        // library fn; reduce's interior staging over the fork: the
+        // init's whole word span stages between the leading list `Ref`
+        // and the trailing callable word, the fold chains one spawned
+        // child per element answering the next accumulator whole (the
+        // callable the callable-defaulted `Fn` word, its checker-proved
+        // answer width the fold's own)
+        name: "fork_reduce",
         module: NativeModule::Builtin,
         index: 48,
         evidence: 1,

@@ -125,12 +125,14 @@ fn par_map_forks_one_child_per_element_and_joins_in_input_order() {
 
 #[test]
 fn par_reduce_chains_one_child_per_element_in_input_order() {
-    // E3's fork-join fold: the non-commutative order witness (a string
-    // chain through the native concat), the empty-input init answer,
-    // and the struct-typed fold chaining its whole word span
+    // E3's fork-join fold over the @std library spelling: the
+    // non-commutative order witness (a string chain through the native
+    // concat) and the empty-input init answer; the multi-word struct
+    // fold keeps its seam-level pin in the lowerer's e2e (the library
+    // spelling's one-word instantiation boundary)
     assert_eq!(
         run_ok(ds().arg("run").arg(example("par_reduce.ds"))),
-        "sum 15\njoined alphabetagamma\nempty 12000\npair 123 6\n0\n"
+        "sum 15\njoined alphabetagamma\nempty 12000\n0\n"
     );
 }
 

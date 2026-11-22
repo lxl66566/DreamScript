@@ -1909,11 +1909,22 @@ fn write_slot(
             frame_slots: slots.len(),
         });
     }
-    if slots[i] != value.slot_type() && slots[i] != SlotType::Raw {
+    // a Fn slot is callable-defaulted (F2): a closure object's Ref word
+    // may inhabit it at every read (the entry check, the generic
+    // dispatch, the callable-word call), so the write admits the same
+    // pairing — a bodied wrapper's pass-through stages its callable
+    // parameter through a Fn-typed temp, and a capturing argument
+    // arrives as a Ref. The pairing stays one-directional: a Ref slot
+    // (a value site) never takes a scalar Fn word.
+    let actual = value.slot_type();
+    if slots[i] != actual
+        && slots[i] != SlotType::Raw
+        && !(slots[i] == SlotType::Fn && actual == SlotType::Ref)
+    {
         return Err(Trap::SlotTypeMismatch {
             slot,
             expected: slots[i],
-            actual: value.slot_type(),
+            actual,
         });
     }
     let at = word_of(fp, i, body_len);

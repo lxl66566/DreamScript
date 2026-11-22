@@ -1,4 +1,5 @@
-//! The `par_map` lowering seam end to end [E3]: the fork call site lowers
+//! The `fork_map` engine-seam lowering end to end [E3] (the seam the
+//! @std `par_map` library fn's body calls): the fork call site lowers
 //! to CALLG — one site staging (list, callable) plus the two List evidence
 //! words — and the callable's struct-typed answer rides the fiber
 //! completion channel whole, the module round-tripping through the writer

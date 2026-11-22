@@ -15,7 +15,14 @@
 //! runtime host flag (`Vm::enable_fork_pool`), so a pooled body refusing
 //! under the sequential drive too is the ruling's reading, the pool
 //! being an execution detail of one drive rather than a second
-//! semantics. The hunt follows the callable's reach: the callable's own
+//! semantics. A pooled site is recognized by resolved identity, never
+//! by the user-facing spelling: the @std library fns (`par_map`/
+//! `par_reduce`) are bodied members whose own bodies enter the private
+//! fork-join engine seams, so a call is pooled exactly when its callee
+//! resolves to such a member (or to a seam itself — the private extern
+//! the stdlib alone can name); a user's same-spelled declaration is
+//! just a fn with no seam in reach and never pools. The hunt follows
+//! the callable's reach: the callable's own
 //! subtree (nested lambdas included — a hosted combinator's element
 //! lambda runs inside the child's extent), named-fn and const-binding
 //! bodies, fn-typed locals through their alias chains (visited-guarded,
@@ -51,16 +58,19 @@ use crate::{
 /// so a bodied fn of the same name never reaches the divergence.
 const CONTROL_NATIVES: [&str; 2] = ["fiber_resume", "nursery_join"];
 
-/// The fork-join combinators whose element bodies a pooled drive owns,
-/// under the same name-keyed routing the lowerer applies to bodiless
-/// generic callees.
-const POOL_COMBINATORS: [&str; 2] = ["par_map", "par_reduce"];
+/// The fork-join engine seams' spellings: the private bodiless generic
+/// externs the @std pooled library fns route through, addressed by the
+/// same by-name native routing the lowerer applies to bodiless generic
+/// callees (the key the fiber control natives above hold — an engine
+/// identity, never a user-facing combinator spelling).
+const POOL_SEAMS: [&str; 2] = ["fork_map", "fork_reduce"];
 
-/// One pooled `par_map`/`par_reduce` call site with its callable
-/// argument's expression.
+/// One pooled call site with its callable argument's expression: a
+/// call whose callee resolves to a member whose body enters a fork-join
+/// seam.
 struct Site<'a> {
-    /// The combinator's name, for the seam the diagnostic names.
-    combinator: &'static str,
+    /// The resolved member's own name, for the seam the diagnostic names.
+    combinator: String,
     /// The combinator call itself, the seam's span.
     call: &'a Expr,
     /// The fn-typed slot's argument.
@@ -128,7 +138,7 @@ pub fn check_pooled_bodies(analyzed: &Analyzed, declared: &DeclaredRows) -> Vec<
     let mut diags = Vec::new();
     for site in sites {
         if let Some(offense) = index.hunt(site.callable, declared) {
-            diags.push(offense.diagnostic(site.combinator, site.call.span()));
+            diags.push(offense.diagnostic(&site.combinator, site.call.span()));
         }
     }
     diags
@@ -136,8 +146,8 @@ pub fn check_pooled_bodies(analyzed: &Analyzed, declared: &DeclaredRows) -> Vec<
 
 /// The pass's read-only substrate over one analyzed package: the
 /// per-file resolution tables, the bodies keyed by definition and
-/// member name, the fn-typed locals' initializers, and the name-filtered
-/// combinator call candidates.
+/// member name, the fn-typed locals' initializers, the call candidates,
+/// and the seam-entering definitions the site gate reads.
 struct Index<'a> {
     package: &'a Package,
     decls: &'a Decls,
@@ -156,9 +166,11 @@ struct Index<'a> {
     /// A local binding's initializer, keyed by the binder span a use
     /// resolves to.
     locals: FxHashMap<Span, Body<'a>>,
-    /// Call expressions whose callee names a combinator, pending the
-    /// resolution-backed gate.
+    /// Call expressions, pending the resolution-backed gate.
     candidates: Vec<&'a Expr>,
+    /// Definitions whose own bodies enter a pooled seam — the @std
+    /// library fns' identity, discovered structurally at index time.
+    pooled_defs: FxHashSet<DefId>,
 }
 
 /// One walkable body: an expression or a block.
@@ -204,6 +216,7 @@ impl<'a> Index<'a> {
             methods: FxHashMap::default(),
             locals: FxHashMap::default(),
             candidates: Vec::new(),
+            pooled_defs: FxHashSet::default(),
         };
         for (position, ast) in analyzed.asts.iter().enumerate() {
             this.files.insert(ast.file.as_u32(), position);
@@ -220,7 +233,74 @@ impl<'a> Index<'a> {
                 Visit::Stmt(stmt) => this.scan_stmt(stmt),
             });
         }
+        this.pooled_defs = this
+            .by_def
+            .iter()
+            .filter_map(|(def, body)| body.map(|body| (*def, body)))
+            .filter(|(_, body)| this.body_enters_seam(*body))
+            .map(|(def, _)| def)
+            .collect();
         this
+    }
+
+    /// Whether one walked body calls a pooled seam directly: any call
+    /// position in the subtree (nested lambdas included) whose callee
+    /// resolves to a seam extern.
+    fn body_enters_seam(&self, body: Body<'a>) -> bool {
+        let mut found = false;
+        let scan = |expr: &'a Expr, found: &mut bool| {
+            if let Expr::Call { callee, .. } = expr
+                && let Some(def) = self.seam_callee(callee)
+                && self.is_seam(def)
+            {
+                *found = true;
+            }
+        };
+        match body {
+            Body::Expr(expr) => walk_expr(expr, &mut |visit| {
+                if let Visit::Expr(expr) = visit {
+                    scan(expr, &mut found);
+                }
+            }),
+            Body::Block(block) => walk_block(block, &mut |visit| {
+                if let Visit::Expr(expr) = visit {
+                    scan(expr, &mut found);
+                }
+            }),
+        }
+        found
+    }
+
+    /// The definition one call callee resolves to when it names a
+    /// package definition: a single-name path, or the free fn a dot's
+    /// receiver feeds.
+    fn seam_callee(&self, callee: &Expr) -> Option<DefId> {
+        match peel(callee) {
+            Expr::Path { path, .. } if path.segments.len() == 1 => {
+                match self.res_of(path.segments[0].span) {
+                    Some(Res::Def(def)) => Some(*def),
+                    _ => None,
+                }
+            },
+            Expr::Field { name, .. } => match self.res_of(name.span) {
+                Some(Res::Dot(DotRes::Free { func, .. })) => Some(*func),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether a definition is a pooled seam itself: the bodiless
+    /// generic extern spelled for one of the engine's fork-join
+    /// natives.
+    fn is_seam(&self, def: DefId) -> bool {
+        matches!(self.by_def.get(&def), Some(None))
+            && self
+                .decls
+                .fns
+                .get(&def)
+                .is_some_and(|sig| !sig.generics.is_empty())
+            && POOL_SEAMS.contains(&self.package.def(def).name.as_str())
     }
 
     /// One item's declaration-level records: definition bodies and
@@ -273,12 +353,10 @@ impl<'a> Index<'a> {
         }
     }
 
-    /// The expression scan: combinator call candidates by callee name.
+    /// The expression scan: every call expression is a candidate, the
+    /// resolution-backed gate below deciding its identity.
     fn scan_expr(&mut self, expr: &'a Expr) {
-        if let Expr::Call { callee, .. } = expr
-            && let Some(name) = callee_name(callee)
-            && POOL_COMBINATORS.contains(&name)
-        {
+        if let Expr::Call { .. } = expr {
             self.candidates.push(expr);
         }
     }
@@ -301,10 +379,12 @@ impl<'a> Index<'a> {
         self.resolutions.get(position)?.get(span)
     }
 
-    /// The combinator call sites: name-filtered candidates gated by the
-    /// resolution — the fork-routing spelling is a bodiless generic
-    /// callee (a bodied fn of the same name plans local and never
-    /// pools), the fn-typed slot's argument its callable.
+    /// The pooled call sites: candidates gated by resolved identity —
+    /// the callee is a pooled seam itself (the private extern only the
+    /// stdlib's own file names) or a bodied member whose body enters
+    /// one, the @std library fns' shape; every other callee (a user's
+    /// same-spelled fn among them) is just a call. The fn-typed slot's
+    /// argument is the callable.
     fn sites(&self) -> Vec<Site<'a>> {
         let mut sites = Vec::new();
         for &call in &self.candidates {
@@ -334,14 +414,11 @@ impl<'a> Index<'a> {
                 },
                 _ => continue,
             };
-            let name = self.package.def(def).name.as_str();
-            let Some(combinator) = combinator_of(name) else {
-                continue;
-            };
             let Some(sig) = self.decls.fns.get(&def) else {
                 continue;
             };
-            if sig.generics.is_empty() || !matches!(self.by_def.get(&def), Some(None)) {
+            let combinator = self.package.def(def).name.clone();
+            if !self.is_seam(def) && !self.pooled_defs.contains(&def) {
                 continue;
             }
             let Some(callable) = callable_arg(&sig.params, fed, args, trailing.as_deref()) else {
@@ -558,25 +635,6 @@ impl<'a> Index<'a> {
             },
             _ => {},
         }
-    }
-}
-
-/// The combinator a callee name addresses, if any.
-fn combinator_of(name: &str) -> Option<&'static str> {
-    match name {
-        "par_map" => Some("par_map"),
-        "par_reduce" => Some("par_reduce"),
-        _ => None,
-    }
-}
-
-/// The callee's written name, when the spelling names one: a
-/// single-segment path or a dot member.
-fn callee_name(callee: &Expr) -> Option<&str> {
-    match peel(callee) {
-        Expr::Path { path, .. } if path.segments.len() == 1 => Some(&path.segments[0].name),
-        Expr::Field { name, .. } => Some(&name.name),
-        _ => None,
     }
 }
 
