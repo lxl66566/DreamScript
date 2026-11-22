@@ -3,12 +3,12 @@
 //! when the typed prefix names no visible name.
 //!
 //! The candidate set composes the registered ambient's exported members
-//! with the `@std` package's own members: under the merged registration
-//! the members' file rides inside the ambient, so the ambient's defs
-//! already carry them and the members' table enriches the same items,
-//! while a registration over the shrunk core (a declaring graph's
-//! ambient) carries none of them and the table serves the offers alone,
-//! each member joining the answer as its own item. The table is the
+//! with the `@std` package's own members: the production registration is
+//! the session composition (the run path's implicit-resolution shape), so
+//! the migrated faces ride inside the ambient while the data-shaped
+//! members — like a registration over the shrunk core (a declaring
+//! graph's ambient) — stay link-bound, and the table serves their offers
+//! alone, each member joining the answer as its own item. The table is the
 //! tree's own sources — the package's member file resolved beside the
 //! core, and the migrated json and string faces composed into the @std
 //! bundle's core member (their free seam calls stay same-file there) —
@@ -73,9 +73,10 @@ pub(crate) struct Inputs<'a> {
 
 /// Attaches the import edit to every item naming an exported ambient
 /// member whose spelling prefix-matches the typed prefix, then to the
-/// `@std` package's own members over the same gate: a merged registration
-/// already lists them (the table enriches the same items), a core-shaped
-/// one joins each as its own item. Accepting an offer inserts the name
+/// `@std` package's own members over the same gate: a registration that
+/// already lists them (the session composition lists every face) sees
+/// the table enrich the same items, a link-bound shape joins each as its
+/// own item. Accepting an offer inserts the name
 /// and applies the edit alongside; a row that already selects the name
 /// answers no edit, and a private or `pub(pkg)` name is never a
 /// candidate.
@@ -137,7 +138,8 @@ pub(crate) fn attach(
             new_text: text,
         };
         match items.iter_mut().find(|item| item.label == member.name) {
-            // The merged registration already lists the member: the same
+            // A registration that already lists the member (the session
+            // composition lists every face) enriches it: the same
             // enrichment the ambient's own defs gave it.
             Some(item) => item.additional_text_edits = Some(vec![edit]),
             // A core-shaped registration lists none of them: the member

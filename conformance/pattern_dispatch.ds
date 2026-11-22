@@ -10,6 +10,7 @@
 // outcome: stage: typecheck
 // brief: stage: run
 // parse_error: stage: typecheck
+// config: stage: typecheck
 // parse_config: stage: typecheck
 // load_config: stage: typecheck
 // eager: stage: typecheck
@@ -54,6 +55,14 @@ fn brief(e: outcome) -> () {
 // this file's stand-in for the record's parser, and the io failure rides
 // the ambient's read_file signature
 tag parse_error
+
+// the config record, file-owned since the demo residue left the
+// ambient (a declaring graph binds the @std member through its link)
+struct config {
+  host: string
+  port: int?
+  retries: int
+}
 
 extern fn parse_config(text: string) -> config | parse_error
 

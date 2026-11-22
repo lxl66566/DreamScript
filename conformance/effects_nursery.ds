@@ -3,6 +3,8 @@
 // items:
 // url: stage: typecheck
 // page: stage: typecheck
+// response: stage: typecheck
+// urls: stage: typecheck
 // fetch: stage: typecheck
 // consume: stage: typecheck
 // die: stage: typecheck
@@ -14,6 +16,12 @@
 
 type url = string
 struct page { url: url, body: string }
+
+// the response record and the demo page list, file-owned since the
+// demo residue left the ambient (a declaring graph binds the @std
+// members through its link)
+struct response
+const urls = ["https://ds.dev", "https://example.org"]
 
 // the fetch/consume/die seams, file-owned since the ambient shed its dead
 // declarations: fetch and consume keep no answering native, so their bodies

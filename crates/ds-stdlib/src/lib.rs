@@ -157,9 +157,10 @@ pub const AMBIENT_FILE: &str = "std/ambient.ds";
 /// member the library-boundary un-merge has not migrated yet. A package
 /// compile whose graph resolved the reserved `@std` package registers
 /// this text as its ambient, so the migrated members bind through the
-/// linked surface alone; an entry script session composes the
-/// [`BODIED_SOURCE`] members back ([`AMBIENT_SESSION_SOURCE`]), and
-/// every other registration serves the merged [`AMBIENT_SOURCE`].
+/// linked surface alone; an entry session composes the
+/// [`BODIED_SOURCE`] members back ([`AMBIENT_SESSION_SOURCE`] — the
+/// run path, `ds check`, and the LSP alike), and every undeclaring
+/// package registration serves the merged [`AMBIENT_SOURCE`].
 pub const AMBIENT_CORE_SOURCE: &str = include_str!("ambient.ds");
 
 /// The migrated `@std` members' file name inside the default package:
@@ -251,14 +252,15 @@ pub const BUNDLE_CORE_SOURCE: &str = concat!(
     include_str!("strings.ds")
 );
 
-/// The entry script session's ambient text: the shrunk core with the
+/// The session composition's ambient text: the shrunk core with the
 /// @std json and string faces and the bodied members composed after
-/// it — the run path's implicit resolution over the implicit `@std`
-/// graph, holding the bare load-bearing migrated names alive (the
-/// json spellings, the string spellings, and the derive walks
-/// included) while the data-shaped members stay bound through the
-/// linked surface. The merged [`AMBIENT_SOURCE`] serves every
-/// undeclaring registration.
+/// it — the implicit resolution every entry-session registration
+/// serves (`ds run`/`ds build` over the implicit `@std` graph, the
+/// `ds check` driver, and the LSP session), holding the bare
+/// load-bearing migrated names alive (the json spellings, the string
+/// spellings, and the derive walks included) while the data-shaped
+/// members stay bound through the linked surface. The merged
+/// [`AMBIENT_SOURCE`] serves every undeclaring package registration.
 pub const AMBIENT_SESSION_SOURCE: &str = concat!(
     include_str!("ambient.ds"),
     "\n",

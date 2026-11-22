@@ -11,11 +11,11 @@ use ds_parse::{Ast, parse};
 const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 
 /// Ambient stdlib stubs for the corpus file, mirroring the shared
-/// ambient's ownership of the failure taxonomy and the config type plus
-/// the types_hybrid list (`read_file`, `parse_json`, the `map`/`list`
-/// types); the M3 stdlib owns their real spellings. The
+/// ambient's ownership of the failure taxonomy plus the types_hybrid
+/// list (`read_file`, `parse_json`, the `map`/`list` types); the M3
+/// stdlib owns their real spellings. The config type and the
 /// `log`/`default_config`/`get` externs are the corpus file's own (the
-/// ambient shed its dead declarations).
+/// ambient shed its dead declarations and its demo residue).
 const AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag float\n",
@@ -34,7 +34,6 @@ const AMBIENT: &str = concat!(
     "}\n",
     "pub struct list[t]\n",
     "pub struct map[k, v]\n",
-    "pub struct config { host: string, port: int?, retries: int }\n",
     "pub fn read_file(path: string) -> string { \"\" }\n",
     "pub fn parse_json(text: string) -> json { json_null }\n",
 );

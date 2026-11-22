@@ -90,11 +90,12 @@
 //!   (never at a member position, never on the empty prefix): the exported ambient members and the
 //!   `@std` package's own members (the tree's sources, the same export gate) whose names
 //!   prefix-match carry the edit that merges into a plain existing `@std` row or inserts a fresh
-//!   one grouped with the file's imports — private and `pub(pkg)` names never offered. Under the
-//!   merged registration the members ride inside the ambient, so every such name is visible anyway
-//!   and the edit is the forward-compatible spelling; a core-shaped registration (a declaring
-//!   graph's) carries none of them, and each member joins the answer as its own item — while the
-//!   session runs no link pass, so the row's own validation stays in the graph's compile.
+//!   one grouped with the file's imports — private and `pub(pkg)` names never offered. The
+//!   production registration is the session composition (the run path's implicit-resolution shape),
+//!   so the migrated faces are visible anyway and their edit is the forward-compatible spelling,
+//!   while the data-shaped members join the answer as their own items the way a core-shaped
+//!   registration (a declaring graph's) serves them — the session runs no link pass, so a
+//!   data-shaped member's row keeps its validation in the graph's compile.
 //! * Rename is a plain identifier substitution over the target's declaration and the uses the
 //!   resolution table recorded — no formatting, and no comment or string awareness (comments and
 //!   strings sit outside every recorded span by construction). A member's edit set covers its own
@@ -426,7 +427,11 @@ struct Session {
 impl Session {
     /// A session with the stdlib ambient registered as the package's
     /// first member (G3): stdlib names resolve in every document, and
-    /// the ambient's file id never gains a client URI.
+    /// the ambient's file id never gains a client URI. The registration
+    /// is the session composition — the run path's implicit-resolution
+    /// shape — so a bare use of a migrated @std face answers hover and
+    /// completion exactly as `ds run` resolves it, while the
+    /// data-shaped members stay link-bound and unknown bare.
     #[cfg(test)]
     fn new() -> Self {
         Self::with_linked(no_surface())
@@ -434,7 +439,7 @@ impl Session {
 
     /// [`Session::new`] over the embedder's linked-surface provider.
     fn with_linked(linked: SurfaceProvider) -> Self {
-        Self::with_ambient(linked, ds_stdlib::AMBIENT_SOURCE)
+        Self::with_ambient(linked, ds_stdlib::AMBIENT_SESSION_SOURCE)
     }
 
     /// A session over the shrunk ambient core: a declaring graph's
@@ -449,7 +454,9 @@ impl Session {
     }
 
     /// [`Session::with_linked`] over a chosen ambient registration: the
-    /// merged source every undeclaring registration serves, or the shrunk
+    /// session composition the production registration serves (the run
+    /// path's implicit-resolution shape — the migrated faces resolve
+    /// bare, the data-shaped members staying link-bound), or the shrunk
     /// core a declaring graph's registration takes.
     fn with_ambient(linked: SurfaceProvider, ambient_source: &str) -> Self {
         let mut db = Db::with_declared_rows(ds_stdlib::declared_rows().clone())
@@ -2848,119 +2855,85 @@ mod tests {
         );
     }
 
-    /// The composed candidate set serves the `@std` package's own members
-    /// under the merged registration: the members ride inside the ambient,
-    /// so the scope answer lists them and the tier enriches those items
-    /// with the same row edit — a prefix that spells a member exactly names
-    /// a visible name, so nothing imports. Accepting an offer leaves a
-    /// document that checks clean: the merged namespace validates the
-    /// row's selection.
+    /// The session registration (the production shape, the run path's
+    /// implicit resolution) resolves the migrated faces bare: a prefix
+    /// spelling a face names a visible name, so nothing imports, and a
+    /// hover over the bare use answers the ambient's own line. The
+    /// data-shaped members stay link-bound — the tier's members' table
+    /// serves their offers as their own items, and the session runs no
+    /// link pass, so an accepted row's validation stays in the graph's
+    /// compile (never asserted clean here). A row selecting a face
+    /// validates against the session namespace all the same.
     #[test]
-    fn auto_import_offers_the_std_members_under_the_merged_registration() {
+    fn auto_import_serves_the_session_registration_like_the_run_path() {
         let mut session = Session::new();
-        // The value-namespace member behind a partial prefix.
+        // A bare face use resolves with no import row: the implicit
+        // resolution `ds run` serves, answered at the hover position.
         let file = open(
             &mut session,
             "a.ds",
+            "fn label(s: string) -> string {\n  s.trim().to_upper()\n}\n",
+        );
+        // The cursor sits over the `s.trim()` call (line 1), whose
+        // checked type the face's own composition answers.
+        let hover = session
+            .hover(Path::new("a.ds"), file, 1, 5)
+            .expect("the hover pass runs")
+            .expect("the bare face use answers");
+        assert!(
+            hover.contents.contains("string"),
+            "the hover answers the face-composed type"
+        );
+        // A prefix spelling a face exactly names a visible name: the
+        // scope answer lists it and nothing imports (the tier fires
+        // behind an unresolved prefix alone).
+        let file = open(
+            &mut session,
+            "b.ds",
+            "fn shout() -> string {\n  to_upper(\"x\")\n}\n",
+        );
+        // The cursor sits right after the exact spelling `to_upper`.
+        let items = session.completion(file, 1, 10).expect("the pass runs");
+        let item = items
+            .iter()
+            .find(|item| item.label == "to_upper")
+            .expect("the face is visible under the session registration");
+        assert!(
+            item.additional_text_edits.is_none(),
+            "a resolved prefix carries no edit: {item:?}"
+        );
+        // A row selecting a face still validates: the session namespace
+        // carries the face, so the forward-compatible spelling checks
+        // clean exactly as the run path's graph-linked row would.
+        let file = open(
+            &mut session,
+            "c.ds",
+            "import @std (parse_json)\n\nfn port(t: string) -> int | parse_err {\n               \
+             json_as_int(parse_json(t)?)\n}\n",
+        );
+        assert!(
+            session.diagnostics(file).expect("the pass runs").is_empty(),
+            "the face's row validates against the session namespace"
+        );
+        // The data-shaped members stay link-bound: the tier offers them
+        // as their own items behind a typed prefix, the edit the import
+        // row a declaring graph's link pass binds.
+        let file = open(
+            &mut session,
+            "d.ds",
             "fn probe_urls() -> list[string] {\n  url\n}\n",
         );
-        // The cursor sits right after the typed prefix `url` on line 1.
         let items = session.completion(file, 1, 5).expect("the pass runs");
         let item = items
             .iter()
             .find(|item| item.label == "urls")
-            .expect("the std member answers");
-        let edits = item
-            .additional_text_edits
-            .as_ref()
-            .expect("the offer imports");
-        assert_eq!(edits[0].new_text, "import @std (urls)\n\n");
-        // Accepting the offer checks clean: the row selects the exported
-        // member, and the body reads it.
-        let accepted = "import @std (urls)\n\nfn probe_urls() -> list[string] {\n  urls\n}\n";
-        session
-            .set(Path::new("a.ds"), accepted)
-            .expect("the accept applies");
-        assert!(
-            session.diagnostics(file).expect("the pass runs").is_empty(),
-            "the imported document checks clean"
-        );
-        // The type-namespace members answer at a type position behind a
-        // partial prefix: the config struct constructs and reads, while
-        // the opaque response binds its name in a signature — its value
-        // uses keep the M3 refusal, a checker matter that never gates the
-        // offer.
-        let file = open(
-            &mut session,
-            "b.ds",
-            "fn probe_config(c: confi) -> int {\n  1\n}\n",
-        );
-        // The cursor sits right after `confi` in the parameter's type.
-        let items = session.completion(file, 0, 24).expect("the pass runs");
-        let item = items
-            .iter()
-            .find(|item| item.label == "config")
-            .expect("the std member answers");
+            .expect("the members' table offers the link-bound name");
         assert_eq!(
             item.additional_text_edits
                 .as_ref()
                 .expect("the offer imports")[0]
                 .new_text,
-            "import @std (config)\n\n"
-        );
-        let accepted =
-            "import @std (config)\n\nfn probe_config(c: config) -> int {\n  c.retries\n}\n";
-        session
-            .set(Path::new("b.ds"), accepted)
-            .expect("the accept applies");
-        assert!(
-            session.diagnostics(file).expect("the pass runs").is_empty(),
-            "the imported annotation checks clean"
-        );
-        // The opaque member's name binds the same way: the offer carries
-        // the edit, the accepted signature the name alone — no value use
-        // exists to construct over.
-        let file = open(
-            &mut session,
-            "d.ds",
-            "fn probe_response(r: respo) -> int {\n  1\n}\n",
-        );
-        let items = session.completion(file, 0, 26).expect("the pass runs");
-        let item = items
-            .iter()
-            .find(|item| item.label == "response")
-            .expect("the std member answers");
-        assert_eq!(
-            item.additional_text_edits
-                .as_ref()
-                .expect("the offer imports")[0]
-                .new_text,
-            "import @std (response)\n\n"
-        );
-        let accepted =
-            "import @std (response)\n\nfn probe_response(r: response) -> int {\n  1\n}\n";
-        session
-            .set(Path::new("d.ds"), accepted)
-            .expect("the accept applies");
-        assert!(
-            session.diagnostics(file).expect("the pass runs").is_empty(),
-            "the opaque member's name binds in a signature"
-        );
-        // A prefix that spells a member exactly names a visible name under
-        // the merged reading: nothing imports.
-        let file = open(
-            &mut session,
-            "c.ds",
-            "fn probe_row(x: row) -> int {\n  1\n}\n",
-        );
-        let items = session.completion(file, 0, 19).expect("the pass runs");
-        let item = items
-            .iter()
-            .find(|item| item.label == "row")
-            .expect("the merged reading keeps the member visible");
-        assert!(
-            item.additional_text_edits.is_none(),
-            "a resolved prefix carries no edit: {item:?}"
+            "import @std (urls)\n\n"
         );
     }
 

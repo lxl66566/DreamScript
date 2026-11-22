@@ -309,6 +309,56 @@ fn a_derived_members_call_checks_clean() {
     assert_eq!(out.stdout, [] as [u8; 0]);
 }
 
+/// The @std faces resolve implicitly: `ds check` registers the session
+/// composition — the run path's implicit-resolution shape — so a file
+/// using the migrated json and string faces with no import row checks
+/// clean exactly as `ds run` resolves it.
+#[test]
+fn the_std_faces_resolve_implicitly_without_an_import_row() {
+    let dir = env::temp_dir().join(format!("ds-cli-check-faces-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let path = dir.join("faces.ds");
+    fs::write(
+        &path,
+        concat!(
+            "fn label(s: string) -> string {\n",
+            "  s.trim().to_upper()\n",
+            "}\n",
+            "\n",
+            "fn port(text: string) -> int | parse_err {\n",
+            "  json_as_int(parse_json(text)?)\n",
+            "}\n",
+        ),
+    )
+    .expect("the temp source writes");
+    let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert_eq!(stderr, "", "the bare face uses carry no diagnostics");
+    assert_eq!(out.stdout, [] as [u8; 0]);
+}
+
+/// The data-shaped @std members stay link-bound under the session
+/// registration: a bare use is an unknown name at the check, the same
+/// boundary `ds run` serves over the implicit graph (a declaring
+/// graph's import row binds the member through the linked surface).
+#[test]
+fn the_std_data_members_stay_link_bound_at_the_check() {
+    let dir = env::temp_dir().join(format!("ds-cli-check-residue-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let path = dir.join("residue.ds");
+    fs::write(&path, "fn probe(r: row) -> int {\n  1\n}\n").expect("the temp source writes");
+    let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("unknown type `row`"),
+        "the bare residue use stays link-bound: {stderr}"
+    );
+}
+
 /// A file past the DefId block budget reports a spanned diagnostic per
 /// overflowing block instead of aborting: blocks 0..=255 still check (an
 /// early block's real error prints beside the packing diagnostics, never

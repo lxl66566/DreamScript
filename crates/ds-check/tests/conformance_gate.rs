@@ -20,9 +20,10 @@ use ds_parse::{Ast, Item, ItemKind, parse};
 
 /// Ambient stdlib stubs per conformance/README.md's types_hybrid list:
 /// signatures only (extern), the M3 stdlib owns the bodies. The failure
-/// taxonomy (io_err) and the config type mirror the shared ambient's
-/// ownership of them; the log/default_config/get externs are the corpus
-/// file's own (the ambient shed its dead declarations).
+/// taxonomy (io_err) mirrors the shared ambient's ownership of it; the
+/// config type and the log/default_config/get externs are the corpus
+/// file's own (the ambient shed its dead declarations and its demo
+/// residue).
 const TYPES_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag float\n",
@@ -32,7 +33,6 @@ const TYPES_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub struct map[k, v]\n",
-    "pub struct config { host: string, port: int?, retries: int }\n",
     "pub struct field { name: string, type: type, tag: string }\n",
     "pub extern fn fields (t: type) -> list[field]\n",
     "pub extern fn type_name (t: type) -> string\n",
@@ -153,7 +153,6 @@ const PATTERN_DISPATCH_AMBIENT: &str = concat!(
     "  net_other { msg: string }\n",
     "}\n",
     "pub trait Copyable { }\n",
-    "pub struct config { host: string, port: int?, retries: int }\n",
     "pub extern fn read_file (path: string) -> string | io_err\n",
     "pub extern fn println (msg: string) -> ()\n",
 );
@@ -269,7 +268,6 @@ const EXTRACTION_AMBIENT: &str = concat!(
     "pub trait Copyable { }\n",
     "pub struct list[t]\n",
     "pub struct map[k, v]\n",
-    "pub struct config { host: string, port: int?, retries: int }\n",
     "pub extern fn println (msg: string) -> ()\n",
     "pub extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "pub extern fn unwrap_or_else[t] (x: t?, f: fn() -> t) -> t\n",

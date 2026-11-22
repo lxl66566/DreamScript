@@ -7,11 +7,14 @@
 //! the ds-diag renderers; the exit code is 0 when nothing fatal was
 //! reported.
 //!
-//! The package is the stdlib ambient plus the files given (G3): the M3
-//! ambient (ds-stdlib) registers as a package member before the user's
-//! files, so corpus sources check clean as-is. `--no-ambient` checks the
-//! files alone — for self-contained packages whose declarations would
-//! collide with the ambient's single namespace.
+//! The package is the stdlib ambient plus the files given (G3): the
+//! session composition (ds-stdlib) registers as a package member before
+//! the user's files, so the @std faces resolve bare exactly as an entry
+//! script session of `ds run` resolves them (the implicit-resolution
+//! alignment: no import needed for the migrated faces, the data-shaped
+//! members staying link-bound and unknown bare). `--no-ambient` checks
+//! the files alone — for self-contained packages whose declarations
+//! would collide with the ambient's single namespace.
 //!
 //! Fatality scoping mirrors the conformance gate
 //! ([`ds_check::corpus`]): in a file carrying the corpus `// items:`
@@ -74,8 +77,13 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     let mut files = Vec::with_capacity(args.files.len() + 1);
     if !args.no_ambient {
         // The ambient is the package's first member: one namespace [G3],
-        // its declarations before the user's in collection order.
-        files.push(db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE));
+        // its declarations before the user's in collection order. The
+        // registration is the session composition — the run path's
+        // implicit-resolution shape — so a bare use of a migrated @std
+        // face checks clean without an import row, matching `ds run`
+        // over the same file, while the data-shaped members stay
+        // link-bound (a declaring graph's import binds them).
+        files.push(db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SESSION_SOURCE));
     }
     for path in &args.files {
         let source =

@@ -3,6 +3,8 @@
 // items:
 // parse_error: stage: typecheck
 // user: stage: typecheck
+// row: stage: typecheck
+// config: stage: typecheck
 // sep: stage: typecheck
 // get: stage: typecheck
 // load_rows: stage: typecheck
@@ -17,6 +19,16 @@ enum parse_error { bad_number(string), missing_field(string) }
 struct user {
   name: string
   age: int
+}
+
+// the row alias and the config record, file-owned since the demo
+// residue left the ambient (a declaring graph binds the @std members
+// through its link)
+type row = map[string, string]
+struct config {
+  host: string
+  port: int?
+  retries: int
 }
 
 // F6 byte literal: `b'x'` is pinned to the ambient's `tag byte` atom, so

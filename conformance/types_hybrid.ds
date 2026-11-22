@@ -2,6 +2,7 @@
 // purpose: config parser exercising enum-minted cases, set-typed errors, is-narrowing, bare return, ?, .err, structural ==
 // items:
 // cfg_err: stage: typecheck
+// config: stage: typecheck
 // log: stage: typecheck
 // default_config: stage: typecheck
 // get: stage: typecheck
@@ -21,6 +22,14 @@
 enum cfg_err {
   missing
   bad_port { got: int }
+}
+
+// the config record, file-owned since the demo residue left the
+// ambient (a declaring graph binds the @std member through its link)
+struct config {
+  host: string
+  port: int?
+  retries: int
 }
 
 // the config fallback's seams, file-owned since the ambient shed its dead
