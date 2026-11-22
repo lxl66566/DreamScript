@@ -471,6 +471,10 @@ where
     let mut linked: Vec<(&DefId, &crate::import::ForeignEntry)> =
         package.foreign().iter().collect();
     linked.sort_by_key(|(def, _)| def.index());
+    let mut ctx = MintCtx {
+        package,
+        forcing: Vec::new(),
+    };
     for (def, entry) in linked {
         if let Some(sig) = &entry.sig {
             decls.fns.insert(*def, sig.clone());
@@ -489,7 +493,14 @@ where
         } else if let Some(fact) = &entry.value {
             decls.foreign_consts.insert(*def, fact.clone());
         } else if let Some(fact) = &entry.ty {
-            install_foreign_type(*def, &entry.name, entry.decl_span, fact, &mut decls);
+            install_foreign_type(
+                &mut ctx,
+                *def,
+                &entry.name,
+                entry.decl_span,
+                fact,
+                &mut decls,
+            );
         }
     }
     package_coherence(&mut decls, &mut diags);
@@ -502,14 +513,16 @@ where
 /// second type kind exists — a struct's atom and field signature, an
 /// enum's case rows, a case's own atom, struct row, and case row, an
 /// alias's written body, an opaque struct's reserved atom, and a
-/// tag's unit atom. The
-/// word kinds resolve by name in this compile's own universe (the
-/// ambient's atoms), the same trust the const fact's scalar atom
-/// enjoys; the link pass's registration gates already proved the mint's
-/// name free, so a failed mint or an unresolvable word skips the def
-/// silently — its uses then fail at their own sites rather than
-/// mis-shaping.
+/// tag's unit atom. The word kinds resolve by name in this compile's
+/// own universe (the ambient's atoms), the same trust the const fact's
+/// scalar atom enjoys — except the Named word, which resolves through
+/// the link table onto the def this compile's own registration minted
+/// for the producer's declaration. The link pass's registration gates
+/// already proved the mint's name free, so a failed mint or an
+/// unresolvable word skips the def silently — its uses then fail at
+/// their own sites rather than mis-shaping.
 fn install_foreign_type(
+    ctx: &mut MintCtx,
     def: DefId,
     name: &str,
     span: Span,
@@ -518,16 +531,16 @@ fn install_foreign_type(
 ) {
     match fact {
         crate::import::TypeFact::Struct { fields, linear } => {
-            install_foreign_struct(def, name, span, fields, *linear, decls);
+            install_foreign_struct(ctx, def, name, span, fields, *linear, decls);
         },
         crate::import::TypeFact::Enum { cases, linear } => {
-            install_foreign_enum(def, name, span, cases, *linear, decls);
+            install_foreign_enum(ctx, def, name, span, cases, *linear, decls);
         },
         crate::import::TypeFact::Case(fact) => {
-            install_foreign_case(def, name, span, fact, decls);
+            install_foreign_case(ctx, def, name, span, fact, decls);
         },
         crate::import::TypeFact::Alias(word) => {
-            install_foreign_alias(def, name, span, (**word).clone(), decls);
+            install_foreign_alias(ctx, def, name, span, (**word).clone(), decls);
         },
         crate::import::TypeFact::Opaque => {
             install_foreign_opaque(def, name, span, decls);
@@ -538,11 +551,49 @@ fn install_foreign_type(
     }
 }
 
+/// The linked mint's resolution context: the consuming package's link
+/// table — the registered rows a Named word resolves through, each the
+/// producer's own declaration — and the forcing stack that breaks
+/// reference cycles while one install pulls another's declaration
+/// forward.
+struct MintCtx<'a> {
+    /// The consuming compile's package.
+    package: &'a Package,
+    /// The defs whose installs are in flight: a second pull of the same
+    /// def is a cycle the early-declared atoms already serve (or an
+    /// inline cycle the producer's own fixpoint refused).
+    forcing: Vec<DefId>,
+}
+
+/// Ensures one linked def's mint ran, forcing it forward when its def
+/// order sits ahead of the referencing install: an install declares its
+/// atom ahead of resolving its fields, so a forced chain's members
+/// resolve while the first install is still in flight, and a def whose
+/// mint never completes answers `None` — the referencing def's silent
+/// skip.
+fn force_minted(ctx: &mut MintCtx, def: DefId, decls: &mut Decls) -> Option<()> {
+    if decls.atoms.get(&def).is_some() || decls.enums.get(&def).is_some() {
+        return Some(());
+    }
+    if ctx.forcing.contains(&def) {
+        return None;
+    }
+    let entry = ctx.package.foreign().get(&def)?;
+    let fact = Arc::clone(entry.ty.as_ref()?);
+    let name = entry.name.clone();
+    let span = entry.decl_span;
+    ctx.forcing.push(def);
+    install_foreign_type(ctx, def, &name, span, &fact, decls);
+    ctx.forcing.pop();
+    (decls.atoms.get(&def).is_some() || decls.enums.get(&def).is_some()).then_some(())
+}
+
 /// One linked field list as the pair of forms the tables carry: the
 /// solved universe fields and the written AST fields (the spelling a
 /// local field of the same word would carry). `None` when a word names
 /// no atom of this universe — the caller skips the whole def silently.
 fn foreign_fields(
+    ctx: &mut MintCtx,
     fields: &[crate::import::TypeField],
     span: Span,
     decls: &mut Decls,
@@ -550,7 +601,7 @@ fn foreign_fields(
     let mut universe_fields = Vec::with_capacity(fields.len());
     let mut ast_fields = Vec::with_capacity(fields.len());
     for field in fields {
-        let (expr, written) = foreign_field_type(field.word.clone(), span, decls)?;
+        let (expr, written) = foreign_field_type(ctx, field.word.clone(), span, decls)?;
         universe_fields.push(Field::named(&field.name, expr));
         ast_fields.push(FieldDecl {
             span,
@@ -569,6 +620,7 @@ fn foreign_fields(
 /// signature, the def tables the construction and field-access paths
 /// read, and the name index the signature solving falls back to.
 fn install_foreign_struct(
+    ctx: &mut MintCtx,
     def: DefId,
     name: &str,
     span: Span,
@@ -576,21 +628,26 @@ fn install_foreign_struct(
     linear: bool,
     decls: &mut Decls,
 ) {
-    let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
-        return;
-    };
     // The atom: a fresh run declares it, a served prefix's replay
     // already declared it (the artifact's mint log and def-atom tables
     // carry this def's atom), so the re-run takes the replayed atom and
     // still installs the rows below — the name index is the one row the
     // serve restores through no other table. Any other taken name keeps
-    // the silent skip.
+    // the silent skip. The atom declares AHEAD of the fields'
+    // resolution: a field naming this very struct (a container-of-self
+    // word), or one whose own fields force this def forward, resolves
+    // the declared atom while the install is still in flight.
     let atom = match decls.universe.declare_struct(name) {
         Ok(atom) => atom,
         Err(_) => match decls.atoms.get(&def) {
             Some(&atom) => atom,
             None => return,
         },
+    };
+    decls.atoms.insert(def, atom);
+    decls.defs_of_atoms.insert(atom, def);
+    let Some((universe_fields, ast_fields)) = foreign_fields(ctx, fields, span, decls) else {
+        return;
     };
     // The replayed atom already carries its shape — the serve set it —
     // so both a fresh set and the replay's refusal answer the same
@@ -601,8 +658,6 @@ fn install_foreign_struct(
     ) {
         return;
     }
-    decls.atoms.insert(def, atom);
-    decls.defs_of_atoms.insert(atom, def);
     decls.structs.insert(def, StructShape {
         params: Vec::new(),
         fields: ast_fields,
@@ -616,6 +671,7 @@ fn install_foreign_struct(
 /// themselves mint at each case's own def (a non-generic enum carries
 /// no atom of its own; its type is the union of its case atoms [B3]).
 fn install_foreign_enum(
+    ctx: &mut MintCtx,
     def: DefId,
     name: &str,
     span: Span,
@@ -630,7 +686,8 @@ fn install_foreign_enum(
             crate::import::CasePayload::Tuple(words) => {
                 let mut ast_items = Vec::with_capacity(words.len());
                 for word in words {
-                    let Some((_, written)) = foreign_field_type(word.clone(), span, decls) else {
+                    let Some((_, written)) = foreign_field_type(ctx, word.clone(), span, decls)
+                    else {
                         return;
                     };
                     ast_items.push(written);
@@ -638,7 +695,7 @@ fn install_foreign_enum(
                 EnumPayload::Tuple(ast_items)
             },
             crate::import::CasePayload::Struct(fields) => {
-                let Some((_, ast_fields)) = foreign_fields(fields, span, decls) else {
+                let Some((_, ast_fields)) = foreign_fields(ctx, fields, span, decls) else {
                     return;
                 };
                 EnumPayload::Struct(ast_fields)
@@ -663,6 +720,7 @@ fn install_foreign_enum(
 /// the enum before its cases), so the enum def resolves through the
 /// name index here.
 fn install_foreign_case(
+    ctx: &mut MintCtx,
     def: DefId,
     name: &str,
     span: Span,
@@ -683,7 +741,8 @@ fn install_foreign_case(
             let mut universe_fields = Vec::with_capacity(words.len());
             let mut ast_items = Vec::with_capacity(words.len());
             for word in words {
-                let Some((expr, written)) = foreign_field_type(word.clone(), span, decls) else {
+                let Some((expr, written)) = foreign_field_type(ctx, word.clone(), span, decls)
+                else {
                     return;
                 };
                 universe_fields.push(Field::positional(expr));
@@ -710,7 +769,8 @@ fn install_foreign_case(
             EnumPayload::Tuple(ast_items)
         },
         crate::import::CasePayload::Struct(fields) => {
-            let Some((universe_fields, ast_fields)) = foreign_fields(fields, span, decls) else {
+            let Some((universe_fields, ast_fields)) = foreign_fields(ctx, fields, span, decls)
+            else {
                 return;
             };
             let atom = match decls.universe.declare_struct(name) {
@@ -763,13 +823,14 @@ fn install_foreign_case(
 /// constructor), so a use site's solving expands the body in this
 /// compile's own universe exactly like the local spelling's.
 fn install_foreign_alias(
+    ctx: &mut MintCtx,
     def: DefId,
     name: &str,
     span: Span,
     word: crate::import::TypeWord,
     decls: &mut Decls,
 ) {
-    let Some((_, written)) = foreign_field_type(word, span, decls) else {
+    let Some((_, written)) = foreign_field_type(ctx, word, span, decls) else {
         return;
     };
     decls.aliases.insert(def, (Vec::new(), written));
@@ -828,6 +889,7 @@ fn install_foreign_tag(def: DefId, name: &str, _span: Span, decls: &mut Decls) {
 /// path naming the atom — the spelling a local field of the same word
 /// would carry). `None` when a word names no atom of this universe.
 fn foreign_field_type(
+    ctx: &mut MintCtx,
     word: crate::import::TypeWord,
     span: Span,
     decls: &mut Decls,
@@ -854,15 +916,15 @@ fn foreign_field_type(
             Some((TypeExpr::Atom(atom), named(word.atom_name(), Vec::new())))
         },
         TypeWord::List(inner) => {
-            let (element, written_element) = foreign_field_type(*inner, span, decls)?;
+            let (element, written_element) = foreign_field_type(ctx, *inner, span, decls)?;
             let element_ty = decls.universe.solve(&element).ok()?;
             let ctor = decls.universe.atom_by_name("list")?;
             let apply = decls.universe.apply_atom(ctor, &[element_ty]).ok()?;
             Some((TypeExpr::Atom(apply), named("list", vec![written_element])))
         },
         TypeWord::Map(key, value) => {
-            let (key_expr, written_key) = foreign_field_type(*key, span, decls)?;
-            let (value_expr, written_value) = foreign_field_type(*value, span, decls)?;
+            let (key_expr, written_key) = foreign_field_type(ctx, *key, span, decls)?;
+            let (value_expr, written_value) = foreign_field_type(ctx, *value, span, decls)?;
             let key_ty = decls.universe.solve(&key_expr).ok()?;
             let value_ty = decls.universe.solve(&value_expr).ok()?;
             let ctor = decls.universe.atom_by_name("map")?;
@@ -871,7 +933,7 @@ fn foreign_field_type(
             Some((TypeExpr::Atom(apply), written))
         },
         TypeWord::Optional(inner) => {
-            let (solved_inner, written_inner) = foreign_field_type(*inner, span, decls)?;
+            let (solved_inner, written_inner) = foreign_field_type(ctx, *inner, span, decls)?;
             // `t?` is exactly `t | none` (B4): the union tree the local
             // optional's own conversion builds, the presence tag over
             // the word's payload word(s)
@@ -885,6 +947,46 @@ fn foreign_field_type(
         TypeWord::Bytes => {
             let atom = decls.universe.atom_by_name("bytes")?;
             Some((TypeExpr::Atom(atom), named("bytes", Vec::new())))
+        },
+        TypeWord::Named(name) => {
+            // Identity, not name lookup: the registration's own row for
+            // the producer's declaration — never this compile's ambient
+            // or local names — resolved onto the def the registration
+            // minted, that def's install forced forward when def order
+            // put it ahead.
+            let def = ctx
+                .package
+                .foreign()
+                .iter()
+                .find(|(_, entry)| entry.name == name && entry.ty.is_some())
+                .map(|(def, _)| *def)?;
+            force_minted(ctx, def, decls)?;
+            if let Some(&atom) = decls.atoms.get(&def) {
+                return Some((TypeExpr::Atom(atom), named(&name, Vec::new())));
+            }
+            // An enum's own name: the union of its minted case atoms,
+            // exactly the written spelling's solving [B3]. The enum's
+            // install ran above (forced if need be) but its cases mint
+            // at their own defs — entries def order may still hold
+            // ahead, so each forces here too.
+            let cases: Vec<(DefId, Arc<crate::import::TypeFact>)> = ctx
+                .package
+                .foreign()
+                .iter()
+                .filter(|(_, entry)| {
+                    matches!(
+                        entry.ty.as_deref(),
+                        Some(crate::import::TypeFact::Case(fact)) if fact.enum_name == name
+                    )
+                })
+                .map(|(def, entry)| Some((*def, Arc::clone(entry.ty.as_ref()?))))
+                .collect::<Option<_>>()?;
+            for (case_def, _) in &cases {
+                force_minted(ctx, *case_def, decls)?;
+            }
+            let shape = decls.enums.get(&def)?;
+            let solved = enum_case_union(ctx.package, &shape.cases, decls)?;
+            Some((solved, named(&name, Vec::new())))
         },
     }
 }

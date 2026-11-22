@@ -24,7 +24,7 @@ const SOURCE: &str = concat!(
     "extern fn map_set (m: mut map[string, string], key: string, value: string) -> ()\n",
     "extern fn map_len[k, v] (m: map[k, v]) -> int\n",
     "extern fn list_len[t] (xs: list[t]) -> int\n",
-    "import @lib (pages, counts, keyed, opt, rrow)\n",
+    "import @lib (pages, counts, keyed, opt, rrow, chain, cell)\n",
     "import @lib as w\n",
     "\n",
     "fn port_of(o: opt) -> int {\n",
@@ -50,6 +50,13 @@ const SOURCE: &str = concat!(
     "  const set = opt { n: 8080 }\n",
     "  const bare = opt { n: none }\n",
     "  println(\"${map_len(rows)} ${port_of(set)} ${port_of(bare)} ${map_len(k.index)}\")\n",
+    "  const leaf = cell { n: 3, rest: [] }\n",
+    "  const linked = chain { head: leaf, tail: [leaf], pick: none }\n",
+    "  const picked = match linked.pick {\n",
+    "    none => 0,\n",
+    "    other => other.n,\n",
+    "  }\n",
+    "  println(\"${linked.head.n + list_len(linked.tail) + picked + leaf.n}\")\n",
     "  list_len(pages) + list_len(seen)\n",
     "}\n",
 );
@@ -136,6 +143,35 @@ fn build_vm() -> (Vm, Lowered) {
                 )],
                 linear: false,
             }),
+            // the Named words: fleet names cell, its declaration sitting
+            // AHEAD of cell's row in the surface (def order), so the
+            // mint's resolution forces cell's install forward — and
+            // cell names itself through its own tail, the early-declared
+            // atom serving the self-reference
+            ty_entry("chain", ds_check::TypeFact::Struct {
+                fields: vec![
+                    field("head", TypeWord::Named("cell".to_owned())),
+                    field(
+                        "tail",
+                        TypeWord::List(Box::new(TypeWord::Named("cell".to_owned()))),
+                    ),
+                    field(
+                        "pick",
+                        TypeWord::Optional(Box::new(TypeWord::Named("cell".to_owned()))),
+                    ),
+                ],
+                linear: false,
+            }),
+            ty_entry("cell", ds_check::TypeFact::Struct {
+                fields: vec![
+                    field("n", TypeWord::Scalar(ScalarWord::Int)),
+                    field(
+                        "rest",
+                        TypeWord::List(Box::new(TypeWord::Named("cell".to_owned()))),
+                    ),
+                ],
+                linear: false,
+            }),
             ty_entry(
                 "rrow",
                 ds_check::TypeFact::Alias(Box::new(TypeWord::Map(
@@ -207,6 +243,7 @@ fn the_widened_facts_embed_round_trip_and_run() {
             "3\n",
             "4\n",
             "1 8080 0 0\n",
+            "7\n",
         )
         .as_bytes(),
         "the embedded list consts, the map and optional words, and the alias all answer"

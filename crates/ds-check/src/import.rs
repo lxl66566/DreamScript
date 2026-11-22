@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use ds_diag::Span;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{EffectRow, Vis, decls::FnSig};
 
@@ -289,18 +289,20 @@ pub struct TypeField {
 
 /// The word vocabulary a linked struct's fields spell in: the scalar
 /// atoms by their ambient names, `bytes` (the immutable byte sequence's
-/// one Ref word), and the three container constructors closed over the
+/// one Ref word), the three container constructors closed over the
 /// vocabulary itself — a list of any word, a map of any two words, and
 /// an optional over any word (the word's union with `none`: one
 /// presence tag word over the word's own payload region, exactly `t?`'s
-/// local lowering) — so every spelling the containers can build from
-/// the ambient atoms carries. A word naming a declared type (a nested
-/// struct, a container over a declared member) and a tuple field stay
-/// outside: the by-name ambient trust resolves constructor and scalar
-/// atoms alone, and a declared-type word waits on the richer encoding
-/// round's cross-fact name resolution. The names resolve in the
-/// consuming compile's own universe — the same trust the const fact's
-/// scalar atom enjoys.
+/// local lowering) — and the Named word, an in-word reference to
+/// another declared type the same producer member exports (a nested
+/// struct field, a container over a declared member, an enum-typed
+/// field), so every spelling the containers can build from the ambient
+/// atoms and the member's own linkable declarations carries. The
+/// consuming compile resolves a Named word through the linked surface
+/// onto its own minted entity for that same declaration — identity, not
+/// name lookup, never its ambient or local names. A tuple field stays
+/// outside (it rides no ambient constructor atom), as does a type the
+/// member cannot itself link.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeWord {
     /// A scalar atom word.
@@ -318,6 +320,13 @@ pub enum TypeWord {
     /// over the word's own payload word(s), the same span a local
     /// optional field lowers to.
     Optional(Box<Self>),
+    /// Another declared type of the same producer member: the name its
+    /// own declaration owns, which the consuming compile resolves
+    /// through the link table onto the def its registration minted — a
+    /// flat struct (or the shape-pending opaque), an enum (the union of
+    /// its minted case atoms), a minted case, or a tag. The containers
+    /// wrap it like any word.
+    Named(String),
 }
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
@@ -374,18 +383,129 @@ impl ScalarWord {
 }
 
 impl TypeFact {
-    /// The fact one declared struct carries, when its whole shape spells
-    /// in the vocabulary: non-generic, every field a word the vocabulary
-    /// carries, the declaration's linearity riding beside them. A
-    /// bodiless declaration (its atom still shape-pending) carries the
-    /// opaque identity alone. The caller gates the def's kind — a
-    /// struct-payload enum case mints a struct atom but is not a
-    /// type-namespace struct export — and the deinit-carrying
-    /// declarations, whose linked death semantics wait on the artifact
-    /// round's member machinery. Everything else answers `None` and
-    /// keeps its selection refused.
+    /// The link facts for every type declaration one package compile
+    /// exports, as one co-derivation fixpoint: a field may name another
+    /// declared type of the same member, and that reference's
+    /// eligibility is the referenced declaration's own fact, so the
+    /// per-def facts derive together over an eligible set that starts
+    /// at every candidate and shrinks until stable — a pair of structs
+    /// naming each other through container words co-derives in one
+    /// round, while an inline cycle never stabilizes and keeps its
+    /// refusal. The candidates are the compile's own type defs (the
+    /// `ambient_files` leading trees are the ambient members, whose
+    /// definitions never export; an import-bound def is another
+    /// package's identity and rides its own re-export row), and the
+    /// deinit-carrying structs stay out (C5: a linked deinit body is the
+    /// artifact round's member machinery). The map's keys are exactly
+    /// the candidates whose fact survived.
     #[must_use]
-    pub fn of_struct(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+    pub fn member_facts(
+        analyzed: &crate::type_of::Analyzed,
+        ambient_files: usize,
+    ) -> FxHashMap<crate::DefId, Arc<Self>> {
+        let package = &analyzed.package;
+        let decls = &analyzed.decls;
+        let mut deinit = std::collections::HashSet::new();
+        for ast in analyzed.asts.iter().skip(ambient_files) {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ds_parse::ItemKind::Struct(decl) = &item.kind else {
+                        continue;
+                    };
+                    if decl
+                        .members
+                        .iter()
+                        .any(|member| matches!(member, ds_parse::StructMember::Deinit { .. }))
+                        && let Some(def) = package.lookup_type(&decl.name.name)
+                    {
+                        deinit.insert(def.index());
+                    }
+                }
+            }
+        }
+        let mut candidates = Vec::new();
+        for (index, def) in package.defs().enumerate() {
+            if (def.span.file.as_u32() as usize) < ambient_files {
+                continue; // the ambient's own definitions never export
+            }
+            if !matches!(
+                def.kind,
+                crate::DefKind::Struct
+                    | crate::DefKind::Enum
+                    | crate::DefKind::Case
+                    | crate::DefKind::TypeAlias
+                    | crate::DefKind::Tag
+            ) {
+                continue;
+            }
+            let id = crate::DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
+            if package.foreign().get(&id).is_some() {
+                continue; // an import-bound def rides its own re-export row
+            }
+            candidates.push(id);
+        }
+        let mut eligible: FxHashSet<crate::DefId> = candidates.iter().copied().collect();
+        loop {
+            let mut facts = FxHashMap::default();
+            let mut next = FxHashSet::default();
+            for &def in &candidates {
+                if let Some(fact) = Self::of_def(package, decls, &deinit, &eligible, def) {
+                    next.insert(def);
+                    facts.insert(def, Arc::new(fact));
+                }
+            }
+            if next == eligible {
+                return facts;
+            }
+            eligible = next;
+        }
+    }
+
+    /// One declaration's fact over the eligible set: the kind dispatch
+    /// the export walk owns, the struct deinit gate included (a linked
+    /// deinit body is the artifact round's member machinery).
+    fn of_def(
+        package: &crate::resolve::Package,
+        decls: &crate::Decls,
+        deinit: &std::collections::HashSet<u32>,
+        eligible: &FxHashSet<crate::DefId>,
+        def: crate::DefId,
+    ) -> Option<Self> {
+        match package.def(def).kind {
+            crate::DefKind::Struct if !deinit.contains(&def.index()) => {
+                Self::struct_fact(package, decls, eligible, def)
+            },
+            crate::DefKind::Enum => Self::enum_fact(package, decls, eligible, def),
+            crate::DefKind::Case => {
+                let enum_name = package.def(decls.cases.get(&def)?.enum_def).name.clone();
+                let payload = WordSolver {
+                    package,
+                    decls,
+                    eligible,
+                    file: package.def(def).span.file,
+                }
+                .case_payload(def)?;
+                Some(Self::Case(CaseFact { enum_name, payload }))
+            },
+            crate::DefKind::TypeAlias => Self::alias_fact(decls, def),
+            crate::DefKind::Tag => Self::tag_fact(decls, def),
+            _ => None,
+        }
+    }
+
+    /// The fact one declared struct carries, when its whole shape
+    /// spells in the vocabulary: non-generic, every field a word the
+    /// vocabulary carries, the declaration's linearity riding beside
+    /// them. A bodiless declaration (its atom still shape-pending)
+    /// carries the opaque identity alone. Everything else — a generic
+    /// parameterization, a field the vocabulary cannot spell — answers
+    /// `None` and keeps its selection refused.
+    fn struct_fact(
+        package: &crate::resolve::Package,
+        decls: &crate::Decls,
+        eligible: &FxHashSet<crate::DefId>,
+        def: crate::DefId,
+    ) -> Option<Self> {
         let shape = decls.structs.get(&def)?;
         if !shape.params.is_empty() {
             return None;
@@ -398,11 +518,17 @@ impl TypeFact {
             crate::AtomKind::Reserved => return Some(Self::Opaque),
             _ => return None,
         };
+        let solver = WordSolver {
+            package,
+            decls,
+            eligible,
+            file: package.def(def).span.file,
+        };
         let mut out = Vec::with_capacity(fields.len());
         for field in fields {
             out.push(TypeField {
                 name: field.name.clone()?,
-                word: word_of_expr(decls, &field.ty)?,
+                word: solver.word_of_expr(&field.ty)?,
             });
         }
         Some(Self::Struct {
@@ -411,43 +537,34 @@ impl TypeFact {
         })
     }
 
-    /// The fact one declared alias carries, when its body spells directly
-    /// in the word vocabulary: non-generic (an alias with parameters
-    /// resolves through use-site args and is no single word), the body a
-    /// word the vocabulary names. Everything else — a body naming
-    /// another alias, a local type, a union — answers `None` and keeps
-    /// its selection refused.
-    #[must_use]
-    pub fn of_alias(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
-        let (params, body) = decls.aliases.get(&def)?;
-        if !params.is_empty() {
-            return None;
-        }
-        Some(Self::Alias(Box::new(word_of_written(body)?)))
-    }
-
-    /// The fact one declared enum carries, when every case spells in the
-    /// vocabulary: non-generic, every payload a unit, a struct payload
-    /// of word-shaped fields, or a tuple payload of word-shaped
-    /// positional members; an empty enum rides its empty rows; the
-    /// declaration's linearity rides beside the rows. Everything else
-    /// answers `None` and keeps its selection refused.
-    #[must_use]
-    pub fn of_enum(
+    /// The fact one declared enum carries, when every case spells in
+    /// the vocabulary: non-generic, every payload a unit, a struct
+    /// payload of word-shaped fields, or a tuple payload of
+    /// word-shaped positional members; an empty enum rides its empty
+    /// rows. Every other shape answers `None` and keeps its selection
+    /// refused.
+    fn enum_fact(
         package: &crate::resolve::Package,
         decls: &crate::Decls,
+        eligible: &FxHashSet<crate::DefId>,
         def: crate::DefId,
     ) -> Option<Self> {
         let shape = decls.enums.get(&def)?;
         if !shape.params.is_empty() {
             return None;
         }
+        let solver = WordSolver {
+            package,
+            decls,
+            eligible,
+            file: package.def(def).span.file,
+        };
         let mut out = Vec::with_capacity(shape.cases.len());
         for (name, ..) in &shape.cases {
             let case_def = package.lookup_type(name)?;
             out.push(TypeCase {
                 name: name.clone(),
-                payload: case_payload(decls, case_def)?,
+                payload: solver.case_payload(case_def)?,
             });
         }
         Some(Self::Enum {
@@ -456,154 +573,264 @@ impl TypeFact {
         })
     }
 
+    /// The fact one declared alias carries, when its body spells
+    /// directly in the word vocabulary by name: non-generic (an alias
+    /// with parameters resolves through use-site args and is no single
+    /// word). A body naming anything the vocabulary cannot spell
+    /// directly — another alias, a local type, a union — answers `None`
+    /// (an alias body never carries the Named word: the universe
+    /// expands aliases transparently, so a solved field naming one
+    /// already carries the expansion).
+    fn alias_fact(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+        let (params, body) = decls.aliases.get(&def)?;
+        if !params.is_empty() {
+            return None;
+        }
+        Some(Self::Alias(Box::new(word_of_written(body)?)))
+    }
+
     /// The fact one declared tag carries: the unit atom's identity
     /// alone. A tag restating the predeclared `none` (the universe's
     /// distinguished unit atom) carries no fact — the consuming
     /// compile's own `none` is that same atom, so the selection keeps
     /// the reserved-name refusal the walk already spells.
-    #[must_use]
-    pub fn of_tag(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+    fn tag_fact(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
         let atom = decls.atoms.get(&def).copied()?;
         match decls.universe.atom_decl(atom).ok()?.kind {
             crate::AtomKind::Unit if atom != crate::TypeId::NONE => Some(Self::Tag),
             _ => None,
         }
     }
-
-    /// The fact one minted enum case carries: its enum's name and its
-    /// payload, when the payload spells in the vocabulary. The enum's
-    /// own gates are [`Self::of_enum`]'s; a case fact of an enum that
-    /// carries none still answers here, but the link walk registers a
-    /// case only beside its registered enum.
-    #[must_use]
-    pub fn of_case(decls: &crate::Decls, def: crate::DefId, enum_name: &str) -> Option<Self> {
-        decls.cases.get(&def)?;
-        Some(Self::Case(CaseFact {
-            enum_name: enum_name.to_owned(),
-            payload: case_payload(decls, def)?,
-        }))
-    }
 }
 
-/// The solved field signature one payloaded case's atom carries (the
-/// positional members of a tuple payload, the named members of a
-/// struct payload).
-fn atom_fields(decls: &crate::Decls, def: crate::DefId) -> Option<Vec<crate::Field>> {
-    let atom = decls.atoms.get(&def)?;
-    match decls.universe.atom_decl(*atom).ok()?.kind {
-        crate::AtomKind::Struct(ref fields) => Some(fields.clone()),
-        _ => None,
-    }
+/// One fact build's word resolver: the ambient vocabulary plus the
+/// in-word references to the other linked declared types of the same
+/// member, gated by the co-derivation fixpoint's eligible set.
+struct WordSolver<'a> {
+    /// The producer compile's package: the def kinds and spans the
+    /// gates read, and the import-bound rows a Named reference refuses.
+    package: &'a crate::resolve::Package,
+    /// The producer compile's solved declarations.
+    decls: &'a crate::Decls,
+    /// The fixpoint's current eligible set: the declarations a Named
+    /// reference may name.
+    eligible: &'a FxHashSet<crate::DefId>,
+    /// The file of the declaration whose fact is being built: the
+    /// same-member gate every Named reference passes (the surface
+    /// serves one member's own definitions, so a cross-member
+    /// reference would name no row).
+    file: ds_diag::FileId,
 }
 
-/// One case's payload shape over the vocabulary, from its minted
-/// declaration products.
-fn case_payload(decls: &crate::Decls, def: crate::DefId) -> Option<CasePayload> {
-    match &decls.cases.get(&def)?.payload {
-        ds_parse::EnumPayload::None => Some(CasePayload::Unit),
-        // the tuple payload's members are the case atom's positional
-        // fields: each solves to one word of the vocabulary
-        ds_parse::EnumPayload::Tuple(_) => {
-            let fields = atom_fields(decls, def)?;
-            let mut out = Vec::with_capacity(fields.len());
-            for field in fields {
-                out.push(word_of_expr(decls, &field.ty)?);
-            }
-            Some(CasePayload::Tuple(out))
-        },
-        ds_parse::EnumPayload::Struct(_) => {
-            let fields = atom_fields(decls, def)?;
-            let mut out = Vec::with_capacity(fields.len());
-            for field in fields {
-                out.push(TypeField {
-                    name: field.name.clone()?,
-                    word: word_of_expr(decls, &field.ty)?,
-                });
-            }
-            Some(CasePayload::Struct(out))
-        },
+impl WordSolver<'_> {
+    /// One solved field type's word kind, when it spells in the
+    /// vocabulary: a bare atom, or a union — `t | none` either order is
+    /// exactly `t?` (B4), and any other union is one enum's complete
+    /// case set, that enum's own Named word.
+    fn word_of_expr(&self, expr: &crate::TypeExpr) -> Option<TypeWord> {
+        match expr {
+            crate::TypeExpr::Atom(id) => self.atom_word(*id),
+            crate::TypeExpr::Union(left, right) => self.union_word(left, right),
+            _ => None,
+        }
     }
-}
 
-/// One solved field type's word kind, when it spells in the vocabulary.
-fn word_of_expr(decls: &crate::Decls, expr: &crate::TypeExpr) -> Option<TypeWord> {
-    match expr {
-        crate::TypeExpr::Atom(id) => {
-            let decl = decls.universe.atom_decl(*id).ok()?;
-            match &decl.kind {
-                // a bare scalar atom, or the bytes word
-                crate::AtomKind::Unit => {
-                    if decl.name == "bytes" {
-                        Some(TypeWord::Bytes)
-                    } else {
-                        ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
-                    }
-                },
-                // a heap-reference constructor applied to word members
-                crate::AtomKind::Apply(ctor, args) => {
-                    let ctor = decls.universe.atom_decl(*ctor).ok()?;
-                    if ctor.name == "list" {
-                        let [arg] = &**args else {
-                            return None;
-                        };
-                        word_of_ty(decls, *arg).map(|word| TypeWord::List(Box::new(word)))
-                    } else if ctor.name == "map" {
-                        let [key, value] = &**args else {
-                            return None;
-                        };
-                        Some(TypeWord::Map(
-                            Box::new(word_of_ty(decls, *key)?),
-                            Box::new(word_of_ty(decls, *value)?),
-                        ))
-                    } else {
-                        None
-                    }
-                },
-                _ => None,
-            }
-        },
-        // `t | none` in either order is exactly `t?` (B4): the optional
-        // word's presence-tag union
-        crate::TypeExpr::Union(left, right) => {
-            let atom = |expr: &crate::TypeExpr| match expr {
-                crate::TypeExpr::Atom(id) => Some(*id),
-                _ => None,
-            };
-            let (left, right) = (atom(left)?, atom(right)?);
-            let inner = if right == crate::TypeId::NONE {
-                left
-            } else if left == crate::TypeId::NONE {
-                right
+    /// One solved argument type's word kind — a container member's
+    /// `Ty`, a solved set of atoms: a single-atom set is the atom's own
+    /// word, a set naming `none` beside one word is exactly that word's
+    /// optional, and any other multi-member set is one enum's complete
+    /// case set (the enum's Named word, the optional wrapping it).
+    fn word_of_ty(&self, ty: crate::Ty) -> Option<TypeWord> {
+        let mut atoms = Vec::new();
+        let mut optional = false;
+        for &atom in self.decls.universe.members(ty) {
+            if atom == crate::TypeId::NONE {
+                optional = true;
             } else {
-                return None;
-            };
-            let word = word_of_expr(decls, &crate::TypeExpr::Atom(inner))?;
-            (inner != crate::TypeId::NONE).then(|| TypeWord::Optional(Box::new(word)))
-        },
-        _ => None,
+                atoms.push(atom);
+            }
+        }
+        let word = match atoms.as_slice() {
+            [only] => self.atom_word(*only),
+            [] => return None,
+            many => self.enum_word(many),
+        }?;
+        if optional { Some(TypeWord::Optional(Box::new(word))) } else { Some(word) }
     }
-}
 
-/// One solved argument type's word kind — a container member's `Ty`, a
-/// solved set of atoms: a single-atom set is the atom's own word, and a
-/// two-member set naming `none` beside one atom is exactly that atom's
-/// optional. Every other set (three members or more, or `none` absent)
-/// spells no word.
-fn word_of_ty(decls: &crate::Decls, ty: crate::Ty) -> Option<TypeWord> {
-    match decls.universe.members(ty) {
-        [only] => word_of_expr(decls, &crate::TypeExpr::Atom(*only)),
-        [first, second] => {
-            let inner = if *second == crate::TypeId::NONE {
-                *first
-            } else if *first == crate::TypeId::NONE {
-                *second
-            } else {
-                return None;
-            };
-            let word = word_of_expr(decls, &crate::TypeExpr::Atom(inner))?;
-            (inner != crate::TypeId::NONE).then(|| TypeWord::Optional(Box::new(word)))
-        },
-        _ => None,
+    /// One atom's word kind: the ambient scalars and `bytes` by name,
+    /// the `list`/`map` constructors recursively over their members,
+    /// and a declared type's own atom as the Named word.
+    fn atom_word(&self, id: crate::atom::TypeId) -> Option<TypeWord> {
+        let decl = self.decls.universe.atom_decl(id).ok()?;
+        match &decl.kind {
+            // a bare scalar atom, or the bytes word
+            crate::AtomKind::Unit => {
+                if decl.name == "bytes" {
+                    Some(TypeWord::Bytes)
+                } else {
+                    ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
+                }
+            },
+            // a heap-reference constructor applied to word members
+            crate::AtomKind::Apply(ctor, args) => {
+                let ctor = self.decls.universe.atom_decl(*ctor).ok()?;
+                if ctor.name == "list" {
+                    let [arg] = &**args else {
+                        return None;
+                    };
+                    self.word_of_ty(*arg)
+                        .map(|word| TypeWord::List(Box::new(word)))
+                } else if ctor.name == "map" {
+                    let [key, value] = &**args else {
+                        return None;
+                    };
+                    Some(TypeWord::Map(
+                        Box::new(self.word_of_ty(*key)?),
+                        Box::new(self.word_of_ty(*value)?),
+                    ))
+                } else {
+                    None
+                }
+            },
+            // a declared type's own atom: a struct, a minted case, a
+            // payloaded tag — or the shape-pending opaque reservation
+            crate::AtomKind::Struct(_) | crate::AtomKind::Reserved => self.named_word(id),
+            _ => None,
+        }
+    }
+
+    /// One union's word kind: `t | none` in either order is exactly
+    /// `t?` (B4) — the optional over the other side's whole word (a
+    /// single atom or one enum's complete case set alike) — and any
+    /// other union must be one enum's complete case set.
+    fn union_word(&self, left: &crate::TypeExpr, right: &crate::TypeExpr) -> Option<TypeWord> {
+        let atom = |expr: &crate::TypeExpr| match expr {
+            crate::TypeExpr::Atom(id) => Some(*id),
+            _ => None,
+        };
+        let inner = if atom(right) == Some(crate::TypeId::NONE) {
+            left
+        } else if atom(left) == Some(crate::TypeId::NONE) {
+            right
+        } else {
+            let mut atoms = Vec::new();
+            Self::flatten_union(left, &mut atoms)?;
+            Self::flatten_union(right, &mut atoms)?;
+            return self.enum_word(&atoms);
+        };
+        if atom(inner) == Some(crate::TypeId::NONE) {
+            return None; // `none` alone spells no payload word
+        }
+        self.word_of_expr(inner)
+            .map(|word| TypeWord::Optional(Box::new(word)))
+    }
+
+    /// Collects one union tree's atoms; a non-atom node spells no Named
+    /// word.
+    fn flatten_union(expr: &crate::TypeExpr, atoms: &mut Vec<crate::atom::TypeId>) -> Option<()> {
+        match expr {
+            crate::TypeExpr::Atom(id) => atoms.push(*id),
+            crate::TypeExpr::Union(left, right) => {
+                Self::flatten_union(left, atoms)?;
+                Self::flatten_union(right, atoms)?;
+            },
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// One atom set's word kind when the set is exactly one non-generic
+    /// enum's case atoms — that enum's own Named word: the written
+    /// spelling names the enum, whose solving rebuilds this union [B3].
+    /// A partial case set (a true subset union) spells no word.
+    fn enum_word(&self, atoms: &[crate::atom::TypeId]) -> Option<TypeWord> {
+        let mut enum_def = None;
+        for &atom in atoms {
+            let def = self.decls.defs_of_atoms.get(&atom).copied()?;
+            let case = self.decls.cases.get(&def)?;
+            match enum_def {
+                None => enum_def = Some(case.enum_def),
+                Some(seen) if seen == case.enum_def => {},
+                Some(_) => return None,
+            }
+        }
+        let enum_def = enum_def?;
+        let shape = self.decls.enums.get(&enum_def)?;
+        if !shape.params.is_empty() {
+            return None;
+        }
+        // the set must cover every case: the enum's whole value set
+        let mut covered = Vec::with_capacity(shape.cases.len());
+        for (name, ..) in &shape.cases {
+            let case_def = self.package.lookup_type(name)?;
+            covered.push(self.decls.atoms.get(&case_def).copied()?);
+        }
+        covered.sort_unstable();
+        let mut named = atoms.to_vec();
+        named.sort_unstable();
+        (covered == named && self.linked_ok(enum_def))
+            .then(|| TypeWord::Named(self.package.def(enum_def).name.clone()))
+    }
+
+    /// One declared-type atom's word: the Named word, an in-word
+    /// reference the consuming compile resolves through the linked
+    /// surface onto its own minted entity for that same declaration —
+    /// never its ambient or local names.
+    fn named_word(&self, atom: crate::atom::TypeId) -> Option<TypeWord> {
+        let def = self.decls.defs_of_atoms.get(&atom).copied()?;
+        self.linked_ok(def)
+            .then(|| TypeWord::Named(self.package.def(def).name.clone()))
+    }
+
+    /// Whether one def is a same-member, non-import-bound, eligible
+    /// type declaration — the gates every Named reference passes: the
+    /// surface serves one member's own definitions (an import-bound row
+    /// re-exports another package's identity and waits on the richer
+    /// round), and the eligible set carries the referenced declaration
+    /// into the consumer's registration.
+    fn linked_ok(&self, def: crate::DefId) -> bool {
+        self.package.def(def).span.file == self.file
+            && self.package.foreign().get(&def).is_none()
+            && self.eligible.contains(&def)
+    }
+
+    /// One case's payload shape over the vocabulary, from its minted
+    /// declaration products.
+    fn case_payload(&self, def: crate::DefId) -> Option<CasePayload> {
+        match &self.decls.cases.get(&def)?.payload {
+            ds_parse::EnumPayload::None => Some(CasePayload::Unit),
+            // the tuple payload's members are the case atom's positional
+            // fields: each solves to one word of the vocabulary
+            ds_parse::EnumPayload::Tuple(_) => {
+                let fields = self.atom_fields(def)?;
+                let mut out = Vec::with_capacity(fields.len());
+                for field in fields {
+                    out.push(self.word_of_expr(&field.ty)?);
+                }
+                Some(CasePayload::Tuple(out))
+            },
+            ds_parse::EnumPayload::Struct(_) => {
+                let fields = self.atom_fields(def)?;
+                let mut out = Vec::with_capacity(fields.len());
+                for field in fields {
+                    out.push(TypeField {
+                        name: field.name.clone()?,
+                        word: self.word_of_expr(&field.ty)?,
+                    });
+                }
+                Some(CasePayload::Struct(out))
+            },
+        }
+    }
+
+    /// The solved field signature one payloaded case's atom carries.
+    fn atom_fields(&self, def: crate::DefId) -> Option<Vec<crate::Field>> {
+        let atom = self.decls.atoms.get(&def)?;
+        match self.decls.universe.atom_decl(*atom).ok()?.kind {
+            crate::AtomKind::Struct(ref fields) => Some(fields.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -1001,6 +1228,7 @@ mod tests {
             "}\n",
             "pub struct holder {\n",
             "  c: cell,\n",
+            "  maybe: cell?,\n",
             "}\n",
             "pub struct opt_list {\n",
             "  xs: list[int]?,\n",
@@ -1026,12 +1254,13 @@ mod tests {
         let file = files.add_source("type_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
         let fact = |name: &str| {
             let def = analyzed
                 .package
                 .lookup_type(name)
                 .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_struct(&analyzed.decls, def)
+            facts.get(&def).map(|fact| (**fact).clone())
         };
         let fields = |fields| {
             Some(super::TypeFact::Struct {
@@ -1126,17 +1355,186 @@ mod tests {
             }),
             "a linear declaration carries its move-discipline bit"
         );
+        // the Named word: a field naming the member's own declared
+        // types — a nested struct, an optional over it, a container
+        // over it — carries as the identity reference
+        assert_eq!(
+            fact("holder"),
+            fields(vec![
+                super::TypeField {
+                    name: "c".to_owned(),
+                    word: super::TypeWord::Named("cell".to_owned()),
+                },
+                super::TypeField {
+                    name: "maybe".to_owned(),
+                    word: super::TypeWord::Optional(Box::new(super::TypeWord::Named(
+                        "cell".to_owned(),
+                    ))),
+                },
+            ])
+        );
+        assert_eq!(
+            fact("keyed_wide"),
+            fields(vec![super::TypeField {
+                name: "index".to_owned(),
+                word: super::TypeWord::Map(
+                    Box::new(super::TypeWord::Scalar(super::ScalarWord::Str)),
+                    Box::new(super::TypeWord::Named("cell".to_owned())),
+                ),
+            }])
+        );
+        assert_eq!(fact("point"), Some(super::TypeFact::Tag));
+        for refused in ["boxed", "twin", "list"] {
+            assert_eq!(fact(refused), None, "{refused} carries no fact");
+        }
+    }
+
+    /// The Named word's own gates: a reference naming a def outside the
+    /// member (here every def is one member, so the gate rides on the
+    /// eligible set instead), a type whose own fact refuses (a generic
+    /// struct, a deinit carrier, a tuple field), and a partial case
+    /// subset of one enum spell no word — the referencing fact refuses
+    /// with them.
+    #[test]
+    fn the_named_word_gates_on_the_referenced_fact() {
+        let source = concat!(
+            "pub trait Copyable {\n",
+            "}\n",
+            "pub tag int\n",
+            "pub tag string\n",
+            "pub struct list[t] {\n",
+            "}\n",
+            "pub struct cell {\n",
+            "  n: int,\n",
+            "}\n",
+            "pub struct boxed[t] {\n",
+            "  v: t,\n",
+            "}\n",
+            "pub struct owned: ~Copyable {\n",
+            "  n: int,\n",
+            "  deinit { }\n",
+            "}\n",
+            "pub struct twin {\n",
+            "  p: (int, int),\n",
+            "}\n",
+            "pub enum shade {\n",
+            "  red,\n",
+            "  green,\n",
+            "}\n",
+            "pub enum pick[t] {\n",
+            "  one { v: t },\n",
+            "}\n",
+            "pub struct over_boxed {\n",
+            "  v: boxed[int],\n",
+            "}\n",
+            "pub struct over_owned {\n",
+            "  v: owned,\n",
+            "}\n",
+            "pub struct over_twin {\n",
+            "  v: twin,\n",
+            "}\n",
+            "pub struct over_pick {\n",
+            "  v: pick[int],\n",
+            "}\n",
+            "pub struct subset {\n",
+            "  v: red,\n",
+            "}\n",
+            "pub struct tinted {\n",
+            "  shade: shade,\n",
+            "  all: list[shade],\n",
+            "  maybe: shade?,\n",
+            "}\n",
+            "pub struct wrap {\n",
+            "  inner: cell,\n",
+            "}\n",
+            "pub struct nest {\n",
+            "  w: wrap,\n",
+            "}\n",
+            "pub struct pair {\n",
+            "  a: nest,\n",
+            "  b: cell,\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("named_gate.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let fact = |name: &str| {
+            let def = analyzed
+                .package
+                .lookup_type(name)
+                .unwrap_or_else(|| panic!("{name} declares"));
+            facts.get(&def).map(|fact| (**fact).clone())
+        };
+        let named = |name: &str| super::TypeWord::Named(name.to_owned());
+        // the referenced facts that refuse take the referencing fact
+        // with them
         for refused in [
-            "boxed",
-            "shade",
-            "holder",
-            "twin",
-            "keyed_wide",
-            "point",
-            "list",
+            "over_boxed",
+            "over_owned",
+            "over_twin",
+            "over_pick",
+            "subset",
         ] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
+        // a chain of Named references co-derives: nest names wrap names
+        // cell, pair names both
+        let fields = |fields| {
+            Some(super::TypeFact::Struct {
+                fields,
+                linear: false,
+            })
+        };
+        assert_eq!(
+            fact("wrap"),
+            fields(vec![super::TypeField {
+                name: "inner".to_owned(),
+                word: named("cell"),
+            }])
+        );
+        assert_eq!(
+            fact("nest"),
+            fields(vec![super::TypeField {
+                name: "w".to_owned(),
+                word: named("wrap"),
+            }])
+        );
+        assert_eq!(
+            fact("pair"),
+            fields(vec![
+                super::TypeField {
+                    name: "a".to_owned(),
+                    word: named("nest"),
+                },
+                super::TypeField {
+                    name: "b".to_owned(),
+                    word: named("cell"),
+                },
+            ])
+        );
+        // an enum-typed field and its containers name the enum
+        assert_eq!(
+            fact("tinted"),
+            fields(vec![
+                super::TypeField {
+                    name: "shade".to_owned(),
+                    word: named("shade"),
+                },
+                super::TypeField {
+                    name: "all".to_owned(),
+                    word: super::TypeWord::List(Box::new(named("shade"))),
+                },
+                super::TypeField {
+                    name: "maybe".to_owned(),
+                    word: super::TypeWord::Optional(Box::new(named("shade"))),
+                },
+            ])
+        );
     }
 
     /// The enum vocabulary carries: a non-generic enum's tag rows — unit
@@ -1206,19 +1604,20 @@ mod tests {
                 word: super::TypeWord::Bytes,
             },
         ];
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
         let enum_fact = |name: &str| {
             let def = analyzed
                 .package
                 .lookup_type(name)
                 .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_enum(&analyzed.package, &analyzed.decls, def)
+            facts.get(&def).map(|fact| (**fact).clone())
         };
-        let case_fact = |name: &str, enum_name: &str| {
+        let case_fact = |name: &str, _enum_name: &str| {
             let def = analyzed
                 .package
                 .lookup_type(name)
                 .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_case(&analyzed.decls, def, enum_name)
+            facts.get(&def).map(|fact| (**fact).clone())
         };
         let rows = |cases, linear| Some(super::TypeFact::Enum { cases, linear });
         assert_eq!(
@@ -1341,12 +1740,13 @@ mod tests {
         let file = files.add_source("tag_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
         let tag_fact = |name: &str| {
             let def = analyzed
                 .package
                 .lookup_type(name)
                 .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_tag(&analyzed.decls, def)
+            facts.get(&def).map(|fact| (**fact).clone())
         };
         assert_eq!(tag_fact("mark"), Some(super::TypeFact::Tag));
         assert_eq!(
@@ -1402,12 +1802,13 @@ mod tests {
         let file = files.add_source("alias_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
         let alias = |name: &str| {
             let def = analyzed
                 .package
                 .lookup_type(name)
                 .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_alias(&analyzed.decls, def)
+            facts.get(&def).map(|fact| (**fact).clone())
         };
         assert_eq!(
             alias("row"),
@@ -1468,13 +1869,7 @@ mod tests {
         for refused in ["pair", "chain", "local", "either", "two"] {
             assert_eq!(alias(refused), None, "{refused} carries no fact");
         }
-        let struct_fact = |name: &str| {
-            let def = analyzed
-                .package
-                .lookup_type(name)
-                .unwrap_or_else(|| panic!("{name} declares"));
-            super::TypeFact::of_struct(&analyzed.decls, def)
-        };
+        let struct_fact = alias;
         assert_eq!(struct_fact("opaque"), Some(super::TypeFact::Opaque));
         assert_eq!(
             struct_fact("empty"),

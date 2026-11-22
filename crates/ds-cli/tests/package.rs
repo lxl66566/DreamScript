@@ -1448,6 +1448,31 @@ version = \"1.0.0\"
         "  }\n",
         "  head + len(s.grid) + keyed\n",
         "}\n",
+        "pub struct fleet {\n",
+        "  head: cell,\n",
+        "  tail: list[cell],\n",
+        "  pick: cell?,\n",
+        "  index: map[string, cell],\n",
+        "  tint: shade,\n",
+        "}\n",
+        "pub fn fleet_of(n: int) -> fleet {\n",
+        "  var index = map[string, cell]()\n",
+        "  index.set(\"k\", cell { n: n, label: \"i\", tags: [], ratio: 0.5, on: true, initial: \
+         'i', code: b'i' })\n",
+        "  fleet { head: make(n), tail: [make(1)], pick: opt(n), index: index, tint: pick(n + 1) \
+         }\n",
+        "}\n",
+        "pub fn fleet_weight(f: fleet) -> int {\n",
+        "  const picked = match f.pick {\n",
+        "    none => 0,\n",
+        "    other => other.n,\n",
+        "  }\n",
+        "  const keyed = match f.index.get(\"k\") {\n",
+        "    none => 0,\n",
+        "    v => v.n,\n",
+        "  }\n",
+        "  area(f.head) + len(f.tail) + picked + keyed + score(f.tint)\n",
+        "}\n",
         "pub type words = list[string]\n",
         "pub type chain = words\n",
         "pub type wide[k] = map[k, int]\n",
@@ -1579,6 +1604,60 @@ fn linked_container_word_fields_bind_and_run() {
     // twin adds 1 + 2 + 7 = 10 over its filled table; the empty own adds
     // 0 — 13 in all, the run echoing the entry's return after the println
     assert_eq!(out, "13\n13\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A linked struct whose fields name another linked declared type of
+/// the same member binds and runs across the boundary (G4): the Named
+/// word — a direct nested field, a `list[cell]`, a `cell?`, a
+/// `map[string, cell]`, and a field naming the member's enum — resolves
+/// onto the consumer's own mint for that same declaration, so the
+/// consumer constructs every field (the nested literal, a list literal
+/// of linked calls, the optional's absent side, the empty map), reads
+/// the nested fields back, and moves whole values into the linked
+/// module's own functions.
+#[test]
+fn linked_named_type_fields_bind_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-fleet");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (cell, make, fleet, fleet_of, fleet_weight, green)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = fleet_of(3)\n",
+            "  var total = fleet_weight(made)\n",
+            "  const own = fleet {\n",
+            "    head: cell { n: 5, label: \"x\", tags: [], ratio: 0.5, on: true, initial: 'd', \
+             code: b'x' },\n",
+            "    tail: [make(1), make(2)],\n",
+            "    pick: none,\n",
+            "    index: map[string, cell](),\n",
+            "    tint: green,\n",
+            "  }\n",
+            "  total = total + fleet_weight(own)\n",
+            "  const picked = match own.pick {\n",
+            "    none => 0,\n",
+            "    other => other.n,\n",
+            "  }\n",
+            "  total = total + own.head.n + len(own.tail) + picked\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the fleet run exits 0 (stderr: {err})");
+    // fleet_weight(made) = area(make(3)) 6 + len([make(1)]) 1 + opt(3).n 3
+    // + index["k"].n 3 + score(pick(4)) 4 = 17; fleet_weight(own) = 10 + 2
+    // + 0 + 0 + score(green) 1 = 13; the reads add 5 + 2 + 0 — 37 in
+    // all, the run echoing the entry's return after the println
+    assert_eq!(out, "37\n37\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
@@ -1721,52 +1800,33 @@ fn linked_bytes_field_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The field shapes the word vocabulary's own closure leaves outside
-/// itself keep their refusals at the same walk (G4): a tuple field and a
-/// map over a non-scalar member carry no fact, so their selections still
-/// refuse — the same DS4021 the nested struct answers. The containers'
-/// recursive members (an optional list, a nested list) bind now (the
-/// spread e2e's legs).
+/// The field shapes the word vocabulary leaves outside itself keep
+/// their refusals at the same walk (G4): a tuple field carries no fact
+/// (it rides no ambient constructor atom), so its selection still
+/// refuses — the same DS4021. The containers over a declared member
+/// (`widemap`'s `map[string, blob]`) bind now through the Named word
+/// (the fleet e2e's legs).
 #[test]
 fn the_wider_word_field_shapes_still_refuse() {
     let (work, pkg_id) = blobs_fixtures("blobs-tiers");
     let root_manifest = blobs_root_manifest(&pkg_id);
-    for (tag, source, refused) in [
-        (
-            "tuple-field",
-            concat!(
-                "import @blobs (pairfield)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "map-over-struct",
-            concat!(
-                "import @blobs (widemap)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-    ] {
-        let root = write_root(&work, &root_manifest, source);
-        let entry = root.join("app.ds");
-        let entry = entry.to_str().expect("temp path is UTF-8");
-        let (ok, out, err) = ds(&["run", entry]);
-        assert!(!ok, "the {tag} selection refuses");
-        assert_eq!(out, "");
-        assert!(
-            err.contains(refused),
-            "the {tag} refusal names its tier (stderr: {err})"
-        );
-        fs::remove_dir_all(&root).expect("the temp tree removes");
-    }
+    let source = concat!(
+        "import @blobs (pairfield)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "7\n",
+        "}\n",
+    );
+    let root = write_root(&work, &root_manifest, source);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the tuple-field selection refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("layout and tag rows are the artifact round"),
+        "the tuple-field refusal names its tier (stderr: {err})"
+    );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
@@ -2060,17 +2120,6 @@ fn the_uncarried_type_shapes_refuse() {
             "generic-struct",
             concat!(
                 "import @shapes (box)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "nested-field",
-            concat!(
-                "import @shapes (nested)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",

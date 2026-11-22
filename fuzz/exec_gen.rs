@@ -2206,9 +2206,8 @@ fn linked_surface(
         .package
         .lookup_type("tone")
         .expect("the library exports the enum");
-    let enum_fact = Arc::new(
-        TypeFact::of_enum(&lib.package, &lib.decls, tone).expect("the enum's fact carries"),
-    );
+    let facts = TypeFact::member_facts(lib, 0);
+    let enum_fact = Arc::clone(facts.get(&tone).expect("the enum's fact carries"));
     let mut entries = vec![entry(
         "tone",
         tone,
@@ -2219,8 +2218,7 @@ fn linked_surface(
     )];
     for case in ["quiet", "loud", "tagged"] {
         let def = lib.package.lookup_type(case).expect("the case registers");
-        let fact =
-            Arc::new(TypeFact::of_case(&lib.decls, def, "tone").expect("the case's fact carries"));
+        let fact = Arc::clone(facts.get(&def).expect("the case's fact carries"));
         entries.push(entry(case, def, ForeignKind::Type, None, Some(fact), None));
     }
     for name in ["pick", "score", "opt"] {
@@ -2253,6 +2251,7 @@ fn origin_surface(
     module: &Module,
     map: &HashMap<FileId, FileId>,
 ) -> MemberSurface {
+    let facts = TypeFact::member_facts(lib, 0);
     let entry = |name: &str, def: ds_check::DefId, kind: ForeignKind| ForeignEntry {
         name: name.to_owned(),
         vis: lib.package.def(def).vis,
@@ -2269,7 +2268,7 @@ fn origin_surface(
             .get(&def)
             .filter(|local| !local.mutable)
             .and_then(|local| ConstFact::of_expr(&local.init)),
-        ty: TypeFact::of_struct(&lib.decls, def).map(Arc::new),
+        ty: facts.get(&def).cloned(),
         link: 0,
         origin: None,
         func: lowered
@@ -2403,6 +2402,9 @@ fn middle_surface(
 /// own ambient atoms). No tag rows ride: the extern face and the
 /// migrated members cross no tag-bearing value.
 fn std_surface(pkg: &ds_check::Analyzed, map: &HashMap<FileId, FileId>) -> MemberSurface {
+    // the first tree is the shrunk core itself, the ambient member the
+    // declaring compile registers ahead of the members' file
+    let facts = TypeFact::member_facts(pkg, 1);
     let mut entries = Vec::new();
     let mut entry = |name: &str,
                      def: ds_check::DefId,
@@ -2442,9 +2444,7 @@ fn std_surface(pkg: &ds_check::Analyzed, map: &HashMap<FileId, FileId>) -> Membe
             .package
             .lookup_type(name)
             .expect("the members file declares the type");
-        let ty = TypeFact::of_struct(&pkg.decls, def)
-            .or_else(|| TypeFact::of_alias(&pkg.decls, def))
-            .map(Arc::new);
+        let ty = facts.get(&def).cloned();
         entry(name, def, ForeignKind::Type, None, None, ty);
     }
     let urls = pkg
