@@ -963,6 +963,37 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 33,
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
+    Native {
+        // the stdin-close seam (the write row's own close): the child's
+        // end-of-input while the handle stays live, total and
+        // idempotent like the close it narrows
+        name: "proc_close_in",
+        module: NativeModule::Platform,
+        index: 34,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the stderr read row, `proc_read`'s own discipline over the
+        // child's captured diagnostics
+        name: "proc_read_err",
+        module: NativeModule::Platform,
+        index: 35,
+        shape: NativeShape::Fallible {
+            payload: SlotType::Ref,      // the captured diagnostics
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        // the non-blocking poll's checked span: the already-reaped
+        // status under the ok member, the none member while the child
+        // runs
+        name: "proc_try_wait",
+        module: NativeModule::Platform,
+        index: 36,
+        shape: NativeShape::Checked,
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.

@@ -177,9 +177,18 @@ pub const OP_PROC_WAIT: u32 = 32;
 /// `proc_close`: proc (the raw idempotent-close seam the `proc_handle`
 /// deinit pairs with — kills and reaps a still-running child).
 pub const OP_PROC_CLOSE: u32 = 33;
+/// `proc_close_in`: proc (closes the child's stdin pipe, the child's
+/// end-of-input while the handle stays live; total and idempotent).
+pub const OP_PROC_CLOSE_IN: u32 = 34;
+/// `proc_read_err`: proc (reads the child's captured stderr, one read
+/// of at most the requested bytes).
+pub const OP_PROC_READ_ERR: u32 = 35;
+/// `proc_try_wait`: proc (polls the child without blocking — the
+/// already-reaped status under the ok member, none while it runs).
+pub const OP_PROC_TRY_WAIT: u32 = 36;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 34;
+pub const OP_COUNT: u32 = 37;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -231,6 +240,9 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "proc_read", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_fn },
     Op { name: "proc_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_wait_fn },
     Op { name: "proc_close", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_fn },
+    Op { name: "proc_close_in", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_in_fn },
+    Op { name: "proc_read_err", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_err_fn },
+    Op { name: "proc_try_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_try_wait_fn },
 ];
 
 macro_rules! unserved {
@@ -279,6 +291,9 @@ unserved!(unserved_op_30 at 30);
 unserved!(unserved_op_31 at 31);
 unserved!(unserved_op_32 at 32);
 unserved!(unserved_op_33 at 33);
+unserved!(unserved_op_34 at 34);
+unserved!(unserved_op_35 at 35);
+unserved!(unserved_op_36 at 36);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -291,7 +306,8 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_20, unserved_op_21, unserved_op_22, unserved_op_23,
     unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
     unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
-    unserved_op_32, unserved_op_33,
+    unserved_op_32, unserved_op_33, unserved_op_34, unserved_op_35,
+    unserved_op_36,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -465,7 +481,13 @@ mod tests {
         assert_eq!(OPS[OP_PROC_WAIT as usize].capability, Capability::Proc);
         assert_eq!(OPS[OP_PROC_CLOSE as usize].name, "proc_close");
         assert_eq!(OPS[OP_PROC_CLOSE as usize].capability, Capability::Proc);
-        assert_eq!(OPS.len(), 34);
+        assert_eq!(OPS[OP_PROC_CLOSE_IN as usize].name, "proc_close_in");
+        assert_eq!(OPS[OP_PROC_CLOSE_IN as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_READ_ERR as usize].name, "proc_read_err");
+        assert_eq!(OPS[OP_PROC_READ_ERR as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].name, "proc_try_wait");
+        assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].capability, Capability::Proc);
+        assert_eq!(OPS.len(), 37);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -520,6 +542,9 @@ mod tests {
             OP_PROC_READ,
             OP_PROC_WAIT,
             OP_PROC_CLOSE,
+            OP_PROC_CLOSE_IN,
+            OP_PROC_READ_ERR,
+            OP_PROC_TRY_WAIT,
         ] {
             assert!(
                 !console.serves(index),
@@ -540,7 +565,7 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 34);
+        assert_eq!(table.len(), 37);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }
@@ -586,6 +611,9 @@ mod tests {
             OP_PROC_READ,
             OP_PROC_WAIT,
             OP_PROC_CLOSE,
+            OP_PROC_CLOSE_IN,
+            OP_PROC_READ_ERR,
+            OP_PROC_TRY_WAIT,
         ] {
             assert!(
                 !embed.serves(index),
