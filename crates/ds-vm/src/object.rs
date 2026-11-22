@@ -276,23 +276,40 @@ enum Object {
 pub(crate) struct ChanData {
     /// The bound (`chan_new`'s capacity, always at least one).
     pub(crate) cap: usize,
-    /// The buffered payload words, FIFO.
+    /// The buffered payload words, FIFO — `stride` consecutive words per
+    /// buffered element.
     pub(crate) elems: VecDeque<Value>,
+    /// How many consecutive words one payload element spans; 0 until
+    /// the first deposit fixes it, sticky across drains (the buffer
+    /// empties while the payload type's width stays the channel's own
+    /// fact, so a drained channel keeps trapping a disagreeing width).
+    /// The list element stride's exact sibling.
+    pub(crate) stride: usize,
     /// The parked senders in park order, each with its staged payload
-    /// word (the frame keeps the count; the entry is a borrow).
+    /// span (the frame keeps the counts; the entry is a borrow).
     pub(crate) senders: VecDeque<ChanSender>,
     /// The parked receivers in park order.
     pub(crate) receivers: VecDeque<FiberId>,
 }
 
-/// One parked sender: the fiber and its staged payload word.
+/// One parked sender: the fiber and its staged payload span.
 #[derive(Debug)]
 pub(crate) struct ChanSender {
     /// The parked sending fiber.
     pub(crate) fiber: FiberId,
-    /// The payload word staged at park time (its count stays the
-    /// parked frame's).
-    pub(crate) payload: Value,
+    /// The payload's whole word span staged at park time (each word's
+    /// count stays the parked frame's).
+    pub(crate) payload: Vec<Value>,
+}
+
+/// One popped channel element: the one-word element answers without
+/// allocation, a wider element as its owned span.
+#[derive(Debug, PartialEq)]
+pub enum ChanPop {
+    /// A one-word element.
+    One(Value),
+    /// A wider element's whole word span.
+    Span(Vec<Value>),
 }
 
 /// A map's payload: the keys, the flattened value words at a per-map
@@ -868,58 +885,90 @@ impl Objects {
         self.alloc(Object::Chan(ChanData {
             cap,
             elems: VecDeque::new(),
+            stride: 0,
             senders: VecDeque::new(),
             receivers: VecDeque::new(),
         }))
     }
 
-    /// Deposits one payload word onto channel object `obj`'s buffer
-    /// tail: the buffer's store takes the word and, for a `Ref` word,
-    /// acquires the buffer's edge count exactly like a list element —
-    /// a local word through the store's own inc, a foreign word by
-    /// posting the inc to the pending queue for the router to drain
-    /// (C4's foreign-post funnel, the channel's cross-heap seam).
+    /// Deposits one payload element — its whole inline word span — onto
+    /// channel object `obj`'s buffer tail, the `list_push` staging
+    /// shape at the channel's hand-off: the buffer's store takes the
+    /// words and acquires one edge count per `Ref` word exactly like
+    /// list elements — a local word through the store's own inc, a
+    /// foreign word by posting the inc to the pending queue for the
+    /// router to drain (C4's foreign-post funnel, the channel's
+    /// cross-heap seam). The first deposit fixes the buffer's element
+    /// stride; a later deposit must repeat it exactly, so a
+    /// hand-assembled mismatch traps instead of misaligning the FIFO.
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownObject`] when the reference names no channel.
-    pub fn chan_deposit(&mut self, obj: u32, word: Value) -> Result<(), Trap> {
+    /// [`Trap::UnknownObject`] when the reference names no channel;
+    /// [`Trap::ElementStride`] when the staged span's width disagrees
+    /// with the stride the first deposit fixed.
+    pub fn chan_deposit(&mut self, obj: u32, words: &[Value]) -> Result<(), Trap> {
         let header = self.header_of(obj)?;
         if !matches!(self.heap.payload::<Object>(header), Object::Chan(_)) {
             return Err(Trap::UnknownObject { obj });
         }
-        if let Value::Ref(id) = word {
-            if id.fiber() == self.owner {
-                self.inc(id.id())?;
-            } else {
-                self.pending.push_back(ForeignOp::Inc(id));
+        if let Object::Chan(data) = self.heap.payload::<Object>(header)
+            && data.stride != 0
+            && data.stride != words.len()
+        {
+            return Err(Trap::ElementStride {
+                obj,
+                stride: data.stride,
+                given: words.len(),
+            });
+        }
+        // the acquire happens before the store: a bogus element
+        // reference leaves the buffer untouched (a foreign element word
+        // queues, so the owning heap takes the buffer's count)
+        for value in words {
+            if let Value::Ref(id) = value {
+                if id.fiber() == self.owner {
+                    self.inc(id.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Inc(*id));
+                }
             }
         }
         match self.heap.payload_mut::<Object>(header) {
             Object::Chan(data) => {
-                data.elems.push_back(word);
+                if data.stride == 0 {
+                    data.stride = words.len();
+                }
+                data.elems.extend(words);
                 Ok(())
             },
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
 
-    /// Pops one payload word off channel object `obj`'s buffer head.
-    /// The popped word keeps the count it holds — the buffer's edge
-    /// count becomes the receiving frame's backing — so no count moves
-    /// here; the receiver's ledger takes the claim through the routed
-    /// face.
+    /// Pops one payload element off channel object `obj`'s buffer head
+    /// — its whole word span. The popped words keep the counts they
+    /// hold — the buffer's edge counts become the receiving frame's
+    /// backing — so no count moves here; the receiver's ledger takes
+    /// one claim per `Ref` word through the routed face.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no channel.
-    pub fn chan_pop(&mut self, obj: u32) -> Result<Option<Value>, Trap> {
+    pub fn chan_pop(&mut self, obj: u32) -> Result<Option<ChanPop>, Trap> {
         let header = self.header_of(obj)?;
         if !matches!(self.heap.payload::<Object>(header), Object::Chan(_)) {
             return Err(Trap::UnknownObject { obj });
         }
         match self.heap.payload_mut::<Object>(header) {
-            Object::Chan(data) => Ok(data.elems.pop_front()),
+            // stride 0 names the never-deposited channel, whose buffer
+            // is empty; the one-word element rides the allocation-free
+            // arm, a wider one its span
+            Object::Chan(data) => Ok(match data.stride {
+                0 | 1 => data.elems.pop_front().map(ChanPop::One),
+                stride => (data.elems.len() >= stride)
+                    .then(|| ChanPop::Span(data.elems.drain(..stride).collect())),
+            }),
             _ => Err(Trap::UnknownObject { obj }),
         }
     }
@@ -2102,39 +2151,42 @@ impl<'a> Heaps<'a> {
     }
 
     /// Whether channel `chan`'s buffer has room for one more payload
-    /// word, routed as a shared read.
+    /// element (the word count against the element stride), routed as a
+    /// shared read.
     pub(crate) fn chan_room(&mut self, chan: RefId) -> Result<bool, Trap> {
         let store = self.store(chan)?;
         match store.payload_chan(chan.id())? {
-            Some(data) => Ok(data.elems.len() < data.cap),
+            Some(data) => Ok(data.elems.len() / data.stride.max(1) < data.cap),
             None => Err(Trap::UnknownObject { obj: chan.id() }),
         }
     }
 
-    /// Deposits one payload word onto channel `chan`'s buffer tail,
-    /// routed: the mutation lands on the channel's store and a `Ref`
-    /// payload's edge count on the payload's own heap (the pending
-    /// funnel draining here).
-    pub(crate) fn chan_deposit(&mut self, chan: RefId, word: Value) -> Result<(), Trap> {
-        self.store(chan)?.chan_deposit(chan.id(), word)?;
+    /// Deposits one payload element's whole word span onto channel
+    /// `chan`'s buffer tail, routed: the mutation lands on the
+    /// channel's store and each `Ref` payload word's edge count on the
+    /// word's own heap (the pending funnel draining here).
+    pub(crate) fn chan_deposit(&mut self, chan: RefId, words: &[Value]) -> Result<(), Trap> {
+        self.store(chan)?.chan_deposit(chan.id(), words)?;
         self.settle(chan.fiber())
     }
 
-    /// Pops one payload word off channel `chan`'s buffer head, routed.
-    /// No count moves: the buffer's edge count becomes the receiving
-    /// frame's backing, the claim taken through [`Heaps::adopt_claim`].
-    pub(crate) fn chan_pop(&mut self, chan: RefId) -> Result<Option<Value>, Trap> {
+    /// Pops one payload element's whole word span off channel `chan`'s
+    /// buffer head, routed. No count moves: the buffer's edge counts
+    /// become the receiving frame's backing, one claim per `Ref` word
+    /// taken through [`Heaps::adopt_claim`].
+    pub(crate) fn chan_pop(&mut self, chan: RefId) -> Result<Option<ChanPop>, Trap> {
         self.store(chan)?.chan_pop(chan.id())
     }
 
     /// Stages one parked sender onto channel `chan`, routed: the fiber
-    /// and its payload word enter the channel's sender queue with no
-    /// count traffic (the parked frame keeps its own count).
+    /// and its payload's whole word span enter the channel's sender
+    /// queue with no count traffic (the parked frame keeps its own
+    /// counts).
     pub(crate) fn chan_park_sender(
         &mut self,
         chan: RefId,
         fiber: FiberId,
-        payload: Value,
+        payload: Vec<Value>,
     ) -> Result<(), Trap> {
         let store = self.store(chan)?;
         match store.payload_chan_mut(chan.id())? {
@@ -3367,6 +3419,94 @@ mod tests {
             .dec(other)
             .expect("the caller drops the stored payload");
         assert!(objects.is_empty(), "the span's payload died with the map");
+    }
+
+    /// The channel buffer carries whole word spans at a per-channel
+    /// element stride: a multi-word payload deposits and pops as one
+    /// element, the stride the first deposit fixes staying in force
+    /// across the drain, a disagreeing width refusing before any count
+    /// moves, and the death cascade dec'ing one count per stored `Ref`
+    /// word of the buffer.
+    #[test]
+    fn channels_carry_multi_word_element_spans() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let text = objects.intern("payload");
+        let chan = objects.alloc_chan(2);
+        // the first deposit fixes the two-word stride and takes the
+        // buffer's edge count per Ref word
+        objects
+            .chan_deposit(chan, &[
+                Value::I64(1),
+                Value::Ref(RefId::new(FIBER_ROOT, text)),
+            ])
+            .expect("the first deposit fixes the stride");
+        assert_eq!(
+            objects.rc_at(text),
+            Ok(2),
+            "the buffer's edge count per stored Ref word"
+        );
+        // a disagreeing width refuses before any count moves
+        assert_eq!(
+            objects.chan_deposit(chan, &[Value::I64(9)]),
+            Err(Trap::ElementStride {
+                obj: chan,
+                stride: 2,
+                given: 1
+            })
+        );
+        assert_eq!(objects.rc_at(text), Ok(2));
+        // the pop hands back the whole span, its count staying with the
+        // words (the receiving frame's claim)
+        assert_eq!(
+            objects.chan_pop(chan),
+            Ok(Some(ChanPop::Span(vec![
+                Value::I64(1),
+                Value::Ref(RefId::new(FIBER_ROOT, text))
+            ])))
+        );
+        // the receiving frame consumes its claimed word: the buffer's
+        // edge count became its backing, so its dec releases here
+        objects
+            .dec(text)
+            .expect("the receiver consumes the claimed word");
+        // the stride survives the drain: a narrower element still refuses
+        assert_eq!(objects.chan_pop(chan), Ok(None));
+        assert_eq!(
+            objects.chan_deposit(chan, &[Value::I64(4)]),
+            Err(Trap::ElementStride {
+                obj: chan,
+                stride: 2,
+                given: 1
+            })
+        );
+        // the one-word element rides the allocation-free pop arm
+        let one = objects.alloc_chan(1);
+        objects
+            .chan_deposit(one, &[Value::I64(5)])
+            .expect("a one-word channel takes its own stride");
+        assert_eq!(objects.chan_pop(one), Ok(Some(ChanPop::One(Value::I64(5)))));
+        objects
+            .dec(one)
+            .expect("the drained one-word channel drops");
+        // the death cascade decs one count per stored Ref word
+        objects
+            .chan_deposit(chan, &[
+                Value::I64(2),
+                Value::Ref(RefId::new(FIBER_ROOT, text)),
+            ])
+            .expect("the same stride deposits again");
+        assert_eq!(objects.rc_at(text), Ok(2));
+        objects.dec(chan).expect("the channel's owner drops");
+        assert_eq!(
+            objects.rc_at(text),
+            Ok(1),
+            "only the caller's count remains"
+        );
+        objects.dec(text).expect("the caller drops its word");
+        assert!(
+            objects.is_empty(),
+            "the span's payload died with the channel"
+        );
     }
 
     /// Foreign probe resolution holds through the pre-resolved forms: a

@@ -35,6 +35,21 @@ impl<'a> FnLower<'a, '_, '_> {
     /// a callable-defaulted parameter that may hold one at runtime) would
     /// leave its count invisible to the element staging and read back as a
     /// Ref word behind a Fn-classified payload slot.
+    /// The channel-carried element type an element-slot argument stages
+    /// into (a list's element, a map's value, a channel's payload):
+    /// read off the receiver's own type, since the native callee
+    /// carries no static parameter type. `None` for any other callee or
+    /// receiver — a union of collections, a non-application.
+    fn element_slot_ty(&self, target: &Callee, receiver: Option<Ty>) -> Option<Ty> {
+        let ty = receiver?;
+        match target {
+            Callee::Builtin(native) if native.name == "list_push" => self.shapes.list_element(ty),
+            Callee::Builtin(native) if native.name == "map_set" => self.shapes.map_value(ty),
+            Callee::Builtin(native) if native.name == "chan_send" => self.shapes.chan_payload(ty),
+            _ => None,
+        }
+    }
+
     fn guard_list_element(
         &mut self,
         val: &TypedPlace,
@@ -1150,7 +1165,12 @@ impl<'a> FnLower<'a, '_, '_> {
         // prepend's head). `map_set` stages its value the same way (the
         // map value channel's whole span at the value stride the first
         // store fixes) while its key stays one word — the probe
-        // vocabulary hashes whole words. `reduce`'s init needs no element
+        // vocabulary hashes whole words. `chan_send` stages its payload
+        // the same way (the channel's element stride at the hand-off:
+        // the receiver's `chan[t]` names `t`, the payload's whole span
+        // crossing at the stride the first deposit fixes, the recv's
+        // answer the tag-less total of the same words). `reduce`'s init
+        // needs no element
         // guard: the checker proves it the fold's own type, so any
         // element that could inhabit the list already passed this guard,
         // and the fold's interior span carries the init's whole width.
@@ -1161,17 +1181,15 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "map_set" => {
                 Some((2usize, "a map_set value"))
             },
+            Callee::Builtin(native) if native.name == "chan_send" => {
+                Some((1usize, "a chan_send payload"))
+            },
             Callee::Generic(generic) if generic.name == "cons" => Some((0usize, "a cons element")),
             _ => None,
         };
         // whether the call is a `map_set` whose key argument (position 1)
         // must stage exactly one word
         let map_set_key = matches!(target, Callee::Builtin(native) if native.name == "map_set");
-        // whether the call is a `chan_send` whose payload argument
-        // (position 1) must stage exactly one word — the channel's
-        // ledger hand-off shape
-        let chan_send_payload =
-            matches!(target, Callee::Builtin(native) if native.name == "chan_send");
         // stage: evaluate every argument to a place, then move its words
         // into the overlay area (argument evaluation may itself call)
         let mut staged: Vec<SlotType> = Vec::new();
@@ -1234,10 +1252,23 @@ impl<'a> FnLower<'a, '_, '_> {
             let param_ty = param_types
                 .as_ref()
                 .and_then(|types| types.get(index).copied());
+            // an element-slot argument stages its channel's whole
+            // element span, so the direct staging paths read the
+            // channel's element type as the position's parameter type:
+            // a union element suppresses them exactly a union
+            // parameter's own staging does (a bare literal would
+            // otherwise stage one word where the element stride needs
+            // the member's whole region)
+            let element_ty = match element_slot {
+                Some((slot, _)) if slot == index => self.element_slot_ty(&target, receiver_ty),
+                _ => None,
+            };
             // A literal scalar argument stages its constant directly on
             // its overlay word. A tail transfer defers the staging past
             // the exit claims, so it keeps the evaluated temp.
-            if !tail && let Some((slot, constant)) = self.direct_literal(arg, param_ty)? {
+            if !tail
+                && let Some((slot, constant)) = self.direct_literal(arg, element_ty.or(param_ty))?
+            {
                 if index == 0 {
                     receiver_ty = Some(self.val(arg.span())?.ty);
                 }
@@ -1253,7 +1284,8 @@ impl<'a> FnLower<'a, '_, '_> {
             // data op, taken only when every later argument evaluates
             // without touching the overlay.
             let offered = if !tail
-                && let Some(slot) = self.direct_compute(arg, param_ty, &arg_exprs[index + 1..])?
+                && let Some(slot) =
+                    self.direct_compute(arg, element_ty.or(param_ty), &arg_exprs[index + 1..])?
             {
                 self.scalar_dst = Some(ScalarDst::Arg {
                     index: u8::try_from(staged.len()).expect("overlay word fits u8"),
@@ -1307,15 +1339,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 // has no static parameter type to drive the widening
                 // family, and the staged words must be the whole
                 // span the channel carries
-                let channel_ty = match target {
-                    Callee::Builtin(native) if native.name == "list_push" => receiver_ty
-                        .as_ref()
-                        .and_then(|ty| self.shapes.list_element(*ty)),
-                    Callee::Builtin(native) if native.name == "map_set" => receiver_ty
-                        .as_ref()
-                        .and_then(|ty| self.shapes.map_value(*ty)),
-                    _ => None,
-                };
+                let channel_ty = self.element_slot_ty(&target, receiver_ty);
                 if let Some(channel_ty) = channel_ty.filter(|ty| *ty != arg_val.ty) {
                     let temp = self.temp_span(channel_ty)?;
                     self.widen_into(&temp, channel_ty, &arg_val, arg.span())?;
@@ -1325,22 +1349,6 @@ impl<'a> FnLower<'a, '_, '_> {
                     };
                 }
                 self.guard_list_element(&arg_val, arg.span(), what)?;
-            }
-            // a chan_send payload stages exactly one word: the channel's
-            // hand-off moves one counted word through the claim ledger,
-            // so a wider payload type has no channel yet (the collection
-            // span seam owns that round)
-            if chan_send_payload && index == 1 {
-                let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
-                if addrs.len() != 1 {
-                    return Err(LowerError::unsupported(
-                        arg.span(),
-                        "a chan_send payload",
-                        "a channel payload lowers as one machine word (the hand-off moves a \
-                         single counted word through the claim ledger); multi-word payloads \
-                         arrive with the collection span seam",
-                    ));
-                }
             }
             // a map_set's key stages exactly one word: the probe
             // resolution and the row index hash whole words, so a wider

@@ -266,13 +266,14 @@ pub struct map[k, v]
 // enters the language. One opaque word behind one heap object on the
 // creating fiber's store (the one owning heap): the word copies into a
 // spawned child's captures exactly a list word's, `send` deposits one
-// payload word parking the sender on a full buffer, `recv` takes the
+// payload element — its whole word span at the buffer's element stride,
+// a scalar or reference word or a pure-word record, tuple, or union
+// member span — parking the sender on a full buffer, `recv` takes the
 // head parking the receiver on empty, and a payload crossing fibers
-// transfers its count through the claim ledger. The payload rides one
-// word in this round (a scalar or an ordinary reference word; a
-// multi-word or deinit-carrying payload refuses at the send), and a
-// channel every fiber has parked on is the honest deadlock: no sender,
-// no answer.
+// transfers one count per reference word through the claim ledger. A
+// deinit-carrying payload refuses at the send (the buffer's edge
+// retention owns counts, never claims), and a channel every fiber has
+// parked on is the honest deadlock: no sender, no answer.
 pub struct chan[t]
 
 // The json value family, the typed face over the JSON grammar: one case

@@ -731,7 +731,7 @@ fn describe_trap(trap: &Trap) -> String {
             "span return of {span} words exceeds the caller's {caller_area}-slot argument area"
         ),
         Trap::ElementStride { obj, stride, given } => {
-            format!("list object {obj} holds {stride}-word elements, the call staged {given}")
+            format!("collection object {obj} holds {stride}-word elements, the call staged {given}")
         },
         Trap::ForeignMapKey { obj, key } => format!(
             "map object {obj} refuses a fresh row keyed by foreign reference {key:?}: the key \

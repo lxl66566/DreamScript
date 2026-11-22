@@ -864,6 +864,27 @@ impl<'a> Shapes<'a> {
         (universe.atom_decl(*ctor).ok()?.name == "list").then_some(*element)
     }
 
+    /// The payload type of one whole-channel application: the send's
+    /// staging reads it (a bare member value re-spans into the payload
+    /// type's whole span before the hand-off). `None` for any other
+    /// type — a union of channels, a non-chan application, a
+    /// non-application.
+    pub(crate) fn chan_payload(&self, ty: Ty) -> Option<Ty> {
+        let universe = &self.analyzed.decls.universe;
+        let [only] = universe.members(ty) else {
+            return None
+        };
+        let decl = universe.atom_decl(*only).ok()?;
+        let ds_check::AtomKind::Apply(ctor, args) = &decl.kind else {
+            return None
+        };
+        if !self.heap_ref(*ctor) {
+            return None;
+        }
+        let [payload] = &**args else { return None };
+        (universe.atom_decl(*ctor).ok()?.name == "chan").then_some(*payload)
+    }
+
     /// The value type of one whole-map application [F7]: the map value
     /// channel's staging reads it (a bare member value re-spans into the
     /// value type's whole span before the store). `None` for any other

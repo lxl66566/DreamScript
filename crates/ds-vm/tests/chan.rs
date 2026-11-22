@@ -715,3 +715,330 @@ fn an_eager_childs_trap_is_contained_and_counted_at_the_join() {
         "the recv answered 77 beside the boundary's trapped count 1"
     );
 }
+
+/// The multi-word fixtures' pool: the three seams, then the fold's
+/// constants (41 and 77 the heads, 1 and 2 the tail words, the radixes).
+fn pair_pool() -> Vec<Const> {
+    vec![
+        builtin(BUILTIN_CHAN_NEW),  // k0
+        builtin(BUILTIN_CHAN_SEND), // k1
+        builtin(BUILTIN_CHAN_RECV), // k2
+        Const::I64(41),             // k3: the first element's head word
+        Const::I64(77),             // k4: the second element's head word
+        Const::I64(1),              // k5: the first element's tail word
+        Const::I64(2),              // k6: the second element's tail word
+        Const::I64(100),            // k7: the head fold's radix
+        Const::I64(1000),           // k8: the tail fold's radix
+        Const::I64(10),             // k9: the drain fold's tail radix
+    ]
+}
+
+fn pair_def(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    body: &[Uop],
+) -> FunctionDef {
+    FunctionDef {
+        name: name.into(),
+        layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
+        pool: pair_pool(),
+        code: assemble(body).expect("fixture body encodes"),
+    }
+}
+
+/// `pair_main(cap: int) -> int`: new, two two-word sends, two recvs, the
+/// fold — the multi-word fast paths with no fiber ever parking, the
+/// buffer's element stride fixed by the first deposit and the recv's
+/// answer the tag-less total of the element's words. The fold mixes both
+/// words of both elements, so a dropped or reordered word flips it.
+fn pair_main_def() -> FunctionDef {
+    pair_def("pair_main", &[I64, Ref, I64, I64, Raw, Raw, Raw], 1, 3, &[
+        Uop::Funcf { frame_slots: 7 },
+        Uop::Mov { dst: 4, src: 0 },
+        Uop::Call {
+            callee: k(0),
+            nargs: 1,
+        },
+        // slot 1 keeps the channel word across the overlay-clobbering calls
+        Uop::Mov { dst: 1, src: 4 },
+        // send (41, 1): the payload's whole two-word span staged past the
+        // channel word
+        Uop::Mov { dst: 4, src: 1 },
+        Uop::Kimm { dst: 5, kidx: k(3) },
+        Uop::Kimm { dst: 6, kidx: k(5) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 3,
+        },
+        // send (77, 2)
+        Uop::Mov { dst: 4, src: 1 },
+        Uop::Kimm { dst: 5, kidx: k(4) },
+        Uop::Kimm { dst: 6, kidx: k(6) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 3,
+        },
+        // recv one element: the total's two words land on overlay words
+        // 4 and 5, moved out ahead of the next call's staging
+        Uop::Mov { dst: 4, src: 1 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        Uop::Mov { dst: 2, src: 4 },
+        Uop::Mov { dst: 3, src: 5 },
+        // recv the second element
+        Uop::Mov { dst: 4, src: 1 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        // (41*100 + 77) * 1000 + 1*10 + 2 = 4177012: head order, tail
+        // words, and word-in-span all folded (slot 6 the radix scratch,
+        // the second element's tail word at slot 5 kept clear)
+        Uop::Kimm { dst: 6, kidx: k(7) },
+        Uop::MulI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 6,
+        },
+        Uop::AddI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 4,
+        },
+        Uop::Kimm { dst: 6, kidx: k(8) },
+        Uop::MulI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 6,
+        },
+        Uop::Kimm { dst: 6, kidx: k(9) },
+        Uop::MulI64 {
+            dst: 3,
+            lhs: 3,
+            rhs: 6,
+        },
+        Uop::AddI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 3,
+        },
+        Uop::AddI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 5,
+        },
+        Uop::Ret { src: 2 },
+    ])
+}
+
+#[test]
+fn the_multi_word_fast_paths_round_trip_whole_spans() {
+    let mut vm = Vm::new(registry(vec![pair_main_def()]));
+    let answer = vm
+        .run("ch", "pair_main", &[Value::I64(2)])
+        .expect("multi-word fast paths run");
+    assert_eq!(
+        answer,
+        FrameAnswer::one(Value::I64(4_177_012)),
+        "both two-word elements crossed whole, FIFO, word-in-span sensitive"
+    );
+}
+
+/// `pair_send_child(ch) -> int`: one send of the two-word element
+/// (41, 1) — the multi-word waker.
+fn pair_send_child_def() -> FunctionDef {
+    pair_def("pair_send_child", &[Ref, Raw, Raw, Raw], 1, 3, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(3) },
+        Uop::Kimm { dst: 3, kidx: k(5) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 3,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+/// `pair_recv_child(ch) -> int`: one recv of a two-word element, folded —
+/// the parking probe's multi-word shape at a plain call, the answer
+/// (41*100 + 77)*1000 + 1 = 4177001 over the delivered total's words.
+fn pair_recv_child_def() -> FunctionDef {
+    pair_def("pair_recv_child", &[Ref, I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 2, src: 0 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        // overlay words 2 and 3 hold the total: head at 2, tail at 3
+        Uop::Mov { dst: 1, src: 2 },
+        Uop::Mov { dst: 2, src: 3 },
+        Uop::Kimm { dst: 3, kidx: k(7) },
+        Uop::MulI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 3,
+        },
+        Uop::Kimm { dst: 3, kidx: k(4) },
+        Uop::AddI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 3,
+        },
+        Uop::Kimm { dst: 3, kidx: k(8) },
+        Uop::MulI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 3,
+        },
+        Uop::AddI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 2,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+#[test]
+fn a_parked_multi_word_recv_wakes_through_the_siblings_send() {
+    let mut vm = Vm::new(registry(vec![
+        make_def(),
+        pair_recv_child_def(),
+        pair_send_child_def(),
+    ]));
+    let ch = channel_of(&mut vm, 1);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "pair_recv_child", &[ch])
+        .expect("spawn the receiver");
+    vm.spawn_fiber_in(nursery, "ch", "pair_send_child", &[ch])
+        .expect("spawn the sender");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(4_177_001)),
+                "the parked receiver's total landed word-for-word at its call site"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(0)),
+                "the sender's unit"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}
+
+/// `pair_sender2(ch) -> int`: two two-word sends past a bound of one —
+/// the second parks with its whole staged span.
+fn pair_sender2_def() -> FunctionDef {
+    pair_def("pair_sender2", &[Ref, Raw, Raw, Raw], 1, 3, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(3) },
+        Uop::Kimm { dst: 3, kidx: k(5) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 3,
+        },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Kimm { dst: 2, kidx: k(4) },
+        Uop::Kimm { dst: 3, kidx: k(6) },
+        Uop::Call {
+            callee: k(1),
+            nargs: 3,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+/// `pair_recvr2(ch) -> int`: two recvs of two-word elements, folded to
+/// 4177012 — the multi-word refiller.
+fn pair_recvr2_def() -> FunctionDef {
+    pair_def("pair_recvr2", &[Ref, I64, I64, Raw, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 6 },
+        Uop::Mov { dst: 4, src: 0 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        Uop::Mov { dst: 1, src: 4 },
+        Uop::Mov { dst: 2, src: 5 },
+        Uop::Mov { dst: 4, src: 0 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        // (41*100 + 77) * 1000 + 1*10 + 2 over both elements' words
+        Uop::Kimm { dst: 3, kidx: k(7) },
+        Uop::MulI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 3,
+        },
+        Uop::AddI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 4,
+        },
+        Uop::Kimm { dst: 3, kidx: k(8) },
+        Uop::MulI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 3,
+        },
+        Uop::Kimm { dst: 3, kidx: k(9) },
+        Uop::MulI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 3,
+        },
+        Uop::AddI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 5,
+        },
+        Uop::AddI64 {
+            dst: 1,
+            lhs: 1,
+            rhs: 2,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
+#[test]
+fn a_parked_multi_word_send_refills_from_the_receivers_drain() {
+    let mut vm = Vm::new(registry(vec![
+        make_def(),
+        pair_sender2_def(),
+        pair_recvr2_def(),
+    ]));
+    let ch = channel_of(&mut vm, 1);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "pair_sender2", &[ch])
+        .expect("spawn the sender");
+    vm.spawn_fiber_in(nursery, "ch", "pair_recvr2", &[ch])
+        .expect("spawn the receiver");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(0)),
+                "the parked sender woke with the unit word"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(4_177_012)),
+                "both spans crossed in order, the parked one refilled whole into the freed slot"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}

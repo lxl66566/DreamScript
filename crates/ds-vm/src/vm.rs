@@ -9067,7 +9067,7 @@ impl Vm {
                                     }
                                 } else if let Some(channel) = nf.channel {
                                     match self
-                                        .chan_switch(channel, &active, pc.0, fp, &f.layout)
+                                        .chan_switch(channel, &active, pc.0, fp, &f.layout, nargs)
                                         .map_err(|e| (e, pc))?
                                     {
                                         ChanOutcome::Answered => {
@@ -9194,7 +9194,7 @@ impl Vm {
                                     // the body; a park pops the frame
                                     // exactly the net tail park would
                                     match self
-                                        .chan_step(channel, fp, &f.layout)
+                                        .chan_step(channel, fp, &f.layout, nargs)
                                         .map_err(|e| (e, pc))?
                                     {
                                         ChanStep::Answer(result) => result,
@@ -10420,17 +10420,22 @@ impl Vm {
     /// One channel step (the 2026-11-21 shared-state ruling): the fast
     /// paths run against the channel's own store through the router
     /// (deposit, pop, the waiter queues), a full send or empty receive
-    /// parks the caller in the channel's waiter queue — the payload
-    /// word staged with no count move, the parked frame keeping its own
-    /// count exactly the net send wait's discipline — and a completed
-    /// hand-off wakes the parked peer through the scheduler's delivery
-    /// and run queue, the peer fiber itself the resumer (no reactor
-    /// interest, no deadline).
+    /// parks the caller in the channel's waiter queue — the payload's
+    /// whole word span staged with no count move, the parked frame
+    /// keeping its own counts exactly the net send wait's discipline —
+    /// and a completed hand-off wakes the parked peer through the
+    /// scheduler's delivery and run queue, the peer fiber itself the
+    /// resumer (no reactor interest, no deadline). The payload element
+    /// spans words at the buffer's element stride (the collection span
+    /// seam: a record or tuple payload's whole span crosses, the
+    /// recv's answer the tag-less total of its words), the staged span
+    /// read past the channel word exactly a `list_push` element's.
     fn chan_step(
         &mut self,
         channel: ChannelNative,
         fp: usize,
         caller: &FrameLayout,
+        nargs: u8,
     ) -> Result<ChanStep, Trap> {
         match channel {
             ChannelNative::New => {
@@ -10446,13 +10451,22 @@ impl Vm {
                 let Value::Ref(chan) = control_word(&self.stack, fp, caller, 0)? else {
                     return Err(Trap::UnknownObject { obj: 0 });
                 };
-                let payload = control_word(&self.stack, fp, caller, 1)?;
+                // the one-word payload keeps the allocation-free read; a
+                // wider element's whole staged span rides the vec (the
+                // park path owns its copy either way)
+                let payload = if usize::from(nargs) == 2 {
+                    vec![control_word(&self.stack, fp, caller, 1)?]
+                } else {
+                    (1..usize::from(nargs))
+                        .map(|index| control_word(&self.stack, fp, caller, index))
+                        .collect::<Result<Vec<_>, Trap>>()?
+                };
                 let here = self.current;
                 if !self.heaps().chan_room(chan)? {
                     self.heaps().chan_park_sender(chan, here, payload)?;
                     return Ok(ChanStep::Park);
                 }
-                self.heaps().chan_deposit(chan, payload)?;
+                self.heaps().chan_deposit(chan, &payload)?;
                 self.chan_release(chan)?;
                 Ok(ChanStep::Answer(NativeResult::Word(Value::I64(0))))
             },
@@ -10465,11 +10479,24 @@ impl Vm {
                     self.heaps().chan_park_receiver(chan, here)?;
                     return Ok(ChanStep::Park);
                 };
-                if let Value::Ref(word) = elem {
-                    self.heaps().adopt_claim(here, word);
-                }
+                let result = match elem {
+                    crate::object::ChanPop::One(word) => {
+                        if let Value::Ref(payload) = word {
+                            self.heaps().adopt_claim(here, payload);
+                        }
+                        NativeResult::Word(word)
+                    },
+                    crate::object::ChanPop::Span(words) => {
+                        for word in &words {
+                            if let Value::Ref(payload) = word {
+                                self.heaps().adopt_claim(here, *payload);
+                            }
+                        }
+                        NativeResult::Total { words }
+                    },
+                };
                 self.chan_refill(chan)?;
-                Ok(ChanStep::Answer(NativeResult::Word(elem)))
+                Ok(ChanStep::Answer(result))
             },
         }
     }
@@ -10485,8 +10512,9 @@ impl Vm {
         pc: u32,
         fp: usize,
         caller: &FrameLayout,
+        nargs: u8,
     ) -> Result<ChanOutcome, Trap> {
-        match self.chan_step(channel, fp, caller)? {
+        match self.chan_step(channel, fp, caller, nargs)? {
             ChanStep::Answer(result) => {
                 overlay_native(result, &mut self.stack, caller, fp)?;
                 Ok(ChanOutcome::Answered)
@@ -10501,11 +10529,13 @@ impl Vm {
         }
     }
 
-    /// Hands one buffered payload word to the head live receiver after a
-    /// deposit: the buffer's edge count becomes the receiver's claim
-    /// (the ledger transfer, no count mutation), the delivery staged and
-    /// the receiver queued ready. Stale waiters — a nursery cancel cut
-    /// them, a release door took them — drop; their entry rode no count.
+    /// Hands one buffered payload element to the head live receiver
+    /// after a deposit: each `Ref` word's buffer edge count becomes the
+    /// receiver's claim (the ledger transfer, no count mutation), the
+    /// delivery staged — the one-word element as a word, a wider one as
+    /// the tag-less total of its span — and the receiver queued ready.
+    /// Stale waiters — a nursery cancel cut them, a release door took
+    /// them — drop; their entry rode no count.
     fn chan_release(&mut self, chan: RefId) -> Result<(), Trap> {
         loop {
             let Some(receiver) = self.heaps().chan_take_receiver(chan)? else {
@@ -10526,19 +10556,32 @@ impl Vm {
                 self.heaps().chan_park_receiver(chan, receiver)?;
                 return Ok(());
             };
-            if let Value::Ref(word) = elem {
-                self.heaps().adopt_claim(receiver, word);
-            }
-            self.wake_chan_waiter(receiver, NativeResult::Word(elem));
+            let result = match elem {
+                crate::object::ChanPop::One(word) => {
+                    if let Value::Ref(payload) = word {
+                        self.heaps().adopt_claim(receiver, payload);
+                    }
+                    NativeResult::Word(word)
+                },
+                crate::object::ChanPop::Span(words) => {
+                    for word in &words {
+                        if let Value::Ref(payload) = word {
+                            self.heaps().adopt_claim(receiver, *payload);
+                        }
+                    }
+                    NativeResult::Total { words }
+                },
+            };
+            self.wake_chan_waiter(receiver, result);
             return Ok(());
         }
     }
 
-    /// Moves one parked sender's staged payload into the slot a receive
-    /// freed: the deposit takes the buffer's edge count on the payload's
-    /// own heap (the C4 funnel), the sender woken with the unit word.
-    /// Stale senders drop — the payload's count was the parked frame's
-    /// own, released by whoever cut it.
+    /// Moves one parked sender's staged payload span into the slot a
+    /// receive freed: the deposit takes the buffer's edge count per
+    /// `Ref` word on the payload's own heap (the C4 funnel), the sender
+    /// woken with the unit word. Stale senders drop — the payload's
+    /// counts were the parked frame's own, released by whoever cut it.
     fn chan_refill(&mut self, chan: RefId) -> Result<(), Trap> {
         loop {
             let Some(sender) = self.heaps().chan_take_sender(chan)? else {
@@ -10551,7 +10594,7 @@ impl Vm {
             {
                 continue;
             }
-            self.heaps().chan_deposit(chan, sender.payload)?;
+            self.heaps().chan_deposit(chan, &sender.payload)?;
             self.wake_chan_waiter(sender.fiber, NativeResult::Word(Value::I64(0)));
             return Ok(());
         }

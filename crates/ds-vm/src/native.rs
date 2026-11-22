@@ -3835,8 +3835,11 @@ pub fn builtin_module() -> Vec<NativeFunction> {
         },
         NativeFunction {
             name: "chan_send",
+            // the staged tail past the channel word is one payload
+            // element's whole inline word span (`list_push`'s variadic
+            // shape at the hand-off position)
             params: &[SlotType::Ref, SlotType::Raw],
-            variadic: false,
+            variadic: true,
             result_words: 1,
             control: None,
             channel: Some(ChannelNative::Send),
