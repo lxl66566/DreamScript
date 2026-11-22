@@ -11,10 +11,13 @@
 //! local index root or a git remote's snapshot — the verified bundles
 //! installing through the store either way.
 
+use std::path::Path;
+
 use ds_diag::FileId;
 use ds_mod::Hash128;
 
 use crate::{
+    dir::dir_package,
     package::Package,
     resolve::{Fetched, ProvidedPackage},
     store::Store,
@@ -183,4 +186,43 @@ where
             member_identity,
         })
     }
+}
+
+/// One path demand answered from a directory: the package the directory
+/// shapes (its manifest plus every member the walk admits) read from
+/// source, its member identity folded, its content identity computed
+/// over the canonical bundle, and the bundle installed under that
+/// identity as a cache fill before it serves — the store never the
+/// path dep's source of truth (a repeat resolution re-reads the source
+/// whatever the store holds), and an install failure degrades to
+/// serving without caching, the fetched-bundle rule. The served name
+/// and version are the directory's own; the resolution walk validates
+/// the name against the demand.
+#[must_use]
+pub fn fetch_path(store: &Store, dir: &Path) -> Fetched {
+    let package = match dir_package(dir) {
+        Ok(package) => package,
+        Err(error) => return Fetched::Refused(error.to_string()),
+    };
+    let Ok(manifest) = package.manifest(FileId::new(0)) else {
+        return Fetched::Refused(format!(
+            "the package at {} does not parse its own manifest member",
+            dir.display()
+        ));
+    };
+    let Ok(member_identity) = package.member_identity() else {
+        return Fetched::Refused(format!(
+            "the package at {} does not fold a member identity",
+            dir.display()
+        ));
+    };
+    let identity = package.content_hash();
+    // the cache fill: a failure degrades to serving without caching,
+    // the next resolution re-reading the source either way
+    let _ = store.install(&package);
+    Fetched::Found(ProvidedPackage {
+        manifest,
+        content_hash: identity,
+        member_identity,
+    })
 }

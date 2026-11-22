@@ -1,17 +1,33 @@
-//! Minimal-version-set resolution over a provider seam. Every dep entry
-//! declares a minimum version and pins the content hash of that version's
-//! package; demands unify by taking each name's maximum declared minimum,
-//! the provider answers name@version exactly (the load walk's provider
-//! discipline) with the winning declarer's pin riding the demand — the
-//! key a store-backed provider resolves straight from, no name-keyed
+//! Minimal-version-set resolution over a provider seam. Every registry
+//! dep entry declares a minimum version and pins the content hash of that
+//! version's package; demands unify by taking each name's maximum declared
+//! minimum, the provider answers name@version exactly (the load walk's
+//! provider discipline) with the winning declarer's pin riding the demand
+//! — the key a store-backed provider resolves straight from, no name-keyed
 //! index needed beside the content-addressed files — the same pin
 //! validating the fetched content, and the resolved graph — one version
-//! per name this round — serializing as the byte-stable lock. The
-//! graph's native artifacts fold the same way: one identity per artifact
-//! name, every declarer's pin agreeing, the manifest texts (artifacts
-//! inside) carrying them into the lock.
+//! per name this round — serializing as the byte-stable lock. The graph's
+//! native artifacts fold the same way: one identity per artifact name,
+//! every declarer's pin agreeing, the manifest texts (artifacts inside)
+//! carrying them into the lock.
+//!
+//! A path-shaped dep entry demands no version: the demand names a
+//! directory (the walk joining the declaring package's root with the
+//! entry's relative path), the fetch reads the package from source, and
+//! the answer carries the content identity the reading actually saw — the
+//! store a cache layer the fetch fills, never the path dep's source of
+//! truth. One demand shape per name: a name demanded both from a path and
+//! through a registry pin refuses, a name demanded at two directories
+//! refuses, and a package the store or registry served (no directory of
+//! its own) declaring a path dep refuses — a fetched bundle has no root
+//! to resolve a relative path against. Path deps nest (a path package's
+//! own manifest declaring path deps, resolved against ITS directory), and
+//! the cycle check reads the final graph's edges over both shapes.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::{Path, PathBuf},
+};
 
 use ds_mod::Hash128;
 
@@ -19,6 +35,28 @@ use crate::{
     manifest::{ArtifactBound, DepBound, Manifest},
     version::Version,
 };
+
+/// One resolution demand's shape: a registry row (the name's demanded
+/// version carrying the winning declarer's content pin) or a local
+/// directory (the path dep's root, the walk having joined the entry's
+/// relative path against the declaring package's directory — the fetch
+/// seam reads absolute paths alone).
+#[derive(Clone, Copy, Debug)]
+pub enum Demand<'a> {
+    /// The registry demand: the exact version plus the winning
+    /// declarer's pin.
+    Registry {
+        /// The demanded exact version.
+        ver: &'a Version,
+        /// The winning declarer's content pin.
+        pin: Hash128,
+    },
+    /// The path demand: the dep's directory, a package manifest inside.
+    Path {
+        /// The dep's package root directory.
+        dir: &'a Path,
+    },
+}
 
 /// One row of provider metadata: the manifest the provider serves plus
 /// the content hash of the package it names (a registry index row's
@@ -35,19 +73,22 @@ pub struct ProvidedPackage {
     pub member_identity: Hash128,
 }
 
-/// The provider seam's answer for one `(name, version)` demand. The
-/// distinction the taxonomy needs is the provider's to report: an unknown
-/// name and a known name whose demanded version is unoffered are different
-/// refusals.
+/// The provider seam's answer for one demand. The distinction the
+/// taxonomy needs is the provider's to report: an unknown name and a
+/// known name whose demanded version is unoffered are different
+/// refusals. A path demand answers `Found` or `Refused` alone — the
+/// taxonomy is a registry concept (a directory either shapes a package
+/// or reports why it cannot), and the walk maps a stray taxonomy answer
+/// to a refusal naming it.
 #[derive(Clone, Debug)]
 pub enum Fetched {
-    /// The package row for exactly this pair.
+    /// The package row for exactly this demand.
     Found(ProvidedPackage),
     /// No package under the name at all.
     UnknownName,
     /// The name exists but the exact version is unoffered; `best` is the
-    /// provider's highest offered version of the name (`None`: the listing
-    /// is empty), carried for the diagnostic, not the algorithm.
+    /// provider's highest offered version of the name (`None`: the
+    /// listing is empty), carried for the diagnostic, not the algorithm.
     Unoffered {
         /// The provider's highest offered version of the name.
         best: Option<Version>,
@@ -132,6 +173,48 @@ pub enum ResolveError {
         /// The hook's refusal message.
         message: String,
     },
+    /// One dep name demanded both from a local path and through a
+    /// registry pin: one demand shape per name.
+    MixedDemand {
+        /// The demanded name.
+        name: String,
+        /// The manifest that demanded it from a path.
+        path: String,
+        /// The manifest that demanded it through a registry pin.
+        pin: String,
+    },
+    /// One dep name demanded at two directories.
+    PathConflict {
+        /// The demanded name.
+        name: String,
+        /// The directory the first declarer named.
+        dir: PathBuf,
+        /// The first declarer.
+        dependent: String,
+        /// The directory the second declarer named.
+        other: PathBuf,
+        /// The second declarer.
+        declarer: String,
+    },
+    /// A package the store or registry served — no directory of its own
+    /// — declared a path dep: a fetched bundle carries no root to
+    /// resolve a relative path against.
+    OrphanPath {
+        /// The path dep's name.
+        name: String,
+        /// The fetched package that declared it.
+        dependent: String,
+    },
+    /// A path demand's fetch refused: the directory unreadable, its
+    /// manifest drifting, or the member set refusing to bundle.
+    PathRefused {
+        /// The demanded name.
+        name: String,
+        /// The demanded directory.
+        dir: PathBuf,
+        /// The fetch's refusal message.
+        message: String,
+    },
 }
 
 impl core::fmt::Display for ResolveError {
@@ -192,16 +275,46 @@ impl core::fmt::Display for ResolveError {
                 version,
                 message,
             } => write!(f, "`{name}` at {version}: {message}"),
+            Self::MixedDemand { name, path, pin } => write!(
+                f,
+                "`{name}` is demanded both from a local path (by `{path}`) and through a registry \
+                 pin (by `{pin}`); one demand shape per name"
+            ),
+            Self::PathConflict {
+                name,
+                dir,
+                dependent,
+                other,
+                declarer,
+            } => write!(
+                f,
+                "`{name}` is demanded at two directories: `{dependent}` declares {}, `{declarer}` \
+                 declares {}",
+                dir.display(),
+                other.display()
+            ),
+            Self::OrphanPath { name, dependent } => write!(
+                f,
+                "`{dependent}` was served from the store and declares the path dep `{name}`; a \
+                 fetched bundle carries no directory to resolve a path against — declare the dep \
+                 in the root manifest, or repin `{dependent}` when publishing"
+            ),
+            Self::PathRefused { name, dir, message } => {
+                write!(f, "`{name}` at {}: {message}", dir.display())
+            },
         }
     }
 }
 
 /// One resolved dependency: the winning version, its validated content
 /// identity, its member identity (the provider's fold over the decoded
-/// bundle's source members), and its manifest.
+/// bundle's source members), its manifest, and — for a path-resolved
+/// package — the directory it read from (the base its own path deps
+/// resolve against, and the root a dev loop watches).
 #[derive(Clone, Debug)]
 pub struct ResolvedPackage {
-    /// The resolved version (the maximum declared minimum).
+    /// The resolved version (the maximum declared minimum for a registry
+    /// demand; the directory's own manifest version for a path demand).
     pub version: Version,
     /// The content pin that validated this package.
     pub content_hash: Hash128,
@@ -211,6 +324,9 @@ pub struct ResolvedPackage {
     pub member_identity: Hash128,
     /// The manifest at the resolved version.
     pub manifest: Manifest,
+    /// The directory a path demand read from; a registry-served package
+    /// carries none.
+    pub dir: Option<PathBuf>,
 }
 
 /// A finished resolution: the root manifest, every resolved dependency
@@ -242,6 +358,19 @@ impl Resolved {
     #[must_use]
     pub fn artifacts(&self) -> &BTreeMap<String, ArtifactBound> {
         &self.artifacts
+    }
+
+    /// Every directory a resolved path dep read from, in ascending
+    /// order: the transitive watch set a dev loop grows over the
+    /// package tree.
+    #[must_use]
+    pub fn path_dirs(&self) -> Vec<PathBuf> {
+        self.deps
+            .values()
+            .filter_map(|package| package.dir.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// The lock: every manifest of the resolved graph (root included),
@@ -290,9 +419,11 @@ impl Resolved {
 
 /// Resolves the root's dependency closure to the minimal version set.
 /// Deterministic by construction: demands live in name-sorted maps, the
-/// work queue drains in first-raise order, and each `(name, version)` is
-/// fetched at most once (a name holds one pending queue entry; a further
-/// raise while queued updates the demand the fetch reads).
+/// work queue drains in first-raise order, and each name is fetched at
+/// most once per demand shape (a name holds one pending queue entry; a
+/// further raise while queued updates the demand the fetch reads).
+/// `root_dir` is the root package's own directory — the base its path
+/// deps resolve against.
 ///
 /// A version carries its pre-release and build segments inline (a
 /// copyable value), so a refusal naming several of them is large; the
@@ -305,14 +436,20 @@ impl Resolved {
 /// [`ResolveError::UnsatisfiableBound`] when a known name's demanded
 /// version is unoffered, [`ResolveError::HashMismatch`] when one
 /// `(name, version)` carries two pins or the fetched content disagrees
-/// with the winning pin, [`ResolveError::Refused`] when the provider's
+/// with the winning pin, [`ResolveError::Refused`] when a registry
 /// fetch fails its own verification or cannot read its storage,
-/// [`ResolveError::ArtifactConflict`] when one artifact name carries two
-/// identities across the graph, and [`ResolveError::Cycle`] when the
-/// final graph carries a cross-package cycle.
+/// [`ResolveError::PathRefused`] when a path demand's directory will
+/// not shape a package, [`ResolveError::MixedDemand`] when one name is
+/// demanded at both shapes, [`ResolveError::PathConflict`] when one
+/// name is demanded at two directories, [`ResolveError::OrphanPath`]
+/// when a fetched package declares a path dep,
+/// [`ResolveError::ArtifactConflict`] when one artifact name carries
+/// two identities across the graph, and [`ResolveError::Cycle`] when
+/// the final graph carries a cross-package cycle.
 pub fn resolve(
     root: &Manifest,
-    mut fetch: impl FnMut(&str, &Version, Hash128) -> Fetched,
+    root_dir: &Path,
+    mut fetch: impl FnMut(&str, Demand<'_>) -> Fetched,
 ) -> Result<Resolved, ResolveError> {
     let mut walk = Walk {
         root: root.name.clone(),
@@ -323,76 +460,128 @@ pub fn resolve(
         queued: BTreeSet::new(),
     };
     for (name, bound) in &root.deps {
-        walk.record(&root.name, name, *bound)?;
+        walk.record(&root.name, Some(root_dir), name, bound)?;
     }
     while let Some(name) = walk.queue.pop_front() {
         walk.queued.remove(&name);
-        let (demanded, dependent) = walk
+        let row = walk
             .demands
             .get(&name)
             .cloned()
             .expect("a queued name carries its demand");
-        // the pin of the winning declared minimum rides the demand: the
-        // identity a store-backed provider reads directly and the same
-        // pin that validates whatever the fetch served
-        let (pinned, pinning) = walk
-            .pins
-            .get(&(name.clone(), demanded))
-            .cloned()
-            .expect("a demand carries the pin of its version");
-        match fetch(&name, &demanded, pinned) {
-            Fetched::UnknownName => {
-                return Err(ResolveError::MissingPackage {
-                    name,
-                    demanded,
-                    dependent,
-                });
-            },
-            Fetched::Unoffered { best } => {
-                return Err(ResolveError::UnsatisfiableBound {
-                    name,
-                    demanded,
-                    best,
-                    dependent,
-                });
-            },
-            Fetched::Refused(message) => {
-                return Err(ResolveError::Refused {
-                    name,
-                    version: demanded,
-                    message,
-                });
-            },
-            Fetched::Found(provided) => {
-                // content under another name or version is the demand
-                // unserved, the load walk's same-miss rule
-                if provided.manifest.name != name || provided.manifest.version != demanded {
-                    return Err(ResolveError::MissingPackage {
-                        name,
-                        demanded,
-                        dependent,
-                    });
+        match row {
+            DemandRow::Registry { ver, dependent } => {
+                // the pin of the winning declared minimum rides the
+                // demand: the identity a store-backed provider reads
+                // directly and the same pin that validates whatever the
+                // fetch served
+                let (pinned, pinning) = walk
+                    .pins
+                    .get(&(name.clone(), ver))
+                    .cloned()
+                    .expect("a registry demand carries the pin of its version");
+                match fetch(&name, Demand::Registry {
+                    ver: &ver,
+                    pin: pinned,
+                }) {
+                    Fetched::UnknownName => {
+                        return Err(ResolveError::MissingPackage {
+                            name,
+                            demanded: ver,
+                            dependent,
+                        });
+                    },
+                    Fetched::Unoffered { best } => {
+                        return Err(ResolveError::UnsatisfiableBound {
+                            name,
+                            demanded: ver,
+                            best,
+                            dependent,
+                        });
+                    },
+                    Fetched::Refused(message) => {
+                        return Err(ResolveError::Refused {
+                            name,
+                            version: ver,
+                            message,
+                        });
+                    },
+                    Fetched::Found(provided) => {
+                        // content under another name or version is the
+                        // demand unserved, the load walk's same-miss rule
+                        if provided.manifest.name != name || provided.manifest.version != ver {
+                            return Err(ResolveError::MissingPackage {
+                                name,
+                                demanded: ver,
+                                dependent,
+                            });
+                        }
+                        // the pin of the winning declared minimum
+                        // validates the recorded content identity
+                        if provided.content_hash != pinned {
+                            return Err(ResolveError::HashMismatch {
+                                name: name.clone(),
+                                version: ver,
+                                pinned,
+                                found: provided.content_hash,
+                                dependent: pinning,
+                            });
+                        }
+                        // a store- or registry-served package carries no
+                        // directory, so its own path deps (any) refuse
+                        // inside record
+                        for (dep, bound) in &provided.manifest.deps {
+                            walk.record(&name, None, dep, bound)?;
+                        }
+                        walk.resolved.insert(name, ResolvedPackage {
+                            version: ver,
+                            content_hash: pinned,
+                            member_identity: provided.member_identity,
+                            manifest: provided.manifest,
+                            dir: None,
+                        });
+                    },
                 }
-                // the pin of the winning declared minimum validates the
-                // recorded content identity
-                if provided.content_hash != pinned {
-                    return Err(ResolveError::HashMismatch {
-                        name: name.clone(),
-                        version: demanded,
-                        pinned,
-                        found: provided.content_hash,
-                        dependent: pinning,
-                    });
+            },
+            DemandRow::Path { dir, dependent: _ } => {
+                match fetch(&name, Demand::Path { dir: &dir }) {
+                    Fetched::UnknownName | Fetched::Unoffered { .. } => {
+                        return Err(ResolveError::PathRefused {
+                            name,
+                            dir,
+                            message: "the fetch answered a registry taxonomy for a path demand"
+                                .to_owned(),
+                        });
+                    },
+                    Fetched::Refused(message) => {
+                        return Err(ResolveError::PathRefused { name, dir, message });
+                    },
+                    Fetched::Found(provided) => {
+                        // the directory must name the demanded dep; the
+                        // version is whatever the directory's manifest
+                        // declares (no pin validates a path)
+                        if provided.manifest.name != name {
+                            return Err(ResolveError::PathRefused {
+                                name,
+                                dir,
+                                message: format!(
+                                    "the package names itself `{}`",
+                                    provided.manifest.name
+                                ),
+                            });
+                        }
+                        for (dep, bound) in &provided.manifest.deps {
+                            walk.record(&name, Some(&dir), dep, bound)?;
+                        }
+                        walk.resolved.insert(name, ResolvedPackage {
+                            version: provided.manifest.version,
+                            content_hash: provided.content_hash,
+                            member_identity: provided.member_identity,
+                            manifest: provided.manifest,
+                            dir: Some(dir),
+                        });
+                    },
                 }
-                for (dep, bound) in &provided.manifest.deps {
-                    walk.record(&name, dep, *bound)?;
-                }
-                walk.resolved.insert(name, ResolvedPackage {
-                    version: demanded,
-                    content_hash: pinned,
-                    member_identity: provided.member_identity,
-                    manifest: provided.manifest,
-                });
             },
         }
     }
@@ -450,15 +639,36 @@ fn fold_artifacts(
         .collect())
 }
 
+/// One name's current demand.
+#[derive(Clone, Debug)]
+enum DemandRow {
+    /// The registry demand: the current demanded maximum and the
+    /// declarer that raised it.
+    Registry {
+        /// The demanded version.
+        ver: Version,
+        /// The raising declarer.
+        dependent: String,
+    },
+    /// The path demand: the resolved directory and the first declarer.
+    Path {
+        /// The dep's package directory.
+        dir: PathBuf,
+        /// The first declarer.
+        dependent: String,
+    },
+}
+
 /// The walk's accumulators.
 struct Walk {
     /// The root package's name (a dep entry naming it is never demanded or
     /// fetched — the root is under development, not provided — and the
     /// cycle check refuses it as a graph edge).
     root: String,
-    /// Each name's current demanded maximum and the declarer that raised it.
-    demands: BTreeMap<String, (Version, String)>,
-    /// Every declared pin, keyed by the (name, version) it covers.
+    /// Each name's current demand.
+    demands: BTreeMap<String, DemandRow>,
+    /// Every declared registry pin, keyed by the (name, version) it
+    /// covers.
     pins: BTreeMap<(String, Version), (Hash128, String)>,
     /// The manifest at each name's current demanded version.
     resolved: BTreeMap<String, ResolvedPackage>,
@@ -471,49 +681,128 @@ struct Walk {
 }
 
 impl Walk {
-    /// Records one dep bound: the pin first (one `(name, ver)` pinned at
-    /// two hashes refuses), then the demand, re-enqueuing the name only
-    /// when its demanded maximum rose. A bound naming the root package
+    /// Records one dep bound: a registry pin records itself (one
+    /// `(name, ver)` pinned at two hashes refuses) then the demand,
+    /// re-enqueuing the name only when its demanded maximum rose; a path
+    /// entry resolves against the declarer's directory (a declarer with
+    /// none — a store- or registry-served package — refuses), agreeing
+    /// with a prior identical path demand and refusing a different
+    /// directory or the other shape. A bound naming the root package
     /// records nothing — the cycle check reads the final graph's edges,
     /// where the bound already appears.
     #[allow(clippy::result_large_err)]
-    fn record(&mut self, dependent: &str, name: &str, bound: DepBound) -> Result<(), ResolveError> {
+    fn record(
+        &mut self,
+        dependent: &str,
+        declarer_dir: Option<&Path>,
+        name: &str,
+        bound: &DepBound,
+    ) -> Result<(), ResolveError> {
         if name == self.root {
             return Ok(());
         }
-        let key = (name.to_owned(), bound.ver);
-        match self.pins.get(&key) {
-            Some((pinned, first)) if *pinned != bound.hash => {
-                return Err(ResolveError::HashMismatch {
-                    name: name.to_owned(),
-                    version: bound.ver,
-                    pinned: *pinned,
-                    found: bound.hash,
-                    dependent: first.clone(),
+        match bound {
+            DepBound::Pin { ver, hash } => {
+                if let Some(DemandRow::Path {
+                    dependent: first, ..
+                }) = self.demands.get(name)
+                {
+                    return Err(ResolveError::MixedDemand {
+                        name: name.to_owned(),
+                        path: first.clone(),
+                        pin: dependent.to_owned(),
+                    });
+                }
+                let key = (name.to_owned(), *ver);
+                match self.pins.get(&key) {
+                    Some((pinned, first)) if *pinned != *hash => {
+                        return Err(ResolveError::HashMismatch {
+                            name: name.to_owned(),
+                            version: *ver,
+                            pinned: *pinned,
+                            found: *hash,
+                            dependent: first.clone(),
+                        });
+                    },
+                    Some(_) => {},
+                    None => {
+                        self.pins.insert(key, (*hash, dependent.to_owned()));
+                    },
+                }
+                let risen = !matches!(self.demands.get(name), Some(DemandRow::Registry { ver: seen, .. }) if *seen >= *ver);
+                if risen {
+                    self.demands.insert(name.to_owned(), DemandRow::Registry {
+                        ver: *ver,
+                        dependent: dependent.to_owned(),
+                    });
+                    if self.queued.insert(name.to_owned()) {
+                        self.queue.push_back(name.to_owned());
+                    }
+                }
+            },
+            DepBound::Path { path } => {
+                if let Some(DemandRow::Registry {
+                    dependent: first, ..
+                }) = self.demands.get(name)
+                {
+                    return Err(ResolveError::MixedDemand {
+                        name: name.to_owned(),
+                        path: dependent.to_owned(),
+                        pin: first.clone(),
+                    });
+                }
+                let Some(base) = declarer_dir else {
+                    return Err(ResolveError::OrphanPath {
+                        name: name.to_owned(),
+                        dependent: dependent.to_owned(),
+                    });
+                };
+                // the canonical spelling compares directories whatever
+                // relative path reached them; a directory the platform
+                // will not resolve keeps the lexical spelling and the
+                // fetch reports the miss with its own words
+                let joined = base.join(path);
+                let dir = joined.canonicalize().unwrap_or(joined);
+                match self.demands.get(name) {
+                    Some(DemandRow::Path {
+                        dir: seen,
+                        dependent: first,
+                    }) => {
+                        if seen != &dir {
+                            return Err(ResolveError::PathConflict {
+                                name: name.to_owned(),
+                                dir: seen.clone(),
+                                dependent: first.clone(),
+                                other: dir,
+                                declarer: dependent.to_owned(),
+                            });
+                        }
+                        // the same directory: the queued or resolved
+                        // demand already covers it
+                        return Ok(());
+                    },
+                    Some(DemandRow::Registry { .. }) => unreachable!("the registry arm refused"),
+                    None => {},
+                }
+                self.demands.insert(name.to_owned(), DemandRow::Path {
+                    dir,
+                    dependent: dependent.to_owned(),
                 });
+                if self.queued.insert(name.to_owned()) {
+                    self.queue.push_back(name.to_owned());
+                }
             },
-            Some(_) => {},
-            None => {
-                self.pins.insert(key, (bound.hash, dependent.to_owned()));
-            },
-        }
-        let risen = !matches!(self.demands.get(name), Some((ver, _)) if *ver >= bound.ver);
-        if risen {
-            self.demands
-                .insert(name.to_owned(), (bound.ver, dependent.to_owned()));
-            if self.queued.insert(name.to_owned()) {
-                self.queue.push_back(name.to_owned());
-            }
         }
         Ok(())
     }
 
     /// Refuses cross-package cycles over the final graph — the root's deps
-    /// plus every resolved manifest's deps, neighbors in name order, an
-    /// explicit stack (a long dep chain grows the heap, not the call
-    /// stack). The root itself is a node like any other, so a dep naming
-    /// it (from the root's own list or a resolved manifest's) closes a
-    /// cycle here; a superseded manifest's root-dep retired with it.
+    /// plus every resolved manifest's deps, both shapes' edges alike,
+    /// neighbors in name order, an explicit stack (a long dep chain grows
+    /// the heap, not the call stack). The root itself is a node like any
+    /// other, so a dep naming it (from the root's own list or a resolved
+    /// manifest's) closes a cycle here; a superseded manifest's root-dep
+    /// retired with it.
     #[allow(clippy::result_large_err)]
     fn refuse_cycles(&self, root: &Manifest) -> Result<(), ResolveError> {
         let deps_of = |name: &str| -> Option<&BTreeMap<String, DepBound>> {

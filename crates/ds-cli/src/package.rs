@@ -22,7 +22,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -34,14 +34,14 @@ use ds_diag::{FileId, Files, render};
 use ds_mod::{Hash128, Module};
 use ds_parse::ItemKind;
 use ds_pkg::{
-    Fetched, Manifest, Package, ProvidedPackage, ResolveError, Store, StoreProvider, Version,
-    resolve,
+    Demand, Fetched, Manifest, Package, ProvidedPackage, ResolveError, Store, StoreProvider,
+    Version, fetch_path, resolve,
 };
 
 use crate::source::{self, CompiledSource, Export, ExportKind, rebase_sig, rebase_span};
 
 /// The manifest's file name inside a package root.
-pub(crate) const MANIFEST_FILE: &str = "ds.pkg";
+pub(crate) const MANIFEST_FILE: &str = ds_pkg::MANIFEST_FILE;
 
 /// One package member file: the member's path inside the package — the
 /// display path the compile registers and the identity fold records —
@@ -94,6 +94,10 @@ pub(crate) struct Graph {
     members: BTreeMap<String, Rc<[Member]>>,
     identities: BTreeMap<String, Hash128>,
     artifacts: BTreeMap<String, ds_pkg::ArtifactBound>,
+    /// Every directory a resolved path dep read from (the transitive
+    /// closure, ascending): the extra watch roots a dev loop grows over
+    /// the package tree.
+    path_dirs: Vec<PathBuf>,
     /// The store the resolution served and the artifact installs landed
     /// in: the run path reopens it per demand (the bound libraries and
     /// their export enumerations read from here).
@@ -167,6 +171,12 @@ fn resolve_front(entry: &Path) -> Result<Option<Front>> {
         );
     };
     let store = Store::open(&root);
+    // the base a path dep's relative directory resolves against: the
+    // manifest's own directory, the declaring package's root
+    let root_dir = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let registry = ds_pkg::RegistryClient::from_env();
     // the registry client fills the store's misses — a local index or
     // a git remote's snapshot clone, its verified bundles installing
@@ -178,14 +188,16 @@ fn resolve_front(entry: &Path) -> Result<Option<Front>> {
     let resolved = if let Some(registry) = &registry {
         let mut provider =
             StoreProvider::with_remote(&store, |name, ver| registry.fetch(name, ver));
-        resolve(&manifest, |name, ver, pin| {
-            default_std_or(&store, &mut provider, name, ver, pin)
+        resolve(&manifest, &root_dir, |name, demand| match demand {
+            Demand::Registry { ver, pin } => default_std_or(&store, &mut provider, name, ver, pin),
+            Demand::Path { dir } => path_demand(&store, name, dir),
         })
         .map_err(|error| refuse(&error, true))?
     } else {
         let mut provider = StoreProvider::cached(&store);
-        resolve(&manifest, |name, ver, pin| {
-            default_std_or(&store, &mut provider, name, ver, pin)
+        resolve(&manifest, &root_dir, |name, demand| match demand {
+            Demand::Registry { ver, pin } => default_std_or(&store, &mut provider, name, ver, pin),
+            Demand::Path { dir } => path_demand(&store, name, dir),
         })
         .map_err(|error| refuse(&error, false))?
     };
@@ -291,10 +303,12 @@ pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
     let members = dep_members(&front.store, &front.resolved)?;
     let identities = identities_of(&front.resolved);
     let artifacts = front.resolved.artifacts().clone();
+    let path_dirs = front.resolved.path_dirs();
     Ok(Some(Graph {
         members,
         identities,
         artifacts,
+        path_dirs,
         store: front.store,
         no_ambient,
         linked: RefCell::new(BTreeMap::new()),
@@ -365,6 +379,7 @@ pub(crate) fn implicit_std_graph() -> Graph {
         members: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), members.into())]),
         identities: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), identity)]),
         artifacts: BTreeMap::new(),
+        path_dirs: Vec::new(),
         // The implicit graph never lands an artifact install (its
         // artifact table is empty, so the bound-module walk reads no
         // store path), and Store::open touches nothing: the row rides
@@ -403,60 +418,15 @@ fn members_of(name: &str, bundle: &Package) -> Result<Vec<Member>> {
 }
 
 /// Every .ds source below one root the member grammar admits, in walk
-/// order: real subdirectories recurse while directory links (junctions
-/// and symlinks) never expand — the entry's own metadata decides, so a
-/// link can neither loop the walk back into the tree nor pull
-/// directories in from outside it — and a .ds link joins the walk only
-/// when its canonical target stays a file inside the root. The member
-/// set is therefore a deterministic function of the worktree, and a
-/// canonical visited set backs the same real directory walking twice.
+/// order — the ds-pkg member walk (the same walk a path dep's directory
+/// package reads), delegating so a root's walked files and a dep's
+/// bundle share one walk policy.
 ///
 /// # Errors
 ///
 /// An unreadable root or directory entry.
 pub(crate) fn walk_sources(root: &Path) -> Result<Vec<PathBuf>> {
-    let inside = root
-        .canonicalize()
-        .with_context(|| format!("reading {}", root.display()))?;
-    let mut visited = HashSet::new();
-    let mut sources = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        // The visited key is the directory's canonical form, so the
-        // backstop holds whatever spelling the walk reached it by.
-        let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-        if !visited.insert(key) {
-            continue;
-        }
-        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
-            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("reading {}", path.display()))?;
-            // The link's own metadata (no follow): a junction or a
-            // directory symlink is not `is_dir` here, so it never
-            // enters the stack and its target never doubles the walk.
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("ds") {
-                continue;
-            }
-            if file_type.is_symlink() && !link_resolves_inside(&path, &inside) {
-                continue;
-            }
-            sources.push(path);
-        }
-    }
-    Ok(sources)
-}
-
-/// Whether a .ds link's canonical target is a file below `inside`.
-fn link_resolves_inside(link: &Path, inside: &Path) -> bool {
-    link.canonicalize()
-        .is_ok_and(|target| target.is_file() && target.strip_prefix(inside).is_ok())
+    ds_pkg::walk_sources(root).map_err(|error| anyhow!("{error}"))
 }
 
 /// The members one package-root entry carries (G3: one package, one
@@ -611,6 +581,21 @@ fn default_std(store: &Store, ver: &Version) -> Fetched {
     }
 }
 
+/// One path demand answered from the directory: the reserved `@std`
+/// name never takes the shape (the toolchain's own package owns the
+/// name whatever a directory claims), every other name reading through
+/// the provider's directory fetch — the source of truth the store only
+/// caches beside.
+fn path_demand(store: &Store, name: &str, dir: &Path) -> Fetched {
+    if name == ds_stdlib::STD_PACKAGE_NAME {
+        return Fetched::Refused(format!(
+            "`{name}` is the reserved standard-library package name; the toolchain's own package \
+             owns it and a path dep cannot take it"
+        ));
+    }
+    fetch_path(store, dir)
+}
+
 /// One graph artifact's install: the store answers an installed identity
 /// first — a validated library is never fetched again — a miss falls to
 /// the registry's content-addressed artifact storage when one is
@@ -660,6 +645,13 @@ impl Graph {
     /// for it.
     pub(crate) fn identities(&self) -> &BTreeMap<String, Hash128> {
         &self.identities
+    }
+
+    /// Every directory a resolved path dep read from: the transitive
+    /// path closure in ascending order — the watch roots a dev loop
+    /// adds beside the package tree.
+    pub(crate) fn path_dirs(&self) -> &[PathBuf] {
+        &self.path_dirs
     }
 
     /// The graph's folded native artifacts, name-keyed: each declared

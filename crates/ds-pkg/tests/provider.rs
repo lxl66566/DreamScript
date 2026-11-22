@@ -6,11 +6,16 @@
 //! graph composes with the deps-first load walk — the store's bundle
 //! serving the linked module's source identity end to end.
 
-use std::{fmt::Write as _, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
 use ds_diag::FileId;
 use ds_mod::{Constant, FuncRefKey, Function, Hash128, Module, TargetClass};
-use ds_pkg::{Manifest, Package, Remote, Resolved, Store, StoreProvider, Version, resolve};
+use ds_pkg::{
+    Demand, Fetched, Manifest, Package, Remote, Resolved, Store, StoreProvider, Version, resolve,
+};
 use ds_vm::{
     FrameAnswer, ModuleRegistry, Value, Vm,
     abi::{ConstIdx, FrameLayout, SlotType::I64, uop::Uop},
@@ -130,8 +135,9 @@ fn resolve_with(fixture: &Fixture, packages: &[Package]) -> (Resolved, RemoteReg
     let mut remote = RemoteRegistry::new(remote_dir(&fixture.store), packages);
     let mut provider =
         StoreProvider::with_remote(&fixture.store, |name, version| remote.fetch(name, version));
-    let resolved = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the fixture resolves");
     (resolved, remote)
@@ -157,8 +163,9 @@ fn a_valid_bundle_is_fetched_once_and_never_again() {
     let mut empty = RemoteRegistry::new(remote_dir(&fixture.store), &[]);
     let mut provider =
         StoreProvider::with_remote(&fixture.store, |name, version| empty.fetch(name, version));
-    let again = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let again = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the store alone resolves");
     assert_eq!(empty.fetches, [] as [(String, Version); 0]);
@@ -177,8 +184,9 @@ fn the_seam_carries_each_dep_s_member_identity() {
     // a second, cache-only provider over the installed rows serves the
     // same identity (the fold landed with the row)
     let mut provider = StoreProvider::cached(&fixture.store);
-    let again = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let again = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the store alone resolves");
     assert_eq!(again.deps()["lib"].member_identity, expected);
@@ -193,8 +201,9 @@ fn the_seam_carries_each_dep_s_member_identity() {
     let mut remote = RemoteRegistry::new(remote_dir(&fixture.store), std::slice::from_ref(&multi));
     let mut provider =
         StoreProvider::with_remote(&fixture.store, |name, version| remote.fetch(name, version));
-    let resolved = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the multi-member fixture resolves");
     assert_eq!(
@@ -221,8 +230,9 @@ fn a_fetched_bundle_without_a_servable_member_set_refuses() {
     let refused = unservable.clone();
     let mut provider =
         StoreProvider::with_remote(&fixture.store, move |_, _| Remote::Found(refused.clone()));
-    let error = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the unservable member set refuses");
     assert_eq!(
@@ -267,8 +277,9 @@ fn a_corrupt_cached_bundle_without_a_remote_refuses() {
     // a cache-only provider serves nothing for the drifted file: the
     // demand refuses through the resolution taxonomy
     let mut provider = StoreProvider::cached(&fixture.store);
-    let error = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the corrupted bundle refuses");
     assert_eq!(
@@ -288,8 +299,9 @@ fn the_cache_s_own_knowledge_sets_the_unserved_taxonomy() {
     // a name the cache has seen at another version is unoffered, its
     // highest carried for the diagnostic
     let high = manifest_of("app", "1.0.0", &[("lib", "2.0.0", Hash128::new([1; 16]))]);
-    let error = resolve(&high, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&high, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the unoffered version refuses");
     assert_eq!(
@@ -298,8 +310,9 @@ fn the_cache_s_own_knowledge_sets_the_unserved_taxonomy() {
     );
     // a name the cache has never seen is unknown
     let ghost = manifest_of("app", "1.0.0", &[("ghost", "1.0.0", Hash128::new([2; 16]))]);
-    let error = resolve(&ghost, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&ghost, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the unknown name refuses");
     assert_eq!(
@@ -319,8 +332,9 @@ fn the_remote_taxonomy_and_content_pass_through_the_seam() {
         _ => Remote::UnknownName,
     });
     let root = manifest_of("app", "1.0.0", &[("lib", "2.0.0", Hash128::new([1; 16]))]);
-    let error = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the remote's unoffered version refuses");
     assert_eq!(
@@ -328,8 +342,9 @@ fn the_remote_taxonomy_and_content_pass_through_the_seam() {
         "`app` demands `lib` at 2.0.0, above every offered version (3.0.0)"
     );
     let ghost = manifest_of("app", "1.0.0", &[("ghost", "1.0.0", Hash128::new([2; 16]))]);
-    let error = resolve(&ghost, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&ghost, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the remote's unknown name refuses");
     assert_eq!(
@@ -342,8 +357,9 @@ fn the_remote_taxonomy_and_content_pass_through_the_seam() {
     let mut provider =
         StoreProvider::with_remote(&fixture.store, |_, _| Remote::Found(other.clone()));
     let swap = manifest_of("app", "1.0.0", &[("lib", "1.0.0", other.content_hash())]);
-    let error = resolve(&swap, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&swap, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("content under another name refuses");
     assert_eq!(
@@ -380,8 +396,9 @@ fn a_demand_serves_from_its_pin_among_many_installed_bundles() {
     )
     .expect("the corruption lands");
     let mut provider = StoreProvider::cached(&fixture.store);
-    let resolved = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the pinned demand resolves");
     assert_eq!(
@@ -402,8 +419,9 @@ fn a_demand_serves_from_its_pin_among_many_installed_bundles() {
 fn an_install_after_the_first_demand_serves_the_same_provider() {
     let fixture = fixture();
     let mut provider = StoreProvider::cached(&fixture.store);
-    let error = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let error = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the empty store refuses");
     assert_eq!(
@@ -415,8 +433,9 @@ fn an_install_after_the_first_demand_serves_the_same_provider() {
         .store
         .install(&fixture.lib)
         .expect("the lib installs");
-    let resolved = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the same provider serves the landed install");
     assert_eq!(
@@ -438,8 +457,9 @@ fn two_identities_under_one_pair_serve_the_demand_s_own_pin() {
     fixture.store.install(&two).expect("the second installs");
     let root = manifest_of("app", "1.0.0", &[("lib", "1.0.0", two.content_hash())]);
     let mut provider = StoreProvider::cached(&fixture.store);
-    let resolved = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the pinned identity serves");
     assert_eq!(resolved.deps()["lib"].content_hash, two.content_hash());

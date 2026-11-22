@@ -33,13 +33,17 @@
 //! a sibling member's edit reloads like the entry's own — the swap
 //! installing through the deps-first load walk — an
 //! already-installed dep validates at its recorded identity and skips,
-//! so only the root's slot moves. A linked dep's members join the watch
-//! through the manifest's pins — the store serves content-addressed
-//! bytes, so a dep source edit reaches the session as `ds save` plus a
-//! repin, and the manifest bytes the poll composes carry the change
-//! (an edit no repin follows never reaches the session: resolution
-//! serves the pinned identity whatever else the store holds). A
-//! repin moves the dep's identity, and the round recomputes the graph
+//! so only the root's slot moves. A registry-pinned dep's members stay
+//! outside the watch — the store serves content-addressed bytes, so a
+//! pinned dep's source edit reaches the session only as `ds save` plus
+//! a repin (resolution serves the pinned identity whatever else the
+//! store holds) — while a directory-shaped dep entry (`[deps.<name>]`
+//! with `path`) joins the watch directly: the resolved path dep
+//! directories watch with the package tree's own discipline (recursive,
+//! dynamically grown), their members and manifests compose into the
+//! watched bytes, and a dep source edit re-resolves from source and
+//! hot-swaps the moved identity with no repin. Either way a moved dep
+//! identity recomputes the graph
 //! honestly: every resolved name the session's registry already holds
 //! at another identity hot-swaps under its own name BEFORE the walk
 //! loads the root — the same two-slot semantics the root's own rounds
@@ -143,11 +147,27 @@ struct DevSession {
     /// until the first load — an empty source is a load too, not
     /// "never loaded".
     loaded: Option<String>,
+    /// A change the reconcile read found that no round has loaded yet
+    /// (an edit landing inside the signal-creation gap, its inotify
+    /// event spent before any watch existed): the next loop window
+    /// consumes it through the ordinary round — never an extra
+    /// out-of-cadence drive, which would advance a parked frame a tick
+    /// the merge window owes the edit.
+    pending: Option<String>,
     name: String,
     entry: String,
     no_ambient: bool,
     vm: Vm,
     fiber: Option<FiberId>,
+    /// Every directory a resolved path dep read from (the transitive
+    /// closure, ascending) — the watch roots the package rounds grow
+    /// beside the package tree, and the watched-bytes composition folds
+    /// so a dep source edit drives the same reload round an entry edit
+    /// does. Empty until the first package round resolves.
+    path_dirs: Vec<PathBuf>,
+    /// Bumped whenever a round moved the path dep directory set: the
+    /// loop's cue to rebuild the signal and re-baseline the watch gate.
+    dir_epoch: u64,
     /// Whether the last round's reload installed a version.
     clean: bool,
     /// Whether the last drive ended trapped or on an unhandled world
@@ -191,11 +211,14 @@ impl DevSession {
             watch,
             path: args.file.clone(),
             loaded: None,
+            pending: None,
             name: name.to_owned(),
             entry: args.entry.clone(),
             no_ambient: args.no_ambient,
             vm,
             fiber: None,
+            path_dirs: Vec::new(),
+            dir_epoch: 0,
             clean: false,
             failed: false,
         }
@@ -211,7 +234,8 @@ impl DevSession {
     /// entry's tick rate: the program advances one park per round
     /// whether or not the watch changed, so a loop-driving entry keeps
     /// running while the host watches. A package root's watch composes
-    /// every member below the root, so a sibling edit is a change.
+    /// every member below the root plus the resolved path deps' members
+    /// and manifests, so a sibling or dep-source edit is a change.
     fn round(&mut self, watched: Option<&str>) -> Result<()> {
         let mut installed = false;
         if let Some(watched) = watched.filter(|watched| self.loaded.as_deref() != Some(watched)) {
@@ -255,11 +279,18 @@ impl DevSession {
             Watch::Script { db, file } => {
                 Self::reload_script(db, *file, watched, &self.name, &mut self.vm)
             },
-            Watch::Package => Ok(Self::reload_package(
-                &self.path,
-                self.no_ambient,
-                &mut self.vm,
-            )),
+            Watch::Package => {
+                match Self::reload_package(&self.path, self.no_ambient, &mut self.vm) {
+                    Some(dirs) => {
+                        if dirs != self.path_dirs {
+                            self.path_dirs = dirs;
+                            self.dir_epoch += 1;
+                        }
+                        Ok(Some(()))
+                    },
+                    None => Ok(None),
+                }
+            },
         }
     }
 
@@ -338,9 +369,10 @@ impl DevSession {
     /// swapped slot; a dep that finished swapping stays swapped when a
     /// later step refuses, exactly the walk's own partial-install rule.
     /// The compile is cold every round, the package run's own rule.
-    /// Answers `None` when the round refuses — reported, the installed
-    /// version untouched.
-    fn reload_package(path: &Path, no_ambient: bool, vm: &mut Vm) -> Option<()> {
+    /// Answers `Some` with the graph's resolved path dep directories
+    /// (empty for a pin-only graph) when the round installs, and `None`
+    /// when it refuses — reported, the installed version untouched.
+    fn reload_package(path: &Path, no_ambient: bool, vm: &mut Vm) -> Option<Vec<PathBuf>> {
         let graph = match package::open(path, no_ambient) {
             Ok(Some(graph)) => graph,
             Ok(None) => {
@@ -428,7 +460,7 @@ impl DevSession {
             eprintln!("dev: installing the reload refused: {error:?}");
             return None;
         }
-        Some(())
+        Some(graph.path_dirs().to_vec())
     }
 
     /// The memoized query pass over the watched file (the same surface
@@ -593,10 +625,14 @@ fn read_watched(path: &Path, manifest: Option<&Path>) -> Result<String> {
     Ok(parts.join("\0"))
 }
 
-/// One poll's read of the watched bytes: an editor's atomic replace can
-/// leave a transient miss, so a read failure reports and answers `None`
-/// — the previous version keeps running and the next poll retries.
-fn poll_watched(path: &Path, manifest: Option<&Path>) -> Option<String> {
+/// One poll's read of the watched bytes: the package root's members and
+/// manifest plus, per resolved path dep directory, its members and
+/// manifest — the whole set the gate compares, so a dep source edit is
+/// one change exactly like an entry edit. An editor's atomic replace
+/// can leave a transient miss, so a read failure reports and answers
+/// `None` — the previous version keeps running and the next poll
+/// retries.
+fn poll_watched(path: &Path, manifest: Option<&Path>, dirs: &[PathBuf]) -> Option<String> {
     let Some(manifest) = manifest else {
         return std::fs::read_to_string(path).ok();
     };
@@ -632,6 +668,40 @@ fn poll_watched(path: &Path, manifest: Option<&Path>) -> Option<String> {
             );
             return None;
         },
+    }
+    for dir in dirs {
+        let members = match package::walk_sources(dir) {
+            Ok(members) => members,
+            Err(error) => {
+                eprintln!(
+                    "dev: reading {} failed ({error}); still watching",
+                    dir.display()
+                );
+                return None;
+            },
+        };
+        for member in members {
+            match std::fs::read_to_string(&member) {
+                Ok(text) => parts.push(text),
+                Err(error) => {
+                    eprintln!(
+                        "dev: reading {} failed ({error}); still watching",
+                        member.display()
+                    );
+                    return None;
+                },
+            }
+        }
+        match std::fs::read_to_string(dir.join(package::MANIFEST_FILE)) {
+            Ok(text) => parts.push(text),
+            Err(error) => {
+                eprintln!(
+                    "dev: reading {} failed ({error}); still watching",
+                    dir.display()
+                );
+                return None;
+            },
+        }
     }
     Some(parts.join("\0"))
 }
@@ -672,15 +742,68 @@ pub fn dev(args: &DevArgs) -> Result<ExitCode> {
             if session.clean && !session.failed { ExitCode::SUCCESS } else { ExitCode::FAILURE };
         return Ok(code);
     }
-    let mut signal = match &manifest {
-        Some(manifest) => FsWatch::tree(&watch_root(manifest)),
-        None => FsWatch::script(path),
-    };
+    // the signal over the whole watch set — the package tree plus every
+    // resolved path dep directory (the first round's resolution grew the
+    // set), or the script file alone — then one reconcile read: the read
+    // lands after the watch exists, and a difference from the loaded
+    // bytes rides the pending slot into the next window's ordinary round
+    // (an edit landing inside the gap would else hide inside a blindly
+    // re-baselined gate, its event already spent and its bytes never
+    // compiled), an agreement costing nothing
+    let mut signal = make_signal(&session, manifest.as_deref(), path);
+    reconcile(&mut session, manifest.as_deref(), path);
     loop {
         // the signal gates only the read: the tick keeps driving the
-        // parked entry whether or not anything changed
-        let watched =
-            if signal.wait(poll) { poll_watched(path, manifest.as_deref()) } else { None };
+        // parked entry whether or not anything changed, and a pending
+        // reconcile change loads through the same round cadence
+        let watched = session.pending.take().or_else(|| {
+            if signal.wait(poll) {
+                poll_watched(path, manifest.as_deref(), &session.path_dirs)
+            } else {
+                None
+            }
+        });
+        let epoch = session.dir_epoch;
         session.round(watched.as_deref())?;
+        // a round that moved the path dep set (a manifest edit declaring
+        // or undeclaring a path dep) rebuilds the signal over the new
+        // roots and re-baselines the gate, the same ordering the startup
+        // read keeps
+        if session.dir_epoch != epoch {
+            signal = make_signal(&session, manifest.as_deref(), path);
+            reconcile(&mut session, manifest.as_deref(), path);
+        }
+    }
+}
+
+/// The signal over the session's whole watch set: the script file's
+/// parent directory (the file's name the filter) for a script target,
+/// the package tree plus every resolved path dep directory for a
+/// package root — one watch set, the tree growth discipline inside
+/// each root.
+fn make_signal(session: &DevSession, manifest: Option<&Path>, path: &Path) -> FsWatch {
+    match manifest {
+        Some(manifest) => {
+            let mut roots = vec![watch_root(manifest)];
+            roots.extend(session.path_dirs.iter().cloned());
+            FsWatch::trees(&roots)
+        },
+        None => FsWatch::script(path),
+    }
+}
+
+/// Reconciles the watch gate over the current watch set: one fresh read
+/// whose difference from the loaded bytes rides the pending slot into
+/// the next window's ordinary round. A blindly re-set baseline could
+/// swallow an edit that landed after the round the gate last served
+/// (its inotify event spent inside the signal-creation gap), and a
+/// round run directly here would drive a parked frame a tick the merge
+/// window owes the edit — the pending slot spends neither. A failed
+/// read keeps the old gate — the next window retries.
+fn reconcile(session: &mut DevSession, manifest: Option<&Path>, path: &Path) {
+    if let Some(fresh) = poll_watched(path, manifest, &session.path_dirs)
+        && session.loaded.as_deref() != Some(&fresh)
+    {
+        session.pending = Some(fresh);
     }
 }

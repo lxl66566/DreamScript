@@ -50,15 +50,48 @@ pub struct Manifest {
     pub artifacts: BTreeMap<String, ArtifactBound>,
 }
 
-/// One declared dependency: a minimum version and the content hash of that
-/// version's package, pinned by the declaring manifest.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct DepBound {
-    /// The minimum accepted version; resolution unifies demands by picking
-    /// the maximum declared minimum.
-    pub ver: Version,
-    /// The blake3-128 content hash of the dep's package at `ver`.
-    pub hash: Hash128,
+/// One declared dependency: a registry pin (a minimum version and the
+/// content hash of that version's package) or a local directory shape (a
+/// relative path naming the dep's package root, resolution reading the
+/// package from source and keying the store by the content it actually
+/// saw). One shape per name: a manifest declaring both for one dep is
+/// drift, and a graph demanding one name at both shapes refuses at
+/// resolution.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DepBound {
+    /// `name = { ver = "...", hash = "blake3:..." }` inline under
+    /// `[deps]`.
+    Pin {
+        /// The minimum accepted version; resolution unifies demands by
+        /// picking the maximum declared minimum.
+        ver: Version,
+        /// The blake3-128 content hash of the dep's package at `ver`.
+        hash: Hash128,
+    },
+    /// `[deps.<name>]` with `path = "<relative directory>"`: the dep
+    /// serves from the source directory, the store a cache layer.
+    Path {
+        /// The dep's package root, relative to the declaring package's
+        /// root (`..` segments allowed — a sibling directory is the
+        /// workspace spelling).
+        path: String,
+    },
+}
+
+/// The dep path grammar: a relative directory, `/`-separated printable
+/// ASCII with no backslash, no leading or trailing separator, and no
+/// empty or `.` segment (`..` allowed — a sibling directory is the
+/// canonical workspace spelling). The path resolves against the
+/// declaring package's root.
+#[must_use]
+pub fn valid_dep_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.bytes().all(|b| matches!(b, 0x20..=0x7e) && b != b'\\')
+        && !path.starts_with('/')
+        && !path.ends_with('/')
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != ".")
 }
 
 /// One declared native artifact: a prebuilt library for one target
@@ -114,8 +147,32 @@ impl Manifest {
                 .state
                 .drift_text(0, 0, "the manifest declares no `version`");
         }
-        if parse.state.diagnostics.is_empty() {
-            let state = parse.state;
+        let mut state = parse.state;
+        let paths = std::mem::take(&mut state.paths);
+        for (name, entry) in paths {
+            let (start, end) = (entry.span.0, entry.span.1);
+            let Some(path) = entry.path else {
+                state.drift_text(
+                    start,
+                    end,
+                    &format!("the [deps.{name}] subsection declares no `path`"),
+                );
+                continue;
+            };
+            if state.deps.contains_key(&name) {
+                state.drift_text(
+                    start,
+                    end,
+                    &format!(
+                        "the dep `{name}` declares both a registry pin and a local path; one \
+                         shape per dep"
+                    ),
+                );
+                continue;
+            }
+            state.deps.insert(name, DepBound::Path { path });
+        }
+        if state.diagnostics.is_empty() {
             Ok(Manifest {
                 name: state.name.unwrap_or_default(),
                 version: state.version.unwrap_or_default(),
@@ -123,7 +180,7 @@ impl Manifest {
                 artifacts: state.artifacts,
             })
         } else {
-            Err(parse.state.diagnostics)
+            Err(state.diagnostics)
         }
     }
 
@@ -136,17 +193,31 @@ impl Manifest {
             "manifest name must be grammar-valid"
         );
         let mut out = format!("name = \"{}\"\nversion = \"{}\"\n", self.name, self.version);
-        if !self.deps.is_empty() {
-            out.push_str("\n[deps]\n");
-            for (name, bound) in &self.deps {
-                debug_assert!(valid_name(name), "dep name must be grammar-valid");
-                // one write per dep line: String formatting never fails
-                let _ = writeln!(
-                    out,
-                    "{name} = {{ ver = \"{}\", hash = \"blake3:{}\" }}",
-                    bound.ver, bound.hash
-                );
+        let mut paths = Vec::new();
+        let mut pinned = false;
+        for (name, bound) in &self.deps {
+            debug_assert!(valid_name(name), "dep name must be grammar-valid");
+            match bound {
+                DepBound::Pin { ver, hash } => {
+                    if !pinned {
+                        pinned = true;
+                        out.push_str("\n[deps]\n");
+                    }
+                    // one write per dep line: String formatting never fails
+                    let _ = writeln!(
+                        out,
+                        "{name} = {{ ver = \"{ver}\", hash = \"blake3:{hash}\" }}"
+                    );
+                },
+                DepBound::Path { path } => {
+                    debug_assert!(valid_dep_path(path), "dep path must be grammar-valid");
+                    paths.push((name, path));
+                },
             }
+        }
+        // the path subsections follow the inline table, names ascending
+        for (name, path) in paths {
+            let _ = writeln!(out, "\n[deps.{name}]\npath = \"{path}\"");
         }
         if !self.artifacts.is_empty() {
             out.push_str("\n[artifacts]\n");
@@ -201,15 +272,19 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// The section an entry belongs to: nothing opened yet, `[deps]`, or
-/// `[artifacts]` — the two ruled sections, in that canonical order.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// The section an entry belongs to: nothing opened yet, `[deps]`, a
+/// `[deps.<name>]` subsection, or `[artifacts]` — the ruled sections, in
+/// that canonical order (the subsections sorted by name inside the deps
+/// zone, after the inline table).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 enum Section {
     /// Before any section header; top-level keys.
     #[default]
     Head,
     /// Inside `[deps]`.
     Deps,
+    /// Inside `[deps.<name>]`; the payload is the subsection's dep name.
+    DepsSub(String),
     /// Inside `[artifacts]`.
     Artifacts,
 }
@@ -232,12 +307,24 @@ struct State {
     version: Option<Version>,
     /// The section the next entry belongs to.
     section: Section,
-    /// The deps table.
+    /// The deps table (the inline registry pins).
     deps: BTreeMap<String, DepBound>,
+    /// The path subsections: each dep name over its `path` value (none
+    /// read yet) and the header's whole-text span.
+    paths: BTreeMap<String, PathEntry>,
     /// The artifacts table.
     artifacts: BTreeMap<String, ArtifactBound>,
     /// Every drift found so far.
     diagnostics: Vec<Diagnostic>,
+}
+
+/// One `[deps.<name>]` subsection under construction.
+#[derive(Clone, Debug, Default)]
+struct PathEntry {
+    /// The `path` value, once read.
+    path: Option<String>,
+    /// The subsection header's span over the whole text.
+    span: (usize, usize),
 }
 
 impl State {
@@ -251,6 +338,7 @@ impl State {
             version: None,
             section: Section::Head,
             deps: BTreeMap::new(),
+            paths: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             diagnostics: Vec::new(),
         }
@@ -451,23 +539,42 @@ impl Parse {
             state.drift(key_span.0, state.line.len(), "expected a key".to_owned());
             return;
         }
-        match state.section {
+        match state.section.clone() {
             Section::Head => self.top_entry(&key, key_span),
             Section::Deps => self.dep_entry(&key, key_span),
+            Section::DepsSub(_) => self.path_entry(&key, key_span),
             Section::Artifacts => self.artifact_entry(&key, key_span),
         }
     }
 
-    /// `[deps]` and `[artifacts]` are the ruled sections, in that order;
-    /// `[build]` is deferred (source builds wait on the pinned-toolchain
-    /// reproducibility story, never permanently rejected), and anything
-    /// else is drift.
+    /// `[deps]`, `[deps.<name>]`, and `[artifacts]` are the ruled
+    /// sections, in that order (the subsections sorted by name after the
+    /// inline table); `[build]` is deferred (source builds wait on the
+    /// pinned-toolchain reproducibility story, never permanently
+    /// rejected), and anything else is drift.
     fn section(&mut self) {
         let state = &mut self.state;
         let start = state.at;
         state.at += 1;
         let name_span = state.word();
         let name = state.text(name_span).to_owned();
+        let dotted = state.line[state.at..].starts_with('.');
+        let sub = if dotted {
+            state.at += 1;
+            let sub_span = state.word();
+            let sub = state.text(sub_span).to_owned();
+            if sub.is_empty() {
+                state.drift(
+                    start,
+                    state.line.len(),
+                    "expected a dep name after `deps.`".to_owned(),
+                );
+                return;
+            }
+            Some(sub)
+        } else {
+            None
+        };
         if !state.eat(b']') {
             state.drift(
                 start,
@@ -480,28 +587,72 @@ impl Parse {
         if !state.trailing("the section header") {
             return;
         }
-        match name.as_str() {
-            "deps" => {
+        match (name.as_str(), sub) {
+            ("deps", None) => {
                 if state.section == Section::Deps {
                     state.drift(start, end, "duplicate `[deps]` section".to_owned());
-                } else if state.section == Section::Artifacts {
+                } else if matches!(state.section, Section::Artifacts | Section::DepsSub(_)) {
                     state.drift(
                         start,
                         end,
-                        "the `[deps]` section must precede `[artifacts]`".to_owned(),
+                        "the `[deps]` table must precede `[artifacts]` and its own subsections"
+                            .to_owned(),
                     );
                 } else {
                     state.section = Section::Deps;
                 }
             },
-            "artifacts" => {
+            ("deps", Some(sub)) => {
+                if !valid_name(&sub) {
+                    state.drift(
+                        start,
+                        end,
+                        format!(
+                            "`{sub}` is not a package name (lowercase `/`-separated segments, \
+                             optional leading `@`)"
+                        ),
+                    );
+                    return;
+                }
+                if matches!(state.section, Section::Artifacts) {
+                    state.drift(
+                        start,
+                        end,
+                        "the `[deps.<name>]` subsections must precede `[artifacts]`".to_owned(),
+                    );
+                    return;
+                }
+                if let Section::DepsSub(last) = &state.section
+                    && sub.as_str() <= last.as_str()
+                {
+                    state.drift(
+                        start,
+                        end,
+                        format!(
+                            "the `[deps.<name>]` subsections sort by name (`{sub}` after `{last}`)"
+                        ),
+                    );
+                    return;
+                }
+                state.paths.insert(sub.clone(), PathEntry {
+                    path: None,
+                    span: (state.base + start, state.base + end),
+                });
+                state.section = Section::DepsSub(sub);
+            },
+            ("artifacts", None) => {
                 if state.section == Section::Artifacts {
                     state.drift(start, end, "duplicate `[artifacts]` section".to_owned());
                 } else {
                     state.section = Section::Artifacts;
                 }
             },
-            "build" => state.drift(
+            ("artifacts", Some(_)) => state.drift(
+                start,
+                end,
+                "the `[artifacts]` grammar has no subsections".to_owned(),
+            ),
+            ("build", None) => state.drift(
                 start,
                 end,
                 "the `[build]` section is deferred: source builds wait on the pinned-toolchain \
@@ -643,10 +794,59 @@ impl Parse {
         state.trailing("the dep entry");
         if state
             .deps
-            .insert(key.to_owned(), DepBound { ver, hash })
+            .insert(key.to_owned(), DepBound::Pin { ver, hash })
             .is_some()
         {
             state.drift(key_span.0, key_span.1, format!("duplicate dep `{key}`"));
+        }
+    }
+
+    /// `path = "<relative directory>"` inside a `[deps.<name>]`
+    /// subsection: the only key the shape admits, the value a relative
+    /// directory resolving against the declaring package's root.
+    fn path_entry(&mut self, key: &str, key_span: (usize, usize)) {
+        let state = &mut self.state;
+        let Section::DepsSub(sub) = state.section.clone() else {
+            return;
+        };
+        if key != "path" {
+            state.drift(
+                key_span.0,
+                key_span.1,
+                format!(
+                    "unknown key `{key}`; the `[deps.<name>]` grammar is `path` alone — a \
+                     registry pin declares inline under `[deps]`"
+                ),
+            );
+            return;
+        }
+        if !state.eat(b'=') {
+            state.drift(
+                key_span.1,
+                state.line.len(),
+                "expected `=` after `path`".to_owned(),
+            );
+            return;
+        }
+        let Ok((value, value_span)) = state.string().map(|(text, span)| (text.to_owned(), span))
+        else {
+            return;
+        };
+        if !valid_dep_path(&value) {
+            state.drift(
+                value_span.0,
+                value_span.1,
+                format!(
+                    "`{value}` is not a relative directory path (`/`-separated segments, `..` \
+                     allowed, no leading or trailing separator)"
+                ),
+            );
+            return;
+        }
+        state.trailing("the path value");
+        let entry = state.paths.entry(sub).or_default();
+        if entry.path.replace(value.clone()).is_some() {
+            state.drift(key_span.0, key_span.1, "duplicate `path` key".to_owned());
         }
     }
 
@@ -929,7 +1129,10 @@ mod tests {
         ))
         .expect("short versions parse");
         assert_eq!(manifest.version, Version::new(2, 0, 0));
-        assert_eq!(manifest.deps["@std"].ver, Version::new(1, 2, 0));
+        assert_eq!(manifest.deps["@std"], DepBound::Pin {
+            ver: Version::new(1, 2, 0),
+            hash: Hash128::ZERO
+        });
         assert!(manifest.to_text().contains("version = \"2.0.0\""));
         assert!(manifest.to_text().contains("ver = \"1.2.0\""));
     }
@@ -1029,7 +1232,13 @@ mod tests {
         );
         let manifest = parse(text).expect("pre-release versions parse");
         assert_eq!(manifest.version.to_string(), "1.2.3-rc.1+build.42");
-        assert_eq!(manifest.deps["@std"].ver.to_string(), "1.0.0-alpha");
+        assert!(
+            matches!(
+                &manifest.deps["@std"],
+                DepBound::Pin { ver, .. } if ver.to_string() == "1.0.0-alpha"
+            ),
+            "the pre-release pin parses"
+        );
         assert_eq!(
             manifest.to_text(),
             text,
@@ -1062,6 +1271,148 @@ mod tests {
     }
 
     #[test]
+    fn path_deps_round_trip_in_canonical_order() {
+        // the inline table first, the subsections after it, names ascending
+        let text = concat!(
+            "name = \"app\"\n",
+            "version = \"0.1.0\"\n",
+            "\n",
+            "[deps]\n",
+            "@std = { ver = \"1.2.0\", hash = \"blake3:0f0e0d0c0b0a09080706050403020100\" }\n",
+            "\n",
+            "[deps.@lib]\n",
+            "path = \"../libs/lib\"\n",
+            "\n",
+            "[deps.util]\n",
+            "path = \"vendor/util\"\n",
+        );
+        let manifest = parse(text).expect("the path shapes parse");
+        assert!(
+            matches!(
+                &manifest.deps["@lib"],
+                DepBound::Path { path } if path == "../libs/lib"
+            ),
+            "the sibling spelling parses"
+        );
+        assert!(
+            matches!(
+                &manifest.deps["util"],
+                DepBound::Path { path } if path == "vendor/util"
+            ),
+            "the in-root spelling parses"
+        );
+        assert_eq!(manifest.deps.len(), 3);
+        assert_eq!(manifest.to_text(), text);
+        let again = parse(&manifest.to_text()).expect("round two parses");
+        assert_eq!(again, manifest);
+        // a path-only manifest omits the inline table
+        let path_only = concat!(
+            "name = \"app\"\n",
+            "version = \"0.1.0\"\n",
+            "\n",
+            "[deps.util]\n",
+            "path = \"../util\"\n",
+        );
+        let manifest = parse(path_only).expect("the path-only manifest parses");
+        assert_eq!(manifest.deps.len(), 1);
+        assert_eq!(manifest.to_text(), path_only);
+    }
+
+    #[test]
+    fn path_dep_drift_refuses_with_its_own_words() {
+        // one name at both shapes refuses at the merge
+        let both = concat!(
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n",
+            "util = { ver = \"1.0.0\", hash = \"blake3:00000000000000000000000000000000\" }\n",
+            "\n[deps.util]\npath = \"../util\"\n",
+        );
+        let diags = parse(both).expect_err("both shapes for one name refuse");
+        assert!(
+            diags.iter().any(|diag| diag
+                .message
+                .contains("both a registry pin and a local path")),
+            "the merge names its refusal: {:?}",
+            diags[0].message
+        );
+        // the subsection grammar is path alone; an inline pin inside it drifts
+        let diags = parse(concat!(
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.util]\n",
+            "ver = \"1.0.0\"\n"
+        ))
+        .expect_err("the wrong key refuses");
+        assert!(
+            diags[0]
+                .message
+                .contains("the `[deps.<name>]` grammar is `path` alone"),
+            "{:?}",
+            diags[0].message
+        );
+        // the path value grammar: absolute, backslash, dot segment, trailing
+        // slash, and a missing path key
+        for text in [
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\npath = \"/abs\"\n",
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\npath = \"a\\\\b\"\n",
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\npath = \"./x\"\n",
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\npath = \"x/\"\n",
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\n",
+        ] {
+            let Err(diags) = parse(text) else {
+                panic!("{text:?} must refuse")
+            };
+            assert!(!diags.is_empty(), "{text:?} reports its drift");
+        }
+        let diags = parse("name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\n")
+            .expect_err("the keyless subsection refuses");
+        assert!(
+            diags
+                .iter()
+                .any(|diag| diag.message.contains("declares no `path`")),
+            "{:?}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn path_dep_sections_keep_canonical_order() {
+        // the inline table precedes its subsections; the subsections sort by
+        // name; [artifacts] follows the deps zone
+        let cases: &[&str] = &[
+            // [deps] after a subsection
+            concat!(
+                "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.u]\npath = \"../u\"\n\n[deps]\n",
+                "x = { ver = \"1.0.0\", hash = \"blake3:00000000000000000000000000000000\" }\n",
+            ),
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.b]\npath = \"../b\"\n\n[deps.a]\npath = \
+             \"../a\"\n",
+            // duplicate subsection
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.a]\npath = \"../a\"\n\n[deps.a]\npath = \
+             \"../a\"\n",
+            // a subsection after [artifacts]
+            concat!(
+                "name = \"app\"\nversion = \"0.1.0\"\n\n[artifacts]\n",
+                "m = { ver = \"1.0.0\", target = \"a-b\", hash = \
+                 \"blake3:00000000000000000000000000000000\" }\n\n[deps.a]\npath = \"../a\"\n",
+            ),
+            // artifacts carries no subsections
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[artifacts.m]\npath = \"../m\"\n",
+            // an empty subsection name
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.]\npath = \"../a\"\n",
+        ];
+        for &text in cases {
+            let Err(diags) = parse(text) else {
+                panic!("{text:?} must refuse")
+            };
+            assert!(
+                !diags.is_empty()
+                    && diags
+                        .iter()
+                        .all(|diag| diag.code == ErrorCode::PackageManifestMalformed),
+                "{text:?}: at least one DS4014 diagnostic"
+            );
+        }
+    }
+
+    #[test]
     fn reference_manifest_shape_is_valid() {
         let text = concat!(
             "name = \"pipeline\"\n",
@@ -1074,7 +1425,13 @@ mod tests {
         let manifest = parse(text).expect("the corpus reference parses");
         assert_eq!(manifest.name, "pipeline");
         assert_eq!(manifest.version, Version::new(0, 4, 0));
-        assert_eq!(manifest.deps["std"].ver, Version::new(1, 2, 0));
+        assert!(
+            matches!(
+                &manifest.deps["std"],
+                DepBound::Pin { ver, .. } if *ver == Version::new(1, 2, 0)
+            ),
+            "the short-version pin normalizes"
+        );
         assert_eq!(manifest.deps.len(), 2);
     }
 }

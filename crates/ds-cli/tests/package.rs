@@ -4364,3 +4364,146 @@ fn a_cross_module_tail_transfer_hands_a_counted_ref_word() {
     }
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
+
+/// The path-shaped deep fixture: the same member the pinned deep
+/// package serves.
+const PATH_DEEP_MEMBER: &str = "pub fn base() -> int {\n7\n}\n";
+
+/// A directory-shaped dep declaration serves a package run from source:
+/// the root's `[deps.@lib]` names the sibling lib directory, resolution
+/// reads the package from source (nothing installs it ahead of the run),
+/// the content identity lands in the store as a cache fill, the dep's
+/// own path dep nests transitively, and the built artifact's link table
+/// records the dep at the member identity the directory's sources fold
+/// — the same reproducibility story a registry pin buys.
+#[test]
+fn a_local_path_dep_serves_a_package_run() {
+    let work = temp_dir("pathdep");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let deep = work.join("deep");
+    write_pkg(&deep, "name = \"@deep\"\nversion = \"1.0.0\"\n", &[(
+        "deep.ds",
+        PATH_DEEP_MEMBER,
+    )]);
+    let lib_manifest = "name = \"@lib\"\nversion = \"1.2.0\"\n\n[deps.@deep]\npath = \"../deep\"\n";
+    let lib_member = "import @deep (base)\n\npub fn twice(n: int) -> int {\nbase() + n\n}\n";
+    let lib = work.join("lib");
+    write_pkg(&lib, lib_manifest, &[("helper.ds", lib_member)]);
+    let root = write_root(
+        &work,
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.@lib]\npath = \"../lib\"\n",
+        ROOT_SOURCE,
+    );
+    let entry = root.join("app.ds");
+    let entry_str = entry.to_str().expect("temp path is UTF-8");
+
+    let (ok, out, err) = ds_env(&cache, None, &["run", entry_str]);
+    assert!(ok, "the path-dep run exits 0 (stderr: {err})");
+    assert_eq!(out, "hi\n28\n", "the call crosses two source-read packages");
+
+    // the store holds the cache fills under the bundle identities the
+    // canonical framing computes — the directory and its saved twin
+    // share one identity by construction
+    let deep_id = bundle_identity("name = \"@deep\"\nversion = \"1.0.0\"\n", &[(
+        "deep.ds",
+        PATH_DEEP_MEMBER,
+    )]);
+    let lib_id = bundle_identity(lib_manifest, &[("helper.ds", lib_member)]);
+    let store = cache.join("pkg");
+    assert!(
+        store.join(format!("{deep_id}.pkg")).is_file(),
+        "the deep directory's bundle cached under its identity"
+    );
+    assert!(
+        store.join(format!("{lib_id}.pkg")).is_file(),
+        "the lib directory's bundle cached under its identity"
+    );
+
+    // and the built artifact's link table records the deps at their
+    // source-folded member identities
+    let out_path = work.join("app.dsmod");
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "build",
+        entry_str,
+        "--out",
+        out_path.to_str().expect("UTF-8"),
+    ]);
+    assert!(ok, "the path-dep build exits 0 (stderr: {err})");
+    let bytes = fs::read(&out_path).expect("the artifact writes");
+    let module = ds_mod::read(&bytes).expect("the built artifact reads");
+    assert!(
+        module
+            .deps()
+            .iter()
+            .any(|dep| dep.name == "@lib"
+                && dep.content_hash == Hash128::compute(lib_member.as_bytes())),
+        "the writer records the path dep at its member identity"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// One dep declared at both shapes in one manifest is parse-time drift:
+/// the DS4014 names the shape mix, and the run refuses before any
+/// resolution.
+#[test]
+fn a_dep_declared_at_both_shapes_refuses() {
+    let work = temp_dir("pathdep-both");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let lib = work.join("lib");
+    write_pkg(&lib, "name = \"@lib\"\nversion = \"1.0.0\"\n", &[(
+        "helper.ds",
+        "pub fn twice(n: int) -> int {\nn\n}\n",
+    )]);
+    let root = write_root(
+        &work,
+        concat!(
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n",
+            "@lib = { ver = \"1.0.0\", hash = \"blake3:00000000000000000000000000000000\" }\n",
+            "\n[deps.@lib]\npath = \"../lib\"\n",
+        ),
+        ROOT_SOURCE,
+    );
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(!ok, "the both-shape manifest refuses");
+    assert!(
+        err.contains("DS4014") && err.contains("both a registry pin and a local path"),
+        "the drift names the shape mix: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A transitive path dep naming the root (a sibling spelling of the
+/// package under development) refuses at the cycle check, both shapes'
+/// edges reading the one final graph.
+#[test]
+fn a_transitive_path_dep_cycle_refuses() {
+    let work = temp_dir("pathdep-cycle");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let side = work.join("side");
+    write_pkg(
+        &side,
+        "name = \"side\"\nversion = \"1.0.0\"\n\n[deps.app]\npath = \"../root\"\n",
+        &[("side.ds", "pub fn member() -> int {\n1\n}\n")],
+    );
+    let root = write_root(
+        &work,
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.side]\npath = \"../side\"\n",
+        "fn main() -> int {\n1\n}\n",
+    );
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(!ok, "the path cycle refuses");
+    assert!(
+        err.contains("cross-package dependency cycle"),
+        "the refusal names the cycle: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}

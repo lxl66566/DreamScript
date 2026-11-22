@@ -51,11 +51,19 @@ impl FsWatch {
         Self::signal(&[dir], only)
     }
 
-    /// The signal over a package root's tree: every directory below
-    /// the root, every event below it kept.
+    /// The signal over several trees: a package root's tree plus every
+    /// resolved path dep directory's, one watch set — roots naming one
+    /// directory through different spellings deduped by their canonical
+    /// forms, so a dep inside the package tree costs no second watch.
     #[must_use]
-    pub(crate) fn tree(root: &Path) -> Self {
-        Self::signal(&[root.to_path_buf()], None)
+    pub(crate) fn trees(roots: &[std::path::PathBuf]) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
+        let dirs = roots
+            .iter()
+            .filter(|root| seen.insert(root.canonicalize().unwrap_or_else(|_| (*root).clone())))
+            .cloned()
+            .collect::<Vec<_>>();
+        Self::signal(&dirs, None)
     }
 
     /// The platform's signal over the watched directories: the
@@ -418,7 +426,7 @@ mod tests {
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(&nested).expect("the nested dir creates");
         std::fs::write(nested.join("deep.ds"), "one").expect("the deep member writes");
-        let mut watch = FsWatch::tree(dir.path());
+        let mut watch = FsWatch::trees(&[dir.path().to_path_buf()]);
         assert!(!watch.wait(TICK), "a quiet window signals nothing");
         std::fs::write(nested.join("deep.ds"), "two").expect("the deep member edits");
         assert!(watch.wait(TICK), "the nested member's edit signals");
@@ -441,7 +449,7 @@ mod tests {
         let leaf = dir.path().join("leaf");
         std::fs::create_dir(&leaf).expect("the leaf dir creates");
         std::fs::write(leaf.join("member.ds"), "one").expect("the member writes");
-        let mut watch = FsWatch::tree(dir.path());
+        let mut watch = FsWatch::trees(&[dir.path().to_path_buf()]);
         assert!(!watch.wait(TICK), "a quiet window signals nothing");
         std::fs::remove_dir_all(&leaf).expect("the leaf deletes");
         assert!(watch.wait(TICK), "the leaf's deletion signals");

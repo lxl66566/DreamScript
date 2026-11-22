@@ -27,6 +27,21 @@ use ds_pkg::{Manifest, Package};
 /// for a machine under a parallel suite's compile load.
 const WAIT: Duration = Duration::from_secs(90);
 
+/// Writes the source atomically (a sibling temp file renamed over the
+/// target), so a dev child's window re-read never lands inside a direct
+/// write's truncate-to-write gap under load.
+fn swap_source(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let mut swap = path.as_os_str().to_os_string();
+    swap.push("~");
+    let swap = std::path::PathBuf::from(swap);
+    std::fs::write(&swap, contents)?;
+    std::fs::rename(&swap, path)
+}
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -169,10 +184,10 @@ fn a_hot_swap_retires_the_old_frame_at_its_next_qualified_call() {
     let prog = dir.path().join("prog.ds");
     let v1 = program("return n * 2", 3);
     let v2 = program("return n * 10", 3);
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 100);
     assert_eq!(dev.line(), "0", "the first round runs v1's work");
-    std::fs::write(&prog, &v2).expect("the swap writes");
+    swap_source(&prog, &v2).expect("the swap writes");
     assert_eq!(dev.line(), "10", "the parked frame's next call runs v2");
     assert_eq!(dev.line(), "20", "the rest of the run is v2's code");
     let answer = dev.line();
@@ -182,7 +197,7 @@ fn a_hot_swap_retires_the_old_frame_at_its_next_qualified_call() {
     // the differential: the swapped run printed exactly what a fresh
     // `ds run` of the updated source prints, byte for byte
     let fresh_source = dir.path().join("fresh.ds");
-    std::fs::write(&fresh_source, &v2).expect("the fresh source writes");
+    swap_source(&fresh_source, &v2).expect("the fresh source writes");
     let fresh = ds()
         .arg("run")
         .arg(&fresh_source)
@@ -205,14 +220,14 @@ fn a_refused_reload_keeps_the_installed_version_running() {
     let prog = dir.path().join("prog.ds");
     let v1 = program("return n", 4);
     let v2 = program("return n * 10", 4);
-    std::fs::write(&prog, v1).expect("the source writes");
+    swap_source(&prog, v1).expect("the source writes");
     // the wide poll keeps the round boundaries apart: each write lands
     // well inside one tick window, so the iteration counts stay fixed
     let mut dev = Dev::spawn(&prog, 1000);
     assert_eq!(dev.line(), "0", "the first round runs v1's work");
     // a broken file refuses the reload, but the parked frame re-enters:
     // the installed version keeps running
-    std::fs::write(&prog, "fn broken {\n").expect("the broken source writes");
+    swap_source(&prog, "fn broken {\n").expect("the broken source writes");
     assert_eq!(
         dev.line(),
         "1",
@@ -223,7 +238,7 @@ fn a_refused_reload_keeps_the_installed_version_running() {
         diagnostic.contains("DS"),
         "the refused round reports the diagnostic: {diagnostic}"
     );
-    std::fs::write(&prog, v2).expect("the swap writes");
+    swap_source(&prog, v2).expect("the swap writes");
     assert_eq!(dev.line(), "20", "the next round swaps to v2");
     assert_eq!(dev.line(), "30");
     dev.kill();
@@ -233,11 +248,11 @@ fn a_refused_reload_keeps_the_installed_version_running() {
 fn a_completed_entry_restarts_on_the_next_change() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let prog = dir.path().join("prog.ds");
-    std::fs::write(&prog, "fn main() {\n  println(\"boot\")\n}\n").expect("the source writes");
+    swap_source(&prog, "fn main() {\n  println(\"boot\")\n}\n").expect("the source writes");
     let mut dev = Dev::spawn(&prog, 100);
     assert_eq!(dev.line(), "boot");
     assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
-    std::fs::write(&prog, "fn main() {\n  println(\"boot2\")\n}\n").expect("the change writes");
+    swap_source(&prog, "fn main() {\n  println(\"boot2\")\n}\n").expect("the change writes");
     assert_eq!(dev.line(), "boot2", "the next change restarts the entry");
     assert_eq!(dev.line(), "0");
     dev.kill();
@@ -252,11 +267,11 @@ fn a_completed_entry_restarts_on_the_next_change() {
 fn an_atomic_replace_hot_swaps_like_an_edit() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let prog = dir.path().join("prog.ds");
-    std::fs::write(&prog, program("return n * 2", 3)).expect("the source writes");
+    swap_source(&prog, program("return n * 2", 3)).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 100);
     assert_eq!(dev.line(), "0", "the first round runs v1's work");
     let swap = dir.path().join("prog.ds~");
-    std::fs::write(&swap, program("return n * 10", 3)).expect("the swap source writes");
+    swap_source(&swap, program("return n * 10", 3)).expect("the swap source writes");
     std::fs::rename(&swap, &prog).expect("the atomic replace lands");
     assert_eq!(dev.line(), "10", "the replaced bytes reload mid-run");
     assert_eq!(dev.line(), "20", "the rest of the run is the replaced code");
@@ -312,10 +327,10 @@ fn a_reordering_reload_refuses_over_the_staged_word_and_recovers() {
     // shift re-keys instead)
     let v2 = format!("{PAD}{}", staged_program("x * 10", 4));
     let v3 = staged_program("x * 10", 4);
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 1000);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
-    std::fs::write(&prog, &v2).expect("the reordering swap writes");
+    swap_source(&prog, &v2).expect("the reordering swap writes");
     assert_eq!(
         dev.line(),
         "2",
@@ -330,7 +345,7 @@ fn a_reordering_reload_refuses_over_the_staged_word_and_recovers() {
         diagnostic.contains("FrameSlot"),
         "the refusal names the staged value's site: {diagnostic}"
     );
-    std::fs::write(&prog, &v3).expect("the order-restoring swap writes");
+    swap_source(&prog, &v3).expect("the order-restoring swap writes");
     assert_eq!(
         dev.line(),
         "20",
@@ -353,10 +368,10 @@ fn a_reload_dropping_the_staged_function_refuses_and_keeps_running() {
     let v2 = "fn main() {\n  var i = 0\n  while i < 4 {\n    println(\"${i * 10}\")\n    i = i + \
               1\n  }\n}\n"
         .to_owned();
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 1000);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
-    std::fs::write(&prog, &v2).expect("the dropping swap writes");
+    swap_source(&prog, &v2).expect("the dropping swap writes");
     assert_eq!(
         dev.line(),
         "2",
@@ -388,10 +403,10 @@ fn a_content_preserving_reorder_rekeys_the_staged_lambda() {
     let prog = dir.path().join("prog.ds");
     let v1 = staged_program("x * 2", 4);
     let v2 = format!("{PAD}{}", staged_program("x * 2", 4));
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 1000);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
-    std::fs::write(&prog, &v2).expect("the content-preserving reorder writes");
+    swap_source(&prog, &v2).expect("the content-preserving reorder writes");
     assert_eq!(
         dev.line(),
         "2",
@@ -405,7 +420,7 @@ fn a_content_preserving_reorder_rekeys_the_staged_lambda() {
     // the differential: the swapped run printed exactly what a fresh
     // `ds run` of the reordered source prints, byte for byte
     let fresh_source = dir.path().join("fresh.ds");
-    std::fs::write(&fresh_source, &v2).expect("the fresh source writes");
+    swap_source(&fresh_source, &v2).expect("the fresh source writes");
     let fresh = ds()
         .arg("run")
         .arg(&fresh_source)
@@ -434,10 +449,10 @@ fn a_rekeyed_reorder_takes_so_the_follow_up_edit_lands() {
     let v1 = staged_program("x * 2", 8);
     let v2 = format!("{PAD}{}", staged_program("x * 2", 8));
     let v3 = format!("{PAD}{}", staged_program("x * 10", 8));
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 1000);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
-    std::fs::write(&prog, &v2).expect("the content-preserving reorder writes");
+    swap_source(&prog, &v2).expect("the content-preserving reorder writes");
     assert_eq!(dev.line(), "2");
     assert_eq!(dev.line(), "4");
     assert_eq!(dev.line(), "6");
@@ -445,7 +460,7 @@ fn a_rekeyed_reorder_takes_so_the_follow_up_edit_lands() {
     // edits the body: it installs only over the reordered version, and
     // the next round answers 4 * 10 — 8 (4 * 2 on the kept v1) is the
     // refusal world the re-key rules out
-    std::fs::write(&prog, &v3).expect("the follow-up edit writes");
+    swap_source(&prog, &v3).expect("the follow-up edit writes");
     assert_eq!(
         dev.line(),
         "40",
@@ -476,7 +491,7 @@ fn a_trapped_entry_releases_and_the_fixed_reload_restarts_it() {
     };
     let v1 = body("10 / (n - 1)");
     let v2 = body("n * 2");
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 100);
     assert_eq!(dev.line(), "dying 0", "the first iteration's own exit drop");
     assert_eq!(dev.line(), "-10", "work(0) answers 10 / -1");
@@ -495,7 +510,7 @@ fn a_trapped_entry_releases_and_the_fixed_reload_restarts_it() {
     );
     // the session keeps watching: the fixed reload restarts the entry
     // fresh, and the whole restart prints what a fresh run would
-    std::fs::write(&prog, &v2).expect("the fix writes");
+    swap_source(&prog, &v2).expect("the fix writes");
     for expected in ["dying 0", "0", "dying 1", "2", "dying 2", "4", "0"] {
         assert_eq!(dev.line(), expected);
     }
@@ -526,7 +541,7 @@ fn a_trapped_entrys_abandoned_nursery_releases_with_the_entry() {
     };
     let v1 = body("10 / (n - 1)");
     let v2 = body("n * 2");
-    std::fs::write(&prog, &v1).expect("the source writes");
+    swap_source(&prog, &v1).expect("the source writes");
     let mut dev = Dev::spawn(&prog, 100);
     // the first round lands: the block joins its child, the value dies at
     // the exit, work answers 10 / -1
@@ -554,7 +569,7 @@ fn a_trapped_entrys_abandoned_nursery_releases_with_the_entry() {
     // the session keeps watching: the fixed reload restarts the entry
     // fresh, every round now joining its child, and the whole restart
     // prints what a fresh run would
-    std::fs::write(&prog, &v2).expect("the fix writes");
+    swap_source(&prog, &v2).expect("the fix writes");
     for expected in [
         "child 0", "dying 0", "0", "child 1", "dying 1", "2", "child 2", "dying 2", "4", "0",
     ] {
@@ -591,7 +606,7 @@ fn a_trapped_entrys_abandoned_nursery_releases_with_the_entry() {
 fn an_empty_source_reports_its_own_diagnostic() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let empty = dir.path().join("empty.ds");
-    std::fs::write(&empty, "").expect("the empty source writes");
+    swap_source(&empty, "").expect("the empty source writes");
     let out = ds()
         .arg("dev")
         .arg(&empty)
@@ -621,13 +636,13 @@ fn an_argv_entry_survives_a_reload_reading_the_process_arguments() {
     let v2 = "fn main() -> int {\n  const n = args().get(0).ok((w: string) => w).err((_: none) => \
               \"0\").parse_int().err((_: parse_err) => 0)\n  println(\"got ${n}\")\n  return n * \
               10\n}\n";
-    std::fs::write(&prog, v1).expect("the source writes");
+    swap_source(&prog, v1).expect("the source writes");
     let mut command = ds();
     command.arg("dev").arg(&prog).arg("--args").arg("21");
     let mut dev = Dev::launch(command, 100);
     assert_eq!(dev.line(), "got 21", "the first round reads --args");
     assert_eq!(dev.line(), "42", "the completed entry answers n * 2");
-    std::fs::write(&prog, v2).expect("the change writes");
+    swap_source(&prog, v2).expect("the change writes");
     assert_eq!(
         dev.line(),
         "got 21",
@@ -714,8 +729,8 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     let cache = dir.path().join("store");
     let lib = dir.path().join("lib");
     std::fs::create_dir_all(&lib).expect("the lib dir creates");
-    std::fs::write(lib.join("ds.pkg"), lib_manifest()).expect("the manifest writes");
-    std::fs::write(lib.join("helper.ds"), LIB_MEMBER).expect("the member writes");
+    swap_source(lib.join("ds.pkg"), lib_manifest()).expect("the manifest writes");
+    swap_source(lib.join("helper.ds"), LIB_MEMBER).expect("the member writes");
     let lib_id = {
         let manifest =
             Manifest::parse(&lib_manifest(), FileId::new(0)).expect("fixture manifest parses");
@@ -737,12 +752,12 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
 
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).expect("the root dir creates");
-    std::fs::write(root.join("ds.pkg"), root_manifest(lib_id)).expect("the manifest writes");
+    swap_source(root.join("ds.pkg"), root_manifest(lib_id)).expect("the manifest writes");
     let entry = root.join("app.ds");
     let v1 = root_program("return twice(n)", false);
     let v2 = root_program("return twice(n) + 1", false);
     let v3 = root_program("return twice(n)", true);
-    std::fs::write(&entry, &v1).expect("the source writes");
+    swap_source(&entry, &v1).expect("the source writes");
 
     let mut command = ds();
     command
@@ -760,7 +775,7 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     );
     // a broken member refuses the reload; the installed version keeps
     // running through the walk's already-installed deps
-    std::fs::write(&entry, "fn broken {\n").expect("the broken source writes");
+    swap_source(&entry, "fn broken {\n").expect("the broken source writes");
     assert_eq!(
         dev.line(),
         "42",
@@ -773,7 +788,7 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     );
     // the member edit swaps: the parked frame's next `work` call runs the
     // new body over the same linked `twice`
-    std::fs::write(&entry, &v2).expect("the swap writes");
+    swap_source(&entry, &v2).expect("the swap writes");
     assert_eq!(
         dev.line(),
         "43",
@@ -781,7 +796,7 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     );
     assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
     // the completed entry restarts on the next change, reading argv
-    std::fs::write(&entry, &v3).expect("the restart writes");
+    swap_source(&entry, &v3).expect("the restart writes");
     assert_eq!(
         dev.line(),
         "42",
@@ -803,12 +818,12 @@ fn a_package_root_sibling_edit_hot_reloads() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).expect("the root dir creates");
-    std::fs::write(root.join("ds.pkg"), "name = \"app\"\nversion = \"0.1.0\"\n")
+    swap_source(root.join("ds.pkg"), "name = \"app\"\nversion = \"0.1.0\"\n")
         .expect("the manifest writes");
     let work_member = |body: &str| format!("pub fn work(n: int) -> int {{\n  return {body}\n}}\n");
-    std::fs::write(root.join("work.ds"), work_member("n * 2")).expect("the sibling member writes");
+    swap_source(root.join("work.ds"), work_member("n * 2")).expect("the sibling member writes");
     let entry = root.join("app.ds");
-    std::fs::write(
+    swap_source(
         &entry,
         "fn main() -> int {\n  const n = args().get(0).ok((w: string) => w).err((_: none) => \
          \"0\").parse_int().err((_: parse_err) => 0)\n  var i = 0\n  while i < 10 {\n    \
@@ -832,7 +847,7 @@ fn a_package_root_sibling_edit_hot_reloads() {
     );
     // the sibling edit swaps: the parked frame's next `work` call runs
     // the new body out of the sibling member
-    std::fs::write(root.join("work.ds"), work_member("n * 3")).expect("the sibling edit writes");
+    swap_source(root.join("work.ds"), work_member("n * 3")).expect("the sibling edit writes");
     assert_eq!(
         dev.line(),
         "63",
@@ -840,7 +855,7 @@ fn a_package_root_sibling_edit_hot_reloads() {
     );
     // a broken sibling refuses the round naming the sibling member;
     // the installed version keeps running
-    std::fs::write(root.join("work.ds"), "fn broken {\n").expect("the broken sibling writes");
+    swap_source(root.join("work.ds"), "fn broken {\n").expect("the broken sibling writes");
     assert_eq!(
         dev.line(),
         "63",
@@ -879,8 +894,8 @@ fn save_lib(
     manifest: &str,
     member: &str,
 ) -> Hash128 {
-    std::fs::write(dir.join("ds.pkg"), manifest).expect("the manifest writes");
-    std::fs::write(dir.join("helper.ds"), member).expect("the member writes");
+    swap_source(dir.join("ds.pkg"), manifest).expect("the manifest writes");
+    swap_source(dir.join("helper.ds"), member).expect("the member writes");
     let parsed = Manifest::parse(manifest, FileId::new(0)).expect("fixture manifest parses");
     let bundle = Package::new(&parsed, [(
         "helper.ds".to_owned(),
@@ -941,7 +956,7 @@ fn multi_package(v1_member: &str) -> MultiPackage {
     std::fs::create_dir_all(&root).expect("the root dir creates");
     let entry = root.join("app.ds");
     let v1 = save_lib(&lib, &cache, &lib_manifest(), v1_member);
-    std::fs::write(root.join("ds.pkg"), pin_manifest("1.2.0", v1)).expect("the manifest writes");
+    swap_source(root.join("ds.pkg"), pin_manifest("1.2.0", v1)).expect("the manifest writes");
     MultiPackage {
         _dir: dir,
         cache,
@@ -963,7 +978,7 @@ fn multi_package(v1_member: &str) -> MultiPackage {
 #[test]
 fn a_repinned_dep_swaps_alongside_the_root() {
     let fix = multi_package(&lib_member("n * 2"));
-    std::fs::write(&fix.entry, dep_program(6)).expect("the source writes");
+    swap_source(&fix.entry, dep_program(6)).expect("the source writes");
     let mut command = ds();
     command
         .env("DS_CACHE", &fix.cache)
@@ -989,7 +1004,7 @@ fn a_repinned_dep_swaps_alongside_the_root() {
         "name = \"@lib\"\nversion = \"1.3.0\"\n",
         &lib_member("n * 10"),
     );
-    std::fs::write(fix.root.join("ds.pkg"), pin_manifest("1.3.0", v2)).expect("the repin writes");
+    swap_source(fix.root.join("ds.pkg"), pin_manifest("1.3.0", v2)).expect("the repin writes");
     assert_eq!(
         dev.line(),
         "20",
@@ -1039,7 +1054,7 @@ fn a_repinned_dep_swaps_alongside_the_root() {
 #[test]
 fn a_dep_swap_refusing_over_a_live_call_site_keeps_running() {
     let fix = multi_package(&lib_member("n * 2"));
-    std::fs::write(&fix.entry, dep_program(6)).expect("the source writes");
+    swap_source(&fix.entry, dep_program(6)).expect("the source writes");
     let mut command = ds();
     command
         .env("DS_CACHE", &fix.cache)
@@ -1067,8 +1082,8 @@ fn a_dep_swap_refusing_over_a_live_call_site_keeps_running() {
         "name = \"@lib\"\nversion = \"1.3.0\"\n",
         "pub fn double(n: int) -> int {\n  return n * 10\n}\n",
     );
-    std::fs::write(fix.root.join("ds.pkg"), pin_manifest("1.3.0", v2)).expect("the repin writes");
-    std::fs::write(
+    swap_source(fix.root.join("ds.pkg"), pin_manifest("1.3.0", v2)).expect("the repin writes");
+    swap_source(
         &fix.entry,
         "import @lib/helper (double)\n\nfn main() -> int {\n  var i = 0\n  while i < 6 {\n    \
          println(\"${double(i)}\")\n    i = i + 1\n  }\n  return 0\n}\n",
@@ -1098,9 +1113,8 @@ fn a_dep_swap_refusing_over_a_live_call_site_keeps_running() {
         "name = \"@lib\"\nversion = \"1.4.0\"\n",
         &lib_member("n * 10"),
     );
-    std::fs::write(fix.root.join("ds.pkg"), pin_manifest("1.4.0", v3))
-        .expect("the recovery writes");
-    std::fs::write(&fix.entry, dep_program(6)).expect("the member restores");
+    swap_source(fix.root.join("ds.pkg"), pin_manifest("1.4.0", v3)).expect("the recovery writes");
+    swap_source(&fix.entry, dep_program(6)).expect("the member restores");
     assert_eq!(
         dev.line(),
         "30",
@@ -1110,4 +1124,77 @@ fn a_dep_swap_refusing_over_a_live_call_site_keeps_running() {
     assert_eq!(dev.line(), "50");
     assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
     dev.kill();
+}
+
+/// A directory-shaped dep's source edit drives the same reload round an
+/// entry edit does: the watch set grows over the resolved path dep's
+/// directory (the tree discipline inside it), the watched bytes compose
+/// the dep's members and manifest beside the root's own, and the
+/// re-resolution reads the dep from source — its identity moved, so the
+/// moved dep hot-swaps under its own name through the two-slot
+/// semantics with no repin, the manifest bytes never changing.
+#[test]
+fn a_path_dep_source_edit_hot_reloads_without_a_repin() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let cache = dir.path().join("store");
+    let lib = dir.path().join("lib");
+    std::fs::create_dir_all(&lib).expect("the lib dir creates");
+    swap_source(lib.join("ds.pkg"), "name = \"@lib\"\nversion = \"1.2.0\"\n")
+        .expect("the manifest writes");
+    swap_source(lib.join("helper.ds"), lib_member("n * 2")).expect("the member writes");
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).expect("the root dir creates");
+    swap_source(
+        root.join("ds.pkg"),
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.@lib]\npath = \"../lib\"\n",
+    )
+    .expect("the manifest writes");
+    let entry = root.join("app.ds");
+    swap_source(&entry, dep_program(6)).expect("the source writes");
+    let mut command = ds();
+    command
+        .env("DS_CACHE", &cache)
+        .env_remove("DS_REGISTRY")
+        .arg("dev")
+        .arg(&entry);
+    let mut dev = Dev::launch(command, 1000);
+    assert_eq!(
+        dev.line(),
+        "0",
+        "the first round links @lib from source and runs twice(0)"
+    );
+    assert_eq!(
+        dev.line(),
+        "2",
+        "the parked frame's next call runs the source-read twice"
+    );
+    // the dep source edit alone: no ds save, no manifest repin — the
+    // directory is the source of truth the round re-reads
+    swap_source(lib.join("helper.ds"), lib_member("n * 10")).expect("the dep edit writes");
+    assert_eq!(
+        dev.line(),
+        "20",
+        "the moved dep swaps and the parked frame's next call runs the new body"
+    );
+    assert_eq!(dev.line(), "30");
+    assert_eq!(dev.line(), "40");
+    assert_eq!(dev.line(), "50");
+    assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
+    dev.kill();
+
+    // and the same tree's plain run links the edited dep from source
+    // with no repin: the fresh run prints the new body throughout
+    let fresh = ds()
+        .env("DS_CACHE", &cache)
+        .env_remove("DS_REGISTRY")
+        .arg("run")
+        .arg(&entry)
+        .output()
+        .expect("the fresh run completes");
+    assert!(fresh.status.success(), "{:?}", fresh.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&fresh.stdout).into_owned(),
+        "0\n10\n20\n30\n40\n50\n0\n",
+        "the fresh run serves the edited dep source"
+    );
 }

@@ -11,12 +11,12 @@
 //! resolution under it reads one file per demand, never the installed
 //! population).
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, path::Path};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ds_diag::FileId;
 use ds_mod::Hash128;
-use ds_pkg::{Manifest, Package, Store, StoreProvider, resolve};
+use ds_pkg::{Demand, Fetched, Manifest, Package, Store, StoreProvider, resolve};
 
 /// The installed bundles the store holds beside the root's deps: each
 /// demand's pin directs its own store read, so the unrelated bundles
@@ -81,8 +81,11 @@ fn fixture() -> (tempfile::TempDir, Store, Manifest) {
 /// member identity folds over the decoded members.
 fn probe_over_per_dep_loads(store: &Store, root: &Manifest) -> Vec<Hash128> {
     let mut provider = StoreProvider::cached(store);
-    let resolved = resolve(root, |name, ver, pin| provider.fetch(name, ver, pin))
-        .expect("the fixture resolves");
+    let resolved = resolve(root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the bench serves no path".to_owned()),
+    })
+    .expect("the fixture resolves");
     resolved
         .deps()
         .values()
@@ -108,8 +111,11 @@ fn probe_over_per_dep_loads(store: &Store, root: &Manifest) -> Vec<Hash128> {
 /// the seam's answer — no bundle loads, no member extraction.
 fn probe_over_the_seam(store: &Store, root: &Manifest) -> Vec<Hash128> {
     let mut provider = StoreProvider::cached(store);
-    let resolved = resolve(root, |name, ver, pin| provider.fetch(name, ver, pin))
-        .expect("the fixture resolves");
+    let resolved = resolve(root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the bench serves no path".to_owned()),
+    })
+    .expect("the fixture resolves");
     resolved
         .deps()
         .values()

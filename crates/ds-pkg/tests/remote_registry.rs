@@ -11,8 +11,8 @@ use std::{fmt::Write as _, path::Path, process::Command};
 use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{
-    GitRegistry, INDEX_SEGMENT, Manifest, Package, RegistryClient, Remote, Resolved, Store,
-    StoreProvider, Version, resolve,
+    Demand, Fetched, GitRegistry, INDEX_SEGMENT, Manifest, Package, RegistryClient, Remote,
+    Resolved, Store, StoreProvider, Version, resolve,
 };
 
 /// Whether the system git serves this suite: the fixtures build
@@ -149,8 +149,9 @@ fn resolve_over(
         fetches += 1;
         registry.fetch(name, version)
     });
-    let outcome = resolve(root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let outcome = resolve(root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     });
     (outcome, fetches)
 }

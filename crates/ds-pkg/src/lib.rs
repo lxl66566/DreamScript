@@ -20,9 +20,18 @@
 //! The graph's native artifacts fold beside the deps — one identity per
 //! artifact name — and install content-addressed into the store's artifact
 //! segment, the registry's storage serving misses by content hash.
+//!
+//! A dep entry may take a directory shape instead: `[deps.<name>]` with
+//! `path = "<relative directory>"` resolves the package from source, the
+//! content it reads keyed through the same store mechanism as a cache
+//! layer — never the path dep's source of truth — the path and the
+//! registry pin refusing to mix for one name, path deps nesting through
+//! their own directories, and a cycle over either shape's edges refusing
+//! at resolution.
 
 #![warn(missing_docs)]
 
+pub mod dir;
 pub mod manifest;
 pub mod package;
 pub mod provider;
@@ -32,13 +41,16 @@ pub mod resolve;
 pub mod store;
 pub mod version;
 
-pub use manifest::{ArtifactBound, DepBound, Manifest, valid_name, valid_target};
+pub use dir::{DirError, MANIFEST_FILE, dir_package, walk_sources};
+pub use manifest::{ArtifactBound, DepBound, Manifest, valid_dep_path, valid_name, valid_target};
 pub use package::{
     BundleError, MANIFEST_MEMBER, Package, bundle_content_hash, member_identity, valid_member_path,
 };
-pub use provider::{Remote, StoreProvider};
+pub use provider::{Remote, StoreProvider, fetch_path};
 pub use registry::{ArtifactFetch, INDEX_SEGMENT, Registry, RegistryClient};
 pub use remote::GitRegistry;
-pub use resolve::{Fetched, ProvidedPackage, ResolveError, Resolved, ResolvedPackage, resolve};
+pub use resolve::{
+    Demand, Fetched, ProvidedPackage, ResolveError, Resolved, ResolvedPackage, resolve,
+};
 pub use store::{ARTIFACT_SEGMENT, SEGMENT, Store, StoreError, artifact_content_hash, cache_root};
 pub use version::{Version, VersionError};

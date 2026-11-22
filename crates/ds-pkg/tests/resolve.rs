@@ -3,11 +3,27 @@
 //! (missing package, unsatisfiable bound, hash pins, cycles), and lock
 //! byte-stability across two resolutions of one graph.
 
-use std::{collections::BTreeMap, fmt::Write};
+use std::{collections::BTreeMap, fmt::Write, path::Path};
 
 use ds_diag::FileId;
 use ds_mod::Hash128;
-use ds_pkg::{Fetched, Manifest, Package, ProvidedPackage, ResolveError, Version, resolve};
+use ds_pkg::{
+    Demand, Fetched, Manifest, Package, ProvidedPackage, ResolveError, Store, Version, fetch_path,
+    resolve,
+};
+
+/// The registry-shaped closure over one static row set: every demand in
+/// these fixtures is registry-shaped (the path-demand tests build their
+/// own closures over real directories), and a stray path demand refuses
+/// with the fixture's own words.
+fn registry_only(
+    mut rows: impl FnMut(&str, &Version) -> Fetched,
+) -> impl FnMut(&str, Demand<'_>) -> Fetched {
+    move |name, demand| match demand {
+        Demand::Registry { ver, .. } => rows(name, ver),
+        Demand::Path { .. } => Fetched::Refused("the fixture registry serves no path".to_owned()),
+    }
+}
 
 /// Builds a manifest from parts; the canonical text round-trips through
 /// [`Manifest::parse`] in the assertions that need spans.
@@ -133,8 +149,12 @@ fn diamond_picks_the_max_of_declared_minima() {
         ("right", "1.0.0"),
     ]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("the diamond resolves");
+    let resolved = resolve(
+        &fixtures.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("the diamond resolves");
     // max of declared minima: 1.2.0 wins, 1.1.0 never fetched
     assert_eq!(resolved.deps()["base"].version, Version::new(1, 2, 0));
     assert_eq!(resolved.deps()["base"].content_hash, {
@@ -164,8 +184,12 @@ fn minimal_versions_not_provider_latest() {
     let foo_20 = package_of(&manifest_of("foo", "2.0.0", &[]));
     let fixtures = graph(vec![foo_15, foo_20], vec![("foo", "1.5.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("resolves at the declared minimum");
+    let resolved = resolve(
+        &fixtures.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("resolves at the declared minimum");
     assert_eq!(resolved.deps()["foo"].version, Version::new(1, 5, 0));
     assert!(
         !registry
@@ -187,8 +211,12 @@ fn a_risen_demand_refetches_the_name_once_per_version() {
     )]));
     let fixtures = graph(vec![b_10, b_11, z], vec![("b", "1.0.0"), ("z", "1.0.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("the raised demand resolves");
+    let resolved = resolve(
+        &fixtures.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("the raised demand resolves");
     assert_eq!(resolved.deps()["b"].version, Version::new(1, 1, 0));
     assert_eq!(registry.fetches, vec![
         ("b".to_owned(), Version::new(1, 0, 0)),
@@ -207,8 +235,12 @@ fn the_taxonomy_refuses() {
         Hash128::new([0x11; 16]),
     )]);
     let mut registry = Registry::new(&[]);
-    let error = resolve(&missing_root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("unknown name refuses");
+    let error = resolve(
+        &missing_root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("unknown name refuses");
     assert_eq!(error, ResolveError::MissingPackage {
         name: "ghost".to_owned(),
         demanded: Version::new(1, 0, 0),
@@ -219,8 +251,12 @@ fn the_taxonomy_refuses() {
     let old = package_of(&manifest_of("old", "0.9.0", &[]));
     let unsat = graph(vec![old], vec![("old", "2.0.0")]);
     let mut registry = Registry::new(&unsat.packages);
-    let error = resolve(&unsat.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("unoffered version refuses");
+    let error = resolve(
+        &unsat.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("unoffered version refuses");
     assert_eq!(error, ResolveError::UnsatisfiableBound {
         name: "old".to_owned(),
         demanded: Version::new(2, 0, 0),
@@ -240,8 +276,12 @@ fn the_taxonomy_refuses() {
     )
     .unwrap();
     let mut registry = Registry::new(&[real]);
-    let error = resolve(&drifted, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("a wrong pin refuses");
+    let error = resolve(
+        &drifted,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("a wrong pin refuses");
     let ResolveError::HashMismatch { pinned, found, .. } = &error else {
         panic!("expected HashMismatch, got {error:?}")
     };
@@ -263,8 +303,12 @@ fn the_taxonomy_refuses() {
         ("x2", "1.0.0", x2.content_hash()),
     ]);
     let mut registry = Registry::new(&[shared, x1, x2]);
-    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("conflicting pins refuse");
+    let error = resolve(
+        &root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("conflicting pins refuse");
     let ResolveError::HashMismatch { version, .. } = &error else {
         panic!("expected HashMismatch, got {error:?}")
     };
@@ -279,18 +323,21 @@ fn the_taxonomy_refuses() {
     let ca = manifest_of("ca", "1.0.0", &[("cb", "1.0.0", hash_b)]);
     let cb = manifest_of("cb", "1.0.0", &[("ca", "1.0.0", hash_a)]);
     let root = manifest_of("app", "1.0.0", &[("ca", "1.0.0", hash_a)]);
-    let error = resolve(&root, |name, _ver, _pin| match name {
-        "ca" => Fetched::Found(ProvidedPackage {
-            manifest: ca.clone(),
-            content_hash: hash_a,
-            member_identity: Hash128::ZERO,
-        }),
-        "cb" => Fetched::Found(ProvidedPackage {
-            manifest: cb.clone(),
-            content_hash: hash_b,
-            member_identity: Hash128::ZERO,
-        }),
-        _ => Fetched::UnknownName,
+    let error = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { .. } => match name {
+            "ca" => Fetched::Found(ProvidedPackage {
+                manifest: ca.clone(),
+                content_hash: hash_a,
+                member_identity: Hash128::ZERO,
+            }),
+            "cb" => Fetched::Found(ProvidedPackage {
+                manifest: cb.clone(),
+                content_hash: hash_b,
+                member_identity: Hash128::ZERO,
+            }),
+            _ => Fetched::UnknownName,
+        },
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the cycle refuses");
     assert_eq!(error, ResolveError::Cycle {
@@ -304,8 +351,12 @@ fn the_taxonomy_refuses() {
         ("app", "1.0.0", Hash128::ZERO),
     ]);
     let mut registry = Registry::new(&[dep]);
-    let error = resolve(&self_root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("the root self-dep refuses");
+    let error = resolve(
+        &self_root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("the root self-dep refuses");
     assert_eq!(error, ResolveError::Cycle {
         cycle: vec!["app".to_owned(), "app".to_owned()]
     });
@@ -333,15 +384,18 @@ fn a_served_mismatch_is_the_demand_unserved() {
     };
     let root = manifest_of("app", "1.0.0", &[("swap", "1.0.0", other.content_hash())]);
     let mut fetches = Vec::new();
-    let error = resolve(&root, |name, ver, _pin| {
-        fetches.push((name.to_owned(), *ver));
-        match rows.get(name) {
-            None => Fetched::UnknownName,
-            Some(versions) => match versions.get(ver) {
-                Some(row) => Fetched::Found(row.clone()),
-                None => Fetched::Unoffered { best: None },
-            },
-        }
+    let error = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, .. } => {
+            fetches.push((name.to_owned(), *ver));
+            match rows.get(name) {
+                None => Fetched::UnknownName,
+                Some(versions) => match versions.get(ver) {
+                    Some(row) => Fetched::Found(row.clone()),
+                    None => Fetched::Unoffered { best: None },
+                },
+            }
+        },
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the version disagreement refuses");
     assert_eq!(error, ResolveError::MissingPackage {
@@ -370,8 +424,12 @@ fn two_raises_before_the_fetch_read_one_demand() {
     )]));
     let fixtures = graph(vec![b_10, b_11, a, x], vec![("a", "1.0.0"), ("x", "1.0.0")]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("the co-raised demand resolves");
+    let resolved = resolve(
+        &fixtures.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("the co-raised demand resolves");
     assert_eq!(resolved.deps()["b"].version, Version::new(1, 1, 0));
     assert_eq!(registry.fetches, vec![
         ("a".to_owned(), Version::new(1, 0, 0)),
@@ -401,8 +459,12 @@ fn agreeing_pins_at_one_version_resolve() {
         ("right", "1.0.0"),
     ]);
     let mut registry = Registry::new(&fixtures.packages);
-    let resolved = resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("agreeing pins resolve");
+    let resolved = resolve(
+        &fixtures.root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("agreeing pins resolve");
     assert_eq!(resolved.deps()["shared"].version, Version::new(1, 0, 0));
     assert_eq!(resolved.deps()["shared"].content_hash, shared_hash);
     // one fetch for the name both declarers demanded
@@ -424,9 +486,12 @@ fn content_under_another_name_is_the_demand_unserved() {
         member_identity: other.member_identity().unwrap(),
     };
     let root = manifest_of("app", "1.0.0", &[("swap", "1.0.0", other.content_hash())]);
-    let error = resolve(&root, |name, _ver, _pin| match name {
-        "swap" => Fetched::Found(row.clone()),
-        _ => Fetched::UnknownName,
+    let error = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { .. } => match name {
+            "swap" => Fetched::Found(row.clone()),
+            _ => Fetched::UnknownName,
+        },
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect_err("the name disagreement refuses");
     assert_eq!(error, ResolveError::MissingPackage {
@@ -447,8 +512,12 @@ fn a_resolved_dep_on_the_root_closes_a_cycle() {
     )]));
     let root = manifest_of("app", "1.0.0", &[("back", "1.0.0", back.content_hash())]);
     let mut registry = Registry::new(&[back]);
-    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("the back edge refuses");
+    let error = resolve(
+        &root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("the back edge refuses");
     assert_eq!(error, ResolveError::Cycle {
         cycle: vec!["app".to_owned(), "back".to_owned(), "app".to_owned()]
     });
@@ -473,15 +542,23 @@ fn two_resolutions_produce_byte_identical_locks() {
     ]);
     let first = {
         let mut registry = Registry::new(&fixtures.packages);
-        resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-            .expect("resolves")
-            .lock_bytes()
+        resolve(
+            &fixtures.root,
+            Path::new("."),
+            registry_only(|name, ver| registry.fetch(name, ver)),
+        )
+        .expect("resolves")
+        .lock_bytes()
     };
     let second = {
         let mut registry = Registry::new(&fixtures.packages);
-        resolve(&fixtures.root, |name, ver, _pin| registry.fetch(name, ver))
-            .expect("resolves again")
-            .lock_bytes()
+        resolve(
+            &fixtures.root,
+            Path::new("."),
+            registry_only(|name, ver| registry.fetch(name, ver)),
+        )
+        .expect("resolves again")
+        .lock_bytes()
     };
     assert_eq!(first, second);
     // the lock carries every manifest of the graph: app, base, left, right
@@ -543,7 +620,12 @@ fn artifacts_fold_from_the_root_and_deps_under_one_name() {
         art,
     );
     let mut registry = Registry::new(&[lib]);
-    let resolved = resolve(&root, |name, ver, _pin| registry.fetch(name, ver)).expect("resolves");
+    let resolved = resolve(
+        &root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("resolves");
     let folded = resolved.artifacts();
     assert_eq!(folded.len(), 1);
     assert_eq!(folded["mymath"].ver, Version::new(1, 2, 0));
@@ -580,8 +662,12 @@ fn a_second_artifact_identity_under_one_name_refuses() {
         found,
     );
     let mut registry = Registry::new(&[lib]);
-    let error = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect_err("the conflict refuses");
+    let error = resolve(
+        &root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect_err("the conflict refuses");
     let ResolveError::ArtifactConflict {
         name,
         pinned: pin,
@@ -645,8 +731,12 @@ fn a_lifted_dep_retires_its_superseded_artifact_pin() {
         ("d", "1.0.0", d.content_hash()),
     ]);
     let mut registry = Registry::new(&[c_10, c_20, d]);
-    let resolved = resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
-        .expect("the lifted diamond resolves");
+    let resolved = resolve(
+        &root,
+        Path::new("."),
+        registry_only(|name, ver| registry.fetch(name, ver)),
+    )
+    .expect("the lifted diamond resolves");
     assert_eq!(resolved.deps()["c"].version, Version::new(2, 0, 0));
     assert_eq!(resolved.artifacts()["libfoo"].hash, pin_2);
 }
@@ -668,10 +758,281 @@ fn an_artifact_edit_rekeys_the_lock() {
             hash,
         );
         let mut registry = Registry::new(&[]);
-        resolve(&root, |name, ver, _pin| registry.fetch(name, ver))
-            .expect("an artifact-only root resolves")
-            .lock_bytes()
+        resolve(
+            &root,
+            Path::new("."),
+            registry_only(|name, ver| registry.fetch(name, ver)),
+        )
+        .expect("an artifact-only root resolves")
+        .lock_bytes()
     };
     assert_ne!(lock_of(one), lock_of(two));
     assert_eq!(lock_of(one), lock_of(one));
+}
+
+/// Writes one directory-shaped package: the manifest plus its members.
+fn write_dir_package(dir: &Path, manifest: &str, members: &[(&str, &str)]) {
+    std::fs::create_dir_all(dir).expect("the package dir creates");
+    std::fs::write(dir.join("ds.pkg"), manifest).expect("the manifest writes");
+    for (path, text) in members {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().expect("the member has a parent"))
+            .expect("the member dir creates");
+        std::fs::write(file, text).expect("the member writes");
+    }
+}
+
+/// A manifest whose deps are all path-shaped.
+fn path_manifest(name: &str, version: &str, deps: &[(&str, &str)]) -> Manifest {
+    let mut text = format!("name = \"{name}\"\nversion = \"{version}\"\n");
+    for (dep, path) in deps {
+        let _ = writeln!(text, "\n[deps.{dep}]\npath = \"{path}\"");
+    }
+    Manifest::parse(&text, FileId::new(0)).expect("fixture manifest parses")
+}
+
+/// The path-demand closure over a real store: every registry demand
+/// reports unknown, every path demand reads the directory through the
+/// provider's own fetch.
+fn path_only(store: &Store) -> impl FnMut(&str, Demand<'_>) -> Fetched + '_ {
+    move |name, demand| match demand {
+        Demand::Registry { .. } => {
+            let _ = name;
+            Fetched::UnknownName
+        },
+        Demand::Path { dir } => fetch_path(store, dir),
+    }
+}
+
+/// A path dep resolves from source: the directory's members frame the
+/// same canonical bundle `ds save` lands, the content identity keys the
+/// store (a cache fill the resolution can serve again), and the
+/// resolved row carries the directory and the directory's own version.
+#[test]
+fn a_path_dep_resolves_from_source_through_the_store_keys() {
+    let work = tempfile::tempdir().expect("a temp dir");
+    let cache = work.path().join("cache");
+    let store = Store::open(&cache);
+    let root = work.path().join("root");
+    let lib = work.path().join("lib");
+    write_dir_package(&lib, "name = \"@lib\"\nversion = \"1.4.0\"\n", &[(
+        "helper.ds",
+        "pub fn base() -> int {\n21\n}\n",
+    )]);
+    write_dir_package(
+        &root,
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.@lib]\npath = \"../lib\"\n",
+        &[("main.ds", "fn main() {}\n")],
+    );
+    let manifest = path_manifest("app", "0.1.0", &[("@lib", "../lib")]);
+    let resolved = resolve(&manifest, &root, path_only(&store)).expect("the path dep resolves");
+    let package = resolved.deps()["@lib"].clone();
+    assert_eq!(package.version, Version::new(1, 4, 0));
+    assert_eq!(package.dir.as_deref(), Some(lib.as_path()));
+    // the identity is the ds-save twin's: the same members, the same
+    // canonical bundle
+    let twin = Package::new(
+        &Manifest::parse("name = \"@lib\"\nversion = \"1.4.0\"\n", FileId::new(0)).unwrap(),
+        [(
+            "helper.ds".to_owned(),
+            b"pub fn base() -> int {\n21\n}\n".to_vec(),
+        )],
+    )
+    .unwrap();
+    assert_eq!(package.content_hash, twin.content_hash());
+    assert_eq!(
+        package.member_identity,
+        twin.member_identity().expect("the twin folds")
+    );
+    // the store holds the cache fill under the identity
+    assert!(store.load(package.content_hash).unwrap().is_some());
+    // and a second resolution serves the same row from the source again
+    let again = resolve(&manifest, &root, path_only(&store)).unwrap();
+    assert_eq!(again.deps()["@lib"].content_hash, package.content_hash);
+}
+
+/// Path deps nest: a path package's own path deps resolve against ITS
+/// directory, and the resolved graph's path set answers the transitive
+/// watch roots in ascending order.
+#[test]
+fn transitive_path_deps_resolve_against_their_own_directories() {
+    let work = tempfile::tempdir().expect("a temp dir");
+    let store = Store::open(&work.path().join("cache"));
+    let root = work.path().join("root");
+    let lib = work.path().join("lib");
+    let deep = work.path().join("deep");
+    write_dir_package(&deep, "name = \"@deep\"\nversion = \"1.0.0\"\n", &[(
+        "deep.ds",
+        "pub fn base() -> int {\n21\n}\n",
+    )]);
+    write_dir_package(
+        &lib,
+        "name = \"@lib\"\nversion = \"1.0.0\"\n\n[deps.@deep]\npath = \"../deep\"\n",
+        &[("lib.ds", "import @deep (base)\n")],
+    );
+    write_dir_package(&root, "name = \"app\"\nversion = \"0.1.0\"\n", &[(
+        "main.ds",
+        "fn main() {}\n",
+    )]);
+    let manifest = path_manifest("app", "0.1.0", &[("@lib", "../lib")]);
+    let resolved = resolve(&manifest, &root, path_only(&store)).expect("the chain resolves");
+    assert_eq!(resolved.deps().len(), 2);
+    assert_eq!(
+        resolved.path_dirs(),
+        vec![
+            deep.canonicalize().expect("the deep dir resolves"),
+            lib.canonicalize().expect("the lib dir resolves")
+        ],
+        "the watch set is the transitive path closure, ascending"
+    );
+}
+
+/// A path dep naming the root (a sibling spelling of the package under
+/// development) closes the cycle the final graph's edges read.
+#[test]
+fn a_path_dep_cycle_refuses() {
+    let work = tempfile::tempdir().expect("a temp dir");
+    let store = Store::open(&work.path().join("cache"));
+    let root = work.path().join("root");
+    let side = work.path().join("side");
+    write_dir_package(
+        &side,
+        "name = \"side\"\nversion = \"1.0.0\"\n\n[deps.app]\npath = \"../root\"\n",
+        &[("side.ds", "fn member() {}\n")],
+    );
+    write_dir_package(&root, "name = \"app\"\nversion = \"0.1.0\"\n", &[(
+        "main.ds",
+        "fn main() {}\n",
+    )]);
+    let manifest = path_manifest("app", "0.1.0", &[("side", "../side")]);
+    let error = resolve(&manifest, &root, path_only(&store)).expect_err("the cycle refuses");
+    assert!(matches!(error, ResolveError::Cycle { .. }), "{error}");
+}
+
+/// One name at both shapes refuses, one name at two directories refuses,
+/// and a served (directory-less) package declaring a path dep refuses.
+#[test]
+fn path_shape_conflicts_refuse() {
+    let work = tempfile::tempdir().expect("a temp dir");
+    let store = Store::open(&work.path().join("cache"));
+    let root = work.path().join("root");
+    let x1 = work.path().join("x1");
+    let x2 = work.path().join("x2");
+    let y = work.path().join("y");
+    write_dir_package(&x1, "name = \"@x\"\nversion = \"1.0.0\"\n", &[(
+        "x.ds",
+        "fn member() {}\n",
+    )]);
+    write_dir_package(&x2, "name = \"@x\"\nversion = \"1.0.0\"\n", &[(
+        "x.ds",
+        "fn other() {}\n",
+    )]);
+    // y path-deps @x at ../x1 (a different directory than the root's x2)
+    write_dir_package(
+        &y,
+        "name = \"@y\"\nversion = \"1.0.0\"\n\n[deps.@x]\npath = \"../x1\"\n",
+        &[("y.ds", "fn member() {}\n")],
+    );
+    write_dir_package(&root, "name = \"app\"\nversion = \"0.1.0\"\n", &[(
+        "main.ds",
+        "fn main() {}\n",
+    )]);
+
+    // the root path-deps @x at ../x2 while @y demands it at ../x1
+    let manifest = path_manifest("app", "0.1.0", &[("@x", "../x2"), ("@y", "../y")]);
+    let error =
+        resolve(&manifest, &root, path_only(&store)).expect_err("the two directories refuse");
+    assert!(
+        matches!(error, ResolveError::PathConflict { .. }),
+        "{error}"
+    );
+
+    // one name at both shapes across declarers: the root path-demands
+    // @x while a served registry package pins it
+    let served = ProvidedPackage {
+        manifest: Manifest::parse(
+            &format!(
+                "name = \"@reg\"\nversion = \"1.0.0\"\n\n[deps]\nx = {{ ver = \"1.0.0\", hash = \
+                 \"blake3:{}\" }}\n",
+                Hash128::ZERO
+            ),
+            FileId::new(0),
+        )
+        .unwrap(),
+        content_hash: Hash128::new([0x77; 16]),
+        member_identity: Hash128::ZERO,
+    };
+    let mut text = String::from("name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n");
+    let _ = writeln!(
+        text,
+        "@reg = {{ ver = \"1.0.0\", hash = \"blake3:{}\" }}",
+        Hash128::new([0x77; 16])
+    );
+    text.push_str("\n[deps.x]\npath = \"../x1\"\n");
+    let manifest = Manifest::parse(&text, FileId::new(0)).unwrap();
+    let error = resolve(&manifest, &root, |name, demand| match (name, demand) {
+        ("@reg", Demand::Registry { .. }) => Fetched::Found(served.clone()),
+        (_, Demand::Registry { .. }) => Fetched::UnknownName,
+        (_, Demand::Path { dir }) => fetch_path(&store, dir),
+    })
+    .expect_err("the mixed shapes refuse");
+    assert!(matches!(error, ResolveError::MixedDemand { .. }), "{error}");
+
+    // a served package declaring a path dep of its own (nothing else
+    // demanding the name): the orphan refusal, never a fetch
+    let orphan = ProvidedPackage {
+        manifest: Manifest::parse(
+            "name = \"@reg\"\nversion = \"1.0.0\"\n\n[deps.@z]\npath = \"../nowhere\"\n",
+            FileId::new(0),
+        )
+        .unwrap(),
+        content_hash: Hash128::new([0x77; 16]),
+        member_identity: Hash128::ZERO,
+    };
+    let manifest = Manifest::parse(
+        &format!(
+            "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@reg = {{ ver = \"1.0.0\", hash = \
+             \"blake3:{}\" }}\n",
+            Hash128::new([0x77; 16])
+        ),
+        FileId::new(0),
+    )
+    .unwrap();
+    let error = resolve(&manifest, &root, |name, demand| match (name, demand) {
+        ("@reg", Demand::Registry { .. }) => Fetched::Found(orphan.clone()),
+        (_, Demand::Registry { .. }) => Fetched::UnknownName,
+        (_, Demand::Path { dir }) => fetch_path(&store, dir),
+    })
+    .expect_err("the orphan path refuses");
+    assert!(matches!(error, ResolveError::OrphanPath { .. }), "{error}");
+}
+
+/// A path target that shapes no package refuses with the directory's
+/// own words (the fetch's refusal rides verbatim).
+#[test]
+fn a_broken_path_target_refuses_with_the_fetches_words() {
+    let work = tempfile::tempdir().expect("a temp dir");
+    let store = Store::open(&work.path().join("cache"));
+    let root = work.path().join("root");
+    write_dir_package(&root, "name = \"app\"\nversion = \"0.1.0\"\n", &[(
+        "main.ds",
+        "fn main() {}\n",
+    )]);
+    let manifest = path_manifest("app", "0.1.0", &[("@ghost", "../ghost")]);
+    let error = resolve(&manifest, &root, path_only(&store)).expect_err("the missing dir refuses");
+    assert!(matches!(error, ResolveError::PathRefused { .. }), "{error}");
+    assert!(error.to_string().contains("ds.pkg"), "{error}");
+
+    // a present directory whose manifest names another package refuses
+    // the name mismatch
+    let wrong = work.path().join("wrong");
+    write_dir_package(&wrong, "name = \"@other\"\nversion = \"1.0.0\"\n", &[(
+        "wrong.ds",
+        "fn member() {}\n",
+    )]);
+    let manifest = path_manifest("app", "0.1.0", &[("@right", "../wrong")]);
+    let error =
+        resolve(&manifest, &root, path_only(&store)).expect_err("the name mismatch refuses");
+    assert!(matches!(error, ResolveError::PathRefused { .. }), "{error}");
+    assert!(error.to_string().contains("names itself"), "{error}");
 }

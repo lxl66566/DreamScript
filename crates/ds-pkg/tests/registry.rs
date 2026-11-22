@@ -14,8 +14,8 @@ use std::{
 use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{
-    ArtifactFetch, INDEX_SEGMENT, Manifest, Package, Registry, Remote, Resolved, Store,
-    StoreProvider, Version, resolve,
+    ArtifactFetch, Demand, Fetched, INDEX_SEGMENT, Manifest, Package, Registry, Remote, Resolved,
+    Store, StoreProvider, Version, resolve,
 };
 
 /// Builds a manifest from parts, mirroring the resolution fixtures.
@@ -117,8 +117,9 @@ fn resolve_over(
         fetches += 1;
         registry.fetch(name, version)
     });
-    let outcome = resolve(root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let outcome = resolve(root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     });
     (outcome, fetches)
 }
@@ -155,8 +156,9 @@ fn a_store_miss_fetches_verifies_and_installs() {
     let registry = Registry::open(&fixture.index);
     let mut provider =
         StoreProvider::with_remote(&store, |name, version| registry.fetch(name, version));
-    let cold = resolve(&fixture.root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let cold = resolve(&fixture.root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the second cold store resolves");
     assert_eq!(cold.lock_bytes(), resolved.lock_bytes());
@@ -362,8 +364,9 @@ fn a_slashed_name_nests_as_its_own_segments() {
     let mut provider = StoreProvider::with_remote(&fixture.store, |name, version| {
         registry.fetch(name, version)
     });
-    let resolved = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the slashed name resolves");
     assert_eq!(
@@ -386,8 +389,9 @@ fn a_multi_version_row_file_serves_the_demanded_version() {
     let mut provider = StoreProvider::with_remote(&fixture.store, |name, version| {
         registry.fetch(name, version)
     });
-    let resolved = resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    let resolved = resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the demanded version resolves");
     assert_eq!(resolved.deps()["lib"].version, Version::new(1, 2, 0));
@@ -401,8 +405,9 @@ fn a_multi_version_row_file_serves_the_demanded_version() {
         fetches.insert(name.to_owned(), *version);
         registry.fetch(name, version)
     });
-    resolve(&root, |name, version, pin| {
-        provider.fetch(name, version, pin)
+    resolve(&root, Path::new("."), |name, demand| match demand {
+        Demand::Registry { ver, pin } => provider.fetch(name, ver, pin),
+        Demand::Path { .. } => Fetched::Refused("the fixture serves no path".to_owned()),
     })
     .expect("the second cold store resolves");
     assert_eq!(
