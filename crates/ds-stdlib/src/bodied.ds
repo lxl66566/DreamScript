@@ -22,10 +22,17 @@
 // these bodies and trips the file privacy refusal. zip pairs by the
 // nested scan whose inner guard is a catchall match (an `if` guarding a
 // type-variable-carrying write refuses at the branch reconcile; the
-// match spelling lowers). take, drop, flat_map, scan, and compose wait
-// behind the seams above (their residuals ride todo item 81); take,
-// drop, and flat_map are unblocked by the plan-time mint seam and wait
-// on the library round's phasing alone.
+// match spelling lowers), and the slice pair guards the same write by
+// the bool match, the one spelling an order comparison lowers. The
+// slice pair clamps at the list's own bounds (a negative, zero, or
+// past-the-end n answering the empty or whole list the bounds imply).
+// flat_map waits behind B2: a fn-typed parameter whose return nests the
+// callee's variable in a type application (`fn(t) -> list[r]`) never
+// solves from a concrete fn or lambda argument (containment binds a
+// bare return variable alone, and no lambda-return annotation exists),
+// so `flatten` lands as the composable half — the flat spelling
+// composing at call sites over map's hosted lambda. scan and compose
+// wait behind the seams above (their residuals ride todo item 81).
 //
 // The race combinators over the timer capability: the caller builds the
 // thunk list (non-capturing scalar lambdas alone — a closure cannot
@@ -116,6 +123,37 @@ pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
   while j < len(thunks) {
     out = out.concat([answers.recv()])
     j += 1
+  }
+  out
+}
+pub fn take[t] (xs: list[t], n: int) -> list[t] {
+  var out = list[t]()
+  var i: int = 0
+  for x in xs {
+    match i < n {
+      true => { out = out.concat([(x)]) }
+      _ => {}
+    }
+    i += 1
+  }
+  out
+}
+pub fn drop[t] (xs: list[t], n: int) -> list[t] {
+  var out = list[t]()
+  var i: int = 0
+  for x in xs {
+    match i < n {
+      true => {}
+      _ => { out = out.concat([(x)]) }
+    }
+    i += 1
+  }
+  out
+}
+pub fn flatten[r] (xss: list[list[r]]) -> list[r] {
+  var out = list[r]()
+  for ys in xss {
+    out = out.concat(ys)
   }
   out
 }

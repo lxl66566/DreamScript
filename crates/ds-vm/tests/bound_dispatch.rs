@@ -14,6 +14,8 @@ use std::{
 };
 
 use ds_abi::BoundRet;
+
+mod support;
 use ds_mod::{Constant, Function, Hash128, Module, TargetClass, read, write};
 use ds_vm::{
     BoundModule, FrameAnswer, LoadError, ModuleRegistry, Value, Vm,
@@ -44,12 +46,10 @@ fn library_name() -> &'static str {
     }
 }
 
-/// A unique temp dir per tag, removed first.
+/// A unique guarded temp dir per tag, removed at the test thread's
+/// exit.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-vm-bound-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
-    dir
+    support::guarded_dir(&format!("ds-vm-bound-{tag}-"))
 }
 
 /// Compiles the fixture cdylib into `dir` and answers its bytes. Cargo

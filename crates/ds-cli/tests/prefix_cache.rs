@@ -15,23 +15,21 @@ use std::{
     process::Command,
 };
 
+mod support;
+
 /// A written zero-parameter entry: the shape the caches serve.
 const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n";
 
 /// One private cache root per tag: tests never share a root and never
 /// touch a real user cache directory.
 fn cache_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-prefix-cache-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the private cache root creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-prefix-cache-{tag}-"))
 }
 
 /// One source file per tag: the cache key folds both the file's stem
 /// (the module name) and the content.
 fn source_file(tag: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-prefix-cache-src-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the source directory creates");
+    let dir = support::guarded_dir("ds-cli-prefix-cache-src-");
     let path = dir.join(format!("{tag}.ds"));
     fs::write(&path, text).expect("the source writes");
     path

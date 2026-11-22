@@ -11,6 +11,8 @@ use std::{
 
 use ds_ffi::{ExportError, enumerate};
 
+mod support;
+
 /// The `Malformed` refusal's detail, so a test can name the offset the
 /// error reports.
 fn malformed_detail(error: ExportError) -> String {
@@ -270,9 +272,7 @@ fn build_fixture(dir: &Path) -> PathBuf {
 /// Mach-O magic refuses as soon as it is whole).
 #[test]
 fn every_fixture_truncation_refuses_without_panicking() {
-    let dir = env::temp_dir().join(format!("ds-ffi-malformed-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir("ds-ffi-malformed-");
     let dylib = build_fixture(&dir);
     let bytes = std::fs::read(&dylib).expect("the fixture reads back");
     for cut in 0..bytes.len() {

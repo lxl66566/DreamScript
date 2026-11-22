@@ -15,6 +15,8 @@ use std::{
     thread,
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -22,17 +24,10 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-test-cache-")
 }
 
 fn example(name: &str) -> PathBuf {
@@ -204,9 +199,7 @@ fn files_round_trip_runs_through_the_success_typed_read() {
     // the round trip's read leg rides the ambient's string | io_err
     // signature: the `.err` handler extracts at run level, and the
     // written file landing before the read proves the legs ordered
-    let dir = env::temp_dir().join(format!("ds_cli_files_example-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir("ds_cli_files_example-");
     let mut command = ds();
     command
         .arg("run")
@@ -315,8 +308,7 @@ fn saved_hash(output: &str) -> String {
 /// middle package alone.
 #[test]
 fn pub_import_selects_the_reexported_surface_through_the_middle_package() {
-    let work = env::temp_dir().join(format!("ds_cli_pub_import_example-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
+    let work = support::guarded_dir("ds_cli_pub_import_example-");
 
     // the origin package: a callable, a literal const, and a flat struct
     let deep = work.join("deep");
@@ -407,6 +399,23 @@ fn race_combinators_answer_in_arrival_order() {
         run_ok(ds().arg("run").arg(example("race.ds"))),
         "first 2\narrival 2 1\nsum 10\n0\n",
         "the race answers by arrival, and the fold folds"
+    );
+}
+
+#[test]
+fn slice_members_clamp_and_flatten_composes_over_map() {
+    // the @std slice pair and the flat_map face's composable half: take
+    // and drop clamp at the list's own bounds (a negative, zero, or
+    // past-the-end n and the empty list answering the empty or whole
+    // list the bounds imply), both spellings bare and UFCS; flatten
+    // composes the flat spelling over map's hosted lambda — the
+    // fn-typed parameter's list-returning signature never solves from a
+    // concrete lambda at the call site (B2), so flatten is the half
+    // that lands — the nested-empty edge included
+    assert_eq!(
+        run_ok(ds().arg("run").arg(example("slices.ds"))),
+        "take 2 0 5 0\nedges 0 3\ndrop 3 5 0 5\nedges 0 1\nflat 10 10\nempty 0 3\n0\n",
+        "the slices clamp at their bounds, and flatten composes"
     );
 }
 
@@ -565,8 +574,7 @@ fn every_example_has_a_gate() {
 
 #[test]
 fn build_then_run_the_module_reproduces_the_source_output() {
-    let dir = env::temp_dir().join(format!("ds_cli_build_example-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = support::guarded_dir("ds_cli_build_example-");
     fs::create_dir_all(&dir).expect("the temp dir creates");
     let module = dir.join("hello.dsmod");
     let out = ds()

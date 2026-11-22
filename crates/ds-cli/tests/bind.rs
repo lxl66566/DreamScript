@@ -19,6 +19,8 @@ use std::{
 use ds_mod::Hash128;
 use ds_pkg::Store;
 
+mod support;
+
 /// The fixture library's file name per platform.
 fn library_name() -> &'static str {
     if cfg!(windows) {
@@ -183,25 +185,16 @@ fn root_manifest(artifact: Hash128) -> String {
     )
 }
 
-/// A unique temp dir per tag, removed first.
+/// A unique guarded temp dir per tag, removed at the test thread's
+/// exit.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-bind-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-bind-{tag}-"))
 }
 
-/// A private per-process store: spawned runs never touch a real user
-/// cache directory.
+/// A private per-thread store: spawned runs never touch a real user
+/// cache directory, and the thread's exit removes the root.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-bind-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-bind-cache-")
 }
 
 /// Runs the built binary against one cache directory.

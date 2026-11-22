@@ -19,6 +19,8 @@ use std::{
     time::Duration,
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -26,18 +28,10 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir =
-                env::temp_dir().join(format!("ds-cli-net-server-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-net-server-cache-")
 }
 
 /// The echo-server source: bind, accept (a park under the reactor), echo
@@ -108,9 +102,7 @@ fn late_peer(port: u16) -> thread::JoinHandle<Vec<u8>> {
 fn a_failed_bind_halts_on_the_total_spellings_error_line() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("the held probe");
     let port = held.local_addr().expect("bound address").port();
-    let dir = env::temp_dir().join(format!("ds-cli-net-bind-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-net-bind-");
     let file = dir.join("bind.ds");
     fs::write(
         &file,
@@ -135,8 +127,7 @@ fn a_failed_bind_halts_on_the_total_spellings_error_line() {
 
 #[test]
 fn a_scheduled_run_parks_its_accept_and_serves_the_peer() {
-    let dir = env::temp_dir().join(format!("ds-cli-net-server-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = support::guarded_dir("ds-cli-net-server-");
     fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("echo_server.ds");
     for _ in 0..8 {

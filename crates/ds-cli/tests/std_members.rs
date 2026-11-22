@@ -31,6 +31,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -38,25 +40,16 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-std-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-std-cache-")
 }
 
 /// Writes one manifest-free script under a fresh temp dir and answers
 /// the file's path.
 fn script(tag: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-std-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir(&format!("ds-cli-std-{tag}-"));
     let file = dir.join("app.ds");
     fs::write(&file, text).expect("the script writes");
     file
@@ -65,9 +58,7 @@ fn script(tag: &str, text: &str) -> PathBuf {
 /// Writes one package root (a `ds.pkg` manifest beside the members)
 /// under a fresh temp dir and answers the root's path.
 fn write_root(tag: &str, manifest: &str, members: &[(&str, &str)]) -> PathBuf {
-    let root = env::temp_dir().join(format!("ds-cli-std-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).expect("the root dir creates");
+    let root = support::guarded_dir(&format!("ds-cli-std-{tag}-"));
     fs::write(root.join("ds.pkg"), manifest).expect("the manifest writes");
     for (path, text) in members {
         fs::write(root.join(path), text).expect("the member writes");

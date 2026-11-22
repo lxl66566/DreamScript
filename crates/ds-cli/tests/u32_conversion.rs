@@ -17,6 +17,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -24,24 +26,15 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-u32-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-u32-cache-")
 }
 
 /// Writes one script under a temp dir and answers its path.
 fn script(tag: &str, name: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-u32-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir(&format!("ds-cli-u32-{tag}-"));
     let file = dir.join(name);
     fs::write(&file, text).expect("the script writes");
     file

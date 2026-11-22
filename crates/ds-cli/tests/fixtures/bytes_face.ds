@@ -14,7 +14,7 @@ struct order { b: bytes }
 #[derive(hash)]
 struct digest { b: bytes }
 
-fn take (b: bytes) -> string | utf8_err {
+fn decode (b: bytes) -> string | utf8_err {
   const text = utf8_decode(b)
   text
 }
@@ -45,7 +45,7 @@ fn main() -> () {
   println(str(d1.hash() == d3.hash()))
   const encoded = utf8_encode("héllo")
   println(str(len(encoded)))
-  match take(encoded) {
+  match decode(encoded) {
     utf8_err => println("decode refused"),
     text => println(text)
   }

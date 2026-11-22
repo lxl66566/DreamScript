@@ -17,6 +17,8 @@ use std::{
     time::Duration,
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -24,18 +26,10 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir =
-                env::temp_dir().join(format!("ds-cli-net-connect-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-net-connect-cache-")
 }
 
 /// The net_err match arms every fallible row of the sources below
@@ -55,9 +49,7 @@ fn free_port() -> u16 {
 /// line, answer the reply.
 #[test]
 fn a_scheduled_run_parks_its_connect_and_speaks_with_the_peer() {
-    let dir = env::temp_dir().join(format!("ds-cli-net-connect-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-net-connect-");
     let file = dir.join("echo_client.ds");
     for _ in 0..8 {
         let port = free_port();
@@ -123,9 +115,7 @@ fn a_scheduled_run_parks_its_connect_and_speaks_with_the_peer() {
 /// deadline, drawing the line.
 #[test]
 fn a_parked_connect_to_a_dead_port_answers_the_refused_class() {
-    let dir = env::temp_dir().join(format!("ds-cli-net-refused-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-net-refused-");
     let file = dir.join("refused.ds");
     for _ in 0..8 {
         // bind, note, drop: the port answers connects with a reset
@@ -163,9 +153,7 @@ fn a_parked_connect_to_a_dead_port_answers_the_refused_class() {
 /// local server's close — the body on stdout.
 #[test]
 fn a_scheduled_run_parks_its_plain_fetch() {
-    let dir = env::temp_dir().join(format!("ds-cli-net-fetch-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-net-fetch-");
     let file = dir.join("fetch.ds");
     for _ in 0..8 {
         let port = free_port();
@@ -232,9 +220,7 @@ fn a_scheduled_run_parks_its_plain_fetch() {
 /// and the program's parked accept serves it.
 #[test]
 fn a_port_zero_bind_reports_its_live_local_address() {
-    let dir = env::temp_dir().join(format!("ds-cli-net-local-addr-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-net-local-addr-");
     let file = dir.join("port_zero.ds");
     let arms = ERR_ARMS;
     fs::write(

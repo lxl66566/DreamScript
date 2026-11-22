@@ -8,12 +8,11 @@ use std::{
     process::Command,
 };
 
-/// A private per-process scratch root.
+mod support;
+
+/// A private guarded scratch root, removed at the test thread's exit.
 fn temp(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-info-{}-{tag}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the scratch root creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-info-{tag}-"))
 }
 
 fn ds_info(target: &Path) -> (bool, String, String) {

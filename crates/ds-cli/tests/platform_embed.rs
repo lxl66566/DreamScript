@@ -4,19 +4,14 @@
 //! the console face, while a source whose declaration claims a world op
 //! beyond it refuses at install with the unprovided-op error.
 
-use std::{env, fs, path::PathBuf, process::Command, sync::OnceLock};
+use std::{env, path::PathBuf, process::Command};
 
 use ds_vm::platform::OP_FILE_SIZE;
 
+mod support;
+
 fn test_cache() -> PathBuf {
-    static CACHE: OnceLock<PathBuf> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-test-cache-")
 }
 
 /// Runs the built binary and flattens the outcome.

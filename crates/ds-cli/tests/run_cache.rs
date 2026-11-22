@@ -19,6 +19,8 @@ use std::{
 
 use ds_mod::Hash128;
 
+mod support;
+
 /// A written zero-parameter entry: the shape the cache serves.
 const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n";
 
@@ -31,17 +33,13 @@ const ARGS_MAIN: &str = "fn main() -> () {\n  const argv = args()\n  if len(argv
 /// One private cache root per tag: tests never share a root and never
 /// touch a real user cache directory.
 fn cache_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-run-cache-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the private cache root creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-run-cache-{tag}-"))
 }
 
 /// One source file per tag: the cache key folds both the file's stem
 /// (the module name) and the content.
 fn source_file(tag: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-run-cache-src-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the source directory creates");
+    let dir = support::guarded_dir("ds-cli-run-cache-src-");
     let path = dir.join(format!("{tag}.ds"));
     fs::write(&path, text).expect("the source writes");
     path
@@ -261,11 +259,11 @@ fn a_linearity_violation_refuses_and_writes_nothing() {
         "linear",
         concat!(
             "struct res: ~Copyable { n: int }\n",
-            "fn take (move r: res) -> int { r.n }\n",
+            "fn consume (move r: res) -> int { r.n }\n",
             "fn main() -> () {\n",
             "  const r = res { n: 5 }\n",
-            "  const a = take(r)\n",
-            "  const b = take(r)\n",
+            "  const a = consume(r)\n",
+            "  const b = consume(r)\n",
             "}\n",
         ),
     );

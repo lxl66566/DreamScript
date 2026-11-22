@@ -1,0 +1,20 @@
+// The @std slice pair over the bodied generic library shape: take
+// answers the first n elements and drop the rest after n, both
+// clamping at the list's own bounds — a negative, zero, or past-the-end
+// n and the empty list all answering the empty or whole list the
+// bounds imply. flatten is the flat_map face's composable half: the
+// fn-typed parameter's list-returning signature never solves from a
+// concrete lambda at the call site (B2 binds a bare return variable
+// alone), so the flat spelling composes as flatten over map's hosted
+// lambda, the nested-empty edge included.
+
+fn main() -> () {
+  const xs = [1, 2, 3, 4, 5]
+  println("take ${take(xs, 2).len()} ${take(xs, 0).len()} ${take(xs, 9).len()} ${take(xs, -1).len()}")
+  println("edges ${take(list[int](), 3).len()} ${xs.take(3).len()}")
+  println("drop ${drop(xs, 2).len()} ${drop(xs, 0).len()} ${drop(xs, 9).len()} ${drop(xs, -1).len()}")
+  println("edges ${drop(list[int](), 2).len()} ${xs.drop(4).len()}")
+  const nested = xs.map((x: int) => [x, x * 10])
+  println("flat ${flatten(nested).len()} ${nested.flatten().len()}")
+  println("empty ${flatten(list[list[int]]()).len()} ${flatten([[1], list[int](), [2, 3]]).len()}")
+}

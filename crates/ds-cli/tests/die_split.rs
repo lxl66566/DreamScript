@@ -16,6 +16,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -23,24 +25,15 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-die-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-die-cache-")
 }
 
 /// Writes one script under a temp dir and answers its path.
 fn script(tag: &str, name: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-die-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir(&format!("ds-cli-die-{tag}-"));
     let file = dir.join(name);
     fs::write(&file, text).expect("the script writes");
     file
@@ -148,9 +141,7 @@ fn a_redeclared_spelling_refuses_against_the_host_member() {
 /// call lowers and the run answers the same halt policy.
 #[test]
 fn a_package_root_run_carries_the_provision() {
-    let dir = env::temp_dir().join(format!("ds-cli-die-root-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the package dir creates");
+    let dir = support::guarded_dir("ds-cli-die-root-");
     fs::write(dir.join("ds.pkg"), "name = \"app\"\nversion = \"0.1.0\"\n")
         .expect("the manifest writes");
     fs::write(

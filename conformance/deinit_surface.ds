@@ -4,7 +4,7 @@
 // res: stage: run
 // named: stage: run
 // early: stage: run
-// take: stage: run
+// take_id: stage: run
 // borrow_keeps: stage: run
 // maker: stage: run
 // main: stage: run
@@ -27,11 +27,11 @@ fn early(n: int) -> int {
   a.id
 }
 
-fn take(f: res) -> int { f.id }
+fn take_id(f: res) -> int { f.id }
 
 fn borrow_keeps(n: int) -> int {
   const r = res { id: n }
-  const got = take(r)
+  const got = take_id(r)
   got + r.id
 }
 

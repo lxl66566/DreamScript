@@ -20,6 +20,8 @@
 
 use std::{env, fs, path::PathBuf, process::Command};
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -27,24 +29,16 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-chan-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-chan-cache-")
 }
 
 /// Writes `source` to a scratch file and runs it, answering (status,
 /// stdout, stderr).
 fn run_source(source: &str) -> (std::process::ExitStatus, String, String) {
-    let dir = env::temp_dir().join(format!("ds-cli-chan-src-{}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
+    let dir = support::guarded_dir("ds-cli-chan-src-");
     let path = dir.join("chan_main.ds");
     fs::write(&path, source).expect("scratch source writes");
     let out = ds().arg("run").arg(&path).output().expect("ds run spawns");

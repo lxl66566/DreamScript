@@ -19,24 +19,17 @@ use std::{
     time::Instant,
 };
 
+mod support;
+
 /// One private cache root per test binary, so the runs never touch a
 /// real user cache directory.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir =
-                env::temp_dir().join(format!("ds-cli-proc-capture-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-proc-capture-cache-")
 }
 
 /// Writes one source program into the test's private source directory.
 fn source_file(tag: &str, text: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-proc-capture-src-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the source directory creates");
+    let dir = support::guarded_dir("ds-cli-proc-capture-src-");
     let path = dir.join(format!("{tag}.ds"));
     fs::write(&path, text).expect("the source writes");
     path

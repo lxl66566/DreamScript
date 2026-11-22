@@ -15,6 +15,8 @@ use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{Manifest, Package};
 
+mod support;
+
 /// The linked library package's member: one exported fn the root
 /// selects.
 const LIB_MEMBER: &str = concat!(
@@ -79,12 +81,9 @@ fn write_pkg(dir: &Path, manifest: &str, sources: &[(&str, &str)]) {
     }
 }
 
-/// A unique temp dir per tag, removed first; the test removes it after.
+/// A unique guarded temp dir per tag, removed at the test thread's exit.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-dsi-surface-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-dsi-surface-{tag}-"))
 }
 
 /// Runs the built binary against one cache directory, flattening the

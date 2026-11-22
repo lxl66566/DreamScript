@@ -11,6 +11,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn ds_fmt(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ds"))
         .args(args)
@@ -24,9 +26,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = env::temp_dir().join(format!("ds-cli-fmt-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("the temp dir creates");
+        let dir = support::guarded_dir(&format!("ds-cli-fmt-{name}-"));
         Self(dir)
     }
 

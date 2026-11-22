@@ -14,6 +14,8 @@ use std::{
 
 use ds_ffi::{Answer, Arg, Library, Param, Ret, Scalar, ScalarKind, ScalarSig, Sig};
 
+mod support;
+
 /// The fixture library's file name per platform: the loader-recognized
 /// spelling rustc emits for a cdylib.
 fn library_name() -> &'static str {
@@ -50,12 +52,10 @@ fn build_fixture(dir: &Path) -> PathBuf {
     out
 }
 
-/// One unique temp dir per leg, removed first.
+/// One unique guarded temp dir per leg, removed at the test thread's
+/// exit.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-ffi-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("the temp dir creates");
-    dir
+    support::guarded_dir(&format!("ds-ffi-{tag}-"))
 }
 
 /// A compiled cdylib binds: the host loader takes it, every exported

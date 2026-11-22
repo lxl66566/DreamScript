@@ -18,6 +18,8 @@
 
 use std::{env, process::Command};
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -431,8 +433,7 @@ fn drop_renames_the_binding_name_token_only() {
 /// Runs one program text through `ds run` and answers its stdout: the
 /// differential twin of a REPL session's own prints.
 fn run_stdout(source: &str) -> String {
-    let dir = env::temp_dir().join(format!("ds-repl-diff-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("the differential dir creates");
+    let dir = support::guarded_dir("ds-repl-diff-");
     let path = dir.join("twin.ds");
     std::fs::write(&path, source).expect("the twin source writes");
     let output = ds()

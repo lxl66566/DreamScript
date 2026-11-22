@@ -10,6 +10,8 @@ use std::{
     env, fs, io::Write, net::TcpListener, path::PathBuf, process::Command, thread, time::Duration,
 };
 
+mod support;
+
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -17,17 +19,10 @@ fn ds() -> Command {
     command
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-io-sched-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-io-sched-cache-")
 }
 
 /// The parked-recv source: connect, recv (a park under the reactor),
@@ -58,9 +53,7 @@ fn a_scheduled_run_parks_its_recv_and_lands_the_answer() {
         sock.write_all(b"from the peer").expect("peer writes");
         sock.flush().expect("peer flushes");
     });
-    let dir = env::temp_dir().join(format!("ds-cli-io-sched-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
+    let dir = support::guarded_dir("ds-cli-io-sched-");
     let file = dir.join("parked_recv.ds");
     fs::write(&file, source(port)).expect("source writes");
     let out = ds().arg("run").arg(&file).output().expect("ds run spawns");

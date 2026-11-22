@@ -14,6 +14,8 @@ use ds_vm::{
     native::{PLATFORM_NONE, PLATFORM_PARSE_ERR},
 };
 
+mod support;
+
 fn k(idx: u16) -> ConstIdx {
     ConstIdx(idx)
 }
@@ -223,17 +225,10 @@ fn platform_tag_module(name: &str, tag: u8) -> Module {
     .with_function(main)
 }
 
-/// A private per-process script-cache root: spawned runs never read or
-/// write a real user cache directory.
+/// A private per-thread script-cache root: spawned runs never read or
+/// write a real user cache directory, and the thread's exit removes it.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-test-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-test-cache-")
 }
 /// Runs the built binary and flattens the outcome.
 fn ds_run(args: &[&str]) -> (bool, String, String) {

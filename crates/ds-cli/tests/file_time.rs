@@ -12,6 +12,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 /// The binary with a private working directory (the fixture writes its
 /// probe file by a relative path) and a private script-cache root.
 fn ds_in(dir: &PathBuf) -> Command {
@@ -23,10 +25,7 @@ fn ds_in(dir: &PathBuf) -> Command {
 
 /// A fresh empty working directory per call, below the OS temp root.
 fn workdir(name: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-file-time-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the working directory creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-file-time-{name}-"))
 }
 
 fn fixture(name: &str) -> PathBuf {

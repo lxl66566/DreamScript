@@ -26,6 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 /// The two entry sources the campaign races: distinct texts and stems so
 /// their keys (and artifacts) differ while sharing one root — multi-line
 /// outputs make any served deviation visible in full, not just at the
@@ -74,17 +76,12 @@ const ROUND_BUDGET: Duration = Duration::from_secs(20);
 /// One shared cache root per test process: the whole campaign runs over
 /// it, never a real user cache directory.
 fn campaign_root() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-cli-run-cache-race-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the campaign cache root creates");
-    dir
+    support::guarded_dir("ds-cli-run-cache-race-")
 }
 
 /// One source file per tag, under a private directory.
 fn source_file(tag: &str, text: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("ds-cli-run-cache-race-src-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the source directory creates");
+    let dir = support::guarded_dir("ds-cli-run-cache-race-src-");
     let path = dir.join(format!("{tag}.ds"));
     fs::write(&path, text).expect("the source writes");
     path

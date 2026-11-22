@@ -11,6 +11,8 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn ds_check(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ds"))
         .args(args)
@@ -315,8 +317,7 @@ fn a_derived_members_call_checks_clean() {
 /// clean exactly as `ds run` resolves it.
 #[test]
 fn the_std_faces_resolve_implicitly_without_an_import_row() {
-    let dir = env::temp_dir().join(format!("ds-cli-check-faces-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir("ds-cli-check-faces-");
     let path = dir.join("faces.ds");
     fs::write(
         &path,
@@ -345,8 +346,7 @@ fn the_std_faces_resolve_implicitly_without_an_import_row() {
 /// graph's import row binds the member through the linked surface).
 #[test]
 fn the_std_data_members_stay_link_bound_at_the_check() {
-    let dir = env::temp_dir().join(format!("ds-cli-check-residue-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir("ds-cli-check-residue-");
     let path = dir.join("residue.ds");
     fs::write(&path, "fn probe(r: row) -> int {\n  1\n}\n").expect("the temp source writes");
     let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);
@@ -372,8 +372,7 @@ fn a_file_past_the_block_budget_reports_each_block_and_keeps_checking() {
         // writing into a String cannot fail
         let _ = writeln!(source, "const b{i} = {i}");
     }
-    let dir = env::temp_dir().join(format!("ds-cli-check-blocks-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the temp dir creates");
+    let dir = support::guarded_dir("ds-cli-check-blocks-");
     let path = dir.join("many_blocks.ds");
     fs::write(&path, source).expect("the temp source writes");
     let out = ds_check(&[
@@ -418,11 +417,7 @@ fn many_generic_impls_of_one_trait_check_clean() {
             );
         }
         source.push_str("fn main() -> int { 0 }\n");
-        let dir = env::temp_dir().join(format!(
-            "ds-cli-check-coherence-{count}-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).expect("the temp dir creates");
+        let dir = support::guarded_dir(&format!("ds-cli-check-coherence-{count}-"));
         let path = dir.join("many_impls.ds");
         fs::write(&path, source).expect("the temp source writes");
         let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);

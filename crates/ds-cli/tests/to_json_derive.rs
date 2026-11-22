@@ -19,14 +19,10 @@ use std::{
     process::{Command, Output},
 };
 
+mod support;
+
 fn workdir(name: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!(
-        "ds-cli-to-json-derive-{}-{name}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the working directory creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-to-json-derive-{name}-"))
 }
 
 fn fixture(name: &str) -> PathBuf {

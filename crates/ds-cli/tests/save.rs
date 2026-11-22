@@ -14,6 +14,8 @@ use ds_diag::FileId;
 use ds_mod::Hash128;
 use ds_pkg::{Manifest, Package};
 
+mod support;
+
 /// The fixture member.
 const MEMBER: &str = "pub fn a() -> int {\n1\n}\n";
 
@@ -29,25 +31,15 @@ fn write_pkg(dir: &Path, manifest: &str, sources: &[(&str, &str)]) {
     }
 }
 
-/// A unique temp dir per tag, removed first; the test removes it after.
+/// A unique guarded temp dir per tag, removed at the test thread's exit.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!("ds-cli-save-{tag}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the temp dir creates");
-    dir
+    support::guarded_dir(&format!("ds-cli-save-{tag}-"))
 }
 
-/// A private per-process store: spawned runs never touch a real user
-/// cache directory.
+/// A private per-thread store: spawned runs never touch a real user
+/// cache directory, and the thread's exit removes the root.
 fn test_cache() -> PathBuf {
-    static CACHE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let dir = env::temp_dir().join(format!("ds-cli-save-cache-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            dir
-        })
-        .clone()
+    support::shared_dir("ds-cli-save-cache-")
 }
 
 /// Runs the built binary against the shared test store and flattens the
