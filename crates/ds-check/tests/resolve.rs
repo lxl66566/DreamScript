@@ -1468,8 +1468,12 @@ fn the_widened_link_shapes_bind_at_the_walk() {
                 "row",
                 Some(ds_check::TypeFact::Alias(Box::new(
                     ds_check::import::TypeWord::Map(
-                        ds_check::import::ScalarWord::Str,
-                        ds_check::import::ScalarWord::Str,
+                        Box::new(ds_check::import::TypeWord::Scalar(
+                            ds_check::import::ScalarWord::Str,
+                        )),
+                        Box::new(ds_check::import::TypeWord::Scalar(
+                            ds_check::import::ScalarWord::Str,
+                        )),
                     ),
                 ))),
                 None,
@@ -1486,9 +1490,11 @@ fn the_widened_link_shapes_bind_at_the_walk() {
                         },
                         ds_check::import::TypeField {
                             name: "port".to_owned(),
-                            word: ds_check::import::TypeWord::Optional(
-                                ds_check::import::ScalarWord::Int,
-                            ),
+                            word: ds_check::import::TypeWord::Optional(Box::new(
+                                ds_check::import::TypeWord::Scalar(
+                                    ds_check::import::ScalarWord::Int,
+                                ),
+                            )),
                         },
                         ds_check::import::TypeField {
                             name: "retries".to_owned(),

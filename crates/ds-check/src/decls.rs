@@ -527,7 +527,7 @@ fn install_foreign_type(
             install_foreign_case(def, name, span, fact, decls);
         },
         crate::import::TypeFact::Alias(word) => {
-            install_foreign_alias(def, name, span, **word, decls);
+            install_foreign_alias(def, name, span, (**word).clone(), decls);
         },
         crate::import::TypeFact::Opaque => {
             install_foreign_opaque(def, name, span, decls);
@@ -550,7 +550,7 @@ fn foreign_fields(
     let mut universe_fields = Vec::with_capacity(fields.len());
     let mut ast_fields = Vec::with_capacity(fields.len());
     for field in fields {
-        let (expr, written) = foreign_field_type(field.word, span, decls)?;
+        let (expr, written) = foreign_field_type(field.word.clone(), span, decls)?;
         universe_fields.push(Field::named(&field.name, expr));
         ast_fields.push(FieldDecl {
             span,
@@ -630,7 +630,7 @@ fn install_foreign_enum(
             crate::import::CasePayload::Tuple(words) => {
                 let mut ast_items = Vec::with_capacity(words.len());
                 for word in words {
-                    let Some((_, written)) = foreign_field_type(*word, span, decls) else {
+                    let Some((_, written)) = foreign_field_type(word.clone(), span, decls) else {
                         return;
                     };
                     ast_items.push(written);
@@ -683,7 +683,7 @@ fn install_foreign_case(
             let mut universe_fields = Vec::with_capacity(words.len());
             let mut ast_items = Vec::with_capacity(words.len());
             for word in words {
-                let Some((expr, written)) = foreign_field_type(*word, span, decls) else {
+                let Some((expr, written)) = foreign_field_type(word.clone(), span, decls) else {
                     return;
                 };
                 universe_fields.push(Field::positional(expr));
@@ -848,44 +848,37 @@ fn foreign_field_type(
             args,
         }
     };
-    let scalar_atom = |decls: &mut Decls, word: crate::import::ScalarWord| {
-        decls.universe.atom_by_name(word.atom_name())
-    };
     match word {
         TypeWord::Scalar(word) => {
-            let atom = scalar_atom(decls, word)?;
+            let atom = decls.universe.atom_by_name(word.atom_name())?;
             Some((TypeExpr::Atom(atom), named(word.atom_name(), Vec::new())))
         },
-        TypeWord::List(word) => {
-            let element = scalar_atom(decls, word)?;
-            let element_ty = decls.universe.atom_ty(element).ok()?;
+        TypeWord::List(inner) => {
+            let (element, written_element) = foreign_field_type(*inner, span, decls)?;
+            let element_ty = decls.universe.solve(&element).ok()?;
             let ctor = decls.universe.atom_by_name("list")?;
             let apply = decls.universe.apply_atom(ctor, &[element_ty]).ok()?;
-            let written = named("list", vec![named(word.atom_name(), Vec::new())]);
-            Some((TypeExpr::Atom(apply), written))
+            Some((TypeExpr::Atom(apply), named("list", vec![written_element])))
         },
         TypeWord::Map(key, value) => {
-            let key_atom = scalar_atom(decls, key)?;
-            let value_atom = scalar_atom(decls, value)?;
-            let key_ty = decls.universe.atom_ty(key_atom).ok()?;
-            let value_ty = decls.universe.atom_ty(value_atom).ok()?;
+            let (key_expr, written_key) = foreign_field_type(*key, span, decls)?;
+            let (value_expr, written_value) = foreign_field_type(*value, span, decls)?;
+            let key_ty = decls.universe.solve(&key_expr).ok()?;
+            let value_ty = decls.universe.solve(&value_expr).ok()?;
             let ctor = decls.universe.atom_by_name("map")?;
             let apply = decls.universe.apply_atom(ctor, &[key_ty, value_ty]).ok()?;
-            let written = named("map", vec![
-                named(key.atom_name(), Vec::new()),
-                named(value.atom_name(), Vec::new()),
-            ]);
+            let written = named("map", vec![written_key, written_value]);
             Some((TypeExpr::Atom(apply), written))
         },
-        TypeWord::Optional(word) => {
-            let atom = scalar_atom(decls, word)?;
+        TypeWord::Optional(inner) => {
+            let (solved_inner, written_inner) = foreign_field_type(*inner, span, decls)?;
             // `t?` is exactly `t | none` (B4): the union tree the local
             // optional's own conversion builds, the presence tag over
-            // the scalar's payload word
-            let solved = TypeExpr::Atom(atom).union(TypeId::NONE.into());
+            // the word's payload word(s)
+            let solved = solved_inner.union(TypeId::NONE.into());
             let written = Type::Optional {
                 span,
-                inner: Box::new(named(word.atom_name(), Vec::new())),
+                inner: Box::new(written_inner),
             };
             Some((solved, written))
         },

@@ -39,6 +39,12 @@ pub(crate) const NET_TIMEOUT: u8 = u8::MAX - 10;
 pub(crate) const NET_REFUSED: u8 = u8::MAX - 11;
 pub(crate) const UTF8_ERR: u8 = u8::MAX - 12;
 pub(crate) const PARSE_ERR: u8 = u8::MAX - 3;
+/// The predeclared `none` atom's tag id: the platform's own none
+/// discriminant, so every module's `t | none` unions and bare `none`
+/// values carry the same immediate — a checked read's re-span target
+/// and a linked struct's optional field agree with no seeding. Pinned
+/// against the VM's reservation by the drift test.
+pub(crate) const NONE_TAG: u8 = u8::MAX - 4;
 pub(crate) const IO_NOT_FOUND: u8 = u8::MAX - 13;
 pub(crate) const IO_PERMISSION_DENIED: u8 = u8::MAX - 14;
 pub(crate) const IO_ALREADY_EXISTS: u8 = u8::MAX - 15;
@@ -1503,6 +1509,7 @@ mod drift {
         assert_eq!(NET_REFUSED, ds_vm::native::PLATFORM_NET_REFUSED);
         assert_eq!(UTF8_ERR, ds_vm::native::PLATFORM_UTF8_ERR);
         assert_eq!(PARSE_ERR, ds_vm::native::PLATFORM_PARSE_ERR);
+        assert_eq!(NONE_TAG, ds_vm::native::PLATFORM_NONE);
         assert_eq!(IO_NOT_FOUND, ds_vm::native::PLATFORM_IO_NOT_FOUND);
         assert_eq!(
             IO_PERMISSION_DENIED,

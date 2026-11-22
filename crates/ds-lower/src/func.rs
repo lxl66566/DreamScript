@@ -4948,6 +4948,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             if !entry.fields.is_empty() {
                 continue;
             }
+            // the predeclared none is the return's success spelling, never
+            // a containable error member: its platform discriminant sits
+            // outside the one-word mask, and a child cancelling with it
+            // traps uncontained at the boundary (the runtime's own check)
+            if *member == TypeId::NONE {
+                continue;
+            }
             let tag = self.shapes.tag_id(*member)?;
             if tag >= 64 {
                 return Err(LowerError::unsupported(

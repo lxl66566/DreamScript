@@ -289,30 +289,35 @@ pub struct TypeField {
 
 /// The word vocabulary a linked struct's fields spell in: the scalar
 /// atoms by their ambient names, `bytes` (the immutable byte sequence's
-/// one Ref word), a list of one scalar and a map of two scalars (the
-/// heap references' single Ref words), and an optional scalar (the
-/// scalar's union with `none`: one presence tag word over the scalar's
-/// own payload region, exactly `t?`'s local lowering). The names
-/// resolve in the consuming compile's own universe — the same trust the
-/// const fact's scalar atom enjoys.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// one Ref word), and the three container constructors closed over the
+/// vocabulary itself — a list of any word, a map of any two words, and
+/// an optional over any word (the word's union with `none`: one
+/// presence tag word over the word's own payload region, exactly `t?`'s
+/// local lowering) — so every spelling the containers can build from
+/// the ambient atoms carries. A word naming a declared type (a nested
+/// struct, a container over a declared member) and a tuple field stay
+/// outside: the by-name ambient trust resolves constructor and scalar
+/// atoms alone, and a declared-type word waits on the richer encoding
+/// round's cross-fact name resolution. The names resolve in the
+/// consuming compile's own universe — the same trust the const fact's
+/// scalar atom enjoys.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeWord {
     /// A scalar atom word.
     Scalar(ScalarWord),
-    /// `list[scalar]`: one Ref word over the runtime's list object.
-    List(ScalarWord),
+    /// `list[word]`: one Ref word over the runtime's list object.
+    List(Box<Self>),
     /// `bytes`: the immutable byte sequence's one Ref word, `string`'s
     /// shape over raw bytes. No plain literal spells it, so it rides
     /// the type vocabulary alone, never the const fact's scalar words.
     Bytes,
-    /// `map[scalar, scalar]`: one Ref word over the runtime's map
-    /// object, the list word's own shape over two key/value members.
-    Map(ScalarWord, ScalarWord),
-    /// `scalar?`: the scalar's union with `none` — one presence tag
-    /// word over the scalar's own payload word(s), the same span a
-    /// local optional field lowers to. An optional over any wider word
-    /// (a list, a map, `bytes`) carries no fact this round.
-    Optional(ScalarWord),
+    /// `map[word, word]`: one Ref word over the runtime's map object,
+    /// the list word's own shape over two key/value members.
+    Map(Box<Self>, Box<Self>),
+    /// `word?`: the word's union with `none` — one presence tag word
+    /// over the word's own payload word(s), the same span a local
+    /// optional field lowers to.
+    Optional(Box<Self>),
 }
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
@@ -534,26 +539,22 @@ fn word_of_expr(decls: &crate::Decls, expr: &crate::TypeExpr) -> Option<TypeWord
                         ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
                     }
                 },
-                // a heap-reference constructor applied to scalar members
+                // a heap-reference constructor applied to word members
                 crate::AtomKind::Apply(ctor, args) => {
                     let ctor = decls.universe.atom_decl(*ctor).ok()?;
-                    let scalar = |ty| {
-                        let [member] = decls.universe.members(ty) else {
-                            return None;
-                        };
-                        let name = decls.universe.atom_decl(*member).ok()?.name.clone();
-                        ScalarWord::by_name(&name)
-                    };
                     if ctor.name == "list" {
                         let [arg] = &**args else {
                             return None;
                         };
-                        scalar(*arg).map(TypeWord::List)
+                        word_of_ty(decls, *arg).map(|word| TypeWord::List(Box::new(word)))
                     } else if ctor.name == "map" {
                         let [key, value] = &**args else {
                             return None;
                         };
-                        Some(TypeWord::Map(scalar(*key)?, scalar(*value)?))
+                        Some(TypeWord::Map(
+                            Box::new(word_of_ty(decls, *key)?),
+                            Box::new(word_of_ty(decls, *value)?),
+                        ))
                     } else {
                         None
                     }
@@ -562,22 +563,45 @@ fn word_of_expr(decls: &crate::Decls, expr: &crate::TypeExpr) -> Option<TypeWord
             }
         },
         // `t | none` in either order is exactly `t?` (B4): the optional
-        // scalar's presence-tag word
+        // word's presence-tag union
         crate::TypeExpr::Union(left, right) => {
             let atom = |expr: &crate::TypeExpr| match expr {
                 crate::TypeExpr::Atom(id) => Some(*id),
                 _ => None,
             };
             let (left, right) = (atom(left)?, atom(right)?);
-            let scalar = if right == crate::TypeId::NONE {
+            let inner = if right == crate::TypeId::NONE {
                 left
             } else if left == crate::TypeId::NONE {
                 right
             } else {
                 return None;
             };
-            let name = decls.universe.atom_decl(scalar).ok()?.name.clone();
-            ScalarWord::by_name(&name).map(TypeWord::Optional)
+            let word = word_of_expr(decls, &crate::TypeExpr::Atom(inner))?;
+            (inner != crate::TypeId::NONE).then(|| TypeWord::Optional(Box::new(word)))
+        },
+        _ => None,
+    }
+}
+
+/// One solved argument type's word kind — a container member's `Ty`, a
+/// solved set of atoms: a single-atom set is the atom's own word, and a
+/// two-member set naming `none` beside one atom is exactly that atom's
+/// optional. Every other set (three members or more, or `none` absent)
+/// spells no word.
+fn word_of_ty(decls: &crate::Decls, ty: crate::Ty) -> Option<TypeWord> {
+    match decls.universe.members(ty) {
+        [only] => word_of_expr(decls, &crate::TypeExpr::Atom(*only)),
+        [first, second] => {
+            let inner = if *second == crate::TypeId::NONE {
+                *first
+            } else if *first == crate::TypeId::NONE {
+                *second
+            } else {
+                return None;
+            };
+            let word = word_of_expr(decls, &crate::TypeExpr::Atom(inner))?;
+            (inner != crate::TypeId::NONE).then(|| TypeWord::Optional(Box::new(word)))
         },
         _ => None,
     }
@@ -594,18 +618,6 @@ fn word_of_expr(decls: &crate::Decls, expr: &crate::TypeExpr) -> Option<TypeWord
 /// `DuplicateName`): resolving the body in the consuming universe
 /// would admit alias-of-alias chains this refusal excludes.
 fn word_of_written(ty: &ds_parse::Type) -> Option<TypeWord> {
-    let scalar_path = |ty: &ds_parse::Type| -> Option<ScalarWord> {
-        let ds_parse::Type::Path { path, args, .. } = ty else {
-            return None;
-        };
-        let [only] = path.segments.as_slice() else {
-            return None;
-        };
-        if !args.is_empty() {
-            return None;
-        }
-        ScalarWord::by_name(&only.name)
-    };
     match ty {
         ds_parse::Type::Path { path, args, .. } => {
             let [only] = path.segments.as_slice() else {
@@ -618,18 +630,23 @@ fn word_of_written(ty: &ds_parse::Type) -> Option<TypeWord> {
                     let [arg] = &**args else {
                         return None;
                     };
-                    scalar_path(arg).map(TypeWord::List)
+                    word_of_written(arg).map(|word| TypeWord::List(Box::new(word)))
                 },
                 "map" => {
                     let [key, value] = &**args else {
                         return None;
                     };
-                    Some(TypeWord::Map(scalar_path(key)?, scalar_path(value)?))
+                    Some(TypeWord::Map(
+                        Box::new(word_of_written(key)?),
+                        Box::new(word_of_written(value)?),
+                    ))
                 },
                 _ => None,
             }
         },
-        ds_parse::Type::Optional { inner, .. } => scalar_path(inner).map(TypeWord::Optional),
+        ds_parse::Type::Optional { inner, .. } => {
+            word_of_written(inner).map(|word| TypeWord::Optional(Box::new(word)))
+        },
         ds_parse::Type::Paren { inner, .. } => word_of_written(inner),
         _ => None,
     }
@@ -939,12 +956,14 @@ mod tests {
     }
 
     /// The structural vocabulary carries: a flat struct's named fields
-    /// over every scalar word, `bytes`, a list of one scalar, a map of
-    /// two scalars, an optional scalar, and the part-less struct — a
-    /// linear declaration carrying its move-discipline bit beside the
-    /// fields; a generic struct, an enum, a tag, and a field outside the
-    /// vocabulary (a nested struct, a tuple, an optional over a wider
-    /// word) carry nothing — those keep their selection refusals.
+    /// over every scalar word, `bytes`, and the container constructors
+    /// closed over the vocabulary itself — a list of any word (a nested
+    /// list included), a map of any two words, an optional over any word
+    /// (an optional list included) — and the part-less struct, a linear
+    /// declaration carrying its move-discipline bit beside the fields; a
+    /// generic struct, an enum, a tag, and a field naming a declared
+    /// type or a tuple carry nothing — those keep their selection
+    /// refusals.
     #[test]
     fn the_fact_is_the_flat_struct_s_word_layout() {
         let source = concat!(
@@ -985,6 +1004,9 @@ mod tests {
             "}\n",
             "pub struct opt_list {\n",
             "  xs: list[int]?,\n",
+            "}\n",
+            "pub struct grid {\n",
+            "  rows: list[list[byte]],\n",
             "}\n",
             "pub struct twin {\n",
             "  p: (int, int),\n",
@@ -1030,7 +1052,9 @@ mod tests {
                 },
                 super::TypeField {
                     name: "tags".to_owned(),
-                    word: super::TypeWord::List(super::ScalarWord::Str),
+                    word: super::TypeWord::List(Box::new(super::TypeWord::Scalar(
+                        super::ScalarWord::Str,
+                    ))),
                 },
                 super::TypeField {
                     name: "code".to_owned(),
@@ -1048,11 +1072,17 @@ mod tests {
             fields(vec![
                 super::TypeField {
                     name: "index".to_owned(),
-                    word: super::TypeWord::Map(super::ScalarWord::Str, super::ScalarWord::Int),
+                    word: super::TypeWord::Map(
+                        Box::new(super::TypeWord::Scalar(super::ScalarWord::Str)),
+                        Box::new(super::TypeWord::Scalar(super::ScalarWord::Int)),
+                    ),
                 },
                 super::TypeField {
                     name: "seen".to_owned(),
-                    word: super::TypeWord::Map(super::ScalarWord::Byte, super::ScalarWord::Byte),
+                    word: super::TypeWord::Map(
+                        Box::new(super::TypeWord::Scalar(super::ScalarWord::Byte)),
+                        Box::new(super::TypeWord::Scalar(super::ScalarWord::Byte)),
+                    ),
                 },
             ])
         );
@@ -1060,7 +1090,29 @@ mod tests {
             fact("opt"),
             fields(vec![super::TypeField {
                 name: "n".to_owned(),
-                word: super::TypeWord::Optional(super::ScalarWord::Int),
+                word: super::TypeWord::Optional(Box::new(super::TypeWord::Scalar(
+                    super::ScalarWord::Int,
+                ))),
+            }])
+        );
+        // the container constructors close over the vocabulary itself: an
+        // optional over a list, a list over a list
+        assert_eq!(
+            fact("opt_list"),
+            fields(vec![super::TypeField {
+                name: "xs".to_owned(),
+                word: super::TypeWord::Optional(Box::new(super::TypeWord::List(Box::new(
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                )))),
+            }])
+        );
+        assert_eq!(
+            fact("grid"),
+            fields(vec![super::TypeField {
+                name: "rows".to_owned(),
+                word: super::TypeWord::List(Box::new(super::TypeWord::List(Box::new(
+                    super::TypeWord::Scalar(super::ScalarWord::Byte),
+                )))),
             }])
         );
         assert_eq!(
@@ -1078,7 +1130,6 @@ mod tests {
             "boxed",
             "shade",
             "holder",
-            "opt_list",
             "twin",
             "keyed_wide",
             "point",
@@ -1090,12 +1141,12 @@ mod tests {
 
     /// The enum vocabulary carries: a non-generic enum's tag rows — unit
     /// cases, struct payloads of word-shaped fields (`bytes` included,
-    /// two payloaded cases too since each row names its case), and tuple
-    /// payloads of word-shaped positional members — and each minted case
-    /// its own fact naming its enum; a linear enum carries its
-    /// move-discipline bit; a generic enum, an empty enum's refusal set,
-    /// and a payload field outside the word vocabulary carry nothing —
-    /// those keep their selection refusals.
+    /// two payloaded cases too since each row names its case, a nested
+    /// container word included), and tuple payloads of word-shaped
+    /// positional members — and each minted case its own fact naming its
+    /// enum; a linear enum carries its move-discipline bit; a generic
+    /// enum and an empty enum's refusal set carry nothing — those keep
+    /// their selection refusals.
     #[test]
     fn the_fact_is_the_enum_s_tag_rows() {
         let source = concat!(
@@ -1146,7 +1197,9 @@ mod tests {
         let blue = vec![
             super::TypeField {
                 name: "tags".to_owned(),
-                word: super::TypeWord::List(super::ScalarWord::Byte),
+                word: super::TypeWord::List(Box::new(super::TypeWord::Scalar(
+                    super::ScalarWord::Byte,
+                ))),
             },
             super::TypeField {
                 name: "data".to_owned(),
@@ -1257,10 +1310,19 @@ mod tests {
             "a linear enum carries its move-discipline bit"
         );
         assert_eq!(enum_fact("pair"), None, "pair carries no fact");
+        // a payload field over the containers' own closure carries: a
+        // nested list word rides like any other
         assert_eq!(
             case_fact("lone", "wide"),
-            None,
-            "a payload field outside the vocabulary carries no fact"
+            Some(super::TypeFact::Case(super::CaseFact {
+                enum_name: "wide".to_owned(),
+                payload: super::CasePayload::Struct(vec![super::TypeField {
+                    name: "v".to_owned(),
+                    word: super::TypeWord::List(Box::new(super::TypeWord::List(Box::new(
+                        super::TypeWord::Scalar(super::ScalarWord::Byte),
+                    )))),
+                }]),
+            }))
         );
     }
 
@@ -1296,8 +1358,9 @@ mod tests {
 
     /// The alias vocabulary carries: a non-generic alias whose body spells
     /// directly in the word vocabulary rides as its resolved word — the
-    /// scalar, `bytes`, list, map, and optional spellings, parentheses
-    /// peeling; a generic alias and a body naming anything else (another
+    /// scalar, `bytes`, and the container spellings over any words
+    /// (parentheses peeling) — the same closure the structural fact
+    /// spells; a generic alias and a body naming anything else (another
     /// alias, a local struct, a union, a tuple) carry nothing. A bodiless
     /// struct carries the opaque identity (its atom stays shape-pending),
     /// distinct from the part-less struct's empty field list.
@@ -1318,6 +1381,8 @@ mod tests {
             "pub type row = map[string, string]\n",
             "pub type words = list[string]\n",
             "pub type port = int?\n",
+            "pub type grid = list[list[byte]]\n",
+            "pub type sparse = list[int]?\n",
             "pub type name = string\n",
             "pub type raw = bytes\n",
             "pub type paren = (int)\n",
@@ -1347,20 +1412,38 @@ mod tests {
         assert_eq!(
             alias("row"),
             Some(super::TypeFact::Alias(Box::new(super::TypeWord::Map(
-                super::ScalarWord::Str,
-                super::ScalarWord::Str
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Str)),
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Str))
             ))))
         );
         assert_eq!(
             alias("words"),
             Some(super::TypeFact::Alias(Box::new(super::TypeWord::List(
-                super::ScalarWord::Str
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Str))
             ))))
         );
         assert_eq!(
             alias("port"),
             Some(super::TypeFact::Alias(Box::new(super::TypeWord::Optional(
-                super::ScalarWord::Int
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Int))
+            ))))
+        );
+        // the written side recurses through the containers too: a nested
+        // list body, an optional list body
+        assert_eq!(
+            alias("grid"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::List(
+                Box::new(super::TypeWord::List(Box::new(super::TypeWord::Scalar(
+                    super::ScalarWord::Byte
+                ))))
+            ))))
+        );
+        assert_eq!(
+            alias("sparse"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Optional(
+                Box::new(super::TypeWord::List(Box::new(super::TypeWord::Scalar(
+                    super::ScalarWord::Int
+                ))))
             ))))
         );
         assert_eq!(

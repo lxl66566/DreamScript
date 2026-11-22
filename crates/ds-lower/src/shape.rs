@@ -285,13 +285,20 @@ impl<'a> Shapes<'a> {
     }
 
     /// The module-wide tag id of one atom, assigned in first-use order
-    /// while functions lower in declaration order. The counter is
+    /// while functions lower in declaration order — except the
+    /// predeclared `none`, whose discriminant is the platform's own
+    /// (never a module-local id, never a table row): an optional word
+    /// crossing a module boundary carries the same immediate on both
+    /// sides with nothing to seed. The counter is
     /// checked against the platform's reserved top: a module with more
     /// distinct tag atoms than the space below it leaves refuses with a
     /// typed error instead of wrapping into the reserved range.
     pub(crate) fn tag_id(&mut self, atom: TypeId) -> Result<u8, LowerError> {
         if let Some(tag) = self.tags.get(&atom) {
             return Ok(*tag);
+        }
+        if atom == TypeId::NONE {
+            return Ok(crate::native::NONE_TAG);
         }
         if self.next_tag >= FIRST_RESERVED_TAG {
             return Err(unsupported(

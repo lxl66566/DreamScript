@@ -1431,6 +1431,31 @@ version = \"1.0.0\"
         "pub struct nested {\n",
         "  c: cell,\n",
         "}\n",
+        "pub struct spread {\n",
+        "  xs: list[int]?,\n",
+        "  grid: list[list[byte]],\n",
+        "  table: map[string, int],\n",
+        "}\n",
+        "pub fn sparse(n: int) -> spread {\n",
+        "  var table = map[string, int]()\n",
+        "  table.set(\"k\", 7)\n",
+        "  if n > 0 {\n",
+        "    spread { xs: [n], grid: [[b'a'], [b'b']], table: table }\n",
+        "  } else {\n",
+        "    spread { xs: none, grid: [], table: table }\n",
+        "  }\n",
+        "}\n",
+        "pub fn weigh(s: spread) -> int {\n",
+        "  const head = match s.xs {\n",
+        "    none => 0,\n",
+        "    only => len(only),\n",
+        "  }\n",
+        "  const keyed = match s.table.get(\"k\") {\n",
+        "    none => 0,\n",
+        "    v => v,\n",
+        "  }\n",
+        "  head + len(s.grid) + keyed\n",
+        "}\n",
         "pub type words = list[string]\n",
         "pub type chain = words\n",
         "pub type wide[k] = map[k, int]\n",
@@ -1524,6 +1549,47 @@ fn linked_struct_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A linked struct whose fields ride the word vocabulary's own closure
+/// binds and runs across the boundary (G4): an optional over a list, a
+/// nested list, and a map over scalars all mint exactly the local
+/// spelling's declaration products, so the consumer constructs each
+/// field (the optional's `none` side included), reads them through the
+/// collection faces, and moves whole values into the linked module's
+/// own functions — the map field crossing both directions with no
+/// e2e before it.
+#[test]
+fn linked_container_word_fields_bind_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-spread");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (spread, sparse, weigh)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const s = spread { xs: [3], grid: [[b'x'], [b'y']], table: map[string, int]() }\n",
+            "  const made = sparse(2)\n",
+            "  var total = weigh(s) + weigh(made)\n",
+            "  const own = spread { xs: none, grid: [], table: map[string, int]() }\n",
+            "  total = total + weigh(own)\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the spread run exits 0 (stderr: {err})");
+    // weigh(s) = len([3]) + len(grid) + miss = 1 + 2 + 0 = 3; the sparse
+    // twin adds 1 + 2 + 7 = 10 over its filled table; the empty own adds
+    // 0 — 13 in all, the run echoing the entry's return after the println
+    assert_eq!(out, "13\n13\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// The fixture package whose surface carries the bytes-word shapes
 /// beside the still-refused field shapes, installed once for the
 /// bytes-field tests.
@@ -1538,9 +1604,6 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "}\n",
         "pub struct maybe {\n",
         "  n: int?,\n",
-        "}\n",
-        "pub struct optlist {\n",
-        "  xs: list[int]?,\n",
         "}\n",
         "pub struct widemap {\n",
         "  index: map[string, blob],\n",
@@ -1666,12 +1729,12 @@ fn linked_bytes_field_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The field shapes the widened word vocabulary leaves outside itself
-/// keep their refusals at the same walk (G4): a tuple field, an optional
-/// over a wider word than a scalar, and a map over a non-scalar member
-/// carry no fact, so their selections still refuse — the same DS4021 the
-/// nested struct answers. The optional scalar field binds now (the
-/// shrunk-core e2e's config leg).
+/// The field shapes the word vocabulary's own closure leaves outside
+/// itself keep their refusals at the same walk (G4): a tuple field and a
+/// map over a non-scalar member carry no fact, so their selections still
+/// refuse — the same DS4021 the nested struct answers. The containers'
+/// recursive members (an optional list, a nested list) bind now (the
+/// spread e2e's legs).
 #[test]
 fn the_wider_word_field_shapes_still_refuse() {
     let (work, pkg_id) = blobs_fixtures("blobs-tiers");
@@ -1681,17 +1744,6 @@ fn the_wider_word_field_shapes_still_refuse() {
             "tuple-field",
             concat!(
                 "import @blobs (pairfield)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "optional-over-list",
-            concat!(
-                "import @blobs (optlist)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
