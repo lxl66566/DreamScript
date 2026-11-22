@@ -605,6 +605,33 @@ pub(crate) struct Plan {
     /// the walk's termination — a cyclic demand graph builds a cyclic
     /// table the dispatches walk lazily, one hop per call.
     chain_memo: HashMap<(MethodId, InstanceId, Option<Vec<TypeId>>), u32>,
+    /// Every minted record's site answer, keyed by the lambda's or
+    /// spawn's own span: the table index, the capture list, and the
+    /// evidence pairs the record's body stages — the facts the minting
+    /// site's walk reads instead of minting, so the walk and the plan
+    /// hold one mint truth.
+    mints: HashMap<Span, Minted>,
+}
+
+/// One minted record's plan row: the facts keyed by the site's span.
+pub(crate) struct Minted {
+    /// The record's function-table index.
+    index: u32,
+    /// The record's capture list, in first-use order.
+    captures: Rc<Vec<(Span, Ty)>>,
+    /// The record's runtime-evidence demands.
+    evidence: Rc<Vec<RuntimePair>>,
+}
+
+/// One mint site's plan answer: what the lowering site reads where it
+/// once minted mid-walk.
+pub(crate) struct MintSite {
+    /// The record's function-table index.
+    pub(crate) index: u32,
+    /// The record's capture list, in first-use order.
+    pub(crate) captures: Rc<Vec<(Span, Ty)>>,
+    /// The record's runtime-evidence demands.
+    pub(crate) evidence: Rc<Vec<RuntimePair>>,
 }
 
 impl Plan {
@@ -620,6 +647,7 @@ impl Plan {
             demands: Demands::default(),
             chains: Vec::new(),
             chain_memo: HashMap::new(),
+            mints: HashMap::new(),
         }
     }
 
@@ -721,10 +749,18 @@ impl Plan {
             captures: captures.clone(),
             decl: None,
             ret: None,
-            evidence,
+            evidence: evidence.clone(),
             bounds,
             spawn_child: false,
             free_generic: false,
+        });
+        let Expr::Lambda { span, .. } = lambda else {
+            unreachable!("push_lambda receives a lambda");
+        };
+        self.mints.insert(*span, Minted {
+            index,
+            captures: captures.clone(),
+            evidence,
         });
         (index, captures)
     }
@@ -771,12 +807,29 @@ impl Plan {
             captures: captures.clone(),
             decl: None,
             ret: Some(ret),
-            evidence,
+            evidence: evidence.clone(),
             bounds,
             spawn_child: true,
             free_generic: false,
         });
+        self.mints.insert(*span, Minted {
+            index,
+            captures: captures.clone(),
+            evidence,
+        });
         (index, captures)
+    }
+
+    /// One mint site's plan answer: the record the discovery pass
+    /// pushed for this lambda's or spawn's own span, for the walk that
+    /// reaches the site to stage instead of minting.
+    pub(crate) fn minted(&self, span: Span) -> Option<MintSite> {
+        let minted = self.mints.get(&span)?;
+        Some(MintSite {
+            index: minted.index,
+            captures: minted.captures.clone(),
+            evidence: minted.evidence.clone(),
+        })
     }
 
     /// Registers one impl-member function under its mangled table name
@@ -1369,6 +1422,332 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
 /// in — their demands ride the child's own entry words (a lambda's
 /// capture block, a spawned child's entry argument area), staged from
 /// this frame's evidence slots at the construction or spawn site.
+/// The plan-time mint discovery: one item's just-planned entries walked
+/// in order, every lambda-value and spawn site minting its record into
+/// the table before any body lowers. The records land after their
+/// enclosing item's entries, so one file's block stays contiguous and
+/// append-stable — and the ambient's prefix (items, deinits, and their
+/// records alike) is a pure function of the ambient's own trees, the
+/// property the served splice pins its bytes against. The walk that
+/// reaches a mint site reads [`Plan::minted`] instead of minting, so
+/// discovery and lowering hold one mint truth; a site the walk reaches
+/// with no plan answer is the drift the discovery predicate and the
+/// walk's routing disagree on, refused loud at the site.
+pub(crate) fn discover_item_mints(plan: &mut Plan, analyzed: &Analyzed, first: usize) {
+    let last = plan.functions.len();
+    for at in first..last {
+        let (name, bounds, file) = {
+            let entry = &plan.functions[at];
+            (
+                entry.name.clone(),
+                entry.bounds.clone(),
+                entry.lambda.span().file,
+            )
+        };
+        let res = &analyzed.resolutions[file.as_u32() as usize];
+        let body = entry_body(&plan.functions[at]).clone();
+        let ctx = MintCtx {
+            enclosing: name,
+            bounds,
+            res,
+        };
+        discover_expr(plan, analyzed, &ctx, &body);
+    }
+}
+
+/// One planned entry's body expression: a declared body lowers its
+/// block directly, every other entry is the lambda shape holding the
+/// body.
+fn entry_body(entry: &PlannedFn) -> &Expr {
+    if let Some(decl) = &entry.decl {
+        return &decl.body;
+    }
+    let Expr::Lambda { body, .. } = &entry.lambda else {
+        unreachable!("a non-declared entry plans a lambda shape");
+    };
+    body
+}
+
+/// The discovery walk's threaded context: the enclosing entry's table
+/// name and declared bounds — the facts a nested record's own sites
+/// inherit, exactly as the walking frame's state once fed the mint.
+struct MintCtx<'a> {
+    enclosing: String,
+    bounds: Rc<HashMap<String, HashSet<TraitId>>>,
+    res: &'a Resolutions,
+}
+
+/// The runtime-evidence demands one minted record's body stages: empty
+/// outside a bounds-carrying body, the propagated pairs inside one —
+/// the same rule the minting walk applied at the site.
+fn mint_evidence(
+    plan: &Plan,
+    analyzed: &Analyzed,
+    ctx: &MintCtx,
+    body: &Expr,
+) -> Rc<Vec<RuntimePair>> {
+    if ctx.bounds.is_empty() {
+        return Rc::new(Vec::new());
+    }
+    Rc::new(runtime_pairs(
+        analyzed,
+        ctx.res,
+        &ctx.bounds,
+        body,
+        &plan.demands,
+    ))
+}
+
+/// The spawned child's answer type: the body's checked value, the
+/// spawn's own type where the body diverges or answers nothing — the
+/// same derivation the spawning walk applied at the site.
+fn spawn_return(analyzed: &Analyzed, span: Span, body: &BlockExpr) -> Option<Ty> {
+    let answer = analyzed.checked.expr_types.get(&body.span).copied();
+    let usable = answer
+        .is_some_and(|val| !val.diverges && !analyzed.decls.universe.members(val.ty).is_empty());
+    if usable {
+        return answer.map(|val| val.ty);
+    }
+    analyzed.checked.expr_types.get(&span).map(|val| val.ty)
+}
+
+/// Whether this call site inlines its last lambda argument instead of
+/// staging it as a hosted callable: the `.err`/`.ok` handlers and the
+/// extraction family's lambda-taking members (`unwrap_or_else`,
+/// `map_err`) lower the lambda's body at the call site, so the lambda
+/// node itself never mints. The routing reads the same resolution rows
+/// and declaration tables the call walk reads.
+fn inlines_lambda_arg(
+    analyzed: &Analyzed,
+    plan: &Plan,
+    res: &Resolutions,
+    callee: &Expr,
+    call_span: Span,
+) -> bool {
+    if let Expr::Field { name, .. } = callee
+        && matches!(res.get(name.span), Some(Res::Handler))
+    {
+        return true;
+    }
+    let def = match callee {
+        Expr::Path { span, .. } => match res.get(*span) {
+            Some(Res::Def(def)) => Some(*def),
+            _ => None,
+        },
+        Expr::Field { name, .. } => match res.get(name.span) {
+            Some(Res::Dot(DotRes::Free { func, fed_param: 0 }))
+                if !analyzed.checked.inherent_calls.contains_key(&call_span)
+                    && !analyzed.checked.trait_calls.contains_key(&call_span) =>
+            {
+                Some(*func)
+            },
+            Some(Res::Dot(DotRes::Module { func })) => Some(*func),
+            _ => None,
+        },
+        _ => None,
+    };
+    extraction_lambda_taker(analyzed, plan, def)
+}
+
+/// Whether `def` is the extraction family's lambda-taking shape: the
+/// compiler-wired @std identity, the two-parameter generic signature,
+/// and the member whose handler runs on the handled side.
+fn extraction_lambda_taker(analyzed: &Analyzed, plan: &Plan, def: Option<DefId>) -> bool {
+    let Some(def) = def else {
+        return false;
+    };
+    let std_shape = match analyzed.package.foreign().get(&def) {
+        Some(entry) => entry.std,
+        None => plan.index_of(def).is_none(),
+    };
+    if !std_shape {
+        return false;
+    }
+    let Some(sig) = analyzed.decls.fns.get(&def) else {
+        return false;
+    };
+    if sig.generics.is_empty() || sig.params.len() != 2 {
+        return false;
+    }
+    matches!(
+        Extraction::of_name(&analyzed.package.def(def).name),
+        Some(Extraction::UnwrapOrElse | Extraction::MapErr)
+    )
+}
+
+/// The pre-order mint walk itself.
+fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) {
+    match e {
+        Expr::Lambda { generics, body, .. } => {
+            if !generics.is_empty() {
+                return; // the walk refuses a generic lambda value; nothing inside it lowers
+            }
+            let evidence = mint_evidence(plan, analyzed, ctx, body);
+            let (index, _) = plan.push_lambda(
+                &ctx.enclosing,
+                e,
+                ctx.res,
+                &analyzed.checked.binders,
+                evidence,
+                ctx.bounds.clone(),
+            );
+            let nested = MintCtx {
+                enclosing: format!("{}${}", ctx.enclosing, index),
+                bounds: ctx.bounds.clone(),
+                res: ctx.res,
+            };
+            discover_expr(plan, analyzed, &nested, body);
+        },
+        Expr::Spawn { span, body } => {
+            let Some(ret) = spawn_return(analyzed, *span, body) else {
+                return; // no checked answer: the walk's own refusal owns the site
+            };
+            let evidence = mint_evidence(plan, analyzed, ctx, &Expr::Block(body.clone()));
+            let (index, _) = plan.push_spawn(
+                &ctx.enclosing,
+                e,
+                ctx.res,
+                &analyzed.checked.binders,
+                ret,
+                evidence,
+                ctx.bounds.clone(),
+            );
+            let nested = MintCtx {
+                enclosing: format!("{}${}", ctx.enclosing, index),
+                bounds: ctx.bounds.clone(),
+                res: ctx.res,
+            };
+            discover_block(plan, analyzed, &nested, body);
+        },
+        Expr::Call {
+            span,
+            callee,
+            args,
+            trailing,
+            ..
+        } => {
+            let inlines = inlines_lambda_arg(analyzed, plan, ctx.res, callee, *span);
+            let mut effective: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
+            if let Some(block) = trailing {
+                effective.push(block);
+            }
+            let last_inlined = inlines
+                && effective
+                    .last()
+                    .is_some_and(|arg| matches!(arg, Expr::Lambda { .. }));
+            for (at, arg) in effective.iter().enumerate() {
+                if last_inlined && at + 1 == effective.len() {
+                    if let Expr::Lambda { body, .. } = arg {
+                        discover_expr(plan, analyzed, ctx, body);
+                    }
+                } else {
+                    discover_expr(plan, analyzed, ctx, arg);
+                }
+            }
+        },
+        Expr::Paren { inner, .. }
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Is { expr: inner, .. }
+        | Expr::Try { expr: inner, .. } => discover_expr(plan, analyzed, ctx, inner),
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        }
+        | Expr::Assign { left, right, .. } => {
+            discover_expr(plan, analyzed, ctx, left);
+            discover_expr(plan, analyzed, ctx, right);
+        },
+        Expr::Str { parts, .. } => {
+            for part in parts {
+                if let StrPart::Expr { expr, .. } = part {
+                    discover_expr(plan, analyzed, ctx, expr);
+                }
+            }
+        },
+        Expr::Struct { fields, .. } => {
+            for (_, value) in fields {
+                if let Some(value) = value {
+                    discover_expr(plan, analyzed, ctx, value);
+                }
+            }
+        },
+        Expr::Tuple { items, .. } | Expr::List { items, .. } => {
+            for item in items {
+                discover_expr(plan, analyzed, ctx, item);
+            }
+        },
+        Expr::Field { recv, .. } => discover_expr(plan, analyzed, ctx, recv),
+        Expr::Index { recv, index, .. } => {
+            discover_expr(plan, analyzed, ctx, recv);
+            discover_expr(plan, analyzed, ctx, index);
+        },
+        Expr::MapApply { key, value, .. } => {
+            discover_expr(plan, analyzed, ctx, key);
+            discover_expr(plan, analyzed, ctx, value);
+        },
+        Expr::If {
+            cond, then, else_, ..
+        } => {
+            discover_expr(plan, analyzed, ctx, cond);
+            discover_block(plan, analyzed, ctx, then);
+            if let Some(else_) = else_ {
+                discover_expr(plan, analyzed, ctx, else_);
+            }
+        },
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            discover_expr(plan, analyzed, ctx, scrutinee);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    discover_expr(plan, analyzed, ctx, guard);
+                }
+                discover_expr(plan, analyzed, ctx, &arm.body);
+            }
+        },
+        Expr::While { cond, body, .. } => {
+            discover_expr(plan, analyzed, ctx, cond);
+            discover_block(plan, analyzed, ctx, body);
+        },
+        Expr::For { iter, body, .. } => {
+            discover_expr(plan, analyzed, ctx, iter);
+            discover_expr(plan, analyzed, ctx, body);
+        },
+        Expr::Return { expr, .. } => {
+            if let Some(expr) = expr {
+                discover_expr(plan, analyzed, ctx, expr);
+            }
+        },
+        Expr::Nursery { body, .. } | Expr::Defer { body, .. } => {
+            discover_block(plan, analyzed, ctx, body);
+        },
+        Expr::Block(block) => discover_block(plan, analyzed, ctx, block),
+        Expr::Literal { .. }
+        | Expr::RawStr { .. }
+        | Expr::Path { .. }
+        | Expr::FnType { .. }
+        | Expr::Break(_)
+        | Expr::Continue(_) => {},
+    }
+}
+
+/// One block's statements, in source order.
+fn discover_block(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, block: &BlockExpr) {
+    for stmt in &block.stmts {
+        discover_stmt(plan, analyzed, ctx, stmt);
+    }
+}
+
+/// One statement: a binding's initializer or an expression.
+fn discover_stmt(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, stmt: &Stmt) {
+    match &stmt.kind {
+        StmtKind::Local(local) => discover_expr(plan, analyzed, ctx, &local.init),
+        StmtKind::Expr(expr) => discover_expr(plan, analyzed, ctx, expr),
+    }
+}
+
 pub(crate) fn runtime_pairs(
     analyzed: &Analyzed,
     res: &Resolutions,
@@ -1953,12 +2332,6 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// word at its slot (empty outside generic bodies and their
     /// lambdas).
     evidence: HashMap<(String, MethodId), u8>,
-    /// The declared bounds of the generic body this frame lowers (an
-    /// impl member's or a free generic fn's), or the ones the enclosing
-    /// generic body carried when this frame is one of its lambdas: a
-    /// lambda's own evidence demands collect against them at its
-    /// construction.
-    bounds: Rc<HashMap<String, HashSet<TraitId>>>,
     /// This function's table index: a dead Fn payload word zero-writes
     /// the frame's own scalar FuncRef (a copyable word the dead member
     /// never calls).
@@ -2142,7 +2515,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 rc
             },
             evidence: HashMap::new(),
-            bounds: planned.bounds.clone(),
             index,
             loops: Vec::new(),
             loop_spans: Vec::new(),
@@ -4472,13 +4844,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// through value-site places (its construction word, const aliases of
     /// it, a provenance-known call result).
     fn lambda_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
-        let Expr::Lambda {
-            generics,
-            span,
-            body,
-            ..
-        } = e
-        else {
+        let Expr::Lambda { generics, span, .. } = e else {
             return Err(mismatch("a lambda value"));
         };
         if !generics.is_empty() {
@@ -4489,31 +4855,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  body's evidence words; free generic fns carry the generic call surface",
             ));
         }
-        // a lambda lexically inside a generic impl body carries its own
-        // evidence demands: the pairs its body calls (through its own
-        // nested lambdas), plus the callee demands its call sites read
-        // from the plan's table, staged from this frame's evidence slots
-        // into the capture block
-        let evidence = if self.bounds.is_empty() {
-            Rc::new(Vec::new())
-        } else {
-            Rc::new(runtime_pairs(
-                self.analyzed,
-                self.res,
-                &self.bounds,
-                body,
-                &self.plan.demands,
-            ))
+        // The record itself is the plan's: the plan-time discovery
+        // minted it for this span, so the site stages the plan's answer
+        // (index, captures, evidence) instead of minting mid-walk — one
+        // mint truth between discovery and the walk.
+        let Some(mint) = self.plan.minted(*span) else {
+            return Err(LowerError::unsupported(
+                *span,
+                "a lambda value",
+                "the plan minted no record for this site: the discovery pass and the walk \
+                 disagree on the mint",
+            ));
         };
-        let (index, captures) = self.plan.push_lambda(
-            &self.name,
-            e,
-            self.res,
-            &self.analyzed.checked.binders,
-            evidence.clone(),
-            self.bounds.clone(),
-        );
-        let (word, slot) = self.child_callable(*span, index, &captures, &evidence)?;
+        let (word, slot) =
+            self.child_callable(*span, mint.index, &mint.captures, &mint.evidence)?;
         Ok(Place {
             base: word,
             shape: PlaceShape::Word(slot),
@@ -5048,37 +5403,23 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 ));
             }
         }
-        // a spawned child lexically inside a generic impl body carries its
-        // own evidence demands: the pairs its body calls (through its own
-        // nested lambdas and spawns), plus the callee demands its call
-        // sites read from the plan's table, staged from this frame's
-        // evidence slots into the child's entry argument area beside the
-        // captures — the closure object's capture block becomes the
-        // spawned fiber's entry arguments verbatim, so the words ride
-        // exactly like a lambda's capture-block evidence
-        let evidence = if self.bounds.is_empty() {
-            Rc::new(Vec::new())
-        } else {
-            Rc::new(runtime_pairs(
-                self.analyzed,
-                self.res,
-                &self.bounds,
-                &Expr::Block(body.clone()),
-                &self.plan.demands,
-            ))
+        // The child record itself is the plan's: the plan-time discovery
+        // minted it for this span with the answer type and evidence the
+        // site's own checks above read, so the site stages the plan's
+        // answer instead of minting mid-walk — one mint truth between
+        // discovery and the walk.
+        let Some(mint) = self.plan.minted(*span) else {
+            return Err(LowerError::unsupported(
+                *span,
+                "a spawned child",
+                "the plan minted no record for this site: the discovery pass and the walk \
+                 disagree on the mint",
+            ));
         };
-        let (index, captures) = self.plan.push_spawn(
-            &self.name,
-            e,
-            self.res,
-            &self.analyzed.checked.binders,
-            ret,
-            evidence.clone(),
-            self.bounds.clone(),
-        );
         let native = crate::native::lookup("nursery_spawn")
             .ok_or_else(|| mismatch("the nursery spawn seam"))?;
-        let (callable, kind) = self.child_callable(*span, index, &captures, &evidence)?;
+        let (callable, kind) =
+            self.child_callable(*span, mint.index, &mint.captures, &mint.evidence)?;
         self.seam_call(native, &[(id_word, SlotType::I64), (callable, kind)], &[
             SlotType::I64,
         ])?;

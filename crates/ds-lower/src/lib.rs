@@ -332,18 +332,27 @@ where
         for block in &ast.blocks {
             for item in &block.items {
                 refuse_derive(item)?;
+                let first = plan.functions().len();
                 plan_item(item, &mut plan, analyzed, slice, admitted);
                 // each struct's deinit plans right after its own item, so
                 // one file's entries stay contiguous and append-stable:
-                // the ambient's records (items plus deinits) remain the
-                // plan's prefix the splice serves, while a growing file's
-                // new declaration appends after every earlier entry —
-                // item and deinit alike — instead of a shifted deinit
-                // re-keying the indices a live frame's retiring row still
-                // names, the reorder a swap refuses over
+                // the ambient's records (items, deinits, and their minted
+                // records) remain the plan's prefix the splice serves,
+                // while a growing file's new declaration appends after
+                // every earlier entry — item, deinit, and record alike —
+                // instead of a shifted deinit re-keying the indices a
+                // live frame's retiring row still names, the reorder a
+                // swap refuses over
                 if !slice {
                     plan_deinits(item, &mut plan, analyzed);
                 }
+                // the item's lambda-value and spawn sites mint their
+                // records here, before any body lowers: the records sit
+                // inside the item's contiguous block, and the walk that
+                // reaches a site reads the plan's answer instead of
+                // minting — the discipline the served splice's
+                // plan-time prefix needs over lowering-time records
+                func::discover_item_mints(&mut plan, analyzed, first);
             }
         }
     }

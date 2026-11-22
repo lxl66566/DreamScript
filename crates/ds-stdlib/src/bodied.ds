@@ -23,7 +23,11 @@
 // nested scan whose inner guard is a catchall match (an `if` guarding a
 // type-variable-carrying write refuses at the branch reconcile; the
 // match spelling lowers). take, drop, flat_map, scan, and compose wait
-// behind the seams above (their residuals ride todo item 81).
+// behind the seams above (their residuals ride todo item 81). The two
+// seam proofs: `incremented` hosts a CALLG lambda argument (the
+// filter/map/reduce seam) and `joined` hosts a `spawn` expression
+// (the firstof/interleave seam) — both lowering-time records inside
+// the ambient the plan-time mint discovery admits into the splice.
 pub fn max (a: int, b: int) -> int {
   if a < b { b } else { a }
 }
@@ -38,6 +42,16 @@ pub fn enumerate[t] (xs: list[t]) -> list[(int, t)] {
     i += 1
   }
   out
+}
+pub fn incremented (xs: list[int]) -> list[int] {
+  xs.map((x: int) => x + 1)
+}
+pub fn joined (n: int) -> list[int] | net_err {
+  nursery {
+    for i in 0..n {
+      spawn { i }
+    }
+  }
 }
 pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
   var out = list[(t, r)]()
