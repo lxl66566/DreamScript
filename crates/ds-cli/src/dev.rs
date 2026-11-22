@@ -56,18 +56,22 @@
 //! on the session VM, so a restart reads exactly what a fresh run of
 //! the same version would.
 //!
-//! The watch is a poll read (`--poll-ms`, default 100ms) against the
-//! last loaded bytes — no fs-watcher dependency this round; changes land
-//! when the next poll sees different bytes. `--hot` off runs the one
-//! round and exits; on, the loop ends only when the process is killed
-//! (Ctrl-C during a running computation kills it; the VM has no step
-//! budget to observe an interrupt at).
+//! The watch reads the watched bytes against the last loaded ones at
+//! every tick (`--poll-ms`, default 100ms): on Linux an inotify edge
+//! signal gates the read — a window that saw no event reads nothing —
+//! while the tick itself keeps the round cadence (the parked entry's
+//! drive rate and the merge window that folds a multi-file edit into
+//! one round), and every other platform (or a refused watcher) keeps
+//! the poll twin reading each window; changes land when the next
+//! window's read sees different bytes either way. `--hot` off runs the
+//! one round and exits; on, the loop ends only when the process is
+//! killed (Ctrl-C during a running computation kills it; the VM has no
+//! step budget to observe an interrupt at).
 
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     process::ExitCode,
-    thread,
     time::Duration,
 };
 
@@ -85,7 +89,7 @@ use ds_vm::{
     native::{PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, is_io_class, is_net_class},
 };
 
-use crate::{package, repl, run, source};
+use crate::{package, repl, run, source, watch::FsWatch};
 
 /// The `ds dev` surface: one .ds source, one entry, the watch loop.
 #[derive(Debug, Args)]
@@ -668,9 +672,15 @@ pub fn dev(args: &DevArgs) -> Result<ExitCode> {
             if session.clean && !session.failed { ExitCode::SUCCESS } else { ExitCode::FAILURE };
         return Ok(code);
     }
+    let mut signal = match &manifest {
+        Some(manifest) => FsWatch::tree(&watch_root(manifest)),
+        None => FsWatch::script(path),
+    };
     loop {
-        thread::sleep(poll);
-        let watched = poll_watched(path, manifest.as_deref());
+        // the signal gates only the read: the tick keeps driving the
+        // parked entry whether or not anything changed
+        let watched =
+            if signal.wait(poll) { poll_watched(path, manifest.as_deref()) } else { None };
         session.round(watched.as_deref())?;
     }
 }

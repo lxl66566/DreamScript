@@ -32,6 +32,7 @@ mod run;
 mod run_cache;
 mod save;
 mod source;
+mod watch;
 
 #[derive(Debug, Parser)]
 #[command(

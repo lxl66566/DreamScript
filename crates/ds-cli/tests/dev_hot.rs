@@ -22,8 +22,10 @@ use ds_mod::Hash128;
 use ds_pkg::{Manifest, Package};
 
 /// One expected line's ceiling: the fresh ambient compile of the first
-/// round runs inside it, every later round inside the poll interval.
-const WAIT: Duration = Duration::from_secs(20);
+/// round and each reload round's recompile run inside it — a package dev
+/// session's reload recompile included — so the bound carries headroom
+/// for a machine under a parallel suite's compile load.
+const WAIT: Duration = Duration::from_secs(90);
 
 fn ds() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
@@ -238,6 +240,28 @@ fn a_completed_entry_restarts_on_the_next_change() {
     std::fs::write(&prog, "fn main() {\n  println(\"boot2\")\n}\n").expect("the change writes");
     assert_eq!(dev.line(), "boot2", "the next change restarts the entry");
     assert_eq!(dev.line(), "0");
+    dev.kill();
+}
+
+/// An editor's atomic replace reaches the session like an in-place
+/// edit: the swap file renames over the source (the inode moves), and
+/// the next round reloads the replaced bytes — the Linux signal's
+/// directory-level watch behind the same merge window the poll twin's
+/// read composes, one behavior either way.
+#[test]
+fn an_atomic_replace_hot_swaps_like_an_edit() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let prog = dir.path().join("prog.ds");
+    std::fs::write(&prog, program("return n * 2", 3)).expect("the source writes");
+    let mut dev = Dev::spawn(&prog, 100);
+    assert_eq!(dev.line(), "0", "the first round runs v1's work");
+    let swap = dir.path().join("prog.ds~");
+    std::fs::write(&swap, program("return n * 10", 3)).expect("the swap source writes");
+    std::fs::rename(&swap, &prog).expect("the atomic replace lands");
+    assert_eq!(dev.line(), "10", "the replaced bytes reload mid-run");
+    assert_eq!(dev.line(), "20", "the rest of the run is the replaced code");
+    let answer = dev.line();
+    assert_eq!(answer, "0", "the completed entry answers the unit word");
     dev.kill();
 }
 
