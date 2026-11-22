@@ -60,10 +60,17 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
             // A bodied top-level fn is the converted const-arrow binding
             // of one lambda (F2), so the .dsi renders its fn signature;
             // a plain binding renders its names and annotation alone.
-            if let (Pattern::Binding { name, .. }, ds_parse::Expr::Lambda { params, ret, .. }) =
-                (&local.pat, &local.init)
+            if let (
+                Pattern::Binding { name, .. },
+                ds_parse::Expr::Lambda {
+                    generics,
+                    params,
+                    ret,
+                    ..
+                },
+            ) = (&local.pat, &local.init)
             {
-                let mut line = format!("pub fn {}", name.name);
+                let mut line = format!("pub fn {}", head(name, generics));
                 write_params(&mut line, params);
                 if let Some(ret) = ret {
                     let _ = write!(line, " -> {}", render_type(ret));
@@ -401,6 +408,38 @@ mod tests {
                 "pub const text = \"kept\"\n",
             ),
             "the initializer renders in the .dsi spelling"
+        );
+        let mut files = Files::new();
+        let file = files.add_source("surface.dsi", &out);
+        let ast = parse(&files, file)
+            .unwrap_or_else(|diags| panic!("the surface re-parses: {}", diags[0].message));
+        let mut again = String::new();
+        member(&mut again, &out, &ast);
+        assert_eq!(again, out, "the surface is a fixed point");
+    }
+
+    /// A bodied generic fn is the converted const-arrow binding (F2),
+    /// so its surface line renders through the lambda's own parts —
+    /// the generic parameters included, a line missing them failing
+    /// DS2004 at the re-parse (the type variables unknown).
+    #[test]
+    fn a_bodied_generic_fn_renders_its_type_parameters() {
+        let src = concat!(
+            "pub fn pick[t] (xs: list[t]) -> t { xs.first() }\n",
+            "pub extern fn cons2[t] (x: t, xs: list[t]) -> list[t]\n",
+        );
+        let mut files = Files::new();
+        let file = files.add_source("m.ds", src);
+        let ast = parse(&files, file).expect("the source parses");
+        let mut out = String::new();
+        member(&mut out, src, &ast);
+        assert_eq!(
+            out,
+            concat!(
+                "pub fn pick[t](xs: list[t]) -> t\n",
+                "pub extern fn cons2[t](x: t, xs: list[t]) -> list[t]\n",
+            ),
+            "the bodied pair keeps the extern's own bracket spelling"
         );
         let mut files = Files::new();
         let file = files.add_source("surface.dsi", &out);
