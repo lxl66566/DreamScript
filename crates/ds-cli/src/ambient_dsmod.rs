@@ -7,7 +7,11 @@
 //! The artifact is a pure cache, never correctness-load-bearing: the
 //! serving seam validates the bytes before installing anything, and every
 //! miss falls back to the fresh in-process lowering with no behavior
-//! change. The checks mirror the script cache's identity story —
+//! change. The decode parks once per process behind one shared handle
+//! ([`resident`]) the same way the `.dsi` tables park in
+//! `ServedTables`: every serve clones what it consumes, so a process
+//! that compiles many members over one ambient pays the validating
+//! decode once. The checks mirror the script cache's identity story —
 //!
 //! * the 16-byte header must fold this build's identity
 //!   ([`run_cache::BUILD_ID`](crate::run_cache::BUILD_ID), the same digest the cache key carries),
@@ -25,9 +29,9 @@
 //! lowering and byte-compares the finished modules, and the miss matrix
 //! exercises every refusal.
 
-#[cfg(test)]
-use ds_mod::Module;
-use ds_mod::{Hash128, read};
+use std::sync::{Arc, OnceLock};
+
+use ds_mod::{Hash128, Module, read};
 
 /// The artifact's module-name label. The label never installs — the
 /// served function records move into the user module's table — it is
@@ -67,7 +71,7 @@ pub(crate) fn generate_module() -> Module {
     let mut files = ds_diag::Files::new();
     let id = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
     let ast = ds_parse::parse(&files, id).expect("the ambient parses");
-    let analyzed = ds_meta::analyze_owned(&files, vec![std::sync::Arc::new(ast)], &[false]);
+    let analyzed = ds_meta::analyze_owned(&files, vec![Arc::new(ast)], &[false]);
     assert!(
         analyzed.checked.diags.is_empty(),
         "the ambient does not check clean: {:?}",
@@ -89,18 +93,43 @@ pub(crate) fn generate_module() -> Module {
     module.clone()
 }
 
+/// The artifact's resident module, decoded and validated once per
+/// process behind one shared handle: every input the validation reads
+/// is process-constant (the embedded bytes, the compile-time build
+/// identity, the embedded ambient source), so the checks answer once
+/// with the same verdict each serve would reach, and a miss stays
+/// cached with it — a drifted artifact answers every caller with the
+/// same miss it answers today, only without re-decoding the bytes per
+/// call. Both consumers clone their own copy (the splice its function
+/// records and tag rows, the load walk the whole module), so the
+/// clone — plain `Vec` copies, no varint decode, no body re-validation
+/// — is all a later serve pays, and no caller holds the resident
+/// itself: no two compiles share a mutable module.
+pub(crate) fn resident() -> Option<Arc<Module>> {
+    RESIDENT
+        .get_or_init(|| decode(ds_stdlib::AMBIENT_DSMOD, &build_identity()).map(Arc::new))
+        .clone()
+}
+
+/// The artifact's decoded module, parked once per process.
+static RESIDENT: OnceLock<Option<Arc<Module>>> = OnceLock::new();
+
 /// The served ambient splice for this build, when the embedded artifact
 /// verifies: the function records a cold compile splices in front of
 /// its own table, plus the tag rows those bodies minted. `None` is the
 /// miss every caller falls back from.
 pub(crate) fn serve() -> Option<ds_lower::Served> {
-    serve_bytes(ds_stdlib::AMBIENT_DSMOD, &build_identity())
+    let module = resident()?;
+    Some(ds_lower::Served {
+        tags: module.tags().to_vec(),
+        functions: module.functions().to_vec(),
+    })
 }
 
-/// The validating serve over artifact bytes: the miss matrix in one
-/// place, so the poisoned-input gates exercise exactly what the run path
-/// consults.
-fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<ds_lower::Served> {
+/// The validating decode over artifact bytes: the miss matrix in one
+/// place, so the poisoned-input gates exercise exactly the checks the
+/// resident park consults.
+fn decode(bytes: &[u8], identity: &Hash128) -> Option<Module> {
     let (header, payload) = bytes.split_first_chunk::<HEADER>()?;
     if header != identity.as_bytes() {
         return None;
@@ -115,6 +144,15 @@ fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<ds_lower::Served> {
     if !module.chains().is_empty() {
         return None;
     }
+    Some(module)
+}
+
+/// The per-bytes splice over freshly decoded bytes: the poisoned-input
+/// gates' probe shape, exercising the same validating decode the
+/// resident consults.
+#[cfg(test)]
+fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<ds_lower::Served> {
+    let module = decode(bytes, identity)?;
     Some(ds_lower::Served {
         tags: module.tags().to_vec(),
         functions: module.into_functions(),
@@ -234,5 +272,45 @@ mod tests {
 
         // the unperturbed bytes still serve
         assert!(serve_bytes(&good, &identity).is_some());
+    }
+
+    /// The decode parks once per process: two resident fetches answer
+    /// one shared handle (a per-serve decode would mint two), so a
+    /// process that compiles many members over one ambient pays the
+    /// validating decode once. The park is process state, so one test
+    /// process must do both fetches itself.
+    #[test]
+    fn the_resident_module_parks_one_decode_per_process() {
+        let first = resident().expect("the embedded artifact verifies");
+        let second = resident().expect("the second fetch serves");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the resident module is one shared handle across fetches"
+        );
+    }
+
+    /// Every serve answers the resident module's own records: the splice
+    /// clones its function records and tag rows off the park, so two
+    /// serves answer equal content — the once-per-process decode's
+    /// discipline the `.dsi` tables' every-serve gate pins the same way.
+    #[test]
+    fn every_serve_answers_the_resident_module() {
+        let resident = resident().expect("the embedded artifact verifies");
+        let first = serve().expect("the first serve clones the resident");
+        let second = serve().expect("the second serve clones the resident");
+        assert_eq!(first.tags, second.tags, "the tag rows answer equal");
+        assert_eq!(
+            first.functions.len(),
+            second.functions.len(),
+            "both serves install the same record count"
+        );
+        assert_eq!(
+            first.functions.len(),
+            resident.functions().len(),
+            "each serve carries the resident module's whole record set"
+        );
+        for (served, resident_row) in first.functions.iter().zip(resident.functions()) {
+            assert_eq!(served.name(), resident_row.name());
+        }
     }
 }

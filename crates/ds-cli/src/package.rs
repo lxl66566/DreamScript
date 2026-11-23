@@ -909,9 +909,13 @@ impl Graph {
         dep_dsi: Option<&crate::run_cache::RunCache>,
     ) -> Result<Option<Module>> {
         if name == crate::ambient_dsmod::AMBIENT_MODULE_NAME && !self.members.contains_key(name) {
-            let module = ds_mod::read(&ds_stdlib::AMBIENT_DSMOD[crate::ambient_dsmod::HEADER..])
-                .context("the checked-in ambient artifact does not read")?;
-            return Ok(Some(module));
+            // The walk serves the same once-per-process park the splice
+            // serves (the identity-validated resident), cloning its own
+            // module out — a drifted artifact refuses here with the same
+            // miss the splice's callers fall back from.
+            let module = crate::ambient_dsmod::resident()
+                .context("the checked-in ambient artifact does not verify")?;
+            return Ok(Some((*module).clone()));
         }
         Ok(self
             .linked(name, dep_dsi)?
