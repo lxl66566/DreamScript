@@ -294,15 +294,16 @@ pub struct TypeField {
 /// an optional over any word (the word's union with `none`: one
 /// presence tag word over the word's own payload region, exactly `t?`'s
 /// local lowering) — and the Named word, an in-word reference to
-/// another declared type the same producer member exports (a nested
-/// struct field, a container over a declared member, an enum-typed
-/// field), so every spelling the containers can build from the ambient
-/// atoms and the member's own linkable declarations carries. The
-/// consuming compile resolves a Named word through the linked surface
-/// onto its own minted entity for that same declaration — identity, not
-/// name lookup, never its ambient or local names. A tuple field stays
-/// outside (it rides no ambient constructor atom), as does a type the
-/// member cannot itself link.
+/// another declared type the same producer member serves — one it
+/// declares or one its own `pub import` row re-exports (a nested struct
+/// field, a container over a declared member, an enum-typed field), so
+/// every spelling the containers can build from the ambient atoms, the
+/// member's own linkable declarations, and its re-export rows carries.
+/// The consuming compile resolves a Named word through the linked
+/// surface onto its own minted entity for that same declaration —
+/// identity, not name lookup, never its ambient or local names. A tuple
+/// field stays outside (it rides no ambient constructor atom), as does
+/// a type the member cannot itself link.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeWord {
     /// A scalar atom word.
@@ -391,7 +392,10 @@ impl TypeFact {
     /// at every candidate and shrinks until stable — a pair of structs
     /// naming each other through container words co-derives in one
     /// round, while an inline cycle never stabilizes and keeps its
-    /// refusal. The candidates are the compile's own type defs (the
+    /// refusal. A Named reference may also name a type a `pub import`
+    /// row re-exports, whose fact the origin package already derived —
+    /// no co-derivation, only the row's same-member gate. The
+    /// candidates are the compile's own type defs (the
     /// `ambient_files` leading trees are the ambient members, whose
     /// definitions never export; an import-bound def is another
     /// package's identity and rides its own re-export row), and the
@@ -608,7 +612,8 @@ impl TypeFact {
 /// member, gated by the co-derivation fixpoint's eligible set.
 struct WordSolver<'a> {
     /// The producer compile's package: the def kinds and spans the
-    /// gates read, and the import-bound rows a Named reference refuses.
+    /// gates read, and the import-bound rows and re-export records a
+    /// Named reference resolves through.
     package: &'a crate::resolve::Package,
     /// The producer compile's solved declarations.
     decls: &'a crate::Decls,
@@ -617,8 +622,8 @@ struct WordSolver<'a> {
     eligible: &'a FxHashSet<crate::DefId>,
     /// The file of the declaration whose fact is being built: the
     /// same-member gate every Named reference passes (the surface
-    /// serves one member's own definitions, so a cross-member
-    /// reference would name no row).
+    /// serves one member's own definitions and its own `pub import`
+    /// rows, so a cross-member reference would name no row).
     file: ds_diag::FileId,
 }
 
@@ -763,14 +768,21 @@ impl WordSolver<'_> {
         // the set must cover every case: the enum's whole value set
         let mut covered = Vec::with_capacity(shape.cases.len());
         for (name, ..) in &shape.cases {
-            let case_def = self.package.lookup_type(name)?;
+            // the cases of a re-exported enum are import-bound defs
+            // the name index the linked install filled answers
+            let case_def = self
+                .package
+                .lookup_type(name)
+                .or_else(|| self.decls.foreign_type(name))?;
             covered.push(self.decls.atoms.get(&case_def).copied()?);
         }
         covered.sort_unstable();
         let mut named = atoms.to_vec();
         named.sort_unstable();
-        (covered == named && self.linked_ok(enum_def))
-            .then(|| TypeWord::Named(self.package.def(enum_def).name.clone()))
+        if covered != named {
+            return None;
+        }
+        self.named_name(enum_def).map(TypeWord::Named)
     }
 
     /// One declared-type atom's word: the Named word, an in-word
@@ -779,20 +791,30 @@ impl WordSolver<'_> {
     /// never its ambient or local names.
     fn named_word(&self, atom: crate::atom::TypeId) -> Option<TypeWord> {
         let def = self.decls.defs_of_atoms.get(&atom).copied()?;
-        self.linked_ok(def)
-            .then(|| TypeWord::Named(self.package.def(def).name.clone()))
+        self.named_name(def).map(TypeWord::Named)
     }
 
-    /// Whether one def is a same-member, non-import-bound, eligible
-    /// type declaration — the gates every Named reference passes: the
-    /// surface serves one member's own definitions (an import-bound row
-    /// re-exports another package's identity and waits on the richer
-    /// round), and the eligible set carries the referenced declaration
-    /// into the consumer's registration.
-    fn linked_ok(&self, def: crate::DefId) -> bool {
-        self.package.def(def).span.file == self.file
-            && self.package.foreign().get(&def).is_none()
-            && self.eligible.contains(&def)
+    /// The name a Named reference to one def carries, when the
+    /// consuming surface serves that name: a same-member eligible
+    /// declaration under its own declared name, and an import-bound
+    /// def under the name a `pub import` row of this member re-exports
+    /// it by (the re-exported fact rode the origin package's own
+    /// derivation, so the reference needs no co-derivation here). A
+    /// privately imported def names no surface row of any dependent,
+    /// so it carries no word and keeps its refusal; the same-member
+    /// gate keeps a cross-member declaration out the same way.
+    fn named_name(&self, def: crate::DefId) -> Option<String> {
+        if let Some(entry) = self.package.foreign().get(&def) {
+            entry.ty.as_ref()?;
+            return self
+                .package
+                .reexports()
+                .iter()
+                .find(|&&(row_def, _, span)| row_def == def && span.file == self.file)
+                .map(|(_, name, _)| name.clone());
+        }
+        (self.package.def(def).span.file == self.file && self.eligible.contains(&def))
+            .then(|| self.package.def(def).name.clone())
     }
 
     /// One case's payload shape over the vocabulary, from its minted
@@ -1535,6 +1557,143 @@ mod tests {
                 },
             ])
         );
+    }
+
+    /// The Named word's re-export gate: a field naming an import-bound
+    /// type carries the word only when a `pub import` row of the same
+    /// member re-exports the name — the surface row the consuming
+    /// compile resolves the word through, the entry's own fact the
+    /// origin package already derived — while a privately imported
+    /// type names no row and keeps its refusal. The shape pass forces
+    /// the referenced installs forward either way, so the referencing
+    /// struct's universe fields carry the name instead of dropping it
+    /// silently.
+    #[test]
+    fn the_named_word_gates_on_the_re_export_row() {
+        let source = concat!(
+            "pub tag int\n",
+            "\n",
+            "pub import @lib (cell)\n",
+            "import @lib (seed)\n",
+            "\n",
+            "pub struct fleet {\n",
+            "  head: cell,\n",
+            "}\n",
+            "\n",
+            "pub struct sealed {\n",
+            "  s: seed,\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("reexport_gate.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let at = ds_diag::Span::new(file, 1, 1);
+        let entry = |name: &str| crate::ForeignEntry {
+            name: name.to_owned(),
+            vis: crate::Vis::Pub,
+            kind: crate::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: crate::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: Some(std::sync::Arc::new(super::TypeFact::Struct {
+                fields: vec![super::TypeField {
+                    name: "n".to_owned(),
+                    word: super::TypeWord::Scalar(super::ScalarWord::Int),
+                }],
+                linear: false,
+            })),
+            link: 0,
+            origin: None,
+            func: None,
+            std: false,
+        };
+        let surface = crate::MemberSurface {
+            tags: Vec::new(),
+            entries: vec![entry("cell"), entry("seed")],
+        };
+        let mut imports = crate::ImportGraph::new();
+        for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+            if let ds_parse::ItemKind::Import(import) = &item.kind {
+                imports.add(import.span, crate::ImportSurface::Linked(surface.clone()));
+            }
+        }
+        let (package, resolutions, diags) = crate::resolve_package_linked(&[&ast], &imports);
+        assert!(diags.is_empty(), "the rows bind clean: {diags:?}");
+        let analyzed = crate::type_of::analyze_resolved(
+            &files,
+            vec![std::sync::Arc::new(ast)].into(),
+            package.into(),
+            resolutions.into(),
+            Vec::new(),
+            std::sync::Arc::default(),
+        );
+        assert!(
+            analyzed.checked.diags.is_empty(),
+            "the probe checks clean: {:?}",
+            analyzed.checked.diags
+        );
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let fact = |name: &str| {
+            let def = analyzed
+                .package
+                .lookup_type(name)
+                .unwrap_or_else(|| panic!("{name} declares"));
+            facts.get(&def).map(|fact| (**fact).clone())
+        };
+        // the re-exported entry's name carries; the privately imported
+        // one keeps the refusal
+        assert_eq!(
+            fact("fleet"),
+            Some(super::TypeFact::Struct {
+                fields: vec![super::TypeField {
+                    name: "head".to_owned(),
+                    word: super::TypeWord::Named("cell".to_owned()),
+                }],
+                linear: false,
+            })
+        );
+        assert_eq!(fact("sealed"), None, "a private import names no row");
+        // the forced installs shaped both structs' universe fields, so
+        // the re-exported type's atom answers under its entry name
+        let cell = analyzed
+            .package
+            .foreign()
+            .iter()
+            .find(|(_, entry)| entry.name == "cell")
+            .map(|(def, _)| *def)
+            .expect("cell registers");
+        assert!(
+            analyzed.decls.atoms.contains_key(&cell),
+            "the re-exported type's install forced forward"
+        );
+        let fleet = analyzed
+            .package
+            .lookup_type("fleet")
+            .expect("fleet declares");
+        let fleet_atom = analyzed
+            .decls
+            .atoms
+            .get(&fleet)
+            .copied()
+            .expect("fleet's atom declares");
+        let crate::AtomKind::Struct(ref fields) = analyzed
+            .decls
+            .universe
+            .atom_decl(fleet_atom)
+            .expect("shapes")
+            .kind
+        else {
+            panic!("fleet's atom carries its fields");
+        };
+        assert_eq!(fields.len(), 1, "the linked-typed field never drops");
     }
 
     /// The enum vocabulary carries: a non-generic enum's tag rows — unit

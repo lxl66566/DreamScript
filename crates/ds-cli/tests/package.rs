@@ -4031,6 +4031,173 @@ fn a_pub_import_reexport_crosses_the_middle_package() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// The Named-word re-export fixture's deepest member: a flat struct and
+/// a unit-cased enum whose facts cross onto the middle package's own
+/// struct fields through its `pub import` rows, beside the private seed
+/// struct the negative leg names in a field.
+const NAMED_DEEP_MEMBER: &str = concat!(
+    "pub struct cell {\n",
+    "  n: int,\n",
+    "  label: string,\n",
+    "}\n",
+    "pub enum shade {\n",
+    "  red,\n",
+    "  green,\n",
+    "}\n",
+    "pub struct seed {\n",
+    "  k: int,\n",
+    "}\n",
+    "pub fn make(n: int) -> cell {\n",
+    "  cell { n: n, label: \"made\" }\n",
+    "}\n",
+    "pub fn area(c: cell) -> int {\n",
+    "  c.n * 2\n",
+    "}\n",
+    "pub fn score(s: shade) -> int {\n",
+    "  match s {\n",
+    "    red => 1,\n",
+    "    green => 2,\n",
+    "  }\n",
+    "}\n",
+);
+
+/// The Named-word re-export fixture's middle member: `pub import`
+/// re-exports the deepest struct, enum, and both its cases (the enum
+/// word's resolution needs the case rows the surface carries), while
+/// its own `fleet` names the re-exported types in every Named-word
+/// spelling — a nested struct field, a container over it, an optional
+/// over it, an enum-typed field — and `sealed` names the PRIVATELY
+/// imported `seed`, the boundary the widening must keep refused.
+const NAMED_LIB_MEMBER: &str = concat!(
+    "import @deep (make, area, score, seed)\n",
+    "pub import @deep (cell, shade, red, green)\n",
+    "\n",
+    "pub struct fleet {\n",
+    "  head: cell,\n",
+    "  tail: list[cell],\n",
+    "  pick: cell?,\n",
+    "  tint: shade,\n",
+    "}\n",
+    "\n",
+    "pub struct sealed {\n",
+    "  s: seed,\n",
+    "}\n",
+    "\n",
+    "pub fn fleet_of(n: int) -> fleet {\n",
+    "  fleet { head: make(n), tail: [make(1)], pick: none, tint: green }\n",
+    "}\n",
+    "\n",
+    "pub fn fleet_weight(f: fleet) -> int {\n",
+    "  const picked = match f.pick {\n",
+    "    none => 0,\n",
+    "    other => other.n,\n",
+    "  }\n",
+    "  area(f.head) + len(f.tail) + picked + score(f.tint)\n",
+    "}\n",
+);
+
+/// The `pub import`-re-exported Named-word fixture packages saved into
+/// the test store: the root pins the middle package alone, the deepest
+/// package entering its own dep closure through the re-export's origin.
+fn named_reexport_fixtures(tag: &str) -> (PathBuf, Hash128) {
+    let work = temp_dir(tag);
+    let deep = work.join("deep");
+    write_pkg(&deep, &deep_manifest(), &[("deep.ds", NAMED_DEEP_MEMBER)]);
+    let deep_id = bundle_identity(&deep_manifest(), &[("deep.ds", NAMED_DEEP_MEMBER)]);
+    let lib = work.join("lib");
+    let lib_manifest = lib_manifest(deep_id);
+    write_pkg(&lib, &lib_manifest, &[("helper.ds", NAMED_LIB_MEMBER)]);
+    for dir in [&deep, &lib] {
+        let (ok, _, err) = ds(&["save", dir.to_str().expect("temp path is UTF-8")]);
+        assert!(ok, "ds save {} exits 0 (stderr: {err})", dir.display());
+    }
+    let lib_id = bundle_identity(&lib_manifest, &[("helper.ds", NAMED_LIB_MEMBER)]);
+    (work, lib_id)
+}
+
+/// A `pub import`-re-exported type carries as the Named word (todo item
+/// 58's richer encoding): the middle package's `fleet` names the
+/// re-exported `cell` in every word spelling — a nested struct field, a
+/// `list[cell]`, a `cell?`, and the enum-typed field over the re-exported
+/// `shade` — so the fact crosses, and the consumer's mint resolves the
+/// word through its link table onto its own def for the re-exported
+/// entry, forcing the entry's install forward past def order; the
+/// consumer then constructs and moves whole `fleet` values, builds its
+/// own `cell` literals beside a local struct naming the re-exported
+/// type, and reads every field back through the middle package's own
+/// functions.
+#[test]
+fn a_reexported_named_type_field_crosses_the_middle_package() {
+    let (work, lib_id) = named_reexport_fixtures("reexport-named");
+    let root_manifest = root_manifest(lib_id, false);
+    let source = concat!(
+        "import @std/io\n",
+        "import @lib/helper (cell, shade, green, fleet, fleet_of, fleet_weight)\n",
+        "\n",
+        "struct wrap {\n",
+        "  c: cell,\n",
+        "}\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  const made = fleet_of(3)\n",
+        "  var total = fleet_weight(made)\n",
+        "  const own = fleet {\n",
+        "    head: cell { n: 5, label: \"x\" },\n",
+        "    tail: [cell { n: 1, label: \"a\" }],\n",
+        "    pick: none,\n",
+        "    tint: green,\n",
+        "  }\n",
+        "  total = total + fleet_weight(own)\n",
+        "  const picked = match own.pick {\n",
+        "    none => 0,\n",
+        "    other => other.n,\n",
+        "  }\n",
+        "  const held = wrap { c: cell { n: 3, label: \"held\" } }\n",
+        "  total = total + own.head.n + len(own.tail) + picked + held.c.n\n",
+        "  println(\"${total}\")\n",
+        "  total\n",
+        "}\n",
+    );
+    let root = write_root(&work, &root_manifest, source);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the re-exported Named-word run exits 0 (stderr: {err})");
+    // fleet_weight(made) = area(make(3)) 6 + len([make(1)]) 1 + 0
+    // + score(green) 2 = 9; fleet_weight(own) = area(5) 10 + len 1 + 0
+    // + 2 = 13; the reads add 5 + 1 + 0 + the local wrap's 3 — 31 in
+    // all, the run echoing the entry's return after the println
+    assert_eq!(out, "31\n31\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The Named word's private-import boundary keeps its refusal: a field
+/// naming a type the middle package imported WITHOUT a `pub import` row
+/// carries no fact (the name joins no dependent's surface, so no link
+/// table row would resolve the word), and the selection refuses at the
+/// ordinary DS4021 seam.
+#[test]
+fn a_privately_imported_type_field_keeps_its_refusal() {
+    let (work, lib_id) = named_reexport_fixtures("reexport-named-refused");
+    let root_manifest = root_manifest(lib_id, false);
+    let source = concat!(
+        "import @lib/helper (sealed)\n",
+        "\n",
+        "fn main() -> int {\n",
+        "7\n",
+        "}\n",
+    );
+    let root = write_root(&work, &root_manifest, source);
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert!(!ok, "the privately-imported type field refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("layout and tag rows are the artifact round"),
+        "the refusal names its tier (stderr: {err})"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 // ---- the cross-module tail transfer (H2 over the linked surface) ------------
 
 /// The linked tail-loop package's member: the M0 mutual pair (ping/pong)

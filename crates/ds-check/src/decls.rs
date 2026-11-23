@@ -468,6 +468,10 @@ where
     // and a mint placed this late would record an id the rank replay
     // lands elsewhere; the mint log's own ids replay in order, and the
     // re-run takes the replayed atom through the served def-atom rows.
+    // A def the shape pass already forced (a written field named it
+    // ahead of this loop) re-installs idempotently below — the same
+    // replay-convergent path a served prefix's already-minted defs
+    // take, so the one late loop serves both.
     let mut linked: Vec<(&DefId, &crate::import::ForeignEntry)> =
         package.foreign().iter().collect();
     linked.sort_by_key(|(def, _)| def.index());
@@ -586,6 +590,59 @@ fn force_minted(ctx: &mut MintCtx, def: DefId, decls: &mut Decls) -> Option<()> 
     install_foreign_type(ctx, def, &name, span, &fact, decls);
     ctx.forcing.pop();
     (decls.atoms.get(&def).is_some() || decls.enums.get(&def).is_some()).then_some(())
+}
+
+/// Whether one import-bound def's install already ran: an atom (a
+/// struct, a case, a tag), an enum's case rows, or an alias's written
+/// body.
+fn linked_minted(decls: &Decls, def: DefId) -> bool {
+    decls.atoms.contains_key(&def)
+        || decls.enums.contains_key(&def)
+        || decls.aliases.contains_key(&def)
+}
+
+/// Ensures one linked def's install ran for a written type spelling —
+/// the shape pass names linked types ahead of the linked mint loop, and
+/// a field whose type missed would silently drop out of the
+/// referencing declaration's universe atom, mis-shaping both this
+/// module's own lowering and the link fact the export walk derives
+/// over the same fields. An enum forces its cases with it (the union
+/// the name spells needs their atoms); a def whose install never
+/// completes answers `None`, and the caller keeps the field dropped.
+fn force_linked(package: &Package, decls: &mut Decls, def: DefId) -> Option<()> {
+    let mut ctx = MintCtx {
+        package,
+        forcing: Vec::new(),
+    };
+    if !linked_minted(decls, def) {
+        let entry = package.foreign().get(&def)?;
+        let fact = Arc::clone(entry.ty.as_ref()?);
+        let name = entry.name.clone();
+        let span = entry.decl_span;
+        ctx.forcing.push(def);
+        install_foreign_type(&mut ctx, def, &name, span, &fact, decls);
+        ctx.forcing.pop();
+    }
+    if decls.enums.contains_key(&def) {
+        // the enum's own cases: their entries sit at their own def
+        // positions ahead of the late mint loop, so each forces here
+        let enum_name = package.def(def).name.clone();
+        let cases: Vec<DefId> = package
+            .foreign()
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.ty.as_deref(),
+                    Some(crate::import::TypeFact::Case(fact)) if fact.enum_name == enum_name
+                )
+            })
+            .map(|(def, _)| *def)
+            .collect();
+        for case_def in cases {
+            force_minted(&mut ctx, case_def, decls)?;
+        }
+    }
+    Some(())
 }
 
 /// One linked field list as the pair of forms the tables carry: the
@@ -1917,7 +1974,35 @@ fn path_expr(
     decls: &mut Decls,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<TypeExpr> {
-    let def = package.lookup_type(&name.name)?;
+    // An import-bound type the shape pass names ahead of the linked
+    // mint loop: its def sits outside the local type namespace (the
+    // link pass's registration), so the foreign table answers by
+    // name, and the install forces forward — or the referencing
+    // field would silently drop out of its declaration's universe
+    // atom, a shape both this module's own lowering and the export
+    // walk's link fact read.
+    let Some(def) = package.lookup_type(&name.name) else {
+        let def = package
+            .foreign()
+            .iter()
+            .find(|(_, entry)| entry.name == name.name && entry.ty.is_some())
+            .map(|(def, _)| *def)?;
+        force_linked(package, decls, def)?;
+        return path_def_expr(package, def, decls, diags);
+    };
+    path_def_expr(package, def, decls, diags)
+}
+
+/// One resolved def's universe form behind a written path segment: an
+/// atom (a struct, a case, a tag), a trait reference, a non-generic
+/// enum's case-atom union [B3], or a non-generic alias's expanded
+/// body. `None` marks a def the universe cannot express here.
+fn path_def_expr(
+    package: &Package,
+    def: DefId,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<TypeExpr> {
     if let Some(&atom) = decls.atoms.get(&def) {
         return Some(TypeExpr::Atom(atom));
     }
