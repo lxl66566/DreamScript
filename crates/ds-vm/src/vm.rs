@@ -3519,38 +3519,35 @@ impl Vm {
     }
 
     /// The install-time reachability sweep over the version table [H6
-    /// item 5]: a row stays pinned while the registry itself keeps it
-    /// (module slots), while any fiber's live call chain names it (the
-    /// context's while a drive runs, every pool slot's otherwise —
-    /// interrupted fibers keep their frames), or while any parked or
-    /// ready fiber's resume point names it. The run-entry hint and the
-    /// CALL cache never reach a sweep as namers: the install takes the
-    /// hint and the stamp check empties every cache entry before the
-    /// sweep runs, and no dispatch happens between them. Every unmarked
-    /// row is dropped — the table's one reference — and the sweep
-    /// answers the retired versions' pool addresses so their KSTR rows
-    /// die with them; the row is a version's single home, so a retired
-    /// version's memory frees right there.
+    /// item 5]: a row no module slot names sits on the registry's detached
+    /// list, and the sweep retires every detached row no fiber names —
+    /// the context's live call chain while a drive runs, every pool slot's
+    /// kept frames otherwise (interrupted fibers keep their frames, and a
+    /// Dead fiber's included: the recycle door walks a dead slot's
+    /// leftover frames firing whatever banded deinit claims survived the
+    /// death, so their rows must outlive the slot's reuse) — or any parked
+    /// or ready fiber's resume point. The run-entry hint and the CALL cache
+    /// never reach a sweep as namers: the install takes the hint and the
+    /// stamp check empties every cache entry before the sweep runs, and no
+    /// dispatch happens between them. Every retired row's memory frees
+    /// right there (the row is the version's single home) and its index
+    /// joins the reuse freelist, so the table's width stays bounded under
+    /// install churn; the sweep answers the retired versions' pool
+    /// addresses so their KSTR rows die with them. The judge list is the
+    /// detached rows alone, so the sweep costs O(detached), never the
+    /// table's width.
     fn sweep_versions(&mut self) -> Vec<usize> {
-        let mut live = vec![false; self.registry.version_rows()];
-        self.registry.mark_own_rows(&mut live);
-        for frame in &self.callinfo {
-            live[frame.module.0 as usize] = true;
-        }
-        for fiber in &self.pool {
-            // every fiber's kept frames pin, a Dead one's included: the
-            // recycle door walks a dead slot's leftover frames firing
-            // whatever banded deinit claims survived the death, so their
-            // rows must outlive the slot's reuse (the reuse itself clears
-            // the chain and drops the pin)
-            for frame in &fiber.callinfo {
-                live[frame.module.0 as usize] = true;
-            }
-            if let Some(resume) = &fiber.resume {
-                live[resume.version.0 as usize] = true;
-            }
-        }
-        self.registry.retire_unmarked_rows(&live)
+        let named = |row: VersionIdx| {
+            self.callinfo.iter().any(|frame| frame.module == row)
+                || self.pool.iter().any(|fiber| {
+                    fiber.callinfo.iter().any(|frame| frame.module == row)
+                        || fiber
+                            .resume
+                            .as_ref()
+                            .is_some_and(|resume| resume.version == row)
+                })
+        };
+        self.registry.retire_detached_rows(named)
     }
 
     /// How many (pool, fiber) intern-row keys the KSTR cache holds — the
@@ -11568,5 +11565,74 @@ mod tests {
         vm.install_module(fixture(7)).expect("the swap installs");
         assert_eq!(vm.registry.row_arc_count(v1), 0);
         assert!(vm.registry.version(v1).is_none());
+    }
+
+    /// The bounded-row regression the item-39 landing owns: deep install
+    /// churn with the entry frame draining between installs recycles the
+    /// swept rows' slots, so the table's width stays a small constant
+    /// instead of growing one row per install — and each recycled index
+    /// serves its new version exactly, the run answering the fresh
+    /// scale.
+    #[test]
+    fn the_version_table_stays_bounded_under_deep_install_churn() {
+        fn fixture(scale: i64) -> ModuleVersion {
+            let g = crate::program::FunctionDef {
+                name: "g".into(),
+                layout: FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 0)
+                    .expect("valid layout"),
+                pool: vec![Const::I64(scale)],
+                code: crate::program::assemble(&[
+                    Uop::Funcf { frame_slots: 2 },
+                    Uop::Kimm {
+                        dst: 1,
+                        kidx: ConstIdx(0),
+                    },
+                    Uop::MulI64 {
+                        dst: 0,
+                        lhs: 0,
+                        rhs: 1,
+                    },
+                    Uop::Ret { src: 0 },
+                ])
+                .expect("fixture body encodes"),
+            };
+            let f = crate::program::FunctionDef {
+                name: "f".into(),
+                layout: FrameLayout::new(vec![SlotType::I64, SlotType::I64], 1, 1)
+                    .expect("valid layout"),
+                pool: vec![Const::FuncRef(ConstFuncRef::Named {
+                    module: "m".into(),
+                    func: 0,
+                })],
+                code: crate::program::assemble(&[
+                    Uop::Funcf { frame_slots: 2 },
+                    Uop::Mov { dst: 1, src: 0 },
+                    Uop::Call {
+                        callee: ConstIdx(0),
+                        nargs: 1,
+                    },
+                    Uop::Ret { src: 1 },
+                ])
+                .expect("fixture body encodes"),
+            };
+            ModuleVersion::new("m", vec![g, f]).expect("valid fixture module")
+        }
+        let mut vm = Vm::new(ModuleRegistry::new());
+        for round in 1..=500 {
+            vm.install_module(fixture(round))
+                .expect("the swap installs");
+            // the run resets the root's kept entry frame onto the fresh
+            // current row, so no frame pins the outgoing one past the next
+            // install's sweep
+            assert_eq!(
+                vm.run("m", "f", &[Value::I64(1)]),
+                Ok(FrameAnswer::one(Value::I64(round)))
+            );
+        }
+        assert!(
+            vm.registry.version_rows() <= 3,
+            "recycled, not accumulated: {}",
+            vm.registry.version_rows()
+        );
     }
 }

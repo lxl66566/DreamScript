@@ -457,8 +457,10 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
 /// A module version's row in the per-VM version table: the u32 name the hot
 /// seams carry — every frame's chain entry, every parked fiber's resume
 /// point, every CALL-cache row — in place of a shared handle, so a call or
-/// a return moves no reference count. Assigned at install, never reused:
-/// the table only appends.
+/// a return moves no reference count. Assigned at install; a row the
+/// sweep retired names no frame, parked fiber, or cache entry (the
+/// sweep's own proof), so its index reuses at a later install while every
+/// live index still names its own version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VersionIdx(pub(crate) u32);
 
@@ -494,8 +496,9 @@ impl ModuleSlots {
 /// keep their code and pool until nothing references them — every frame
 /// carries a [`VersionIdx`], and the table owns each version's survival
 /// until an install-time sweep proves nothing references its row [H6
-/// item 5]. Native modules ([`NativeFunction`] tables, the builtin
-/// mechanism) live in the same name space: a pool FuncRef resolves through
+/// item 5]; a swept row's index reuses at a later install, so the table's
+/// width tracks live rows, never install count. Native modules ([`NativeFunction`] tables, the
+/// builtin mechanism) live in the same name space: a pool FuncRef resolves through
 /// the uop tables first, the native tables second, so `CALL` has one
 /// resolution path for both callee kinds.
 #[derive(Debug, Default)]
@@ -523,16 +526,27 @@ pub struct ModuleRegistry {
     /// name-to-id direction rides each slot's own `id`, so a name lookup
     /// is one `modules` descent.
     id_names: Vec<String>,
-    /// The per-VM version table: one row per installed version, appended
-    /// at install and never reused. The row holds the one `Arc` that owns
-    /// the version's survival — the version's single home, so immutable
-    /// code stays `Send + Sync` for worker sharing — and every other
-    /// holder of a version is a [`VersionIdx`] naming the row. A row is
-    /// dropped only by the install-time sweep, which proves no live frame
-    /// or parked fiber names it — the hint and cache entries never reach a
-    /// sweep, since the install takes the hint and empties the cache
-    /// before it runs.
+    /// The per-VM version table: one row per live installed version, plus
+    /// the retired rows whose slots wait on reuse. The row holds the one
+    /// `Arc` that owns the version's survival — the version's single
+    /// home, so immutable code stays `Send + Sync` for worker sharing —
+    /// and every other holder of a version is a [`VersionIdx`] naming the
+    /// row. A row is dropped only by the install-time sweep, which proves
+    /// no live frame or parked fiber names it — the hint and cache
+    /// entries never reach a sweep, since the install takes the hint and
+    /// empties the cache before it runs — and a dropped row's slot reuses
+    /// at a later install, so the table's width stays bounded under
+    /// install churn.
     versions: Vec<Option<Arc<ModuleVersion>>>,
+    /// The rows no module slot names, in detach order: each install under
+    /// a loaded name moves the outgoing retiring row here, and the next
+    /// sweep judges the list — a row a live frame or parked fiber still
+    /// names stays queued until the next install's sweep retires it.
+    detached: Vec<VersionIdx>,
+    /// The reuse freelist: the indices of rows the sweep dropped, most
+    /// recently retired first. The sweep proved no frame, parked fiber, or
+    /// cache names them, so a reused index never aliases a live one.
+    retired: Vec<VersionIdx>,
     /// The last run entry [`ModuleRegistry::resolve`] answered, as of
     /// `generation`: a host drive re-entering one entry skips both name
     /// lookups. A hint beside the authoritative lookup, so a miss costs one
@@ -604,19 +618,31 @@ impl ModuleRegistry {
     }
 
     /// Installs a version: it becomes the module's current slot, the
-    /// previous current moves to the retiring slot, and the version table
-    /// appends the installed version as a fresh row (the row the retiring
-    /// slot drops is the sweep's business, never this method's). Answers
-    /// the installed version's table row: the row's `Arc` is the one
+    /// previous current moves to the retiring slot, and the outgoing
+    /// retiring row joins the detached list the next sweep judges (this
+    /// method drops nothing). The installed version takes a swept row's
+    /// slot when the reuse freelist holds one, else a fresh appended row,
+    /// so the table's width tracks live rows instead of install count.
+    /// Answers the installed version's table row: the row's `Arc` is the one
     /// owner of the version's survival, and no second home exists to
     /// outlive it — a host inspecting the installed code reads through
     /// [`ModuleRegistry::version`] on this row while it stays live.
     pub fn install(&mut self, version: ModuleVersion) -> VersionIdx {
         let name = version.name().to_owned();
         let installed = Arc::new(version);
-        let row = VersionIdx(u32::try_from(self.versions.len()).expect("version rows fit u32"));
-        self.versions.push(Some(installed));
+        let row = if let Some(row) = self.retired.pop() {
+            debug_assert!(self.versions[row.0 as usize].is_none());
+            self.versions[row.0 as usize] = Some(installed);
+            row
+        } else {
+            let row = VersionIdx(u32::try_from(self.versions.len()).expect("version rows fit u32"));
+            self.versions.push(Some(installed));
+            row
+        };
         if let Some(slots) = self.modules.get_mut(&name) {
+            if let Some(outgoing) = slots.retiring {
+                self.detached.push(outgoing);
+            }
             slots.retiring = Some(slots.current);
             slots.current = row;
         } else {
@@ -672,7 +698,9 @@ impl ModuleRegistry {
     /// The version a table row names, if the sweep has not retired it:
     /// the host's only read of installed code — no owning handle exists,
     /// the row is the version's single home, so the borrow ends with the
-    /// row's life.
+    /// row's life. A retired row's slot reuses at a later install, so an
+    /// index held past its retirement answers the reuse's version, never
+    /// a stale one.
     #[must_use]
     pub fn version(&self, row: VersionIdx) -> Option<&ModuleVersion> {
         self.versions.get(row.0 as usize).and_then(Option::as_deref)
@@ -713,40 +741,42 @@ impl ModuleRegistry {
         unsafe { &*std::ptr::from_ref(version) }
     }
 
-    /// How many rows the version table holds (live and retired): the
-    /// reachability bitset's width at a sweep.
+    /// How many rows the version table holds (live, detached, and
+    /// reusable): the reachability bitset's width at a swap re-check.
+    /// Swept rows recycle, so the width stays bounded under install churn.
     pub(crate) fn version_rows(&self) -> usize {
         self.versions.len()
     }
 
-    /// Marks the rows the registry itself keeps alive into `live`: every
-    /// module's current and retiring slot. The run-entry hint never
-    /// reaches a sweep — the install that runs the sweep takes the hint
-    /// first — so it is no marking source.
-    pub(crate) fn mark_own_rows(&self, live: &mut [bool]) {
-        for slots in self.modules.values() {
-            live[slots.current.0 as usize] = true;
-            if let Some(row) = slots.retiring {
-                live[row.0 as usize] = true;
-            }
-        }
-    }
-
-    /// The install-time sweep's retire half: drops every row `live` leaves
-    /// unmarked and answers the pool addresses of the retired versions'
-    /// functions (the kstr rows keyed by those pools are dead hints). A
-    /// dropped row releases the table's one reference, and the row is the
-    /// version's single home, so the version's memory frees right there.
-    pub(crate) fn retire_unmarked_rows(&mut self, live: &[bool]) -> Vec<usize> {
+    /// The install-time sweep's retire half: drops every detached row no
+    /// live frame or parked fiber names (`named`, the caller's marking
+    /// walk) and answers the retired versions' pool addresses (the KSTR
+    /// rows keyed by those pools are dead hints). A dropped row releases
+    /// the table's one reference — the row is the version's single home,
+    /// so the version's memory frees right there — and its index joins
+    /// the reuse freelist, most recently retired first. A named row stays
+    /// queued, in detach order, for the next install's sweep. The walk
+    /// touches the detached list alone, so the sweep costs O(detached),
+    /// never the table's width.
+    pub(crate) fn retire_detached_rows(
+        &mut self,
+        named: impl Fn(VersionIdx) -> bool,
+    ) -> Vec<usize> {
         let mut pools = Vec::new();
-        for (at, row) in self.versions.iter_mut().enumerate() {
-            if live[at] {
-                continue;
-            }
-            if let Some(version) = row.take() {
-                pools.extend(version.functions().iter().map(|f| f.pool.as_ptr() as usize));
+        let mut kept = 0;
+        for at in 0..self.detached.len() {
+            let row = self.detached[at];
+            if named(row) {
+                self.detached.swap(kept, at);
+                kept += 1;
+            } else {
+                if let Some(version) = self.versions[row.0 as usize].take() {
+                    pools.extend(version.functions().iter().map(|f| f.pool.as_ptr() as usize));
+                }
+                self.retired.push(row);
             }
         }
+        self.detached.truncate(kept);
         pools
     }
 
@@ -939,6 +969,8 @@ impl CodeSnapshot {
             versions: self.versions.clone(),
             entry: RefCell::new(None),
             generation: self.generation,
+            detached: Vec::new(),
+            retired: Vec::new(),
         }
     }
 }
@@ -1011,18 +1043,17 @@ mod tests {
         let v1_arc = reg.versions[v1_row.0 as usize]
             .clone()
             .expect("the fresh row holds its version");
-        // two more installs: the second moves v1's row out of every slot
-        // the registry itself marks
+        // two more installs: the third moves v1's row out of every slot
+        // onto the detached list
         reg.install(
             ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
         );
         reg.install(
             ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
         );
-        let mut live = vec![false; reg.version_rows()];
-        reg.mark_own_rows(&mut live);
-        live[v1_row.0 as usize] = true; // a parked fiber's frame
-        let pools = reg.retire_unmarked_rows(&live);
+        // a parked fiber names v1's row: the sweep keeps it, in detach
+        // order, queued for the next install's judgment
+        let pools = reg.retire_detached_rows(|row| row == v1_row);
         assert!(pools.is_empty(), "the named row stays");
         assert!(std::ptr::eq(
             reg.version(v1_row).expect("still live"),
@@ -1033,16 +1064,40 @@ mod tests {
             2,
             "the row plus this test's private probe"
         );
-        // the same sweep with no live reference drops the row and answers
-        // the retired version's pool addresses; the row was the version's
+        assert_eq!(reg.detached, [v1_row], "the kept row stays queued");
+        // the same sweep with no namer drops the row and answers the
+        // retired version's pool addresses; the row was the version's
         // single home, so the drop frees it (this probe keeps the last
         // count here)
-        let mut live = vec![false; reg.version_rows()];
-        reg.mark_own_rows(&mut live);
-        let pools = reg.retire_unmarked_rows(&live);
+        let pools = reg.retire_detached_rows(|_| false);
         assert_eq!(pools.len(), 2, "the two retired functions' pools");
         assert!(reg.version(v1_row).is_none());
         assert_eq!(reg.row_arc_count(v1_row), 0);
+        assert!(reg.detached.is_empty(), "the retired row left the queue");
+        // the swept row's slot reuses: the freelist answers the retired
+        // index back, most recently retired first
+        let v4_row = reg.install(
+            ModuleVersion::new("m", vec![empty_def("a"), empty_def("b")]).expect("valid module"),
+        );
+        assert_eq!(v4_row, v1_row);
+    }
+
+    /// The bounded-row regression the item-39 landing owns: deep install
+    /// churn with nothing naming the outgoing rows recycles swept slots,
+    /// so the table's width stays a small constant instead of growing one
+    /// row per install.
+    #[test]
+    fn the_table_stays_bounded_under_deep_install_churn() {
+        let mut reg = ModuleRegistry::new();
+        for _ in 0..2000 {
+            reg.install(ModuleVersion::new("m", vec![empty_def("a")]).expect("valid module"));
+            reg.retire_detached_rows(|_| false);
+        }
+        assert!(
+            reg.version_rows() <= 3,
+            "recycled, not accumulated: {}",
+            reg.version_rows()
+        );
     }
 
     /// The worker-sharing contract the fork-join tier queues on: a

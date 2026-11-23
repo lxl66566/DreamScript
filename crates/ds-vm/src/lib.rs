@@ -54,11 +54,11 @@
 //!   validating every link's content hash against the installed slot or the fetched module's source
 //!   hash; the single-module install seam is [`crate::loader::install`].
 //! - Modules. A two-slot module table [H6 item 5] over a per-VM version table: each module holds a
-//!   current and at most one retiring version, both naming rows of an append-only table that owns
-//!   every version's survival; every call resolves through the current slot, so a swap redirects
+//!   current and at most one retiring version, both naming rows of a table that owns every
+//!   version's survival; every call resolves through the current slot, so a swap redirects
 //!   subsequent calls immediately while live frames keep running their entered version's code and
 //!   pool — frames carry the row as a u32, and an install-time sweep retires rows nothing
-//!   references.
+//!   references, recycling their indices for later installs so the table stays bounded under churn.
 //! - Backtraces. On a trap, [`Vm::backtrace`] reports each real frame plus its tail-chain elided
 //!   count [H2]; lazy materialization of elided frames from per-elision records is deferred to
 //!   per-fiber debug recording.
