@@ -23,15 +23,21 @@
 //! the net face's own parked-twin discipline, the wake performing the
 //! op once and delivering its answer at the parked site. A kernel
 //! without pidfd (or a non-Linux host, or no reactor) keeps the
-//! blocking twin: the rows block the calling fiber exactly `proc_run`'s
-//! own wait. `proc_close_in` is the stdin-close
-//! seam — the child's end-of-input while the handle stays live — and
+//! blocking twin: the read rows block the calling fiber exactly
+//! `proc_run`'s own wait, and the wait twin polls the child on a
+//! bounded sleep loop — a waitpid owns no portable interrupt shape,
+//! so the host's stop flag cuts a blocked wait within one interval. `proc_close_in` is the
+//! stdin-close seam — the child's end-of-input while the handle stays live — and
 //! `proc_close` the raw idempotent-close seam the `proc_handle` deinit
 //! pairs with: a close of a still-running child kills and reaps it, so
 //! a dropped handle leaks neither a child nor a zombie.
 
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -161,6 +167,14 @@ pub const PROC_CAP: usize = 1024 * 1024;
 /// timeout span.
 pub const PROC_PARK_TIMEOUT: Duration = Duration::from_hours(24);
 
+/// The blocking wait twin's poll interval: a waitpid owns no portable
+/// interrupt shape (the parked twin's pidfd is Linux's own), so the
+/// twin polls the child non-blockingly on a bounded sleep loop and the
+/// host's stop flag cuts a blocked wait within one interval — the
+/// accept twin's own poll discipline, the per-wait wakeup latency the
+/// cost a reactor-less embedder's blocking fallback pays.
+const PROC_WAIT_POLL: Duration = Duration::from_millis(10);
+
 /// The process face's raw OS binding (the 2026-11-23 ruling):
 /// `pidfd_open` for the exit interest and `fcntl(O_NONBLOCK)` for the
 /// pipes — libc's own symbols over no crate, the epoll driver's
@@ -263,6 +277,12 @@ pub(crate) struct Procs {
     /// default), the blocking twin's own unbounded wait restated as
     /// the wheel's far backstop.
     timeout: Duration,
+    /// The host's blocking-drive stop flag (the 2026-11-24 signal
+    /// ruling's non-reactor twin): the blocking wait twin observes it
+    /// between its poll rounds and answers the `Interrupted` marker
+    /// the caller maps to the shutdown trap. A host that installs
+    /// none keeps today's behavior — the flag stands false forever.
+    stop: Arc<AtomicBool>,
 }
 
 impl Default for Procs {
@@ -272,6 +292,7 @@ impl Default for Procs {
             next_id: 0,
             parking: false,
             timeout: PROC_PARK_TIMEOUT,
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -326,6 +347,12 @@ impl Procs {
     /// unbounded whatever the bound).
     pub(crate) fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Installs the host's blocking-drive stop flag
+    /// ([`crate::Vm::set_shutdown_flag`]).
+    pub(crate) fn set_stop_flag(&mut self, stop: Arc<AtomicBool>) {
+        self.stop = stop;
     }
 
     /// The entry of handle `pid`.
@@ -448,9 +475,7 @@ impl Procs {
                 buf.truncate(n);
                 crate::net::NetAttempt::Done(Ok(buf))
             },
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                crate::net::NetAttempt::Park
-            },
+            Err(err) if err.kind() == ErrorKind::WouldBlock => crate::net::NetAttempt::Park,
             Err(err) => crate::net::NetAttempt::Done(Err(err)),
         }
     }
@@ -527,13 +552,29 @@ impl Procs {
     /// child ended without a status code (a signal on Unix) answering
     /// -1, `proc_run`'s own convention. Idempotent: a later wait
     /// answers the reaped status again without touching the child, so
-    /// the deinit's close after a wait stays clean.
+    /// the deinit's close after a wait stays clean. The blocking twin
+    /// polls the child non-blockingly on a bounded sleep loop (a
+    /// waitpid owns no portable interrupt shape), the host's stop flag
+    /// answering the `Interrupted` marker between rounds — the wait
+    /// stays unbounded for a live child exactly `proc_run`'s own.
     pub(crate) fn wait(&mut self, pid: i64) -> std::io::Result<i64> {
+        let stopped = Arc::clone(&self.stop);
         let entry = self.entry(pid)?;
         if let Some(status) = entry.status {
             return Ok(status);
         }
-        let status = i64::from(entry.child.wait()?.code().unwrap_or(-1));
+        let status = loop {
+            match entry.child.try_wait() {
+                Ok(Some(exit)) => break i64::from(exit.code().unwrap_or(-1)),
+                Ok(None) => {
+                    if stopped.load(Ordering::Relaxed) {
+                        return Err(std::io::Error::new(ErrorKind::Interrupted, "host shutdown"));
+                    }
+                    std::thread::sleep(PROC_WAIT_POLL);
+                },
+                Err(err) => return Err(err),
+            }
+        };
         entry.status = Some(status);
         Ok(status)
     }
@@ -766,9 +807,10 @@ pub(crate) fn proc_read_fn(
 /// `proc_run`'s convention — idempotently, so a second wait answers
 /// the reaped status again. Under a Linux reactor the wait parks on
 /// the child's pidfd (the readable wake reaping the status
-/// non-blockingly); a kernel refusing a pidfd keeps the blocking twin
-/// below, the wait blocking the calling fiber exactly `proc_run`'s
-/// own.
+/// non-blockingly); a kernel refusing a pidfd, a non-Linux host, or a
+/// host with no reactor keeps the blocking twin below — the wait
+/// polling the child on a bounded sleep loop, so a flipped stop flag
+/// answers the shutdown trap within one interval.
 pub(crate) fn proc_wait_fn(
     heaps: &mut Heaps,
     out: &mut OutputSink,
@@ -802,6 +844,9 @@ pub(crate) fn proc_wait_fn(
             tag: PLATFORM_IO_OK,
             payload: Value::I64(status),
         },
+        // the stop flag's marker between poll rounds: the shutdown
+        // trap exactly the accept twin's own cut
+        Err(err) if err.kind() == ErrorKind::Interrupted => return Err(Trap::Shutdown),
         Err(err) => io_err(heaps, "proc_wait", &pid.to_string(), &err),
     })
 }

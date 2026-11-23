@@ -2945,10 +2945,11 @@ impl Vm {
     /// Hands the blocking drive its stop flag (the 2026-11-24 signal
     /// ruling's non-reactor twin): a host without a reactor keeps the
     /// blocking natives, so its own signal helper — a sigwait thread, a
-    /// console-control handler — flips this flag and the bounded
-    /// blocking poll rows observe it between rounds, the drive answering
-    /// [`Trap::Shutdown`] exactly the reactor path's outcome. The host
-    /// keeps its clone; the engine decides nothing.
+    /// console-control handler — flips this flag and the blocking
+    /// twins' poll rows (the bounded accept, the unbounded proc wait)
+    /// observe it between rounds, the drive answering [`Trap::Shutdown`]
+    /// exactly the reactor path's outcome. The host keeps its clone;
+    /// the engine decides nothing.
     pub fn set_shutdown_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
         self.out.set_shutdown_flag(flag);
     }
