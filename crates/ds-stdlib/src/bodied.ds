@@ -50,8 +50,9 @@
 // into the bounded answers channel; the join-all boundary drains after every
 // child completed — the channel's FIFO is the arrival order.
 // `firstof` answers the first arrival; `interleave` collects in
-// arrival order. The empty race traps the channel's zero-bound
-// refusal, and a wider-than-one-word answer refuses at the call's
+// arrival order. The empty race parks the zero-bound answers channel
+// with no fiber left to serve it, the stall guard answering the honest
+// deadlock, and a wider-than-one-word answer refuses at the call's
 // one-word instantiation. `sum` is the fold spelling over reduce's
 // hosted callable (the CALLG lambda seam).
 //

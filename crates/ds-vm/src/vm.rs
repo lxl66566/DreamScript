@@ -83,7 +83,7 @@ use crate::{
         NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
     },
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
-    object::{Heaps, Objects},
+    object::{ChanPop, ChanSender, Heaps, Objects},
     program::{Const, ConstFuncRef, ConstKind},
     reactor::Reactor,
     sched::{SchedState, WaitEntry, WorldWait},
@@ -369,11 +369,11 @@ pub enum Trap {
     /// deadlocks here by design — the honest degenerate the
     /// shared-state ruling leaves: no sender, no answer.
     SchedulerDeadlock,
-    /// `chan_new(cap)` with a bound below one (the 2026-11-21
-    /// shared-state ruling): the bounded channel's buffer holds at
-    /// least one payload word — a zero-capacity rendezvous channel is a
-    /// combinator round over the timer capability, not the buffer's
-    /// degenerate.
+    /// `chan_new(cap)` with a negative bound (the 2026-11-21
+    /// shared-state ruling): zero is the rendezvous bound — the buffer
+    /// holds nothing and every hand-off pairs a parked sender's staged
+    /// span with a receiving fiber — so only a bound below zero names
+    /// no buffer and no rendezvous.
     ChanCapacity {
         /// The refused bound.
         cap: i64,
@@ -11016,6 +11016,12 @@ impl Vm {
     /// seam: a record or tuple payload's whole span crosses, the
     /// recv's answer the tag-less total of its words), the staged span
     /// read past the channel word exactly a `list_push` element's.
+    /// A zero-bound channel is the rendezvous: the buffer holds
+    /// nothing, so a send with no parked receiver parks with its staged
+    /// span, a receive with no staged sender parks — and the first peer
+    /// to arrive pairs with its opposite directly (the deposit's edge
+    /// counts and the take's ledger claims the buffered hand-off's
+    /// own discipline, the buffer never retaining the element).
     fn chan_step(
         &mut self,
         channel: ChannelNative,
@@ -11026,10 +11032,10 @@ impl Vm {
         match channel {
             ChannelNative::New => {
                 let cap = control_i64(&self.stack, fp, caller, 0)?;
-                if cap < 1 {
+                if cap < 0 {
                     return Err(Trap::ChanCapacity { cap });
                 }
-                let cap = usize::try_from(cap).expect("a positive capacity fits usize");
+                let cap = usize::try_from(cap).expect("a non-negative capacity fits usize");
                 let word = self.heaps().alloc_chan(cap);
                 Ok(ChanStep::Answer(NativeResult::Word(word)))
             },
@@ -11048,7 +11054,13 @@ impl Vm {
                         .collect::<Result<Vec<_>, Trap>>()?
                 };
                 let here = self.current;
-                if !self.heaps().chan_room(chan)? {
+                // a zero-bound channel's only room is a live parked
+                // receiver: the deposit takes the hand-off's edge counts
+                // and the release hands the element straight over, the
+                // buffer never retaining it; with no receiver the
+                // sender parks, its staged span the rendezvous's other
+                // door
+                if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
                     self.heaps().chan_park_sender(chan, here, payload)?;
                     return Ok(ChanStep::Park);
                 }
@@ -11062,25 +11074,27 @@ impl Vm {
                 };
                 let here = self.current;
                 let Some(elem) = self.heaps().chan_pop(chan)? else {
-                    self.heaps().chan_park_receiver(chan, here)?;
-                    return Ok(ChanStep::Park);
+                    // a zero-bound channel's buffer holds nothing, so
+                    // the empty pop pairs with a staged sender first:
+                    // the staged span's deposit takes the buffer's edge
+                    // count per `Ref` word (the parked sender's frame
+                    // keeps its own counts), the wake answers the sender
+                    // with the unit word, and the immediate pop hands
+                    // the span to this frame — no refill, the next
+                    // staged sender has no slot to fill
+                    let Some(sender) = self.chan_take_live_sender(chan)? else {
+                        self.heaps().chan_park_receiver(chan, here)?;
+                        return Ok(ChanStep::Park);
+                    };
+                    self.heaps().chan_deposit(chan, &sender.payload)?;
+                    let elem = self
+                        .heaps()
+                        .chan_pop(chan)?
+                        .expect("the rendezvous deposit precedes its pop");
+                    self.wake_chan_waiter(sender.fiber, NativeResult::Word(Value::I64(0)));
+                    return Ok(ChanStep::Answer(self.chan_elem_answer(elem, here)));
                 };
-                let result = match elem {
-                    crate::object::ChanPop::One(word) => {
-                        if let Value::Ref(payload) = word {
-                            self.heaps().adopt_claim(here, payload);
-                        }
-                        NativeResult::Word(word)
-                    },
-                    crate::object::ChanPop::Span(words) => {
-                        for word in &words {
-                            if let Value::Ref(payload) = word {
-                                self.heaps().adopt_claim(here, *payload);
-                            }
-                        }
-                        NativeResult::Total { words }
-                    },
-                };
+                let result = self.chan_elem_answer(elem, here);
                 self.chan_refill(chan)?;
                 Ok(ChanStep::Answer(result))
             },
@@ -11115,6 +11129,73 @@ impl Vm {
         }
     }
 
+    /// Stages one popped channel element as the native answer to fiber
+    /// `fiber`: each `Ref` word's edge count becomes the fiber's claim
+    /// (the ledger transfer, no count mutation), the one-word element a
+    /// word, a wider element the tag-less total of its span.
+    fn chan_elem_answer(&mut self, elem: ChanPop, fiber: FiberId) -> NativeResult {
+        match elem {
+            ChanPop::One(word) => {
+                if let Value::Ref(payload) = word {
+                    self.heaps().adopt_claim(fiber, payload);
+                }
+                NativeResult::Word(word)
+            },
+            ChanPop::Span(words) => {
+                for word in &words {
+                    if let Value::Ref(payload) = word {
+                        self.heaps().adopt_claim(fiber, *payload);
+                    }
+                }
+                NativeResult::Total { words }
+            },
+        }
+    }
+
+    /// Whether channel `chan`'s receiver queue holds a live parked
+    /// receiver, dropping the stale head entries a cancel or release
+    /// door left (their queue entry rode no state): the rendezvous
+    /// send's pairing door reads it without consuming the live entry —
+    /// the release the door's deposit precedes performs the take.
+    fn chan_live_receiver(&mut self, chan: RefId) -> Result<bool, Trap> {
+        loop {
+            match self.heaps().chan_peek_receiver(chan)? {
+                None => return Ok(false),
+                Some(fiber) => {
+                    if self
+                        .pool
+                        .get(fiber.index())
+                        .is_some_and(|f| f.state == FiberState::WorldParked)
+                    {
+                        return Ok(true);
+                    }
+                    self.heaps().chan_take_receiver(chan)?;
+                },
+            }
+        }
+    }
+
+    /// Pops the head live staged sender off channel `chan`, dropping
+    /// the stale entries a cancel or release door left (the payload's
+    /// counts were the parked frame's own, released by whoever cut it):
+    /// the rendezvous receive's pairing door.
+    fn chan_take_live_sender(&mut self, chan: RefId) -> Result<Option<ChanSender>, Trap> {
+        loop {
+            match self.heaps().chan_take_sender(chan)? {
+                None => return Ok(None),
+                Some(sender) => {
+                    if self
+                        .pool
+                        .get(sender.fiber.index())
+                        .is_some_and(|f| f.state == FiberState::WorldParked)
+                    {
+                        return Ok(Some(sender));
+                    }
+                },
+            }
+        }
+    }
+
     /// Hands one buffered payload element to the head live receiver
     /// after a deposit: each `Ref` word's buffer edge count becomes the
     /// receiver's claim (the ledger transfer, no count mutation), the
@@ -11142,22 +11223,7 @@ impl Vm {
                 self.heaps().chan_park_receiver(chan, receiver)?;
                 return Ok(());
             };
-            let result = match elem {
-                crate::object::ChanPop::One(word) => {
-                    if let Value::Ref(payload) = word {
-                        self.heaps().adopt_claim(receiver, payload);
-                    }
-                    NativeResult::Word(word)
-                },
-                crate::object::ChanPop::Span(words) => {
-                    for word in &words {
-                        if let Value::Ref(payload) = word {
-                            self.heaps().adopt_claim(receiver, *payload);
-                        }
-                    }
-                    NativeResult::Total { words }
-                },
-            };
+            let result = self.chan_elem_answer(elem, receiver);
             self.wake_chan_waiter(receiver, result);
             return Ok(());
         }

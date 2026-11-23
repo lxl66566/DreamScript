@@ -58,6 +58,7 @@ fn pool() -> Vec<Const> {
         Const::I64(41),             // k3
         Const::I64(77),             // k4
         Const::I64(100),            // k5: the FIFO fold's radix
+        Const::I64(0),              // k6: the rendezvous bound
     ]
 }
 
@@ -455,11 +456,181 @@ fn a_recv_with_no_live_sender_is_the_honest_deadlock() {
 }
 
 #[test]
-fn a_bound_below_one_refuses() {
+fn a_negative_bound_refuses() {
     let mut vm = Vm::new(registry(vec![make_def()]));
-    match vm.run("ch", "make", &[Value::I64(0)]) {
-        Err(Trap::ChanCapacity { cap }) => assert_eq!(cap, 0),
-        other => panic!("the constructor refuses a sub-one bound: {other:?}"),
+    match vm.run("ch", "make", &[Value::I64(-1)]) {
+        Err(Trap::ChanCapacity { cap }) => assert_eq!(cap, -1),
+        other => panic!("the constructor refuses a negative bound: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rendezvous_sender_parks_until_a_receive_takes_the_staged_span() {
+    // bound zero: the buffer holds nothing, so the sender parks with
+    // its staged span in the channel's own queue and the arriving
+    // receive takes it whole — the waking peer the resumer, exactly the
+    // buffered park's discipline
+    let mut vm = Vm::new(registry(vec![
+        make_def(),
+        recv_child_def(),
+        send_child_def(),
+    ]));
+    let ch = channel_of(&mut vm, 0);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "send_child", &[ch])
+        .expect("spawn the sender");
+    vm.spawn_fiber_in(nursery, "ch", "recv_child", &[ch])
+        .expect("spawn the receiver");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(0)),
+                "the parked rendezvous sender woke with the unit word"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(77)),
+                "the receiver took the staged span whole"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rendezvous_receiver_parks_and_the_send_pairs_directly() {
+    // the other door: the receive parks first, and the send — with no
+    // buffer room ever — hands its element straight to the parked
+    // receiver through the deposit's edge counts and the release's
+    // claim transfer
+    let mut vm = Vm::new(registry(vec![
+        make_def(),
+        recv_child_def(),
+        send_child_def(),
+    ]));
+    let ch = channel_of(&mut vm, 0);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "recv_child", &[ch])
+        .expect("spawn the receiver");
+    vm.spawn_fiber_in(nursery, "ch", "send_child", &[ch])
+        .expect("spawn the sender");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(77)),
+                "the parked receiver's answer landed at its call site"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(0)),
+                "the pairing send answered the unit word"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rendezvous_pair_answers_in_staged_order_across_a_reparking_sender() {
+    // both of the sender's sends park (its own fiber re-parks after the
+    // first wake), and the two receives take the staged spans in park
+    // order — the queue is the channel's own, FIFO exactly the buffered
+    // sender queue's
+    let mut vm = Vm::new(registry(vec![make_def(), sender2_def(), recvr2_def()]));
+    let ch = channel_of(&mut vm, 0);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "sender2", &[ch])
+        .expect("spawn the sender");
+    vm.spawn_fiber_in(nursery, "ch", "recvr2", &[ch])
+        .expect("spawn the receiver");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(0)),
+                "the twice-parked sender woke with the unit word both times"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(4177)),
+                "both payloads crossed in staged order"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}
+
+#[test]
+fn a_parked_rendezvous_multi_word_span_crosses_whole() {
+    // the staged span machinery the full-buffer park already owns: the
+    // rendezvous take deposits the staged element (fixing the buffer's
+    // element stride) and the pop answers the tag-less total of its
+    // words — a wider payload needs no new seam
+    let mut vm = Vm::new(registry(vec![
+        make_def(),
+        pair_recv_child_def(),
+        pair_send_child_def(),
+    ]));
+    let ch = channel_of(&mut vm, 0);
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "ch", "pair_send_child", &[ch])
+        .expect("spawn the sender");
+    vm.spawn_fiber_in(nursery, "ch", "pair_recv_child", &[ch])
+        .expect("spawn the receiver");
+    match vm.join_nursery(nursery).expect("the drive consumes") {
+        JoinOutcome::Joined(spans) => {
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(0)),
+                "the parked rendezvous sender woke with the unit word"
+            );
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(4_177_001)),
+                "the staged two-word span crossed word-for-word at the rendezvous"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rendezvous_send_with_no_receiver_is_the_honest_deadlock() {
+    // the stall guard's channel report covers the rendezvous door too:
+    // a sender parked on a channel no live fiber serves deadlocks by
+    // design, exactly the empty receive's own degenerate
+    let mut reg = ModuleRegistry::new();
+    reg.install(
+        ModuleVersion::new("dl", vec![
+            make_def(),
+            def("main", &[I64, Ref, Raw, Raw], 0, 2, &[
+                Uop::Funcf { frame_slots: 4 },
+                Uop::Kimm { dst: 0, kidx: k(6) },
+                Uop::Mov { dst: 2, src: 0 },
+                Uop::Call {
+                    callee: k(0),
+                    nargs: 1,
+                },
+                // send 41 onto the rendezvous channel: no receiver ever
+                // arrives, so the one fiber parks on the send
+                Uop::Mov { dst: 1, src: 2 },
+                Uop::Kimm { dst: 3, kidx: k(3) },
+                Uop::Mov { dst: 2, src: 1 },
+                Uop::Call {
+                    callee: k(1),
+                    nargs: 2,
+                },
+                Uop::Ret { src: 2 },
+            ]),
+        ])
+        .expect("valid fixture module"),
+    );
+    let mut vm = Vm::new(reg);
+    match vm.run("dl", "main", &[]) {
+        Err(Trap::SchedulerDeadlock) => {},
+        other => panic!("the stall guard answers the rendezvous deadlock: {other:?}"),
     }
 }
 

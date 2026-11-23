@@ -10,8 +10,12 @@
 //!   payloads print in order.
 //! - a string payload crossing heaps: a child's own-heap string deposits through the foreign-post
 //!   funnel and reads back on the parent's drain.
-//! - the honest deadlock: a recv with no live sender traps (exit 1, the stall guard's report).
-//! - the bound: `chan_new(0)` traps its named refusal.
+//! - the honest deadlock: a recv with no live sender traps (exit 1, the stall guard's report), the
+//!   rendezvous send's own degenerate with it (a parked sender no live fiber serves).
+//! - the bound: `chan_new(-1)` traps its named refusal; zero is the rendezvous bound.
+//! - the rendezvous (the zero-bound channel): a send parks its staged span until a receive takes it
+//!   whole, a receive parks until a send pairs directly — both orders, a multi-word span, and the
+//!   answer ordering across a re-parking sender.
 //! - multi-word payloads (the collection span seam): a record and a tuple payload cross at the
 //!   buffer's element stride, the recv answering the tag-less total of the span's words; a parked
 //!   recv wakes to a multi-word claim, a parked multi-word send refills from the drain, and a union
@@ -133,18 +137,158 @@ fn a_recv_with_no_live_sender_traps_the_stall_guard() {
 }
 
 #[test]
-fn a_bound_below_one_traps_its_named_refusal() {
+fn a_negative_bound_traps_its_named_refusal() {
     let (status, _stdout, stderr) = run_source(
         r"fn main() -> int {
-  const ch = chan[int](0)
+  const ch = chan[int](-1)
   0
 }
 ",
     );
     assert_eq!(status.code(), Some(1), "the bound refuses: {status}");
     assert!(
-        stderr.contains("refuses a bound below one"),
+        stderr.contains("refuses a negative bound"),
         "the refusal names the seam: {stderr}"
+    );
+}
+
+#[test]
+fn a_rendezvous_sender_parks_until_the_sibling_receives() {
+    // bound zero: the send parks its staged payload in the channel's
+    // own queue, and the later sibling's receive takes it whole — the
+    // waking peer the resumer
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](0)
+  const _ = nursery {
+    spawn { ch.send(41) }
+    spawn { println("rendez ${ch.recv()}") }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the rendezvous runs: {stderr}");
+    assert!(
+        stdout.contains("rendez 41"),
+        "the staged payload crossed at the rendezvous: {stdout}"
+    );
+}
+
+#[test]
+fn a_rendezvous_receiver_parks_and_the_sibling_send_pairs_directly() {
+    // the other door: the receive parks first, and the send — no
+    // buffer room ever — hands its payload straight to the parked
+    // receiver
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](0)
+  const _ = nursery {
+    spawn { println("paired ${ch.recv()}") }
+    spawn { ch.send(77) }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the rendezvous runs: {stderr}");
+    assert!(
+        stdout.contains("paired 77"),
+        "the parked receiver woke with the paired payload: {stdout}"
+    );
+}
+
+#[test]
+fn a_rendezvous_answers_in_staged_order_across_a_reparking_sender() {
+    // both of the sender's sends park (the fiber re-parks after each
+    // wake), and the draining receives answer in staged order — the
+    // channel's own queue, FIFO
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](0)
+  const _ = nursery {
+    spawn {
+      ch.send(41)
+      ch.send(77)
+    }
+    spawn { println("drain ${ch.recv()} ${ch.recv()}") }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the rendezvous runs: {stderr}");
+    assert!(
+        stdout.contains("drain 41 77"),
+        "the staged payloads crossed in park order: {stdout}"
+    );
+}
+
+#[test]
+fn a_rendezvous_record_payload_crosses_whole() {
+    // the multi-word span discipline the full-buffer park already
+    // owns: the parked send stages its whole record span and the take
+    // answers the tag-less total
+    let (status, stdout, stderr) = run_source(
+        r#"struct pair { a: int, b: int }
+fn main() -> int {
+  const ch = chan[pair](0)
+  const _ = nursery {
+    spawn { ch.send(pair { a: 41, b: 59 }) }
+    spawn {
+      const p = ch.recv()
+      println("pair ${p.a} ${p.b}")
+    }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the multi-word rendezvous runs: {stderr}");
+    assert!(
+        stdout.contains("pair 41 59"),
+        "the staged record span crossed word-for-word: {stdout}"
+    );
+}
+
+#[test]
+fn a_rendezvous_send_with_no_receiver_traps_the_stall_guard() {
+    // the rendezvous's own honest degenerate: a send parked on a
+    // channel no live fiber serves deadlocks through the stall guard
+    // exactly the empty receive's
+    let (status, _stdout, stderr) = run_source(
+        r"fn main() -> int {
+  const ch = chan[int](0)
+  ch.send(41)
+  0
+}
+",
+    );
+    assert_eq!(status.code(), Some(1), "the deadlock traps: {status}");
+    assert!(
+        stderr.contains("nothing runnable"),
+        "the stall guard reports: {stderr}"
+    );
+}
+
+#[test]
+fn the_empty_race_parks_the_rendezvous_answers_channel_into_the_deadlock() {
+    // firstof's empty race builds a zero-bound answers channel: with
+    // the rendezvous bound the construction no longer traps, so the one
+    // receive parks with no fiber to serve it and the stall guard
+    // answers the honest deadlock (the shared-state ruling's own
+    // degenerate)
+    let (status, _stdout, stderr) = run_source(
+        r"fn main() -> int {
+  const x = firstof(list[fn() -> int]())
+  x
+}
+",
+    );
+    assert_eq!(status.code(), Some(1), "the empty race deadlocks: {status}");
+    assert!(
+        stderr.contains("nothing runnable"),
+        "the stall guard reports: {stderr}"
     );
 }
 

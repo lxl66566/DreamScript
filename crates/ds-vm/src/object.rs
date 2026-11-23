@@ -274,7 +274,9 @@ enum Object {
 /// run queue carries the hand-off.
 #[derive(Debug)]
 pub(crate) struct ChanData {
-    /// The bound (`chan_new`'s capacity, always at least one).
+    /// The bound (`chan_new`'s capacity; zero is the rendezvous bound —
+    /// the buffer holds nothing and every hand-off is a direct pairing
+    /// of a parked sender's staged span with a receiving fiber).
     pub(crate) cap: usize,
     /// The buffered payload words, FIFO — `stride` consecutive words per
     /// buffered element.
@@ -877,10 +879,10 @@ impl Objects {
         self.alloc(Object::List(ListData { elems, stride }))
     }
 
-    /// Allocates a fresh bounded channel of capacity `cap` (always at
-    /// least one — the constructor native refuses a smaller bound ahead
-    /// of the allocation), owned by the caller: the birth count is the
-    /// creating frame's, exactly a fresh list's.
+    /// Allocates a fresh bounded channel of capacity `cap` (zero the
+    /// rendezvous bound, the constructor native refusing a negative
+    /// bound ahead of the allocation), owned by the caller: the birth
+    /// count is the creating frame's, exactly a fresh list's.
     pub fn alloc_chan(&mut self, cap: usize) -> u32 {
         self.alloc(Object::Chan(ChanData {
             cap,
@@ -2216,6 +2218,17 @@ impl<'a> Heaps<'a> {
         let store = self.store(chan)?;
         match store.payload_chan_mut(chan.id())? {
             Some(data) => Ok(data.senders.pop_front()),
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Peeks the head parked receiver off channel `chan`, routed — the
+    /// rendezvous send's pairing door reads it without consuming the
+    /// entry (the release that follows performs the take).
+    pub(crate) fn chan_peek_receiver(&mut self, chan: RefId) -> Result<Option<FiberId>, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan(chan.id())? {
+            Some(data) => Ok(data.receivers.front().copied()),
             None => Err(Trap::UnknownObject { obj: chan.id() }),
         }
     }
