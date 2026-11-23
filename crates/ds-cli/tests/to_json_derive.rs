@@ -11,7 +11,9 @@
 //! mirror's refusal, statement-position here), the nested derive
 //! composition, the nested list walk, the enum target's unit, payload,
 //! and lone tuple-payload shapes, and the from_json roundtrips over
-//! the declarations deriving both families.
+//! the declarations deriving both families; the empty enum hosts its
+//! encode member over the name-solved head (the vacuous body answering
+//! the empty document), pinned by the member lowering with the module.
 
 use std::{
     env, fs,

@@ -2087,3 +2087,22 @@ fn written_type_applications_validate_arity_and_constructor_kind() {
     clean("struct map[k, v]\nfn f(m: map[string, int]) -> int { 0 }\n");
     clean("type rw[t] = list[t]\nfn f() -> rw[int] { list[int]() }\n");
 }
+
+#[test]
+fn a_zero_case_enum_s_name_solves_to_its_type() {
+    // The union of zero case atoms is the empty set: uninhabited, still
+    // a type — so the name checks at every annotation boundary and an
+    // inherent impl head hosts members over it.
+    clean("enum never { }\nfn f(v: never) -> never { v }\nfn main() -> int { 0 }\n");
+    clean(concat!(
+        "enum never { }\n",
+        "impl never { fn size(self) -> int { 0 } }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    // No value inhabits it: a construction attempt keeps the union's
+    // own refusal.
+    assert_eq!(
+        check(concat!("enum never { }\n", "fn f() -> never { 0 }\n",)),
+        ["DS2001 `lambda body` has type `int`, not contained in `empty` [B2]"]
+    );
+}

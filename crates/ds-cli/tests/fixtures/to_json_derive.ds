@@ -45,6 +45,13 @@ enum step { stay, walk(int, string) }
 #[derive(to_json)]
 enum bearing { plain, paired(int, int), named { label: string } }
 
+// The empty enum hosts the encode member over its name-solved head:
+// the receiver cannot exist, so the body is vacuous and answers the
+// driver's empty document — no call can spell it (no value of the
+// type exists), the member lowering with the module is the pin.
+#[derive(to_json)]
+enum nothing { }
+
 // The lone tuple-payload case: a sole tuple case encodes as its
 // positions' array, the single-arm member test lowering over the
 // sole-member gate (2026-11-21). The roundtrip rows pass the decoded

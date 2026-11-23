@@ -2050,11 +2050,11 @@ fn linked_tag_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// An empty linked enum binds its name alone (G4): the empty case
-/// rows ride the fact, so the selection lifts where the vocabulary
-/// refused it, the name entering the type namespace exactly like a
-/// local empty enum — uninhabited, no value crossing, every use
-/// keeping the local spelling's own solving refusal.
+/// An empty linked enum binds its name and now solves it like the
+/// local spelling (the empty case rows ride the fact, so the
+/// name-solved head the local empty enum gained holds on the consumer
+/// side too): uninhabited, no value crossing, an annotation boundary
+/// naming it checking clean.
 #[test]
 fn an_empty_linked_enum_binds_its_name() {
     let (work, pkg_id) = shapes_fixtures("shapes-empty");
@@ -2065,6 +2065,8 @@ fn an_empty_linked_enum_binds_its_name() {
         concat!(
             "import @shapes (hollow)\n",
             "\n",
+            "fn passthrough(v: hollow) -> hollow { v }\n",
+            "\n",
             "fn main() -> int {\n",
             "  7\n",
             "}\n",
@@ -2073,7 +2075,7 @@ fn an_empty_linked_enum_binds_its_name() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
     let (ok, out, err) = ds(&["run", entry]);
-    assert!(ok, "the empty-enum selection binds (stderr: {err})");
+    assert!(ok, "the empty-enum name solves (stderr: {err})");
     assert_eq!(out, "7\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }

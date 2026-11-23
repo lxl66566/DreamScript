@@ -6392,7 +6392,9 @@ impl Bodies<'_> {
                         // non-generic one names the union of its minted
                         // case atoms [B3] — a linked enum's case defs
                         // answer through the name index the linked
-                        // install filled.
+                        // install filled. A zero-case enum names the
+                        // empty set: uninhabited, still its own type, so
+                        // impl heads and annotations over it check.
                         if let Some(&atom) = self.decls.atoms.get(&def) {
                             return self.decls.universe.atom_ty(atom).ok();
                         }
@@ -6413,7 +6415,8 @@ impl Bodies<'_> {
                                 None => ty,
                             });
                         }
-                        union
+                        // A zero-case enum names the empty set.
+                        Some(union.unwrap_or_else(|| self.empty()))
                     },
                     DefKind::TypeAlias => {
                         let (params, body) = self.decls.aliases.get(&def)?.clone();

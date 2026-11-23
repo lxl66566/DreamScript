@@ -56,9 +56,10 @@
 //! payload, the array read for a tuple payload), and several payloaded
 //! cases each from the member its own name keys (the 2026-11-21
 //! discriminator ruling), any other shape answering `parse_err` at the
-//! probe chain's tail. The walk refuses: a field whose type spells no read (a
-//! tuple, a union, a shape the reader vocabulary does not name) or an
-//! enum with no cases.
+//! probe chain's tail; a zero-case enum hosts the member over its
+//! name-solved head, the body answering `parse_err` unconditionally
+//! (no member case can match). The walk refuses: a field whose type spells no read (a
+//! tuple, a union, a shape the reader vocabulary does not name).
 //! `to_json` answers the encode walk, from_json's mirror — the
 //! receiverless inherent member `fn to_json(v: Self) -> json` building
 //! the document through the `encoder` trait members alone over one
@@ -77,11 +78,14 @@
 //! body matches the receiver, the unit cases answering their names
 //! through `enc_string`, the sole payloaded case its bare payload
 //! shape, and several payloaded cases one-member objects keyed by
-//! their own names (the 2026-11-21 discriminator ruling). The walk refuses: a field whose
+//! their own names (the 2026-11-21 discriminator ruling); a zero-case
+//! enum hosts the member over its name-solved head, the body vacuous
+//! over the impossible receiver and answering the driver's empty
+//! document. The walk refuses: a field whose
 //! type spells no write (a tuple, a union, a shape the case vocabulary
-//! does not name), an optional nested inside a part (a `t?` list
+//! does not name) or an optional nested inside a part (a `t?` list
 //! element, an optional payload field — the M3 member dispatch has no
-//! runtime contract for either), or an enum with no cases.
+//! runtime contract for either).
 //! `==` refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
@@ -2658,9 +2662,24 @@ fn from_json_impl(
             ))
         },
         ItemKind::Enum(decl) => {
+            // A zero-case enum hosts the decode member over the
+            // name-solved head: no member case can match, so the body
+            // answers `parse_err` unconditionally and never binds the
+            // shared fail seed.
+            if decl.cases.is_empty() {
+                let body = vec![expr_stmt(parse_err_expr(mint))];
+                return Some(impl_item(
+                    attr,
+                    &decl.name,
+                    &decl.generics,
+                    from_json_member(mint),
+                    body,
+                    mint,
+                ));
+            }
             // Every payload mix decodes under the discriminator ruling
             // (the sole case from its bare shape, several from their own
-            // member keys); the body's own refusal owns the empty enum.
+            // member keys).
             let fail = fresh_binder(&mut 0, "f");
             let body = vec![
                 fail_local(mint, &fail),
@@ -3160,16 +3179,7 @@ fn enum_decode_body(
     fail: &str,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Expr> {
-    if decl.cases.is_empty() {
-        diags.push(part_refused(
-            decl.span,
-            "from_json",
-            "enum",
-            &decl.name.name,
-            "an enum with no cases has no value to decode",
-        ));
-        return None;
-    }
+    debug_assert!(!decl.cases.is_empty(), "the empty enum hosts its own body");
     let payloaded: Vec<&EnumCase> = decl
         .cases
         .iter()
@@ -3593,9 +3603,23 @@ fn to_json_impl(
             ))
         },
         ItemKind::Enum(decl) => {
+            // A zero-case enum hosts the encode member over the
+            // name-solved head: the receiver cannot exist, so the body
+            // is vacuous and answers the driver's empty document.
+            if decl.cases.is_empty() {
+                let body = vec![expr_stmt(doc_seed(mint))];
+                return Some(impl_item(
+                    attr,
+                    &decl.name,
+                    &decl.generics,
+                    to_json_member(mint),
+                    body,
+                    mint,
+                ));
+            }
             // Every payload mix encodes under the discriminator ruling;
-            // the body's own refusals own the empty enum and the lone
-            // tuple case's unlowerable single-arm member test.
+            // the body's own refusal owns the lone tuple case's
+            // unlowerable single-arm member test.
             let body = vec![
                 doc_seed_local(mint),
                 expr_stmt(enum_encode_body(decl, mint, diags)?),
@@ -3980,16 +4004,7 @@ fn presence_narrow(mint: &mut Mint, name: &str, inner: &str, rows: Vec<Stmt>) ->
 /// one-member objects keyed by their own names (the 2026-11-21
 /// discriminator ruling's encode half).
 fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic>) -> Option<Expr> {
-    if decl.cases.is_empty() {
-        diags.push(part_refused(
-            decl.span,
-            "to_json",
-            "enum",
-            &decl.name.name,
-            "an enum with no cases has no value to encode",
-        ));
-        return None;
-    }
+    debug_assert!(!decl.cases.is_empty(), "the empty enum hosts its own body");
     // Several payloaded cases wrap (the discriminator ruling); the sole
     // payloaded case answers its bare shape.
     let wrap = decl

@@ -669,15 +669,16 @@ fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
 /// each naming the family and the refusing shape: a function-typed or
 /// `~Copyable` part (the shared part refusal), a generic declaration
 /// (the runtime seam's one-member-body boundary), a tag (no members to
-/// walk), a tuple field (a shape spelling no read over the typed
-/// readers), and the one enum shape the walk cannot name (an empty
-/// enum). The attribute-level refusals need no json face: the family
+/// walk), and a tuple field (a shape spelling no read over the typed
+/// readers). The attribute-level refusals need no json face: the family
 /// refuses before any name resolves. The optional list field — once the
 /// family's own refusal — now expands clean: the decode walk mirrors
 /// to_json's statement-position member row, the presence narrow's
 /// catchall arm carrying the array walk. So do the tuple payload and
 /// several payloaded cases (the 2026-11-21 discriminator ruling), so
-/// their rows live in the json-faced e2e suites alone.
+/// their rows live in the json-faced e2e suites alone; an empty enum
+/// hosts its member over the name-solved head
+/// (`the_json_families_host_an_empty_enum`).
 #[test]
 fn the_from_json_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -696,11 +697,9 @@ fn the_from_json_family_refuses_its_carve_outs() {
         "tag tone\n",
         "#[derive(from_json)]\n",
         "struct pair { both: (int, int) }\n",
-        "#[derive(from_json)]\n",
-        "enum never { }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 6, "the six refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 5, "the five refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `from_json` refuses the field `cb`: a function-typed part")),
@@ -726,11 +725,6 @@ fn the_from_json_family_refuses_its_carve_outs() {
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("refuses the field `both`: this shape spells no json read")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum `never`: an enum with no cases")),
         "{rendered:?}"
     );
     // The one clean derive synthesizes its impl beside the declaration;
@@ -786,6 +780,130 @@ fn the_from_json_family_refuses_its_carve_outs() {
     assert_eq!(
         grown, 5,
         "the consumed derive appends its one impl beside the four written items"
+    );
+}
+
+/// A zero-case enum's name solves to its type (the empty set), so the
+/// json families host their members over the name-solved head:
+/// `from_json` answers `parse_err` unconditionally (no member case
+/// can match, so the body never binds the shared fail seed) and
+/// `to_json` is vacuous over the impossible receiver, answering the
+/// driver's empty document. Both impl heads check and the members
+/// carry solvable signatures without the ambient.
+#[test]
+fn the_json_families_host_an_empty_enum() {
+    // from_json: the body constructs one parse_err, the member's
+    // signature solving `Self | parse_err` down to parse_err alone.
+    let mut files = Files::new();
+    let id = files.add_source(
+        "from_json_empty.ds",
+        concat!(
+            "tag int\n",
+            "tag json\n",
+            "tag parse_err { pos: int }\n",
+            "#[derive(from_json)]\n",
+            "enum never { }\n",
+            "fn main() -> int { 0 }\n",
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let (expanded, diags) = ds_meta::expand_derives(&asts);
+    assert!(diags.is_empty(), "the empty enum hosts: {diags:?}");
+    let grown = expanded[0]
+        .blocks
+        .iter()
+        .flat_map(|b| b.items.iter())
+        .count();
+    assert_eq!(
+        grown, 6,
+        "the consumed derive appends its one impl beside the five written items"
+    );
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the name-solved head checks: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| human(d, &files))
+            .collect::<Vec<_>>()
+    );
+    // to_json: the vacuous body reads the driver's empty document
+    // (`json.default()`, the driver face's convention), so the probe
+    // declares the document type's own default member.
+    let mut files = Files::new();
+    let id = files.add_source(
+        "to_json_empty.ds",
+        concat!(
+            "tag int\n",
+            "enum json { jnull }\n",
+            "impl json { fn default() -> json { jnull } }\n",
+            "#[derive(to_json)]\n",
+            "enum never { }\n",
+            "fn main() -> int { 0 }\n",
+        ),
+    );
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the vacuous encode member checks: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| human(d, &files))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The trait-impl families keep their refusal over an empty enum: the
+/// instance core names an impl head as a union of atoms, and the empty
+/// set spells no atom — so show, hash, ord, and clone each refuse at
+/// the head they synthesized (the checker's honest boundary, one
+/// diagnostic per family), while `default` refuses at the attribute
+/// (an empty enum has no default value). The landed bodies never
+/// touch the impossible receiver (show, hash, ord answer constants;
+/// clone hands the receiver back), but the head seam owns them all.
+#[test]
+fn the_trait_families_keep_their_empty_enum_refusal() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "trait hash {\n",
+        "  fn hash(self) -> int\n",
+        "}\n",
+        "trait ord {\n",
+        "  fn compare(self, other: Self) -> int\n",
+        "}\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "#[derive(show, hash, ord, clone, default)]\n",
+        "enum never { }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 5, "the five refusals: {rendered:?}");
+    assert!(
+        rendered
+            .iter()
+            .filter(|r| r.contains("DS2001")
+                && r.contains("impl head `never` does not name atoms the type core can check"))
+            .count()
+            == 4,
+        "one head refusal per trait family: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains(
+                "derive `default` refuses the enum `never`: an enum with no cases has no default \
+                 value"
+            )),
+        "{rendered:?}"
     );
 }
 
@@ -920,8 +1038,8 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
 /// attribute, each naming the family and the refusing shape: a
 /// function-typed or `~Copyable` part (the shared part refusal), a
 /// generic declaration (the runtime seam's one-member-body boundary),
-/// a tag (no members to walk), a tuple field (a shape spelling no json
-/// write), the enum shapes the walk cannot name (an empty enum). The
+/// a tag (no members to walk), and a tuple field (a shape spelling no
+/// json write). The
 /// attribute-level refusals need no json face: the family refuses
 /// before any name resolves. The
 /// optional list field — the decode mirror's refusal — expands clean:
@@ -930,7 +1048,9 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
 /// could not (the checked pin rides the conformance gate's json-faced
 /// ambient). A tuple case (lone or beside siblings) and several
 /// payloaded cases encode under the 2026-11-21 discriminator ruling,
-/// so their rows live in the json-faced e2e suites alone.
+/// so their rows live in the json-faced e2e suites alone; an empty
+/// enum hosts its member over the name-solved head
+/// (`the_json_families_host_an_empty_enum`).
 #[test]
 fn the_to_json_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -949,11 +1069,9 @@ fn the_to_json_family_refuses_its_carve_outs() {
         "tag tone\n",
         "#[derive(to_json)]\n",
         "struct pair { both: (int, int) }\n",
-        "#[derive(to_json)]\n",
-        "enum never { }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 6, "the six refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 5, "the five refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `to_json` refuses the field `cb`: a function-typed part")),
@@ -978,11 +1096,6 @@ fn the_to_json_family_refuses_its_carve_outs() {
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("refuses the field `both`: this shape spells no json write")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|r| r.contains("DS2026")
-            && r.contains("refuses the enum `never`: an enum with no cases")),
         "{rendered:?}"
     );
     // The optional list field derives clean: the expansion appends its

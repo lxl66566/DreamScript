@@ -49,7 +49,9 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// walk plus the discriminator ruling's rows (2026-11-21): two
 /// payloaded cases decoding from their own member keys, the sole tuple
 /// payload from its bare array, and a mixed enum's wrapped payloaded
-/// cases, each wrong key or wrong shape answering parse_err.
+/// cases, each wrong key or wrong shape answering parse_err — plus
+/// the empty enum's unconditional parse_err rows (no member case can
+/// match, so every document refuses).
 const GOLDEN: &str = concat!(
     "cell 12 2.5 true arch\n",
     "parse_err\n",
@@ -111,6 +113,9 @@ const GOLDEN: &str = concat!(
     "\"plain\"\n",
     "{\"paired\":[1,2]}\n",
     "{\"named\":{\"label\":\"q\"}}\n",
+    "parse_err\n",
+    "parse_err\n",
+    "parse_err\n",
     "parse_err\n",
     "parse_err\n",
     "0\n",

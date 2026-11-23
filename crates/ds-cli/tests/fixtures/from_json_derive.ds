@@ -66,6 +66,12 @@ enum step { stay, walk(int, string) }
 #[derive(from_json, to_json)]
 enum bearing { plain, paired(int, int), named { label: string } }
 
+// The empty enum's row: no member case can match, so the decode
+// answers parse_err whatever the document (the name-solved head
+// hosting the member — to_json rides the encode fixture).
+#[derive(from_json)]
+enum nothing { }
+
 fn cell_row (text: string) -> () {
   const c = cell.from_json(doc(text))
   if c is parse_err { println("parse_err") } else {
@@ -125,6 +131,12 @@ fn bearing_row (text: string) -> () {
   const b = bearing.from_json(doc(text))
   if b is parse_err { println("parse_err") } else {
     println(bearing.to_json(b).to_json())
+  }
+}
+
+fn nothing_row (text: string) -> () {
+  if nothing.from_json(doc(text)) is parse_err { println("parse_err") } else {
+    println("impossible")
   }
 }
 
@@ -191,4 +203,7 @@ fn main() -> () {
   bearing_row("{\"named\": {\"label\": \"q\"}}")
   bearing_row("[1, 2]")
   bearing_row("{\"paired\": [1, \"x\"]}")
+  nothing_row("null")
+  nothing_row("3")
+  nothing_row("{}")
 }
