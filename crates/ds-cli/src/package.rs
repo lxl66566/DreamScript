@@ -118,7 +118,7 @@ pub(crate) struct Graph {
 /// script and prefix cache keys fold. [`resolve_identities`] answers
 /// these alone, so a cache probe pays no dep bundle load, no artifact
 /// install, and no graph assembly.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct GraphKeys {
     /// Each resolved dep's identity.
     pub(crate) identities: BTreeMap<String, Hash128>,
@@ -279,6 +279,77 @@ pub(crate) fn resolve_identities(entry: &Path) -> Result<Option<GraphKeys>> {
         identities: identities_of(&front.resolved),
         artifact_pins: artifact_pins_of(front.resolved.artifacts()),
     }))
+}
+
+/// The fold domain of the resolution-input fingerprint, so a
+/// fingerprint never shares a spelling with another blake3 use.
+const FINGERPRINT_DOMAIN: &[u8] = b"dreamscript-resolution-inputs";
+
+/// The content fingerprint of the input set the root's resolution
+/// consumes: the manifest's bytes — the registry pins, the artifact
+/// pins, and the path dep directories all live inside them — plus each
+/// path dep directory's own package content hash over the same edges
+/// resolution walks, nested path deps included. The LSP's
+/// linked-surface memo compares this once per hover ahead of every
+/// map read: a match stands on the memo, a mismatch re-resolves, and
+/// no mtime is read. `None` names a manifest-free entry (or one whose
+/// reads refuse) — the shape the memo re-probes per hover anyway.
+pub(crate) fn resolution_fingerprint(entry: &Path) -> Option<Hash128> {
+    let manifest_path = manifest_beside(entry)?;
+    let bytes = fs::read(&manifest_path).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(FINGERPRINT_DOMAIN);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(&bytes);
+    if let Ok(manifest) = Manifest::parse(&String::from_utf8_lossy(&bytes), FileId::new(0)) {
+        // the base a path dep's relative directory resolves against:
+        // the manifest's own directory, the declaring package's root
+        let declaring_root = manifest_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        fold_path_deps(
+            &mut hasher,
+            &manifest,
+            &declaring_root,
+            &mut BTreeSet::new(),
+        );
+    }
+    let digest = hasher.finalize();
+    let mut hash = [0u8; 16];
+    hash.copy_from_slice(&digest.as_bytes()[..16]);
+    Some(Hash128::new(hash))
+}
+
+/// The path dep half of the resolution fingerprint: each directory's
+/// package content hash — the content-addressed fold the path-dep
+/// round keys the store by, so a dep source edit moves the
+/// fingerprint — followed by the dep's own manifest's path edges
+/// against the dep's own root, the same relative resolution the graph
+/// walk applies. Each directory folds once, so a cycle the resolution
+/// refuses cannot loop the fold.
+fn fold_path_deps(
+    hasher: &mut blake3::Hasher,
+    manifest: &Manifest,
+    declaring_root: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) {
+    for bound in manifest.deps.values() {
+        let ds_pkg::DepBound::Path { path } = bound else {
+            continue;
+        };
+        let dir = declaring_root.join(path);
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        let Ok(package) = ds_pkg::dir_package(&dir) else {
+            continue;
+        };
+        hasher.update(package.content_hash().as_bytes());
+        if let Ok(dep_manifest) = package.manifest(FileId::new(0)) {
+            fold_path_deps(hasher, &dep_manifest, &dir, visited);
+        }
+    }
 }
 
 /// The package run `entry` shapes, when a manifest sits beside it:
@@ -1293,5 +1364,64 @@ mod tests {
             ])
             .expect("the fixture members fold")
         );
+    }
+
+    /// The resolution fingerprint keys the consumed inputs' content: a
+    /// manifest-free entry answers `None`, a root's fingerprint stands
+    /// while the inputs hold unchanged, and it moves with a manifest
+    /// edit (the dep repin) and with a path dep's source edit — nested
+    /// path edges included, never an mtime.
+    #[test]
+    fn the_fingerprint_moves_with_the_consumed_inputs() {
+        let work =
+            std::env::temp_dir().join(format!("ds-cli-package-fingerprint-{}", std::process::id()));
+        let root = work.join("root");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&lib).expect("the package dirs create");
+        std::fs::write(
+            lib.join(super::MANIFEST_FILE),
+            "name = \"@lib\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("the dep manifest writes");
+        std::fs::write(lib.join("lib.ds"), "pub fn one() -> int {\n1\n}\n")
+            .expect("the dep member writes");
+        let root_manifest = "name = \"app\"\nversion = \"0.1.0\"\n\n[deps.@lib]\npath = \"lib\"\n";
+        std::fs::write(root.join(super::MANIFEST_FILE), root_manifest)
+            .expect("the root manifest writes");
+        std::fs::write(root.join("main.ds"), "fn main() -> int {\n1\n}\n")
+            .expect("the entry writes");
+        let free = std::env::temp_dir().join(format!(
+            "ds-cli-package-fingerprint-free-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&free).expect("the plain dir creates");
+        let entry = root.join("main.ds");
+        assert_eq!(
+            super::resolution_fingerprint(&free.join("main.ds")),
+            None,
+            "a manifest-free entry answers nothing"
+        );
+        let before = super::resolution_fingerprint(&entry).expect("the root carries a manifest");
+        assert_eq!(
+            super::resolution_fingerprint(&entry),
+            Some(before),
+            "the unchanged inputs fold the same fingerprint"
+        );
+        std::fs::write(
+            root.join(super::MANIFEST_FILE),
+            "name = \"app\"\nversion = \"0.2.0\"\n\n[deps.@lib]\npath = \"lib\"\n",
+        )
+        .expect("the repinned manifest writes");
+        let repinned = super::resolution_fingerprint(&entry).expect("the root carries a manifest");
+        assert_ne!(repinned, before, "the manifest edit moves the fingerprint");
+        std::fs::write(lib.join("lib.ds"), "pub fn one() -> int {\n2\n}\n")
+            .expect("the dep member rewrites");
+        let edited = super::resolution_fingerprint(&entry).expect("the root carries a manifest");
+        assert_ne!(
+            edited, repinned,
+            "the path dep's source edit moves the fingerprint"
+        );
+        std::fs::remove_dir_all(&work).expect("the work dir removes");
+        std::fs::remove_dir_all(&free).expect("the free dir removes");
     }
 }

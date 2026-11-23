@@ -347,3 +347,171 @@ fn ds_lsp_hovers_the_linked_name_from_the_cached_dsi() {
     fs::remove_dir_all(app.parent().expect("the tree root")).expect("the tree removes");
     fs::remove_dir_all(&cache).expect("the cache removes");
 }
+
+/// The repin fixture's library member, v1: `pick` the root calls plus
+/// `bonus`, the import selection the hovers read.
+const REPIN_LIB_V1: &str = concat!(
+    "pub fn pick(n: int) -> int {\n",
+    "  n\n",
+    "}\n",
+    "\n",
+    "pub fn bonus() -> int {\n",
+    "  1\n",
+    "}\n",
+);
+
+/// The repinned library member, v2: `bonus` gains a parameter, so the
+/// served `.dsi` line the hover reads moves with the new pin while the
+/// root's own call stays valid.
+const REPIN_LIB_V2: &str = concat!(
+    "pub fn pick(n: int) -> int {\n",
+    "  n\n",
+    "}\n",
+    "\n",
+    "pub fn bonus(scale: int) -> int {\n",
+    "  scale\n",
+    "}\n",
+);
+
+/// The repin fixture's root source: `pick` called, `bonus` imported
+/// and never called, so both pins of the library type-check.
+const REPIN_ROOT_SOURCE: &str = concat!(
+    "import @lib (pick, bonus)\n",
+    "\n",
+    "pub fn twice(n: int) -> int {\n",
+    "  pick(n) * 2\n",
+    "}\n",
+    "\n",
+    "fn main() -> int {\n",
+    "  twice(21)\n",
+    "}\n",
+);
+
+/// A dep repin mid-session lands with no restart: the provider's
+/// memo guards each root's resolved keys behind the consumed inputs'
+/// content fingerprint, so the rewritten manifest's pin re-resolves
+/// the root on the next hover and the served `.dsi` line moves with
+/// the new pin — the same server session across the repin, and the
+/// unchanged manifest after it standing on the memo.
+#[test]
+fn a_mid_session_repin_serves_the_new_surface_without_restart() {
+    let root = temp_dir("repin-tree");
+    let cache = temp_dir("repin-cache");
+    let lib = root.join("lib");
+    let app = root.join("app");
+    write_pkg(&lib, &lib_manifest(), &[("lib.ds", REPIN_LIB_V1)]);
+    let v1 = bundle_identity(&lib_manifest(), &[("lib.ds", REPIN_LIB_V1)]);
+    write_pkg(&app, &root_manifest(v1), &[("main.ds", REPIN_ROOT_SOURCE)]);
+    let entry = app.join("main.ds");
+    let (ok, _, err) = ds(&cache, &["save", lib.to_str().expect("utf-8 path")]);
+    assert!(ok, "the v1 library saves into the store (stderr: {err})");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    assert!(ok, "the v1 run caches the dep's .dsi (stderr: {err})");
+    assert_eq!(out, "42\n");
+
+    let mut server = Command::new(env!("CARGO_BIN_EXE_ds"))
+        .env("DS_CACHE", &cache)
+        .env_remove("DS_REGISTRY")
+        .args(["lsp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the ds binary runs");
+    let request = |id: u64, method: &str, params: &str| {
+        format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{method}\",\"params\":{params}}}")
+    };
+    let notification = |method: &str, params: &str| {
+        format!("{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\",\"params\":{params}}}")
+    };
+    send(
+        &mut server,
+        &request(
+            1,
+            "initialize",
+            "{\"processId\": null, \"rootUri\": null, \"capabilities\": {}}",
+        ),
+    );
+    loop {
+        let reply = recv(&mut server);
+        if reply.contains("\"id\":1") {
+            break;
+        }
+    }
+    send(&mut server, &notification("initialized", "{}"));
+    let uri = format!("file:///{}", entry.to_string_lossy().replace('\\', "/"));
+    send(
+        &mut server,
+        &notification(
+            "textDocument/didOpen",
+            &format!(
+                "{{\"textDocument\": {{\"uri\": \"{uri}\", \"languageId\": \"dreamscript\", \
+                 \"version\": 1, \"text\": {}}}}}",
+                json_string(REPIN_ROOT_SOURCE)
+            ),
+        ),
+    );
+    // the open publishes the unresolved-import diagnostics; the reads
+    // below skip them.
+    // `bonus` in the import row sits at line 0 chars 19..24.
+    let mut hover = |id: u64| {
+        send(
+            &mut server,
+            &request(
+                id,
+                "textDocument/hover",
+                &format!(
+                    "{{\"textDocument\": {{\"uri\": \"{uri}\"}}, \"position\": {{\"line\": 0, \
+                     \"character\": 21}}}}"
+                ),
+            ),
+        );
+        for _ in 0..8 {
+            let reply = recv(&mut server);
+            if reply.contains(&format!("\"id\":{id}")) {
+                return reply;
+            }
+        }
+        panic!("the hover reply never arrives");
+    };
+    let v1_hover = hover(2);
+    assert!(
+        v1_hover.contains("pub fn bonus() -> int"),
+        "the pinned v1 surface answers: {v1_hover}"
+    );
+
+    // the repin, outside the server: the library's member changes, the
+    // new identity replaces the manifest's pin, and a run caches the
+    // new dep's .dsi beside its dsmod
+    write_pkg(&lib, &lib_manifest(), &[("lib.ds", REPIN_LIB_V2)]);
+    let v2 = bundle_identity(&lib_manifest(), &[("lib.ds", REPIN_LIB_V2)]);
+    write_pkg(&app, &root_manifest(v2), &[("main.ds", REPIN_ROOT_SOURCE)]);
+    let (ok, _, err) = ds(&cache, &["save", lib.to_str().expect("utf-8 path")]);
+    assert!(ok, "the v2 library saves into the store (stderr: {err})");
+    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    assert!(ok, "the v2 run succeeds (stderr: {err})");
+    assert_eq!(out, "42\n");
+
+    // the same session: the changed manifest re-resolves the root, so
+    // the hover serves the repinned content's line
+    let v2_hover = hover(3);
+    assert!(
+        v2_hover.contains("pub fn bonus(scale: int) -> int"),
+        "the repinned surface answers with no restart: {v2_hover}"
+    );
+    assert!(
+        !v2_hover.contains("pub fn bonus() -> int"),
+        "the stale pinned line never serves: {v2_hover}"
+    );
+    // the unchanged manifest after the repin stands on the memo: the
+    // same repinned line answers again
+    let again = hover(4);
+    assert!(
+        again.contains("pub fn bonus(scale: int) -> int"),
+        "the memo hit serves the same line: {again}"
+    );
+    let _ = server.kill();
+    let _ = server.wait();
+    fs::remove_dir_all(app.parent().expect("the tree root")).expect("the tree removes");
+    fs::remove_dir_all(&cache).expect("the cache removes");
+}
