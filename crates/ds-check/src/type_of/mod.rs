@@ -368,7 +368,8 @@ pub fn analyze_resolved(
     resolve_diags: Vec<Diagnostic>,
     artifacts: Arc<ArtifactSymbols>,
 ) -> Analyzed {
-    let (decls, checked) = check_bodies(files, &asts[..], &package, &resolutions[..], None);
+    let (decls, checked) = check_bodies(files, &asts[..], &package, &resolutions[..], None)
+        .expect("a fresh build carries no serve to drift");
     let mut diags = resolve_diags;
     let resolve_diag_count = u32::try_from(diags.len()).expect("diagnostic count fits u32");
     diags.extend(checked.diags);
@@ -469,6 +470,11 @@ fn analyze_served_over(
     artifacts: Arc<ArtifactSymbols>,
 ) -> Analyzed {
     let mut diags = diags;
+    // The diagnostics seeded ahead of this call (the derive expansion's
+    // over the trees) outlive the fallback below; the collection,
+    // linking, and resolution diags the serve path produces rebuild
+    // over the same trees when the serve refuses.
+    let seed_len = diags.len();
     let mut package = package;
     assert!(
         resolutions.len() <= asts.len(),
@@ -496,7 +502,38 @@ fn analyze_served_over(
         tables.push(uses);
         diags.append(&mut file_diags);
     }
-    let (decls, checked) = check_bodies(files, &asts[..], &package, &tables[..], Some(served));
+    let checked = check_bodies(files, &asts[..], &package, &tables[..], Some(served));
+    let (decls, checked) = if let Ok(pair) = checked {
+        pair
+    } else {
+        // The serve drifted: a name-addressed row refused to resolve
+        // over this compile's own universe (a corrupt or foreign
+        // artifact, a walk the rows' raw ids did not reproduce). The
+        // artifact is a pure cache, so the analyze falls back to the
+        // fully fresh path — re-collect, re-link, re-resolve, and
+        // rebuild every declaration over the same trees — paying
+        // the fresh cost once instead of serving a wrong fact.
+        let mut fresh_package = Package::new();
+        let trees: Vec<&Ast> = asts.iter().map(|ast| &**ast).collect();
+        diags.truncate(seed_len);
+        for ast in &trees {
+            diags.extend(fresh_package.add_file(ast));
+        }
+        if let Some(imports) = imports {
+            diags.extend(fresh_package.link_imports(&trees, imports));
+        }
+        let mut fresh_tables = Vec::new();
+        for ast in &trees {
+            let (uses, mut file_diags) = fresh_package.resolve(ast);
+            fresh_tables.push(uses);
+            diags.append(&mut file_diags);
+        }
+        package = fresh_package;
+        tables = fresh_tables;
+        let (decls, checked) = check_bodies(files, &asts[..], &package, &tables[..], None)
+            .expect("a fresh build carries no serve to drift");
+        (decls, checked)
+    };
     let resolve_diag_count = u32::try_from(diags.len()).expect("diagnostic count fits u32");
     diags.extend(checked.diags);
     let checked = Checked {
@@ -531,19 +568,24 @@ fn analyze_served_over(
 /// registers may leave holes in the file-id space (unparseable files
 /// contribute no tree), so positions — not file ids — align the two.
 /// `served` carries the checked-ambient prefix's declaration tables when
-/// the caller analyzed through [`analyze_served`].
+/// the caller analyzed through [`analyze_served`]. A drift refusal
+/// answers [`Err`] with the count of diagnostics the serve-path's own
+/// collection produced ahead of this pass, so the caller can fall back
+/// to the fresh collection over the same trees — the artifact is a
+/// pure cache, and a refused serve never serves a wrong fact.
 fn check_bodies<T>(
     files: &Files,
     asts: &[T],
     package: &Package,
     resolutions: &[Resolutions],
     served: Option<decls::ServedDecls>,
-) -> (Decls, Checked)
+) -> Result<(Decls, Checked), ()>
 where
     T: std::borrow::Borrow<Ast>,
 {
     let trees: Vec<&Ast> = asts.iter().map(std::borrow::Borrow::borrow).collect();
-    let (mut decls, mut diags) = decls::build_over(package, &trees, resolutions, served);
+    let (mut decls, mut diags) =
+        decls::build_over(package, &trees, resolutions, served).map_err(|_| ())?;
     let res_by_file = FilePositions::new(&trees);
     let mut def_types = FxHashMap::default();
     let mut binders = HashMap::default();
@@ -664,7 +706,7 @@ where
         }
         def_types.extend(linked_types);
     }
-    (decls, Checked {
+    Ok((decls, Checked {
         diags,
         def_types,
         binders,
@@ -677,7 +719,7 @@ where
         generic_call_bounds,
         is_tests,
         method_selections,
-    })
+    }))
 }
 
 /// The resolved graph's bound artifacts (H5): artifact name to its

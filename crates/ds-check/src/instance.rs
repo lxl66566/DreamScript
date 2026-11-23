@@ -108,7 +108,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     atom::{AtomKind, TraitId, TypeId},
     error::Error,
-    expr::{TypeExpr, remap_type_expr},
+    expr::TypeExpr,
     id_table::IdTable,
     universe::{Ty, Universe, narrow},
 };
@@ -630,20 +630,6 @@ impl InstanceEnv {
     #[must_use]
     pub fn served_len(&self) -> usize {
         self.served
-    }
-
-    /// Rewrites the served rows' written heads and conditions onto the
-    /// merged ids the mint replay landed at (the declaration build's
-    /// post-replay remap): the recorded expressions name minted atoms
-    /// by their generation ids, which a fresh file's reserve mints shift.
-    pub fn remap_served_exprs(&mut self, minted: &FxHashMap<TypeId, TypeId>) {
-        let land = |id: TypeId| -> TypeId { minted.get(&id).copied().unwrap_or(id) };
-        for row in self.instances.iter_mut().take(self.served) {
-            remap_type_expr(&mut row.head_expr, &land);
-            for condition in &mut row.condition_exprs {
-                remap_type_expr(&mut condition.ty, &land);
-            }
-        }
     }
 
     /// Closure check over the final instance environment (B6, section 10

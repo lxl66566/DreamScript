@@ -47,7 +47,7 @@ use crate::{
     id_table::IdTable,
     instance::{Condition, InherentBounds, InstanceDecl, InstanceEnv, InstanceId},
     resolve::{DefId, DefKind, MethodId, MethodOwner, Package},
-    universe::{ReplayMint, Ty, Universe},
+    universe::{Ty, Universe},
 };
 
 /// One declared generic parameter, AST-shaped.
@@ -326,30 +326,53 @@ pub struct ForeignLink {
     pub func: u32,
 }
 
+/// Why a checked prefix's name-keyed rows refused to resolve over the
+/// merged compile's universe: a name that does not resolve, a raw id the
+/// merged walk did not reproduce inside the def-named identity range, an
+/// intern landing off its recorded index, or a mint that could not
+/// replay. The artifact is a pure cache, so a drift refusal is a cache
+/// miss — the declaration build falls back to the fresh path over the
+/// same trees, never diagnosing and never serving a wrong fact.
+#[derive(Clone, Debug)]
+pub struct ServedDrift {
+    /// What refused, for the drift gates' failure output.
+    pub detail: String,
+}
+
+/// The per-serve resolution of a checked prefix's name-keyed rows over
+/// the merged compile's own universe: the artifact layer builds it
+/// beside the shared bases (it owns the rows), and the declaration
+/// build runs it once the reserve pass has minted the prefix's atoms —
+/// the first moment every name the rows carry resolves. Mints replay
+/// through the declaring pass's own operations, the interned sets
+/// re-intern over name-resolved members in the generation's intern
+/// order, and every recorded raw id rides beside its name as a checked
+/// fast path — a disagreement is the [`ServedDrift`] the build falls
+/// back from.
+pub type ServedResolve = Box<dyn FnOnce(&mut Decls) -> Result<(), ServedDrift>>;
+
 /// The declaration-side prefix a checked-ambient artifact serves: the
-/// pre-built [`Decls`] (its universe replayed through the mint log, its
-/// interned sets replayed in intern order, with [`Decls::served_defs`]
-/// and [`Decls::served_methods`] set), the trait memberships the
-/// skipped shape arms would have registered, and the shape-phase atom
-/// mints the skipped impl arms would have performed — all keyed by
-/// index against the spaces the replays reproduce. Memberships and
-/// mints apply after the reserve pass — the mints continue the atom
-/// space exactly where the declaring pass's impl arms did, after every
-/// file's reserve mints — and before the shape pass, whose solving
-/// reads them.
+/// pre-built [`Decls`] — its universe empty, its def-keyed tables the
+/// shared bases the serve installs, [`Decls::served_defs`] and
+/// [`Decls::served_methods`] set — plus one resolve step the
+/// declaration build runs after its own reserve pass mints the
+/// prefix's def atoms in the merged walk's order. The rows the resolve
+/// step installs are name-addressed: the shapes, memberships, mints,
+/// interned sets, instance rows, and solved span-keyed records of the
+/// prefix's own declaration pass, every atom reference through one
+/// interned name table with the generation's raw id beside it as a
+/// checked fast path.
 pub struct ServedDecls {
-    /// The prefix's declaration tables; `served_defs` and
-    /// `served_methods` must be set.
+    /// The prefix's declaration tables (the shared bases installed,
+    /// `served_defs` and `served_methods` set, the universe empty).
     pub decls: Decls,
-    /// `(trait index, atom index)` membership records in any order.
-    pub memberships: Vec<(TraitId, TypeId)>,
-    /// The shape-phase atom mints, in mint order, each with the
-    /// generation atom id the prefix's recorded data names it by (the
-    /// landing map's key half — see [`Universe::remap_minted_ids`]).
-    pub mints: Vec<(TypeId, ReplayMint)>,
-    /// The count of leading trees the prefix covers: the rebuild below
-    /// walks exactly these, and the caller aligns one served resolution
-    /// table per covered tree ahead of the fresh ones.
+    /// The name-addressed rows' resolution over the merged universe.
+    pub resolve: ServedResolve,
+    /// The count of leading trees the prefix covers: the shape pass
+    /// skips these trees' own solving and instance declarations (the
+    /// resolve step installed those products), and the caller aligns
+    /// one served resolution table per covered tree ahead of the fresh
+    /// ones.
     pub files: usize,
 }
 
@@ -366,30 +389,35 @@ pub fn build<T>(
 where
     T: std::borrow::Borrow<Ast>,
 {
-    build_over(package, asts, resolutions, None)
+    build_over(package, asts, resolutions, None).expect("a fresh build carries no serve to drift")
 }
 
-/// [`build`] over a checked-ambient prefix: the pass starts
-/// from the served [`Decls`] instead of an empty one, the reserve and
-/// shape arms skip every served def's minting and shape solving (the
-/// serve installed those products), the served member's own impl items
-/// skip their instance declarations (the artifact's rows are installed),
-/// the served trait memberships and shape-phase mints apply between the
-/// reserve pass (which mints every file's def-named atoms first, so the
-/// mints continue the atom space where the declaring pass's impl arms
-/// did) and the shape pass (whose solving reads them), and every table
-/// the serve carries no rows for — aliases, the solved span-keyed
-/// records — builds fresh over all files as in [`build`]; the const
-/// rows answer from the shared base the caller installed (the ambient
-/// serve parks one, a user prefix-cache serve has none and builds
-/// fresh exactly as before).
-#[must_use]
+/// [`build`] over a checked-ambient prefix: the pass starts from the
+/// served [`Decls`] (its shared bases installed, its universe empty),
+/// the reserve pass mints every tree's def atoms in the merged walk's
+/// own order — a served def's atom mints exactly as a fresh pass's
+/// does, so the atom space answers the fresh run's — and the serve's
+/// name-addressed rows resolve over that universe between the reserve
+/// and shape passes: the def-named identity checks (a name resolving
+/// off its recorded raw id is a walk divergence), the shape-phase mints
+/// replayed through the declaring pass's own operations, the interned
+/// sets re-interned over name-resolved members in the generation's
+/// intern order, the memberships, the instance rows, and the solved
+/// span-keyed records installed. The shape pass then skips every
+/// served tree's own solving (the resolve step installed those
+/// products); every table the serve carries no rows for — aliases —
+/// builds fresh over all files as in [`build`]; the const rows answer
+/// from the shared base the caller installed (the ambient serve parks
+/// one, a user prefix-cache serve has none and builds fresh exactly as
+/// before). A drift refusal answers [`Err`]: the artifact is a pure
+/// cache, so the caller falls back to the fresh path over the same
+/// trees.
 pub fn build_over<T>(
     package: &Package,
     asts: &[T],
     resolutions: &[Resolutions],
     served: Option<ServedDecls>,
-) -> (Decls, Vec<Diagnostic>)
+) -> Result<(Decls, Vec<Diagnostic>), ServedDrift>
 where
     T: std::borrow::Borrow<Ast>,
 {
@@ -400,9 +428,9 @@ where
         served_files <= trees.len(),
         "a served prefix cannot cover more trees than the caller passed"
     );
-    let (mut decls, memberships, mints) = match served {
-        Some(served) => (served.decls, served.memberships, served.mints),
-        None => (Decls::default(), Vec::new(), Vec::new()),
+    let (mut decls, resolve) = match served {
+        Some(served) => (served.decls, Some(served.resolve)),
+        None => (Decls::default(), None),
     };
     let mut diags = Vec::new();
     for ast in &trees {
@@ -412,41 +440,17 @@ where
             }
         }
     }
-    for (trait_id, atom) in memberships {
-        let _ = decls.universe.impl_trait(trait_id, atom);
+    // The serve's name-addressed rows resolve over the merged walk's
+    // universe — the one moment every name the rows carry exists: the
+    // def atoms the reserve pass minted and the mints this step replays.
+    // Every recorded raw id rides beside its name; inside the def-named
+    // identity range a disagreement is a walk divergence the resolution
+    // refuses loudly, and any name that does not resolve is a corrupt
+    // or foreign artifact — both a cache miss the caller falls back
+    // from, never a run-path condition to diagnose.
+    if let Some(resolve) = resolve {
+        resolve(&mut decls)?;
     }
-    // The replay's failures are ignored like the memberships' above: the
-    // artifact's bytes are drift-gate-pinned, so a replay that cannot
-    // land is a corrupt artifact (a generation-side failure), never a
-    // run-path condition to diagnose. Each landing records against the
-    // generation id the prefix's recorded data names the mint by, and a
-    // mint's own inputs (a tuple's elements) read the earlier landings —
-    // so one pass remaps the recorded data onto the merged ids before
-    // any later pass reads them.
-    let mut minted: FxHashMap<TypeId, TypeId> = FxHashMap::default();
-    for (gen_id, mint) in &mints {
-        let mint = match mint {
-            ReplayMint::Var(name) => ReplayMint::Var(name.clone()),
-            ReplayMint::Tuple(elements) => ReplayMint::Tuple(
-                elements
-                    .iter()
-                    .map(|&e| minted.get(&e).copied().unwrap_or(e))
-                    .collect(),
-            ),
-            ReplayMint::Apply(ctor, args) => {
-                ReplayMint::Apply(minted.get(ctor).copied().unwrap_or(*ctor), args.clone())
-            },
-            // a linked struct's fields name the ambient's def-named atoms
-            // (identities) and its own later-minted applies, which the
-            // final remap below rewrites once they land; a linked opaque
-            // struct carries no shape to remap
-            ReplayMint::Struct(..) | ReplayMint::Reserved(_) => mint.clone(),
-        };
-        if let Ok(landed) = decls.universe.replay_mint(&mint) {
-            minted.insert(*gen_id, landed);
-        }
-    }
-    remap_served_mints(&mut decls, &minted);
     for (index, ast) in trees.iter().enumerate() {
         let served_item = index < served_files;
         for block in &ast.blocks {
@@ -455,7 +459,6 @@ where
             }
         }
     }
-    rebuild_solved_records(&trees[..served_files], package, &mut decls);
     // The import-bound definitions (G4): a linked function's signature
     // registers from the link pass's surface exactly like an extern's — a
     // call site checks against the written types — and its link fact
@@ -463,11 +466,10 @@ where
     // fact rides the table the type minting and the embed read; a linked
     // type's structural fact mints the declaration products a local
     // struct would carry, so every later pass consumes it unchanged.
-    // The minted atom rides the artifact's mint log (never the def-named
-    // atom log): a served prefix replays the def-named atoms by rank,
-    // and a mint placed this late would record an id the rank replay
-    // lands elsewhere; the mint log's own ids replay in order, and the
-    // re-run takes the replayed atom through the served def-atom rows.
+    // The minted atom rides the serve's mint log: it is minted past the
+    // shape phase, so neither a fresh walk nor the serve's def-named
+    // identity range places it, and the resolve step's rows address it
+    // by name — the re-run takes the minted atom through those rows.
     // A def the shape pass already forced (a written field named it
     // ahead of this loop) re-installs idempotently below — the same
     // replay-convergent path a served prefix's already-minted defs
@@ -508,7 +510,7 @@ where
         }
     }
     package_coherence(&mut decls, &mut diags);
-    (decls, diags)
+    Ok((decls, diags))
 }
 
 /// Mints one linked type's structural fact into the declaration tables:
@@ -1048,211 +1050,13 @@ fn foreign_field_type(
     }
 }
 
-/// Rewrites the served prefix's recorded data onto the merged ids the
-/// mint replay landed at: the universe's atom-kind field signatures,
-/// interned set members, and structural index keys (see
-/// [`Universe::remap_minted_ids`]), plus the served instance rows'
-/// written heads and conditions. The recorded data names minted atoms
-/// by their generation ids, which the merged run's reserve mints shift
-/// — a def-named reference is an identity and stays untouched.
-fn remap_served_mints(decls: &mut Decls, minted: &FxHashMap<TypeId, TypeId>) {
-    decls.universe.remap_minted_ids(minted);
-    decls.instances.remap_served_exprs(minted);
-}
-
-/// Rebuilds the solved span-keyed records of the served prefix's impl
-/// items — the trait-reference arguments and the generic inherent
-/// bounds — over the served trees and the replayed universe. The serve
-/// skips these items' instance declarations (the artifact's rows are
-/// installed), and no served table carries the records, so the
-/// declaration arms' own derivations replay here: each generic
-/// parameter maps to the variable atom the mint log replayed, its
-/// unique name reconstructed through the counter sequence the
-/// declaring pass minted under (the served prefix is one leading run
-/// of files, so the sequence restarts where that pass started), and
-/// every solve lands on the handle the set log's intern-order replay
-/// already answers. A written expression that names anything but a
-/// minted variable or a declared atom records nothing — solving it
-/// could read a mid-growth state the replay cannot reproduce, so the
-/// artifact's clean generation refuses such a prefix outright (the
-/// drift gate's served-vs-fresh record comparison).
-fn rebuild_solved_records(trees: &[&Ast], package: &Package, decls: &mut Decls) {
-    let mut var_seq = 0u32;
-    for tree in trees {
-        for block in &tree.blocks {
-            for item in &block.items {
-                let ItemKind::Impl(imp) = &item.kind else {
-                    continue;
-                };
-                let mut vars = FxHashMap::default();
-                // The trait arm mints only once the referenced trait
-                // resolves (the declaring pass returns before the mint
-                // otherwise), and records its arguments only when the
-                // head converted — the same control flow, mirrored.
-                let record = if let Some(trait_ref) = &imp.trait_ref {
-                    let [trait_only] = trait_ref.path.segments.as_slice() else {
-                        continue;
-                    };
-                    let Some(owner) = package.lookup_type(&trait_only.name) else {
-                        continue;
-                    };
-                    if !decls.traits.contains_key(&owner) {
-                        continue;
-                    }
-                    for param in &imp.generics {
-                        var_seq += 1;
-                        minted_var(&param.name.name, var_seq, decls, &mut vars);
-                    }
-                    if conv_node(package, &imp.target, &vars, decls).is_none() {
-                        continue;
-                    }
-                    if trait_ref.args.is_empty()
-                        || !trait_ref
-                            .args
-                            .iter()
-                            .all(|arg| names_atoms_only(package, arg, &vars, decls))
-                    {
-                        continue;
-                    }
-                    let mut solved_args = Vec::with_capacity(trait_ref.args.len());
-                    let mut solved_all = true;
-                    for arg in &trait_ref.args {
-                        let Some(solved) = conv_node(package, arg, &vars, decls)
-                            .and_then(|expr| decls.universe.solve(&expr).ok())
-                        else {
-                            solved_all = false;
-                            break;
-                        };
-                        solved_args.push(solved);
-                    }
-                    solved_all.then_some(Record::Args(solved_args))
-                // The inherent arm mints only for a generic impl and
-                // records only when the head and bounds solve.
-                } else {
-                    if imp.generics.is_empty() {
-                        continue;
-                    }
-                    for param in &imp.generics {
-                        var_seq += 1;
-                        minted_var(&param.name.name, var_seq, decls, &mut vars);
-                    }
-                    if !names_atoms_only(package, &imp.target, &vars, decls) {
-                        continue;
-                    }
-                    let Some(head_expr) = conv_node(package, &imp.target, &vars, decls) else {
-                        continue;
-                    };
-                    let Ok(head) = decls.universe.solve(&head_expr) else {
-                        continue;
-                    };
-                    let mut conditions = Vec::new();
-                    for param in &imp.generics {
-                        let Some(bound) = &param.bound else { continue };
-                        let Some(bound_trait) = trait_of_type(package, bound, decls) else {
-                            continue;
-                        };
-                        let Some(&var) = vars.get(&param.name.name) else {
-                            continue;
-                        };
-                        if let Ok(ty) = decls.universe.atom_ty(var) {
-                            conditions.push(Condition::new(bound_trait, ty));
-                        }
-                    }
-                    Some(Record::Inherent { head, conditions })
-                };
-                match record {
-                    Some(Record::Args(args)) => {
-                        decls.trait_impl_args.insert(item.span, args);
-                    },
-                    Some(Record::Inherent { head, conditions }) => {
-                        decls
-                            .inherent_impl_bounds
-                            .insert(item.span, InherentBounds { head, conditions });
-                    },
-                    None => {},
-                }
-            }
-        }
-    }
-}
-
-/// What one rebuilt impl item records.
-enum Record {
-    /// The solved trait-reference arguments.
-    Args(Vec<Ty>),
-    /// The solved inherent head and its bounds.
-    Inherent {
-        /// The solved head pattern.
-        head: Ty,
-        /// One condition per declared bound.
-        conditions: Vec<Condition<Ty>>,
-    },
-}
-
-/// Maps one impl generic parameter to the variable atom the mint log
-/// replayed, through the unique name the declaring pass minted it
-/// under — `#counter` over the parameter's name, the counter this
-/// rebuild reconstructs. A name the replay does not carry leaves the
-/// parameter unmapped, as a mint that failed left it.
-fn minted_var(name: &str, seq: u32, decls: &Decls, vars: &mut FxHashMap<String, TypeId>) {
-    let unique = format!("${name}#{seq}");
-    if let Some(var) = decls.universe.atom_by_name(&unique) {
-        vars.insert(name.to_owned(), var);
-    }
-}
-
-/// Whether a written type the rebuild solves names only minted
-/// variables and declared atoms, positionally: the expressions whose
-/// solving a later declaration cannot widen, so the replay answers
-/// exactly what the declaring pass solved. A trait spelled as a set,
-/// an alias, a negation, and every other non-atom form name state the
-/// replay does not carry.
-fn names_atoms_only(
-    package: &Package,
-    ty: &Type,
-    vars: &FxHashMap<String, TypeId>,
-    decls: &Decls,
-) -> bool {
-    use ds_parse::Type as Written;
-    match ty {
-        Written::Path { path, args, .. } => {
-            let [only] = path.segments.as_slice() else {
-                return false;
-            };
-            let known = vars.contains_key(&only.name)
-                || package
-                    .lookup_type(&only.name)
-                    .is_some_and(|def| decls.atoms.get(&def).is_some());
-            known
-                && args
-                    .iter()
-                    .all(|arg| names_atoms_only(package, arg, vars, decls))
-        },
-        Written::Optional { inner, .. } | Written::Paren { inner, .. } => {
-            names_atoms_only(package, inner, vars, decls)
-        },
-        Written::TypeKw(_) | Written::Unit(_) => true,
-        Written::Union { left, right, .. } => {
-            names_atoms_only(package, left, vars, decls)
-                && names_atoms_only(package, right, vars, decls)
-        },
-        Written::Tuple { items, .. } => items
-            .iter()
-            .all(|item| names_atoms_only(package, item, vars, decls)),
-        Written::Intersect { .. }
-        | Written::Difference { .. }
-        | Written::Negation { .. }
-        | Written::Fn { .. }
-        | Written::Ptr { .. }
-        | Written::Foreign { .. } => false,
-    }
-}
-
 /// Whether a def's plain declaration tables arrived pre-built from the
-/// checked-ambient artifact: the minting arms skip it, its products
-/// already installed by the serve. A user item duplicating a served name
-/// resolves to the served def and skips too — the fresh path skips it as
-/// well (the duplicate mint fails), so the outcome is the same.
+/// checked-ambient artifact: the plain-table arms skip the def, its rows
+/// already installed by the serve, while its atoms and traits still
+/// mint — the merged walk owns those spaces. A user item duplicating a
+/// served name resolves to the served def and skips the plain tables
+/// too — the fresh path skips it as well (the duplicate mint fails),
+/// so the outcome is the same.
 fn is_served(decls: &Decls, def: DefId) -> bool {
     def.index() < decls.served_defs
 }
@@ -1364,9 +1168,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
     };
     match &item.kind {
         ItemKind::Tag(t) => {
-            if is_served(decls, def) {
-                return;
-            }
+            // The atom mints even for a served def — the merged walk owns
+            // the atom space — while the plain-table rows the serve
+            // installs as its shared base stay skipped (see `is_served`).
             match &t.payload {
                 EnumPayload::None => {
                     if let Some(id) = declare_unit_name(decls, &t.name.name) {
@@ -1383,37 +1187,35 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     if let Ok(id) = decls.universe.declare_struct(&t.name.name) {
                         decls.atoms.insert(def, id);
                         decls.defs_of_atoms.insert(id, def);
-                        decls.structs.insert(def, StructShape {
-                            params: Vec::new(),
-                            fields: fields.clone(),
-                            linear: false,
-                        });
+                        if !is_served(decls, def) {
+                            decls.structs.insert(def, StructShape {
+                                params: Vec::new(),
+                                fields: fields.clone(),
+                                linear: false,
+                            });
+                        }
                     }
                 },
                 EnumPayload::Tuple(_) => {},
             }
         },
         ItemKind::Struct(s) => {
-            if is_served(decls, def) {
-                return;
-            }
             if let Ok(id) = decls.universe.declare_struct(&s.name.name) {
                 decls.atoms.insert(def, id);
                 decls.defs_of_atoms.insert(id, def);
-                decls.structs.insert(def, StructShape {
-                    params: s.generics.iter().map(GenericParam::from).collect(),
-                    fields: struct_fields_ast(&s.members),
-                    linear: s.supers.iter().any(linear_marker),
-                });
+                if !is_served(decls, def) {
+                    decls.structs.insert(def, StructShape {
+                        params: s.generics.iter().map(GenericParam::from).collect(),
+                        fields: struct_fields_ast(&s.members),
+                        linear: s.supers.iter().any(linear_marker),
+                    });
+                }
             }
         },
         ItemKind::Enum(e) => {
             // A duplicate name keeps the first def (reported at
             // collection); the name span proves this item owns the def.
             if package.def(def).span != e.name.span {
-                return;
-            }
-            if is_served(decls, def) {
                 return;
             }
             let generic = !e.generics.is_empty();
@@ -1429,7 +1231,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             } else {
                 Ok(())
             };
-            if declared.is_ok() {
+            if declared.is_ok() && !is_served(decls, def) {
                 decls.enums.insert(def, EnumShape {
                     params: e.generics.iter().map(GenericParam::from).collect(),
                     cases: e
@@ -1462,7 +1264,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                         decls.atoms.insert(case_def, id);
                         decls.defs_of_atoms.insert(id, case_def);
                     }
-                    if let EnumPayload::Struct(fields) = &case.payload {
+                    if let EnumPayload::Struct(fields) = &case.payload
+                        && !is_served(decls, case_def)
+                    {
                         // A named-payload case carries the struct shape
                         // field access and struct patterns read [B3].
                         decls.structs.insert(case_def, StructShape {
@@ -1471,10 +1275,12 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                             linear,
                         });
                     }
-                    decls.cases.insert(case_def, CaseDecl {
-                        enum_def: def,
-                        payload: case.payload.clone(),
-                    });
+                    if !is_served(decls, case_def) {
+                        decls.cases.insert(case_def, CaseDecl {
+                            enum_def: def,
+                            payload: case.payload.clone(),
+                        });
+                    }
                 }
             }
         },
@@ -1488,44 +1294,42 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             );
         },
         ItemKind::Trait(t) => {
-            if is_served(decls, def) {
-                return;
-            }
             if let Ok(id) = decls.universe.declare_trait(&t.name.name) {
                 decls.traits.insert(def, id);
-                let mut names = Vec::new();
-                for member in &t.members {
-                    if let TraitMember::Fn(f) = member {
-                        names.push(f.name.name.clone());
-                        if let Some(method) = member_id(package, def, &f.name.name) {
-                            decls.members.insert(method, Arc::new(FnSig::of(f)));
+                if !is_served(decls, def) {
+                    let mut names = Vec::new();
+                    for member in &t.members {
+                        if let TraitMember::Fn(f) = member {
+                            names.push(f.name.name.clone());
+                            if let Some(method) = member_id(package, def, &f.name.name) {
+                                decls.members.insert(method, Arc::new(FnSig::of(f)));
+                            }
                         }
                     }
+                    decls.trait_members.insert(def, names);
+                    decls.trait_member_defaults.insert(
+                        def,
+                        t.members
+                            .iter()
+                            .filter_map(|member| {
+                                let TraitMember::Fn(f) = member else {
+                                    return None;
+                                };
+                                f.body.is_some().then(|| f.name.name.clone())
+                            })
+                            .collect(),
+                    );
+                    decls.trait_generics.insert(
+                        def,
+                        t.generics.iter().map(|p| p.name.name.clone()).collect(),
+                    );
                 }
-                decls.trait_members.insert(def, names);
-                decls.trait_member_defaults.insert(
-                    def,
-                    t.members
-                        .iter()
-                        .filter_map(|member| {
-                            let TraitMember::Fn(f) = member else {
-                                return None;
-                            };
-                            f.body.is_some().then(|| f.name.name.clone())
-                        })
-                        .collect(),
-                );
-                decls.trait_generics.insert(
-                    def,
-                    t.generics.iter().map(|p| p.name.name.clone()).collect(),
-                );
             }
         },
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
-            if is_served(decls, def) {
-                return;
+            if !is_served(decls, def) {
+                decls.fns.insert(def, Arc::new(FnSig::of(f)));
             }
-            decls.fns.insert(def, Arc::new(FnSig::of(f)));
         },
         ItemKind::Import(_) | ItemKind::Local(_) | ItemKind::Impl(_) | ItemKind::Platform(_) => {},
     }

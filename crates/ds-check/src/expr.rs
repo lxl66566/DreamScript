@@ -31,27 +31,6 @@ pub enum TypeExpr {
     Tuple(Vec<Self>),
 }
 
-/// Rewrites one type expression's atom references through a landing
-/// map — the served prefix's post-replay remap (the mint log replays a
-/// prefix's shape mints into the merged universe, where fresh reserve
-/// mints shift their landing ids, so the recorded expressions name the
-/// generation ids until this rewrite).
-pub(crate) fn remap_type_expr(expr: &mut TypeExpr, land: &impl Fn(TypeId) -> TypeId) {
-    match expr {
-        TypeExpr::Atom(id) => *id = land(*id),
-        TypeExpr::Trait(_) | TypeExpr::Not(_) => {},
-        TypeExpr::Union(a, b) | TypeExpr::Inter(a, b) | TypeExpr::Diff(a, b) => {
-            remap_type_expr(a, land);
-            remap_type_expr(b, land);
-        },
-        TypeExpr::Tuple(elements) => {
-            for element in elements {
-                remap_type_expr(element, land);
-            }
-        },
-    }
-}
-
 impl TypeExpr {
     /// An atom reference.
     #[must_use]

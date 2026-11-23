@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId},
     error::Error,
-    expr::{TypeExpr, remap_type_expr},
+    expr::TypeExpr,
 };
 
 /// A solved type: a handle into the minting universe's hash-consed sets.
@@ -28,29 +28,6 @@ impl Ty {
     pub const fn index(self) -> u32 {
         self.0
     }
-}
-
-/// One shape-phase atom mint a checked-ambient artifact replays: the
-/// mints the skipped impl arms would have performed (impl type variables
-/// and the structural atoms their head solving minted), in mint order.
-#[derive(Clone, Debug)]
-pub enum ReplayMint {
-    /// A minted impl type variable, under its unique name.
-    Var(String),
-    /// A structural tuple atom over its element atoms.
-    Tuple(Vec<TypeId>),
-    /// A structural application atom over its constructor and argument
-    /// sets.
-    Apply(TypeId, Vec<Ty>),
-    /// A minted linked struct: its declared name and field signatures.
-    /// An import-bound type's atom is def-named, so the def-named log's
-    /// rank replay could not place it — the mint log's ids replay in
-    /// order, so the atom rides here.
-    Struct(String, Vec<Field>),
-    /// A minted linked opaque struct: its declared name, identity alone
-    /// — the reserve a local bodiless `struct x` performs, its shape
-    /// never set.
-    Reserved(String),
 }
 
 /// Cap on the combinations one tuple distribution may mint. Each combination
@@ -124,9 +101,14 @@ impl Universe {
     }
 
     /// Appends one atom declaration and clears the solved-type caches a new
-    /// atom invalidates.
+    /// atom invalidates. Every atom — structural ones included — lands
+    /// in the name index: a structural atom's name is derived from its
+    /// content (characters no identifier spells), so name resolution is
+    /// total over declared atoms, the address a serve's name-keyed rows
+    /// resolve through.
     fn push_atom(&mut self, decl: AtomDecl) -> TypeId {
         let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atom_names.insert(decl.name.clone(), id);
         self.atoms.push(decl);
         self.atom_tys.push(None);
         self.full_ty = None;
@@ -157,12 +139,10 @@ impl Universe {
         if self.atom_names.contains_key(name) || self.trait_names.contains_key(name) {
             return Err(Error::DuplicateName(name.to_owned()));
         }
-        let id = self.push_atom(AtomDecl {
+        Ok(self.push_atom(AtomDecl {
             name: name.to_owned(),
             kind,
-        });
-        self.atom_names.insert(name.to_owned(), id);
-        Ok(id)
+        }))
     }
 
     /// Fills a reserved struct's field signature.
@@ -315,7 +295,9 @@ impl Universe {
     /// equality: same arity and same atoms position-wise. Elements must
     /// already be declared atoms (each a single atom by construction, since
     /// only [`Universe::tuple_solve`] mints tuples).
-    fn tuple_atom(&mut self, elements: &[TypeId]) -> Result<TypeId, Error> {
+    /// The structural atom of one element-atom list (the serve's tuple
+    /// replay mints through this beside [`Universe::apply_atom`]).
+    pub fn tuple_atom(&mut self, elements: &[TypeId]) -> Result<TypeId, Error> {
         if let Some(&id) = self.tuple_index.get(elements) {
             return Ok(id);
         }
@@ -434,117 +416,11 @@ impl Universe {
         self.sets.iter().map(AsRef::as_ref)
     }
 
-    /// Replays one interned member set from a checked-ambient artifact:
-    /// the log's entries push in intern order, so every replayed handle
-    /// keeps the index the declaring pass minted it under, and every
-    /// later interning continues after the prefix exactly as in that
-    /// pass (the mint-determinism pin). An already-present set answers
-    /// its existing handle — the declaring log never interns one twice,
-    /// so this marks a corrupt artifact, answered harmlessly.
-    pub fn replay_set(&mut self, members: &[TypeId]) -> Ty {
-        self.intern(members.to_vec())
-    }
-
-    /// Replays one shape-phase mint through the declaring pass's own
-    /// operation, so the atom lands at its minted index and the
-    /// hash-cons maps carry it for every later mint of the same shape.
-    /// Answers the landing atom's id: the mint replay runs in the
-    /// merged universe, where a served prefix's mints land past the
-    /// fresh files' reserve mints, so the caller records the landing
-    /// id against the generation id the prefix's recorded data names
-    /// (see [`Universe::remap_minted_ids`]).
-    pub fn replay_mint(&mut self, mint: &ReplayMint) -> Result<TypeId, Error> {
-        match mint {
-            ReplayMint::Var(name) => self.declare_tag(name),
-            ReplayMint::Tuple(elements) => self.tuple_atom(elements),
-            ReplayMint::Apply(ctor, args) => self.apply_atom(*ctor, args),
-            ReplayMint::Struct(name, fields) => {
-                let id = self.declare_struct(name)?;
-                self.set_struct_fields(id, fields.clone())?;
-                Ok(id)
-            },
-            ReplayMint::Reserved(name) => self.declare_struct(name),
-        }
-    }
-
-    /// Rewrites every served datum that names a minted atom by its
-    /// generation id into the merged id the replay landed it at. The
-    /// recorded data (struct and enum-case field signatures, interned
-    /// set members, tuple and application index keys) predates the
-    /// merged run's reserve mints, so a fresh file declaring atoms
-    /// shifts every later mint's landing; def-named references are
-    /// identities (the atom log replays them first, at their own ids),
-    /// while mint references drift. The map is injective (a generation
-    /// id maps to one landing, identities never collide with targets),
-    /// so the rewrite can rebuild the hash-cons indexes in place over
-    /// the remapped members without folding two rows together.
-    pub fn remap_minted_ids(&mut self, map: &FxHashMap<TypeId, TypeId>) {
-        let land = |id: TypeId| -> TypeId { map.get(&id).copied().unwrap_or(id) };
-        // Only the served prefix's own data names minted atoms by their
-        // generation ids here: its struct and enum-case field signatures
-        // (the fresh files' reserve atoms keep reserved and unit shapes —
-        // the shape pass fills them after this walk) and the interned
-        // sets the artifact replayed. The mint-replayed atoms' own kinds
-        // and the structural hash-cons maps already carry landing ids
-        // where they name atoms (the replay remapped a tuple's element
-        // inputs through the landings), while an application's arguments
-        // are interned-set handles the recorded data shares — this walk
-        // lands their members below and the application atoms' names
-        // re-render after it — so re-mapping the kinds here would fold
-        // one landing onto another.
-        for decl in &mut self.atoms {
-            match &mut decl.kind {
-                AtomKind::Struct(fields) => {
-                    for field in fields {
-                        remap_type_expr(&mut field.ty, &land);
-                    }
-                },
-                AtomKind::Enum(cases) => {
-                    for case in cases {
-                        for field in &mut case.fields {
-                            remap_type_expr(&mut field.ty, &land);
-                        }
-                    }
-                },
-                AtomKind::Unit
-                | AtomKind::Reserved
-                | AtomKind::Tuple(_)
-                | AtomKind::Apply(..)
-                | AtomKind::FnSig(..) => {},
-            }
-        }
-        let mut sets = Vec::with_capacity(self.sets.len());
-        for set in &self.sets {
-            let members: Rc<[TypeId]> = set.iter().map(|&id| land(id)).collect();
-            sets.push(members);
-        }
-        self.sets = sets;
-        let mut index = FxHashMap::default();
-        for (at, set) in self.sets.iter().enumerate() {
-            let raw = u32::try_from(at).expect("a set index fits u32");
-            index.insert(set.clone(), raw);
-        }
-        self.index = index;
-        // A mint-replayed application's structural name rendered its
-        // arguments' members before this rewrite landed them, so the
-        // members could alias a fresh file's reserve atoms at the
-        // generation ids (an ambient generic impl's head naming its
-        // variables through the user's atoms). The replay keeps the
-        // recorded set handles — the recorded data shares them — so
-        // only the name is stale: re-render every application atom's
-        // name over the landed members.
-        let apply_names: Vec<(usize, String)> = self
-            .atoms
-            .iter()
-            .enumerate()
-            .filter_map(|(at, decl)| match &decl.kind {
-                AtomKind::Apply(ctor, args) => Some((at, self.apply_name(*ctor, args))),
-                _ => None,
-            })
-            .collect();
-        for (at, name) in apply_names {
-            self.atoms[at].name = name;
-        }
+    /// The atom count so far: the merged walk's mint base the serve's
+    /// landing checks read.
+    #[must_use]
+    pub fn atom_count(&self) -> u32 {
+        narrow(self.atoms.len())
     }
 
     /// The singleton type of one atom.

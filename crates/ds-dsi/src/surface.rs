@@ -276,9 +276,9 @@ mod tests {
 
     use super::{SurfaceBand, member_surface, signature_line, surface_lines};
     use crate::{
-        AtomEntry, AtomShapeData, DeclsData, DefData, EnumCaseData, EnumShapeData, FnSigData,
-        GenericParamData, MethodDeclData, MethodOwnerData, PackageData, ParamSigData, PrefixDsi,
-        StructShapeData, UniverseLog, artifact_bytes, decode_dsi, extract,
+        DeclsData, DefData, EnumCaseData, EnumShapeData, FnSigData, GenericParamData,
+        MethodDeclData, MethodOwnerData, PackageData, ParamSigData, PrefixDsi, StructShapeData,
+        UniverseLog, artifact_bytes, decode_dsi, extract,
     };
 
     /// One clean compile's artifact over its sources, the same pipeline
@@ -581,6 +581,7 @@ mod tests {
             span,
         };
         PrefixDsi {
+            names: Vec::new(),
             package: PackageData {
                 files: vec![FileId::new(0)],
                 // fn=0, const=1, struct=3, enum=4, tag=5, case=6,
@@ -607,14 +608,13 @@ mod tests {
             },
             uses: vec![Vec::new()],
             universe: UniverseLog {
-                atoms: vec![AtomEntry {
-                    name: "unit".to_owned(),
-                    shape: AtomShapeData::Unit,
-                }],
+                atoms: Vec::new(),
                 traits: Vec::new(),
                 memberships: Vec::new(),
                 mints: Vec::new(),
                 sets: Vec::new(),
+                impl_args: Vec::new(),
+                inherent_bounds: Vec::new(),
                 var_counter: 0,
             },
             decls,

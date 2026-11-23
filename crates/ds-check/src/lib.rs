@@ -162,7 +162,7 @@ pub mod witness;
 
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
-pub use decls::{Decls, FnSig, GenericParam, ServedDecls, render_type};
+pub use decls::{Decls, FnSig, GenericParam, ServedDecls, ServedDrift, render_type};
 pub use effects::{
     DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedMethodRow, effects_of,
 };
@@ -191,7 +191,7 @@ pub use type_of::{
     Analyzed, ArtifactSymbols, Checked, GenericCallBounds, HoleShowDispatches, InherentCallBounds,
     TraitCall, Val, analyze, analyze_owned, analyze_resolved, analyze_served, type_check,
 };
-pub use universe::{ReplayMint, Ty, Universe};
+pub use universe::{Ty, Universe};
 pub use witness::{Witness, WitnessField};
 
 pub use crate::platform::{
