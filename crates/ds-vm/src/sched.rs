@@ -55,11 +55,15 @@ pub enum WorldWait {
     /// connection's handle, the stream registering into the connection
     /// table like a connecting one.
     Accept { listener: i64, deadline: Instant },
-    /// `net_connect(host, port)`: the raw socket's in-progress connect
-    /// (the 2026-11-23 ruling) — the writability wake probes
-    /// `SO_ERROR`, connected registering the stream under the pending
-    /// row's id, a spurious wake leaving the wait standing; the row's
-    /// fd releases with the wait whichever door ends it. `target`
+    /// `net_connect(host, port)`: the staged machine's rows — the
+    /// resolve stage first (item 79, ruled 2026-11-24: a name's
+    /// resolution runs on the resolver helper thread, its posted
+    /// eventfd the readable interest) and the in-progress raw connect
+    /// after (the 2026-11-23 ruling, the writability the completion
+    /// reports — the wake probing `SO_ERROR`, connected registering
+    /// the stream under the pending row's id, a spurious wake
+    /// leaving the wait standing). The row's fd releases with the
+    /// wait whichever door ends it; `target`
     /// carries the "host:port" the error spans name (no table key
     /// renders it).
     Connect {
@@ -304,7 +308,11 @@ impl WorldWait {
     }
 
     /// The direction the wait watches, `None` for the timer-only wait
-    /// (no IO interest stands).
+    /// (no IO interest stands). The staged machines' resolve stage
+    /// (a connect or fetch row whose hostname is still resolving)
+    /// answers the readable eventfd instead — the dispatcher resolves
+    /// the stage's own direction through the net tables at
+    /// registration (a direction the wait's static shape cannot name).
     #[must_use]
     pub fn direction(&self) -> Option<Direction> {
         match self {

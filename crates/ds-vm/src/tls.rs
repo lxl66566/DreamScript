@@ -258,16 +258,14 @@ impl TlsFetch {
 /// the same finish the plain machine and the blocking twin share.
 pub(crate) fn step(machine: &mut TlsFetch, net: &mut net::Connections) -> net::FetchWake {
     use crate::reactor::Direction;
-    // the connect stage: the plain machine's own probe
+    // the connect stage: the plain machine's own probe (the resolve
+    // step first, item 79 — a resolving row advancing at its posted
+    // eventfd, the direction passing through)
     if !machine.connected {
         match net.connect_wake(machine.conn) {
-            net::NetAttempt::Park => {
-                return net::FetchWake::Pending {
-                    watch: Direction::Write,
-                }
-            },
-            net::NetAttempt::Done(Err(err)) => return net::FetchWake::Done(Err(err)),
-            net::NetAttempt::Done(Ok(conn)) => {
+            net::ConnectWake::Pending { watch } => return net::FetchWake::Pending { watch },
+            net::ConnectWake::Done(Err(err)) => return net::FetchWake::Done(Err(err)),
+            net::ConnectWake::Done(Ok(conn)) => {
                 machine.conn = conn;
                 machine.connected = true;
             },

@@ -69,7 +69,17 @@
 //! session itself driven a step per readiness wake over the same
 //! staged connect (its wants-write/wants-read naming the interest each
 //! step watches); a non-Linux host keeps the blocking twins under any
-//! reactor until its driver round owns the raw seam.
+//! reactor until its driver round owns the raw seam. The staged
+//! connect's first step is the hostname resolution (ruled 2026-11-24,
+//! item 79): under the reactor an IP-literal host connects inline
+//! exactly the blocking twin's own resolution, a name resolves on the
+//! connection table's resolver helper thread — std's own
+//! `to_socket_addrs`, its completion posting the eventfd the reactor
+//! watches ([`crate::resolver`]) — and the wake starts the connect
+//! stage over the resolved addresses, a failed lookup answering its
+//! own `net_err`; the resolution's parked wait keeps the configured
+//! net-timeout bound like every other, and a reactor-less embedder or
+//! non-Linux host keeps the inline blocking resolution.
 //!
 //! # Caps
 //!
@@ -102,7 +112,7 @@
 
 use std::{
     io::{self, ErrorKind, Read, Write},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::Arc,
     time::Duration,
 };
@@ -169,7 +179,7 @@ pub(crate) struct Connections {
     /// the linux driver's machine; the wake's completion probe dials
     /// the address a second time).
     #[cfg(target_os = "linux")]
-    connecting: Vec<(i64, std::os::fd::OwnedFd, std::net::SocketAddr)>,
+    connecting: Vec<(i64, std::os::fd::OwnedFd, SocketAddr)>,
     /// The parked plain-http exchanges, keyed by their own minted ids
     /// (the staged connect plus the request/response buffers).
     #[cfg(target_os = "linux")]
@@ -179,6 +189,18 @@ pub(crate) struct Connections {
     /// [`crate::tls`], the transport this table owns).
     #[cfg(target_os = "linux")]
     tls_fetches: Vec<(i64, crate::tls::TlsFetch)>,
+    /// The parked DNS twin's pending rows (item 79, ruled 2026-11-24):
+    /// one per resolving connect, keyed by the pre-minted ids the
+    /// resolved connect stage registers under — the job cell shared
+    /// with the resolver helper thread that posts it
+    /// ([`crate::resolver`], the machine's step 0).
+    #[cfg(target_os = "linux")]
+    resolving: Vec<(i64, Arc<crate::resolver::ResolveCell>)>,
+    /// The resolver helper thread, started by the first resolving
+    /// connect under the parking discipline and joined by this
+    /// table's drop — the thread never outlives the VM it serves.
+    #[cfg(target_os = "linux")]
+    resolver: Option<crate::resolver::Resolver>,
     /// The parked accept-tls machines, keyed by the pre-minted handle
     /// ids their completion registers under (the accepted stream and
     /// its rustls session closing with the row — [`crate::tls`]'s
@@ -203,6 +225,10 @@ impl Default for Connections {
             fetches: Vec::new(),
             #[cfg(target_os = "linux")]
             tls_fetches: Vec::new(),
+            #[cfg(target_os = "linux")]
+            resolving: Vec::new(),
+            #[cfg(target_os = "linux")]
+            resolver: None,
             #[cfg(target_os = "linux")]
             tls_accepts: Vec::new(),
         }
@@ -229,6 +255,23 @@ pub(crate) enum NetConnectStart {
     Done(Result<i64, io::Error>),
     /// The connect stands in progress: the pending row's id.
     Pending(i64),
+}
+
+/// One parked connect's wake outcome (the staged machine's own, the
+/// fetch machines' connect stage the same): the direction the row's
+/// current stage still watches (the wait stands, its interest
+/// re-aimed and its bound re-armed), or the machine's end — the
+/// registered handle on success, the failure the class mapping reads
+/// its class off.
+#[derive(Debug)]
+pub(crate) enum ConnectWake {
+    /// The row's stage still waits: `watch` names the direction the
+    /// next wake watches (the resolve stage's eventfd readability,
+    /// the connect stage's writability).
+    Pending { watch: crate::reactor::Direction },
+    /// The connect answered: the registered handle on success, the
+    /// failure otherwise.
+    Done(Result<i64, io::Error>),
 }
 
 /// One parked plain-http exchange's wake outcome: the direction the
@@ -644,18 +687,57 @@ impl Connections {
     }
 
     /// Starts one non-blocking connect over the raw OS socket (the
-    /// 2026-11-23 ruling): the addresses resolve, the first that either
-    /// connects at once or stands in progress wins, and an immediate
-    /// refusal falls to the next address with the last failure the
-    /// report. [`NetConnectStart::Pending`] names the connecting row
-    /// the park's completion reads — the id pre-minted, so the wake
-    /// registers the stream under the very id the parked caller saw.
+    /// 2026-11-23 ruling): an IP-literal host resolves inline (the
+    /// machine starting at its connect stage exactly today), a name
+    /// submits its resolution to the resolver helper thread — item
+    /// 79's parked DNS twin, the machine's step 0 (ruled 2026-11-24)
+    /// — answering the pre-minted row id whose eventfd readability
+    /// the wake's resolve stage consumes. [`NetConnectStart::Pending`]
+    /// names the resolving or connecting row the park's completion
+    /// reads — the id pre-minted, so the wake registers the stream
+    /// under the very id the parked caller saw.
     #[cfg(target_os = "linux")]
     pub(crate) fn start_connect(&mut self, host: &str, port: u16) -> NetConnectStart {
-        let addrs = match (host, port).to_socket_addrs() {
-            Ok(addrs) => addrs.collect::<Vec<_>>(),
+        let conn = self.next_id;
+        self.next_id = conn + 1;
+        if let Some(ip) = crate::resolver::ip_literal(host) {
+            let addr = SocketAddr::new(ip, port);
+            return self.connect_stage(vec![addr], conn);
+        }
+        // the resolver helper starts with the first job it serves and
+        // joins with this table's drop; the cell it posts shares the
+        // row's Arc, so a canceled row's late posting writes a live fd
+        if self.resolver.is_none() {
+            match crate::resolver::Resolver::start() {
+                Ok(helper) => self.resolver = Some(helper),
+                Err(err) => return NetConnectStart::Done(Err(err)),
+            }
+        }
+        let cell = match crate::resolver::ResolveCell::new() {
+            Ok(cell) => Arc::new(cell),
             Err(err) => return NetConnectStart::Done(Err(err)),
         };
+        let submitted = self
+            .resolver
+            .as_ref()
+            .expect("the helper just started")
+            .submit(host, port, Arc::clone(&cell));
+        if let Err(err) = submitted {
+            return NetConnectStart::Done(Err(err));
+        }
+        self.resolving.push((conn, cell));
+        NetConnectStart::Pending(conn)
+    }
+
+    /// The staged machine's connect stage: the raw-socket loop over
+    /// the resolved addresses — the first that either connects at
+    /// once or stands in progress wins, an immediate refusal falling
+    /// to the next address with the last failure the report.
+    /// `pending` names the id the in-progress row registers under,
+    /// pre-minted by the caller so the wake registers under the very
+    /// id the parked caller saw.
+    #[cfg(target_os = "linux")]
+    fn connect_stage(&mut self, addrs: Vec<SocketAddr>, pending: i64) -> NetConnectStart {
         let mut last = io::Error::new(ErrorKind::NotFound, "no address resolved");
         for addr in addrs {
             let family = if addr.is_ipv4() { raw_sock::AF_INET } else { raw_sock::AF_INET6 };
@@ -676,10 +758,8 @@ impl Connections {
                 // in progress: the row owns the fd and the address,
                 // the pre-minted id the wake registers under
                 Ok(true) => {
-                    let conn = self.next_id;
-                    self.next_id = conn + 1;
-                    self.connecting.push((conn, fd, addr));
-                    return NetConnectStart::Pending(conn);
+                    self.connecting.push((pending, fd, addr));
+                    return NetConnectStart::Pending(pending);
                 },
                 // the refusal falls to the next address; the fd's drop
                 // closes the attempt
@@ -689,29 +769,74 @@ impl Connections {
         NetConnectStart::Done(Err(last))
     }
 
-    /// One parked connect's completion probe: the wake the writability
-    /// reports dials the row's address a second time — connected (the
-    /// raw fd adopted into the stream registered under the row's id),
-    /// still pending (a spurious wake, the wait standing), or the
-    /// errno the attempt met.
+    /// One parked connect's wake (the staged machine's own step): the
+    /// resolve stage first — the readable eventfd taking the helper
+    /// thread's answer and starting the connect stage over the
+    /// resolved addresses — then the completion probe, a second
+    /// connect reading the attempt's own state. `Pending` answers the
+    /// direction the row's current stage still watches.
     #[cfg(target_os = "linux")]
-    pub(crate) fn connect_wake(&mut self, conn: i64) -> NetAttempt<i64> {
-        let Some(at) = self.connecting.iter().position(|(id, ..)| *id == conn) else {
-            return NetAttempt::Done(Err(unknown(conn)));
-        };
-        let done = raw_sock::connect_done(&self.connecting[at].1, &self.connecting[at].2);
+    pub(crate) fn connect_wake(&mut self, conn: i64) -> ConnectWake {
+        // the resolve stage (item 79): the eventfd's readable wake
+        // takes the worker's answer, a failed lookup answering its
+        // own error, the resolved addresses feeding the connect stage
+        // under the very id the parked caller saw
+        if let Some(at) = self.resolving.iter().position(|(id, _)| *id == conn) {
+            let (_, cell) = self.resolving.remove(at);
+            let Some(answer) = cell.take() else {
+                // the worker has not posted yet (a spurious wake): the
+                // row stands, the eventfd still its interest
+                self.resolving.push((conn, cell));
+                return ConnectWake::Pending {
+                    watch: crate::reactor::Direction::Read,
+                };
+            };
+            let addrs = match answer {
+                Ok(addrs) => addrs,
+                Err(detail) => {
+                    return ConnectWake::Done(Err(io::Error::other(detail)));
+                },
+            };
+            return match self.connect_stage(addrs, conn) {
+                NetConnectStart::Done(Ok(registered)) => ConnectWake::Done(Ok(registered)),
+                NetConnectStart::Done(Err(err)) => ConnectWake::Done(Err(err)),
+                // the connect stage stands in progress under the same
+                // id: the row's interest moves to the raw fd's
+                // writability
+                NetConnectStart::Pending(_) => ConnectWake::Pending {
+                    watch: crate::reactor::Direction::Write,
+                },
+            };
+        }
+        // the connect stage: the completion probe reads the attempt's
+        // own state — 0 or EISCONN connected, EALREADY still pending,
+        // any other errno the failure the attempt met
+        let done = self
+            .connecting
+            .iter()
+            .position(|(id, ..)| *id == conn)
+            .map(|at| raw_sock::connect_done(&self.connecting[at].1, &self.connecting[at].2));
         match done {
-            Ok(true) => NetAttempt::Park,
-            Ok(false) => {
-                let (conn, fd, _) = self.connecting.remove(at);
+            // still pending: a spurious wake, the wait standing
+            Some(Ok(true)) => ConnectWake::Pending {
+                watch: crate::reactor::Direction::Write,
+            },
+            Some(Ok(false)) => {
+                let at = self
+                    .connecting
+                    .iter()
+                    .position(|(id, ..)| *id == conn)
+                    .expect("the row the probe just read");
+                let (row, fd, _) = self.connecting.remove(at);
                 let stream = fd_into_stream(fd);
-                self.adopt(conn, stream);
-                NetAttempt::Done(Ok(conn))
+                self.adopt(row, stream);
+                ConnectWake::Done(Ok(row))
             },
-            Err(err) => {
-                self.connecting.remove(at);
-                NetAttempt::Done(Err(err))
+            Some(Err(err)) => {
+                self.connecting.retain(|(id, ..)| *id != conn);
+                ConnectWake::Done(Err(err))
             },
+            None => ConnectWake::Done(Err(unknown(conn))),
         }
     }
 
@@ -725,25 +850,36 @@ impl Connections {
         self.streams.push((conn, stream));
     }
 
-    /// Drops one pending connect's row, the raw fd closing with it —
-    /// the parked-IO cancellation's cleanup, total over an unknown id
-    /// (the wait's every other end door rides the same release).
+    /// Drops one pending connect's row (either stage — the resolving
+    /// job's cell, the raw fd closing with the connecting one), the
+    /// parked-IO cancellation's cleanup, total over an unknown id
+    /// (the wait's every other end door rides the same release). The
+    /// cell's Arc keeps the eventfd open until the helper's own post
+    /// lands, so a canceled row's late posting writes a live fd.
     pub(crate) fn cancel_connect(&mut self, conn: i64) {
         #[cfg(target_os = "linux")]
-        self.connecting.retain(|(id, ..)| *id != conn);
+        {
+            self.connecting.retain(|(id, ..)| *id != conn);
+            self.resolving.retain(|(id, _)| *id != conn);
+        }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = conn;
         }
     }
 
-    /// The OS-level handle of one pending connect's raw socket, the
-    /// park's registration key; `None` for an unknown row (and on the
-    /// hosts that keep the blocking twin — no row ever stands there).
+    /// The OS-level handle of one pending connect's current stage, the
+    /// park's registration key: the resolving row's eventfd, the
+    /// connecting row's raw socket. `None` for an unknown row (and on
+    /// the hosts that keep the blocking twin — no row ever stands
+    /// there).
     pub(crate) fn raw_connect_handle(&mut self, conn: i64) -> Option<crate::reactor::IoHandle> {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd as _;
+            if let Some((_, cell)) = self.resolving.iter().find(|(id, _)| *id == conn) {
+                return cell.handle();
+            }
             let fd = self
                 .connecting
                 .iter()
@@ -758,6 +894,48 @@ impl Connections {
             let _ = conn;
             None
         }
+    }
+
+    /// The interest direction one pending connect row's current stage
+    /// watches (the park's initial registration, item 79): the
+    /// resolve stage's eventfd readability, the connect stage's raw
+    /// writability. An unknown row answers the connect's own — the
+    /// rows only stand under the linux driver, where the connect
+    /// stage is the machine a row cannot be past.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn connect_interest(&mut self, conn: i64) -> crate::reactor::Direction {
+        if self.resolving.iter().any(|(id, _)| *id == conn) {
+            crate::reactor::Direction::Read
+        } else {
+            crate::reactor::Direction::Write
+        }
+    }
+
+    /// The interest direction one parked plain exchange's current
+    /// stage watches: its transport row's own ([`Connections::connect_interest`],
+    /// the machine's step 0 the same resolve stage).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fetch_interest(&mut self, fetch: i64) -> crate::reactor::Direction {
+        self.fetches
+            .iter()
+            .find(|(id, _)| *id == fetch)
+            .map(|(_, machine)| machine.conn)
+            .map_or(crate::reactor::Direction::Write, |conn| {
+                self.connect_interest(conn)
+            })
+    }
+
+    /// The interest direction one parked TLS exchange's current stage
+    /// watches: its transport row's own, the plain machine's.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tls_fetch_interest(&mut self, fetch: i64) -> crate::reactor::Direction {
+        self.tls_fetches
+            .iter()
+            .find(|(id, _)| *id == fetch)
+            .map(|(_, machine)| machine.conn)
+            .map_or(crate::reactor::Direction::Write, |conn| {
+                self.connect_interest(conn)
+            })
     }
 
     /// Starts one parked plain-http exchange: the staged connect plus
@@ -805,14 +983,12 @@ impl Connections {
             let (_, mut machine) = self.fetches.remove(at);
             if !machine.connected {
                 match self.connect_wake(machine.conn) {
-                    NetAttempt::Park => {
+                    ConnectWake::Pending { watch } => {
                         self.fetches.push((fetch, machine));
-                        return FetchWake::Pending {
-                            watch: crate::reactor::Direction::Write,
-                        };
+                        return FetchWake::Pending { watch };
                     },
-                    NetAttempt::Done(Err(err)) => return FetchWake::Done(Err(err)),
-                    NetAttempt::Done(Ok(conn)) => {
+                    ConnectWake::Done(Err(err)) => return FetchWake::Done(Err(err)),
+                    ConnectWake::Done(Ok(conn)) => {
                         machine.conn = conn;
                         machine.connected = true;
                     },
@@ -2187,15 +2363,15 @@ mod tests {
                 let mut answered = None;
                 for _ in 0..500 {
                     match conns.connect_wake(conn) {
-                        NetAttempt::Park => std::thread::sleep(Duration::from_millis(1)),
-                        wake @ NetAttempt::Done(_) => {
+                        ConnectWake::Pending { .. } => std::thread::sleep(Duration::from_millis(1)),
+                        wake @ ConnectWake::Done(_) => {
                             answered = Some(wake);
                             break;
                         },
                     }
                 }
                 match answered.expect("the loopback connect completes") {
-                    NetAttempt::Done(Ok(done)) => {
+                    ConnectWake::Done(Ok(done)) => {
                         assert_eq!(done, conn, "the wake registers under the row's id");
                         conn
                     },
@@ -2231,12 +2407,12 @@ mod tests {
             NetConnectStart::Pending(row) => {
                 for _ in 0..500 {
                     match conns.connect_wake(row) {
-                        NetAttempt::Park => std::thread::sleep(Duration::from_millis(1)),
-                        NetAttempt::Done(Err(err)) => {
+                        ConnectWake::Pending { .. } => std::thread::sleep(Duration::from_millis(1)),
+                        ConnectWake::Done(Err(err)) => {
                             refused = Some(err);
                             break;
                         },
-                        NetAttempt::Done(Ok(conn)) => {
+                        ConnectWake::Done(Ok(conn)) => {
                             // a parallel test re-bound the port: not a
                             // refused probe, the live-listener leg above
                             // already covered that door
@@ -2251,6 +2427,168 @@ mod tests {
         if let Some(err) = refused {
             assert_eq!(NetClass::of(&err), NetClass::Refused, "the class: {err}");
         }
+    }
+
+    /// The parked DNS twin's machine (item 79, ruled 2026-11-24): a
+    /// name answers the pre-minted pending row at once — the drive
+    /// thread never blocks in the resolution — the eventfd the row's
+    /// interest and its readability the stage's direction; the wake
+    /// takes the helper's answer, starts the connect stage over the
+    /// resolved addresses, and registers under the very id the parked
+    /// caller saw. An IP literal keeps the inline path: no helper
+    /// thread ever starts for it. The retry loops are the test's own
+    /// poll, the reactor's discipline.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_resolving_connect_parks_on_the_helper_and_wakes_through_it() {
+        let mut conns = Connections::default();
+        conns.enable_parking();
+        // a dual-stack loopback listener: "localhost" resolves to either
+        // loopback family (in the resolver's own order), and both reach
+        // the same bound socket, so whichever address the machine tries
+        // first connects
+        let listener = TcpListener::bind(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)))
+            .expect("the dual-stack loopback bind");
+        let addr = listener.local_addr().expect("local address");
+        let port = addr.port();
+        // the literal keeps the inline path: the machine starts at its
+        // connect stage, no resolver row, no helper thread (either door
+        // of the landed machine's own — a loopback connect connects at
+        // once or stands in progress)
+        let literal = match conns.start_connect("127.0.0.1", port) {
+            NetConnectStart::Done(Ok(conn)) => conn,
+            NetConnectStart::Pending(row) => {
+                let mut registered = None;
+                for _ in 0..500 {
+                    match conns.connect_wake(row) {
+                        ConnectWake::Pending { .. } => std::thread::sleep(Duration::from_millis(1)),
+                        ConnectWake::Done(Ok(conn)) => {
+                            registered = Some(conn);
+                            break;
+                        },
+                        ConnectWake::Done(Err(err)) => panic!("a live listener's literal: {err}"),
+                    }
+                }
+                registered.expect("the loopback literal connect completes")
+            },
+            other @ NetConnectStart::Done(_) => panic!("a literal connect: {other:?}"),
+        };
+        assert!(
+            conns.resolver.is_none(),
+            "the inline literal path starts no helper thread"
+        );
+        conns.close(literal);
+        // the name parks at its resolve stage: the row stands before
+        // any answer, the eventfd the interest the wake reads
+        let conn = match conns.start_connect("localhost", port) {
+            NetConnectStart::Pending(conn) => conn,
+            other @ NetConnectStart::Done(_) => panic!("a resolving name parks: {other:?}"),
+        };
+        assert!(conns.resolver.is_some(), "the helper thread stands");
+        assert_eq!(
+            conns.connect_interest(conn),
+            crate::reactor::Direction::Read,
+            "the resolve stage watches the eventfd's readability"
+        );
+        assert!(
+            conns.raw_connect_handle(conn).is_some(),
+            "the posted eventfd is the registration key"
+        );
+        let mut registered = None;
+        for _ in 0..1000 {
+            match conns.connect_wake(conn) {
+                ConnectWake::Pending { .. } => std::thread::sleep(Duration::from_millis(1)),
+                ConnectWake::Done(Ok(done)) => {
+                    registered = Some(done);
+                    break;
+                },
+                ConnectWake::Done(Err(err)) => panic!("localhost resolves: {err}"),
+            }
+        }
+        assert_eq!(registered.expect("the resolved connect lands"), conn);
+        // the registered handle carries data: the accepted peer reads
+        // what the machine's connection wrote
+        let mut pending = b"ping".to_vec();
+        match conns.try_send(conn, &mut pending) {
+            NetAttempt::Done(Ok(())) => {},
+            other => panic!("the fresh loopback buffer takes the ping: {other:?}"),
+        }
+        // the literal's already closed connection sits first in the
+        // backlog, so the accepts drain to the live one
+        // deterministically
+        let mut got = [0; 4];
+        let peer = loop {
+            let (mut sock, _) = listener.accept().expect("the peer accepts");
+            // the closed literal's stale backlog entry answers EOF
+            // and drains; the live connection reads the ping
+            if sock.read_exact(&mut got).is_ok_and(|()| &got == b"ping") {
+                break sock;
+            }
+        };
+        assert_eq!(&got, b"ping");
+        drop(peer);
+        // a canceled resolve row releases clean: the helper's late
+        // posting lands on a dropped row and a live fd, the interest
+        // the cancel already deregistered elsewhere
+        let canceled = match conns.start_connect("localhost", port) {
+            NetConnectStart::Pending(conn) => conn,
+            other @ NetConnectStart::Done(_) => {
+                panic!("a second resolving name parks: {other:?}")
+            },
+        };
+        conns.cancel_connect(canceled);
+        assert!(
+            conns.raw_connect_handle(canceled).is_none(),
+            "the canceled row is gone"
+        );
+        match conns.connect_wake(canceled) {
+            ConnectWake::Done(Err(err)) => {
+                assert_eq!(
+                    err.to_string(),
+                    format!("unknown connection {canceled}"),
+                    "a canceled row answers the unknown-handle floor"
+                );
+            },
+            other => panic!("the canceled row answered: {other:?}"),
+        }
+        // the drop joins the helper: a leaked worker would hang it
+        drop(conns);
+    }
+
+    /// A failed resolution answers its own error (NXDOMAIN, no
+    /// addresses): the helper posts the lookup's failure, the wake
+    /// answering the `net_other` floor the class mapping reads. The
+    /// bounded poll answers an environment whose lookup stalls past
+    /// the bound loudly, never hanging the drive.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_failed_resolution_answers_its_own_error() {
+        let mut conns = Connections::default();
+        conns.enable_parking();
+        let conn = match conns.start_connect("example.invalid", 80) {
+            NetConnectStart::Pending(conn) => conn,
+            other @ NetConnectStart::Done(_) => panic!("an unresolvable name parks: {other:?}"),
+        };
+        let mut failed = None;
+        for _ in 0..1000 {
+            match conns.connect_wake(conn) {
+                ConnectWake::Pending { .. } => std::thread::sleep(Duration::from_millis(10)),
+                ConnectWake::Done(Err(err)) => {
+                    failed = Some(err);
+                    break;
+                },
+                ConnectWake::Done(Ok(conn)) => {
+                    panic!("example.invalid resolves nowhere: {conn}")
+                },
+            }
+        }
+        let err = failed.expect("the lookup fails");
+        assert_eq!(NetClass::of(&err), NetClass::Other, "the class: {err}");
+        assert_eq!(
+            conns.connect_interest(conn),
+            crate::reactor::Direction::Write,
+            "the failed row is gone, the connect's own direction the default"
+        );
     }
 
     /// The local-address op: a port-0 bind reports its bound address

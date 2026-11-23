@@ -5521,8 +5521,22 @@ impl Vm {
             WorldWait::ProcWait { pid, .. } => self.out.procs().raw_exit_handle(*pid),
             _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
         };
+        // the staged machines' resolve stage (item 79's DNS twin): a
+        // connect or fetch row may stand at its resolve step, whose
+        // interest is the posted eventfd's readability rather than
+        // the connect's writability — the tables answer the stage's
+        // own direction
+        #[cfg(target_os = "linux")]
+        let direction = match &wait {
+            WorldWait::Connect { conn, .. } => Some(self.out.net().connect_interest(*conn)),
+            WorldWait::Fetch { fetch, .. } => Some(self.out.net().fetch_interest(*fetch)),
+            WorldWait::TlsFetch { fetch, .. } => Some(self.out.net().tls_fetch_interest(*fetch)),
+            _ => wait.direction(),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let direction = wait.direction();
         let token = self.sched.mint();
-        if let (Some(handle), Some(direction)) = (handle, wait.direction()) {
+        if let (Some(handle), Some(direction)) = (handle, direction) {
             let registered = match self.reactor.as_mut() {
                 Some(installed) => installed.driver().register(handle, direction, token),
                 None => Err(crate::reactor::ReactorError(
@@ -5609,14 +5623,16 @@ impl Vm {
     }
 
     /// Re-arms one staged machine's pending step (a fetch exchange,
-    /// plain or tls, or the tls accept machine): the bound resets to
-    /// the step-grained deadline the blocking twin's socket timeouts
-    /// keep, and the standing interest re-aims at the direction the
-    /// machine named. A machine whose registration key moved under
-    /// the step (the tls accept's listener fd becoming the accepted
-    /// stream's) swaps the stored handle and deregisters the stale
-    /// key — a left level-triggered interest would wake every poll
-    /// with a dead token and busy-loop the executor.
+    /// plain or tls, the tls accept machine, or a connect's resolve
+    /// step): the bound resets to the step-grained deadline the
+    /// blocking twin's socket timeouts keep, and the standing interest
+    /// re-aims at the direction the machine named. A machine whose
+    /// registration key moved under the step (the tls accept's
+    /// listener fd becoming the accepted stream's, or a resolve
+    /// stage's eventfd becoming the connect stage's raw fd) swaps
+    /// the stored handle and deregisters the stale key — a left
+    /// level-triggered interest would wake every poll with a dead
+    /// token and busy-loop the executor.
     fn rearm_step(
         &mut self,
         token: u64,
@@ -5632,6 +5648,9 @@ impl Vm {
                 deadline: armed, ..
             }
             | WorldWait::TlsAccept {
+                deadline: armed, ..
+            }
+            | WorldWait::Connect {
                 deadline: armed, ..
             } = &mut live.wait
         {
@@ -5849,26 +5868,34 @@ impl Vm {
                         crate::net::NetAttempt::Park => return,
                     }
                 },
-                // the raw socket's completion: the writable (or errored)
-                // wake probes SO_ERROR — connected registering the stream
-                // under the pending row's id, the errno it holds the
-                // failure — still-in-progress a spurious wake the wait
-                // stands over
+                // the staged connect machine's wake (the 2026-11-23
+                // raw-socket ruling, item 79's resolve stage the first
+                // step): the readable eventfd takes the resolver
+                // helper's answer and starts the connect over the
+                // resolved addresses, the writable (or errored) wake
+                // probing the attempt — connected registering the
+                // stream under the pending row's id, the errno it
+                // holds the failure; a stage left standing re-aims the
+                // interest at its own direction and registration key
                 WorldWait::Connect { conn: id, .. } => {
                     let Some(event) = ready.filter(|event| event.write || event.read) else {
                         return;
                     };
                     let _ = event;
                     match self.out.net().connect_wake(id) {
-                        crate::net::NetAttempt::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
-                        crate::net::NetAttempt::Done(Err(err)) => {
+                        crate::net::ConnectWake::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
+                        crate::net::ConnectWake::Done(Err(err)) => {
                             let class = crate::net::NetClass::of(&err);
                             let detail = err.to_string();
                             self.complete_in_store(fiber, |heaps| {
                                 crate::net::net_err(heaps, class, op, &target, &detail)
                             })
                         },
-                        crate::net::NetAttempt::Park => return,
+                        crate::net::ConnectWake::Pending { watch } => {
+                            let handle = self.out.net().raw_connect_handle(id);
+                            self.rearm_step(token, handle, watch);
+                            return;
+                        },
                     }
                 },
                 // the plain exchange's machine: the OS probes gate the
@@ -5889,7 +5916,11 @@ impl Vm {
                             })
                         },
                         crate::net::FetchWake::Pending { watch } => {
-                            self.rearm_step(token, entry.handle, watch);
+                            // the machine's registration key moves with
+                            // its stage (the resolve stage's eventfd
+                            // becoming the connect stage's raw fd)
+                            let handle = self.out.net().raw_fetch_handle(fetch);
+                            self.rearm_step(token, handle, watch);
                             return;
                         },
                     }
@@ -5912,7 +5943,8 @@ impl Vm {
                             })
                         },
                         crate::net::FetchWake::Pending { watch } => {
-                            self.rearm_step(token, entry.handle, watch);
+                            let handle = self.out.net().raw_tls_fetch_handle(fetch);
+                            self.rearm_step(token, handle, watch);
                             return;
                         },
                     }

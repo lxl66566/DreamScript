@@ -22,12 +22,17 @@
 //! - the eager start: a spawned-but-unentered nursery child runs while its joiner parks on a world
 //!   op — the in-language nursery block's child feeds the parked recv's wake, its own send the
 //!   signal the joiner's peer writes behind, the sockets ordering the handshake with no clock.
+//! - the parked DNS twin (item 79, the 2026-11-24 ruling): a resolving connect parks its fiber on
+//!   the resolver helper's posted eventfd — a sibling runs across the resolution, socket-ordered
+//!   behind the resolving child's own transport — the failed lookup answers its own net_err, the
+//!   deadline the same bound every parked wait keeps, and a resolving fetch rides the same staged
+//!   machine. The shapes early-return on a host with no reactor driver.
 //! - no reactor installed: the identical program keeps the blocking semantics (the embedder's
 //!   platform choice, never a language fact).
 
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{Ipv6Addr, SocketAddr, TcpListener},
     thread,
     time::{Duration, Instant},
 };
@@ -105,7 +110,7 @@ fn def_pool(
 
 /// A local listener answering its address and the accepted peer's writer
 /// half: the test's transport.
-fn listener() -> (TcpListener, std::net::SocketAddr) {
+fn listener() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
     let addr = listener.local_addr().expect("local address");
     (listener, addr)
@@ -248,11 +253,7 @@ fn fetch_child_def() -> FunctionDef {
 
 /// One scheduled connect over a fresh accepted peer, answering the
 /// handle and the peer.
-fn connect(
-    vm: &mut Vm,
-    listener: &TcpListener,
-    addr: &std::net::SocketAddr,
-) -> (i64, std::net::TcpStream) {
+fn connect(vm: &mut Vm, listener: &TcpListener, addr: &SocketAddr) -> (i64, std::net::TcpStream) {
     // the listener's backlog holds the connection: the VM connects
     // first, the peer accepts after (an accept before the connect
     // would deadlock the one thread that drives the VM)
@@ -266,6 +267,61 @@ fn connect(
         other => panic!("connect answered no handle: {other:?}"),
     };
     (conn, accept(listener))
+}
+
+/// Whether this host parks (its platform ships a reactor driver —
+/// the parked DNS twin is the linux driver's own, so its shapes
+/// early-return on a host without one, the suite's skip pattern).
+fn parks() -> bool {
+    ds_vm::reactor::platform_default().is_some()
+}
+
+/// A dual-stack loopback listener: "localhost" resolves to either
+/// loopback family in the resolver's own order, and both reach the
+/// one bound socket, so whichever address the staged connect tries
+/// first connects.
+fn dualstack_listener() -> (TcpListener, SocketAddr) {
+    let listener =
+        TcpListener::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))).expect("dual-stack bind");
+    let addr = listener.local_addr().expect("local address");
+    (listener, addr)
+}
+
+/// `(host: string, port: int) -> word`: resolve the host name,
+/// connect over the resolution, and send the go bytes — the parked
+/// resolve's own probe (the staged machine's step 0 through its
+/// send), answering the send's tag word.
+fn resolving_child_def() -> FunctionDef {
+    def_pool(
+        "resolving_child",
+        &[Ref, I64, Raw, Raw, Raw, Raw],
+        2,
+        2,
+        vec![
+            platform(OP_NET_CONNECT), // k0
+            platform(OP_NET_SEND),    // k1
+            Const::Str("a".into()),   // k2
+        ],
+        &[
+            Uop::Funcf { frame_slots: 6 },
+            Uop::Mov { dst: 4, src: 0 },
+            Uop::Mov { dst: 5, src: 1 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            // the connect's span overlays the arg area (the tag at 4,
+            // the handle at 5); the send stages the handle beside its
+            // data
+            Uop::Mov { dst: 4, src: 5 },
+            Uop::Kstr { dst: 5, kidx: k(2) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Ret { src: 4 },
+        ],
+    )
 }
 
 /// The payload word of one answer, read as its string.
@@ -716,4 +772,155 @@ fn an_eagerly_started_child_feeds_the_parked_joiners_wake() {
         .expect("the eagerly started child fed the parked recv");
     assert_eq!(answer_string(&vm, &answer), "late data");
     feeder.join().expect("feeder lands");
+}
+
+/// The parked DNS twin's overlap (item 79, ruled 2026-11-24): a
+/// resolving connect parks the calling fiber — the drive never blocks
+/// in getaddrinfo — and the sibling runs across the resolution, its
+/// own recv parked until the resolving child's transport exists: the
+/// feeder thread accepts the resolved connect, reads the go bytes,
+/// and only then writes the sibling's wake. The sockets alone order
+/// the handshake — no clock, no external network.
+#[test]
+fn a_resolving_connect_parks_while_its_sibling_runs() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = dualstack_listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def(), resolving_child_def()]);
+    // the sibling's own transport, pre-connected and accepted so the
+    // listener's backlog carries only the resolving child's connect
+    let (conn_b, peer_b) = connect(&mut vm, &listener, &addr);
+    let feeder = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("the resolved connect accepts");
+        let mut go = [0; 1];
+        sock.read_exact(&mut go)
+            .expect("the resolving child's go lands");
+        assert_eq!(&go, b"a", "the connect behind the resolution carried data");
+        let mut peer_b = peer_b;
+        peer_b
+            .write_all(b"behind the resolve")
+            .expect("the sibling's wake writes");
+        peer_b.flush().expect("the wake flushes");
+    });
+    let host = vm.intern_str("localhost");
+    let nursery = vm.open_root_nursery();
+    let resolving = vm
+        .spawn_fiber_in(nursery, "io", "resolving_child", &[
+            host,
+            Value::I64(i64::from(addr.port())),
+        ])
+        .expect("the resolving child spawns");
+    let sibling = vm
+        .spawn_fiber_in(nursery, "io", "recv_child", &[Value::I64(conn_b)])
+        .expect("the sibling spawns");
+    assert_ne!(resolving, sibling);
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    match joined {
+        ds_vm::JoinOutcome::Joined(answers) => {
+            assert_eq!(answers.len(), 2, "both children landed");
+            assert!(
+                matches!(
+                    answers[0].as_slice().first(),
+                    Some(Value::Tag(ds_vm::native::PLATFORM_IO_OK))
+                ),
+                "the resolving child sent over its resolved connection: {:?}",
+                answers[0].as_slice()
+            );
+            let recv = answers[1].clone();
+            assert_eq!(
+                answer_string(&vm, &recv),
+                "behind the resolve",
+                "spawn order"
+            );
+        },
+        other @ ds_vm::JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
+    }
+    feeder.join().expect("feeder lands");
+}
+
+/// A failed resolution answers its own net_err (NXDOMAIN, no
+/// addresses): the parked resolve wakes through the helper's posted
+/// failure, the span naming its own op and target — the same span
+/// the blocking twin answers.
+#[test]
+fn a_failed_resolution_answers_its_own_net_err_span() {
+    if !parks() {
+        return;
+    }
+    let mut vm = scheduled_vm(vec![connect_def()]);
+    let host = vm.intern_str("example.invalid");
+    let answer = vm
+        .run("io", "connect", &[host, Value::I64(80)])
+        .expect("the failed lookup lands");
+    let text = answer_string(&vm, &answer);
+    assert!(
+        text.starts_with("net_connect example.invalid:80:"),
+        "the span names its op and target: {text}"
+    );
+}
+
+/// The parked resolve keeps the configured net-timeout bound: a
+/// deadline already due fires from the wheel before any helper post
+/// can land, answering the same timeout span the connect path
+/// answers — the bound is semantic, no clock assertion.
+#[test]
+fn a_parked_resolve_wakes_at_its_deadline_with_the_timeout_span() {
+    if !parks() {
+        return;
+    }
+    let mut vm = scheduled_vm(vec![connect_def()]);
+    vm.set_net_timeout(Duration::ZERO);
+    let host = vm.intern_str("localhost");
+    let answer = vm
+        .run("io", "connect", &[host, Value::I64(80)])
+        .expect("the deadline wake lands");
+    let text = answer_string(&vm, &answer);
+    assert!(text.contains("timed out"), "the timeout message: {text}");
+    assert!(
+        text.contains("net_connect localhost:80"),
+        "the span names its op and target: {text}"
+    );
+}
+
+/// A resolving fetch rides the same staged machine's step 0: the
+/// hostname in the URL resolves on the helper, the wake starts the
+/// connect, and the exchange answers the local server's body — the
+/// landed plain-fetch shape over a host name instead of a literal.
+#[test]
+fn a_resolving_fetch_answers_the_local_server() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = dualstack_listener();
+    // the local HTTP peer: one accept, the request read to its blank
+    // line, then the close-delimited response (the peer's own exit
+    // the close the machine reads)
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("the server accepts");
+        sock.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("timeout");
+        let mut seen = vec![0; 1024];
+        let mut got = 0;
+        while got < seen.len() {
+            match sock.read(&mut seen[got..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    got += n;
+                    if seen[..got].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                },
+            }
+        }
+        sock.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nhello resolving fetch")
+            .expect("the server writes");
+    });
+    let mut vm = scheduled_vm(vec![fetch_child_def()]);
+    let url = vm.intern_str(&format!("http://localhost:{}/hello", addr.port()));
+    let answer = vm
+        .run("io", "fetch_child", &[url])
+        .expect("the resolving fetch lands");
+    assert_eq!(answer_string(&vm, &answer), "hello resolving fetch");
+    server.join().expect("the server lands");
 }

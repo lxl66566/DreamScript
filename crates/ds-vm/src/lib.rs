@@ -132,6 +132,8 @@ pub mod proc;
 pub mod program;
 pub mod reactor;
 pub mod repl;
+#[cfg(target_os = "linux")]
+mod resolver;
 pub mod sched;
 mod tls;
 pub mod value;
