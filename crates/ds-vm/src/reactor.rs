@@ -22,6 +22,14 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IoHandle(pub u64);
 
+/// The reserved token of the host's shutdown interest (the
+/// 2026-11-24 signal ruling): a host registers its own shutdown door
+/// — Linux's signalfd — as one more reactor interest under this token,
+/// and the drive reads its wake as the shutdown event, never a wait.
+/// Minted wait tokens count up from zero, so the reservation can never
+/// collide.
+pub const SHUTDOWN_TOKEN: u64 = u64::MAX;
+
 /// The readiness direction one interest watches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {

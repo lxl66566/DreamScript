@@ -53,8 +53,11 @@ pub enum WorldWait {
     /// `net_accept(lid)`: the readable wake (a pending connection is
     /// readable) performs the accept and answers the accepted
     /// connection's handle, the stream registering into the connection
-    /// table like a connecting one.
-    Accept { listener: i64, deadline: Instant },
+    /// table like a connecting one. The wait carries no deadline: the
+    /// 2026-11-24 signal ruling makes the signal the quiet accept's
+    /// backstop, so the park stands until a connection arrives, the
+    /// nursery's cancel cut, or the host's shutdown.
+    Accept { listener: i64 },
     /// `net_connect(host, port)`: the staged machine's rows — the
     /// resolve stage first (item 79, ruled 2026-11-24: a name's
     /// resolution runs on the resolver helper thread, its posted
@@ -180,10 +183,11 @@ impl WorldWait {
     }
 
     /// An accept wait's constructor (the listener's own handle rides
-    /// in; the deadline the configured net timeout restated).
+    /// in; the park is unbounded — the signal round's backstop
+    /// ruling, every other op's deadline discipline unchanged).
     #[must_use]
-    pub fn accept(listener: i64, deadline: Instant) -> Self {
-        Self::Accept { listener, deadline }
+    pub fn accept(listener: i64) -> Self {
+        Self::Accept { listener }
     }
 
     /// A connect wait's constructor: the pending connect's row id, the
@@ -255,20 +259,22 @@ impl WorldWait {
         Self::ProcWait { pid, deadline }
     }
 
-    /// The wait's deadline.
+    /// The wait's deadline, `None` for the one wait the signal ruling
+    /// left unbounded (the quiet accept — the signal is its backstop)
+    /// and the park the wheel never arms.
     #[must_use]
-    pub fn deadline(&self) -> Instant {
+    pub fn deadline(&self) -> Option<Instant> {
         match self {
             Self::Recv { deadline, .. }
             | Self::Send { deadline, .. }
-            | Self::Accept { deadline, .. }
             | Self::Connect { deadline, .. }
             | Self::Fetch { deadline, .. }
             | Self::TlsFetch { deadline, .. }
             | Self::TlsAccept { deadline, .. }
             | Self::ProcRead { deadline, .. }
             | Self::ProcWait { deadline, .. }
-            | Self::Sleep { deadline } => *deadline,
+            | Self::Sleep { deadline } => Some(*deadline),
+            Self::Accept { .. } => None,
         }
     }
 
@@ -390,6 +396,11 @@ pub(crate) struct SchedState {
     /// The completed answers awaiting delivery at each woken fiber's
     /// resume point — the parked call site's overlay words.
     pub(crate) deliveries: HashMap<FiberId, NativeResult>,
+    /// The staged cancel-cuts: fibers whose wait the cancel discipline
+    /// deregistered (a raised flag, the host's shutdown) and whose
+    /// sentinel cut the next entry performs in place of a wake's
+    /// answer — the resume-shaped point a nursery cancel delivers at.
+    pub(crate) cancels: Vec<FiberId>,
 }
 
 impl SchedState {
@@ -419,6 +430,23 @@ impl SchedState {
     /// Queues a fiber ready (wake order).
     pub(crate) fn push_ready(&mut self, fiber: FiberId) {
         self.run_queue.push_back(fiber);
+    }
+
+    /// Stages one fiber's cancel-cut: the executor's pop takes the
+    /// entry and performs the cut instead of entering a delivery.
+    pub(crate) fn stage_cancel(&mut self, fiber: FiberId) {
+        if !self.cancels.contains(&fiber) {
+            self.cancels.push(fiber);
+        }
+    }
+
+    /// Takes one fiber's staged cancel, `false` when none stands.
+    pub(crate) fn take_cancel(&mut self, fiber: FiberId) -> bool {
+        let Some(at) = self.cancels.iter().position(|&queued| queued == fiber) else {
+            return false;
+        };
+        self.cancels.swap_remove(at);
+        true
     }
 
     /// Takes one fiber's queued entry: a drive that enters a woken
@@ -506,7 +534,7 @@ mod tests {
     fn the_proc_waits_name_their_pipe_and_exit_interests() {
         let at = Instant::now() + Duration::from_millis(5);
         let read = WorldWait::proc_read(3, ProcPipe::Out, 4096, at);
-        assert_eq!(read.deadline(), at);
+        assert_eq!(read.deadline(), Some(at));
         assert_eq!(read.conn(), Some(3));
         assert_eq!(read.direction(), Some(Direction::Read));
         assert_eq!(read.op_name(), "proc_read");
@@ -515,7 +543,7 @@ mod tests {
         let err = WorldWait::proc_read(3, ProcPipe::Err, 4096, at);
         assert_eq!(err.op_name(), "proc_read_err");
         let wait = WorldWait::proc_wait(3, at);
-        assert_eq!(wait.deadline(), at);
+        assert_eq!(wait.deadline(), Some(at));
         assert_eq!(wait.conn(), Some(3));
         assert_eq!(wait.direction(), Some(Direction::Read));
         assert_eq!(wait.op_name(), "proc_wait");
@@ -530,10 +558,29 @@ mod tests {
     fn the_sleep_wait_names_no_io_interest() {
         let at = Instant::now() + Duration::from_millis(5);
         let wait = WorldWait::sleep(at);
-        assert_eq!(wait.deadline(), at);
+        assert_eq!(wait.deadline(), Some(at));
         assert_eq!(wait.conn(), None, "no deregistration target");
         assert_eq!(wait.direction(), None, "no readiness direction");
         assert_eq!(wait.op_name(), "time_sleep");
         assert_eq!(wait, WorldWait::Sleep { deadline: at });
+    }
+
+    /// The quiet accept's shape: the listener its interest watches, no
+    /// deadline the wheel ever arms (the signal the backstop), and the
+    /// staged cancel cut the flag discipline queues.
+    #[test]
+    fn the_accept_wait_parks_unbounded_and_the_cut_stages() {
+        let wait = WorldWait::accept(5);
+        assert_eq!(wait.deadline(), None, "the signal is the backstop");
+        assert_eq!(wait.conn(), Some(5));
+        assert_eq!(wait.direction(), Some(Direction::Read));
+        assert_eq!(wait.op_name(), "net_accept");
+        let mut sched = SchedState::default();
+        let fiber = FiberId(3);
+        assert!(!sched.take_cancel(fiber), "nothing staged");
+        sched.stage_cancel(fiber);
+        sched.stage_cancel(fiber);
+        assert!(sched.take_cancel(fiber), "the cut stages once");
+        assert!(!sched.take_cancel(fiber), "the staged cut consumed");
     }
 }

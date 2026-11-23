@@ -27,7 +27,7 @@ use ds_vm::{
     platform::Platform,
 };
 
-use crate::{package, run_cache::RunCache, source};
+use crate::{package, run_cache::RunCache, shutdown::ShutdownWatch, source};
 
 /// The CLI is the platform provider (H5, E1): every run installs the
 /// default `std` platform handler (console, fsys, net, time) into its
@@ -73,6 +73,14 @@ pub struct RunArgs {
 /// 2026-11-21): a clean completion exits 0, a trap or an unhandled
 /// failure 1, and an `exit(code)` call answers its deliberate status.
 pub fn run(args: &RunArgs) -> Result<ExitCode> {
+    // The host's shutdown door (the 2026-11-24 signal ruling), armed
+    // before any other thread can spawn: the signals block on this
+    // thread first — mask inheritance carries the block to every
+    // thread the run later spawns (the fork-join workers, the
+    // resolver helper), so no thread can receive the default
+    // disposition — and the drive observes the event through the
+    // door the platform's shape arms below.
+    let signals = ShutdownWatch::install()?;
     let mut prepared = match source_or_module(&args.file)? {
         FileKind::Dsmod => read_dsmod(args)?,
         FileKind::Source => run_source(args)?,
@@ -91,7 +99,11 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     if let Some(reactor) = ds_vm::reactor::platform_default() {
         prepared.vm.install_reactor(reactor);
     }
-    resolve_and_run(&mut prepared, &args.entry)
+    // the platform's own shutdown door: Linux's signalfd registers as
+    // the reactor's own interest, every other host's helper flips the
+    // blocking drive's stop flag
+    signals.arm(&mut prepared.vm)?;
+    resolve_and_run(&mut prepared, &args.entry, &signals)
 }
 
 /// The extension as UTF-8, when it is.
@@ -369,6 +381,27 @@ fn compile_source(compiled: source::CompiledSource) -> Result<PreparedRun> {
     })
 }
 
+/// Resolves the entry, runs it, and answers the run's outcome — with
+/// the host's shutdown event observed (the 2026-11-24 signal ruling),
+/// the exit code the host's own per the die split: Unix answers
+/// 128+signum, whatever the drive's last outcome was, the event
+/// having cut it or raced it.
+fn resolve_and_run(
+    prepared: &mut PreparedRun,
+    entry: &str,
+    signals: &ShutdownWatch,
+) -> Result<ExitCode> {
+    let outcome = resolve_and_drive(prepared, entry);
+    // the host's shutdown event (the 2026-11-24 signal ruling): the
+    // exit code is the host's own per the die split — Unix answers
+    // 128+signum — whatever the drive's last outcome was, the event
+    // having cut it or raced it
+    if let Some(code) = signals.exit_code() {
+        return Ok(code);
+    }
+    outcome
+}
+
 /// Resolves the entry, runs it, and reports the result: a platform
 /// failure tag (io, net, parse) is a failed run — the lowered
 /// unhandled-failure handler already printed the message — the `none`
@@ -380,9 +413,11 @@ fn compile_source(compiled: source::CompiledSource) -> Result<PreparedRun> {
 /// interrupted root, so the kept frames' deinit hooks fire exactly once
 /// and their claims drain before the run exits nonzero. The host owns
 /// the exit code (the CLI process surface): a clean completion exits 0,
-/// a trap or an unhandled failure 1, and an `exit(code)` call ends the
-/// run with its deliberate status, no report printed.
-fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
+/// a trap or an unhandled failure 1, an `exit(code)` call ends the run
+/// with its deliberate status, no report printed, and the shutdown
+/// trap carries no report at all — the host's door observed the event
+/// and owns the status.
+fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
     if prepared
         .vm
         .registry()
@@ -430,6 +465,15 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> 
             // kept frames' deinit hooks fire and their claims drain
             prepared.vm.release_interrupted(FIBER_ROOT);
             Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)))
+        },
+        Err(Trap::Shutdown) => {
+            // the host's shutdown cut the drive: every parked fiber died
+            // with the sentinel and its deinit hooks already ran, so no
+            // report stands and the interrupted-root release is the
+            // idempotent no-op — the status is the host's own (the
+            // resolve_and_run override answers it), never the engine's
+            prepared.vm.release_interrupted(FIBER_ROOT);
+            Ok(ExitCode::FAILURE)
         },
         Err(trap) => {
             let report = trap_error(&prepared.vm, &trap);
@@ -781,6 +825,9 @@ fn describe_trap(trap: &Trap) -> String {
             .to_owned(),
         Trap::OutOfFuel => "a budgeted drive ran past its step limit (the comptime fence's cap; a \
                             run drive carries none)"
+            .to_owned(),
+        Trap::Shutdown => "the host's shutdown event cut the drive (the engine decides nothing; \
+                           the host owns the status)"
             .to_owned(),
         Trap::ChanCapacity { cap } => {
             format!("chan_new refuses a bound below one: {cap}")

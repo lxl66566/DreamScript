@@ -408,6 +408,15 @@ pub enum Trap {
     /// terminates while its stack stays flat (a loop forgetting its
     /// decrement). The unbounded drives never raise it.
     OutOfFuel,
+    /// The host's shutdown event cut the drive (the 2026-11-24 signal
+    /// ruling): the host's own registered interest — the CLI's
+    /// signalfd — woke the reactor, every parked fiber answered the
+    /// cancel sentinel at its resume-shaped point with its deinit
+    /// hooks fired, and the drive hands control back. The engine
+    /// decides nothing here: no message, no exit code — the host that
+    /// installed the interest owns the status it answers, per the die
+    /// split.
+    Shutdown,
 }
 
 /// One entry of the call-info stack: the frame base plus the module
@@ -1095,6 +1104,10 @@ pub(crate) enum ExecutorStep {
     /// The host fiber's own answer crossed (the program's or the
     /// resumed fiber's) — the drive ends with it.
     HostAnswer(FrameAnswer),
+    /// The host's shutdown event cut every parked fiber (the
+    /// 2026-11-24 signal ruling): nothing live remains, the drive
+    /// ends, and the host owns the outcome.
+    Shutdown,
 }
 
 /// The eager pass's outcome over one started child.
@@ -2597,6 +2610,7 @@ pub struct BacktraceFrame {
 /// ([`crate::native::BUILTIN_MODULE`]) into the registry at construction;
 /// the world surface is an installed platform handler's to serve
 /// ([`crate::platform`]) — a bare VM carries no world surface.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct Vm {
     pub(crate) registry: ModuleRegistry,
@@ -2710,6 +2724,12 @@ pub struct Vm {
     /// The IO scheduler's tables: the wait register, the deadline
     /// wheel, the FIFO run queue, and the wake deliveries.
     sched: SchedState,
+    /// Whether the host's shutdown interest has woken (the 2026-11-24
+    /// signal ruling): the drive raises every open nursery's flag with
+    /// it, cuts parked fibers at their resume-shaped points, and
+    /// answers [`Trap::Shutdown`] — the host that registered the
+    /// interest owns the exit code, never the engine.
+    shutdown: bool,
 }
 
 /// The caller identity a call-site resolution carries: the running
@@ -2847,6 +2867,7 @@ impl Vm {
             fork_pool_drives: 0,
             reactor: None,
             sched: SchedState::default(),
+            shutdown: false,
         }
     }
 
@@ -2890,6 +2911,55 @@ impl Vm {
         // installs
         self.out.enable_proc_parking();
         self.reactor = Some(InstalledReactor(reactor));
+    }
+
+    /// Registers the host's shutdown door as the reactor's own interest
+    /// (the 2026-11-24 signal ruling): `handle` is a readable fd the host
+    /// owns — Linux's signalfd — and its wake under the reserved token is
+    /// the shutdown event, never a wait. The engine decides nothing about
+    /// it: the drive raises every open nursery's cancel flag, cuts
+    /// parked fibers with the sentinel at their resume-shaped points
+    /// (their deinit hooks firing), and answers [`Trap::Shutdown`] — the
+    /// host that installed the interest owns the exit code.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::reactor::ReactorError`] when no reactor stands (the
+    /// interest needs one) or the driver refuses the registration.
+    pub fn watch_shutdown(
+        &mut self,
+        handle: crate::reactor::IoHandle,
+    ) -> Result<(), crate::reactor::ReactorError> {
+        let Some(installed) = self.reactor.as_mut() else {
+            return Err(crate::reactor::ReactorError(
+                "no reactor installed".to_owned(),
+            ));
+        };
+        installed.driver().register(
+            handle,
+            crate::reactor::Direction::Read,
+            crate::reactor::SHUTDOWN_TOKEN,
+        )
+    }
+
+    /// Hands the blocking drive its stop flag (the 2026-11-24 signal
+    /// ruling's non-reactor twin): a host without a reactor keeps the
+    /// blocking natives, so its own signal helper — a sigwait thread, a
+    /// console-control handler — flips this flag and the bounded
+    /// blocking poll rows observe it between rounds, the drive answering
+    /// [`Trap::Shutdown`] exactly the reactor path's outcome. The host
+    /// keeps its clone; the engine decides nothing.
+    pub fn set_shutdown_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.out.set_shutdown_flag(flag);
+    }
+
+    /// Whether the drive observed the host's shutdown event (the
+    /// registered interest's wake, or the blocking twin's stop flag
+    /// answering [`Trap::Shutdown`]): the host reads it after its run
+    /// to own the exit code whatever the drive's last outcome was.
+    #[must_use]
+    pub fn shutdown_observed(&self) -> bool {
+        self.shutdown
     }
 
     /// Interns a string into the root fiber's heap and hands back its
@@ -3855,6 +3925,10 @@ impl Vm {
                                 self.host_delivery(value);
                             }
                             break Ok(DriveOutcome::Died(answer));
+                        },
+                        Ok(ExecutorStep::Shutdown) => {
+                            self.host_release();
+                            break Err((Trap::Shutdown, pc));
                         },
                         Err(trap) => break Err((trap, pc)),
                     }
@@ -5249,13 +5323,17 @@ impl Vm {
         }
     }
 
-    /// Whether the running fiber's nursery has its cancel flag raised
-    /// [E5]: the preemption check. Only nurseries with live children are
-    /// ever cancelled, so a stale id cannot fire here.
+    /// Whether the running fiber observes a cancel discipline [E5]:
+    /// its own nursery's raised flag at a taken backward branch, or the
+    /// host's shutdown standing (the 2026-11-24 signal ruling) — the
+    /// cut is the same sentinel death either way. Only nurseries with
+    /// live children are ever cancelled, so a stale id cannot fire
+    /// here.
     fn cancel_requested(&self) -> bool {
-        self.pool[self.current.index()]
-            .nursery
-            .is_some_and(|n| self.nurseries[n.index()].cancelled)
+        self.shutdown
+            || self.pool[self.current.index()]
+                .nursery
+                .is_some_and(|n| self.nurseries[n.index()].cancelled)
     }
 
     /// Resolves and checks a run/spawn entry: unknown function, arity,
@@ -5554,7 +5632,12 @@ impl Vm {
                 return;
             }
         }
-        self.sched.arm(deadline, token);
+        // the unbounded wait (the quiet accept — the signal its
+        // backstop) arms no wheel entry: nothing but a connection, a
+        // cancel cut, or the shutdown ends it
+        if let Some(deadline) = deadline {
+            self.sched.arm(deadline, token);
+        }
         self.sched.waits.insert(token, WaitEntry {
             fiber,
             wait,
@@ -5730,7 +5813,7 @@ impl Vm {
         }
         let target = entry.wait.target();
         let op = entry.wait.op_name();
-        if entry.wait.deadline() <= Instant::now() {
+        if entry.wait.deadline().is_some_and(|at| at <= Instant::now()) {
             let result = self.wait_error_span(fiber, &entry.wait, true, "");
             self.finish_wait(token, result);
             return;
@@ -5993,6 +6076,12 @@ impl Vm {
     fn wait_world(&mut self) -> Result<(), Trap> {
         let mut events = Vec::new();
         loop {
+            // the shutdown stands: nothing here may block again — the
+            // callers' next pass cuts every parked fiber and answers
+            // the host
+            if self.shutdown {
+                return Ok(());
+            }
             self.host_release();
             let now = Instant::now();
             for token in self.sched.pop_expired(now) {
@@ -6038,6 +6127,14 @@ impl Vm {
                 Ok(()) => {
                     let drained = std::mem::take(&mut events);
                     for event in drained {
+                        // the host's shutdown door: its wake is the
+                        // shutdown event, never a wait — the drive
+                        // raises every flag and the callers' pass cuts
+                        // the parked fibers with the sentinel
+                        if event.token == crate::reactor::SHUTDOWN_TOKEN {
+                            self.shutdown_raised();
+                            continue;
+                        }
                         self.complete_wait(event.token, Some(event));
                     }
                 },
@@ -6066,6 +6163,54 @@ impl Vm {
         }
     }
 
+    /// The shutdown observation's engine half (the 2026-11-24 signal
+    /// ruling): the flag stands, and every open nursery's cancel flag
+    /// rises with it so the drives' cuts observe one discipline — the
+    /// sentinel at the resume-shaped point, the deinit hooks firing,
+    /// the boundary reporting. Nothing here decides anything: the
+    /// host that registered the interest owns the outcome.
+    fn shutdown_raised(&mut self) {
+        self.shutdown = true;
+        for nursery in &mut self.nurseries {
+            if nursery.state == NurseryState::Open {
+                nursery.cancelled = true;
+            }
+        }
+    }
+
+    /// One fiber the executor's pass must cut: parked at a
+    /// resume-shaped point while either the host's shutdown stands or
+    /// its own nursery's cancel flag is raised — the flag discipline
+    /// the join/teardown sweep performs for its own frame's children,
+    /// extended to the fibers no drive stands over (the 2026-11-12
+    /// amendment's parked-IO cancellation, and the 2026-11-24 signal
+    /// ruling's whole-drive cut). An unbounded accept park dies here
+    /// exactly a bounded one does.
+    fn cut_candidate(&self) -> Option<FiberId> {
+        self.pool.iter().enumerate().find_map(|(slot, fiber)| {
+            let cut = self.shutdown
+                || fiber.nursery.is_some_and(|n| {
+                    self.nurseries
+                        .get(n.index())
+                        .is_some_and(|nr| nr.state == NurseryState::Open && nr.cancelled)
+                });
+            let parked = matches!(
+                fiber.state,
+                FiberState::Suspended | FiberState::Preempted | FiberState::WorldParked
+            ) && fiber.resume.is_some();
+            (cut && parked).then(|| FiberId(u32::try_from(slot).expect("pool slots fit u32 ids")))
+        })
+    }
+
+    /// Stages one fiber's cancel cut: the wait (its interest, its
+    /// delivery) drops exactly the sweep's cut path, the staged cut
+    /// and run-queue entry carrying the sentinel to the next entry.
+    fn stage_cut(&mut self, fiber: FiberId) {
+        self.cancel_wait(fiber);
+        self.sched.stage_cancel(fiber);
+        self.sched.push_ready(fiber);
+    }
+
     /// Enters one woken fiber: the staged answer's head word rides the
     /// switch payload, the whole answer overlays the parked call site,
     /// and the fiber continues. The sentinel resume point (an entry
@@ -6074,6 +6219,24 @@ impl Vm {
     /// host) taking the delivery. `Quiet` answers a fiber that cannot
     /// be entered (already cut, or its delivery gone with the cut).
     fn enter_woken(&mut self, fiber: FiberId) -> Result<Woken, Trap> {
+        // the staged cancel cut (a raised flag, the shutdown): the
+        // sentinel at the resume-shaped point instead of any answer —
+        // the sweep's cancelled-parked-child cut, delivered where no
+        // drive stands over the fiber
+        if self.sched.take_cancel(fiber) {
+            if !matches!(
+                self.pool[fiber.index()].state,
+                FiberState::Suspended | FiberState::Preempted | FiberState::WorldParked
+            ) || self.pool[fiber.index()].resume.is_none()
+            {
+                return Ok(Woken::Quiet);
+            }
+            self.switch_in(fiber, Value::Tag(PLATFORM_NONE));
+            return Ok(match self.cancel_current() {
+                Some(step) => Woken::Step(step),
+                None => Woken::Quiet,
+            });
+        }
         let Some(result) = self.sched.deliveries.remove(&fiber) else {
             return Ok(Woken::Quiet);
         };
@@ -6158,6 +6321,19 @@ impl Vm {
                 EagerPass::Host(answer) => {
                     return Ok(ExecutorStep::HostAnswer(answer));
                 },
+            }
+            // the cut pass: a parked fiber under the host's shutdown or
+            // its own raised flag dies with the sentinel — the staged
+            // cut rides the ready queue into the loop's entry above,
+            // so its resumer's continuation drives exactly a woken
+            // fiber's. With the shutdown standing and nothing left to
+            // cut, the drive is over: the host owns the outcome.
+            if let Some(fiber) = self.cut_candidate() {
+                self.stage_cut(fiber);
+                continue;
+            }
+            if self.shutdown {
+                return Ok(ExecutorStep::Shutdown);
             }
             self.wait_world()?;
         }
@@ -6828,6 +7004,12 @@ impl Vm {
             None => self.root_drive::<false>(active),
         };
         self.fuel = 0;
+        // the blocking twin's stop flag answers the same shutdown trap
+        // the reactor path's wake does: record the observation so the
+        // host reads one fact whatever door the event came through
+        if matches!(answer, Err(Trap::Shutdown)) {
+            self.shutdown = true;
+        }
         answer
     }
 
@@ -6874,6 +7056,10 @@ impl Vm {
                                 self.host_delivery(value);
                             }
                             return Ok(answer);
+                        },
+                        Ok(ExecutorStep::Shutdown) => {
+                            self.host_release();
+                            return Err(Trap::Shutdown);
                         },
                         Err(trap) => {
                             self.trap_pc = Some(pc);

@@ -636,6 +636,13 @@ impl Vm {
                             }
                             return Ok(ReplOutcome::Died(answer));
                         },
+                        // the host's shutdown cut the parked submission:
+                        // the trap carries no decision — the REPL host
+                        // answers its own policy above
+                        Ok(ExecutorStep::Shutdown) => {
+                            self.host_release();
+                            return Err(Trap::Shutdown);
+                        },
                         Err(trap) => {
                             self.trap_pc = Some(pc);
                             self.host_release();

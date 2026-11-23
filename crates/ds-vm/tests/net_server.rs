@@ -4,10 +4,14 @@
 //! accept round trip against a local peer (listen, accept, send, recv,
 //! the two closes — hermetic, no external network), the parked accept
 //! under an installed reactor (the peer's late connection is the wake,
-//! the accepted stream owning the connection face in full), the
-//! deadline bound on a listener no peer ever dials (the blocking twin
-//! polls to the same bound — std's listener carries no OS accept
-//! timeout), the idempotent listener close with a later accept on the
+//! the accepted stream owning the connection face in full), the parked
+//! accept holding past its old deadline for a late peer (the
+//! 2026-11-24 signal ruling: the quiet accept parks unbounded, the
+//! signal its backstop — a non-reactor host keeping the bounded poll
+//! twin), the deadline bound on a listener no peer ever dials under
+//! the blocking twin (std's listener carries no OS accept timeout,
+//! so the poll draws the line the parked twin no longer does), the
+//! idempotent listener close with a later accept on the
 //! closed handle answering the unknown-listener floor, and the
 //! addr_in_use class of a bind against a port another socket holds.
 //!
@@ -422,15 +426,52 @@ fn a_scheduled_accept_wakes_on_the_peers_connection() {
     panic!("no free loopback port answered the bind");
 }
 
-/// The deadline bound on a listener no peer dials: the accept waits
-/// its configured bound and answers the timeout class — the parked
-/// twin through the wheel, the blocking twin through the poll, the
-/// same span either way.
+/// The parked accept holds past its old deadline for a late peer
+/// (the 2026-11-24 signal ruling): the quiet accept parks with no
+/// wheel entry — the signal its backstop — so a peer dialing past the
+/// configured bound still wakes it, while the reactor-less twin keeps
+/// the bounded poll below. Needs a reactor driver; a host without one
+/// keeps the bounded blocking twin and early-returns.
 #[test]
-fn a_silent_listener_times_out_within_the_bound() {
+fn a_scheduled_accept_holds_past_its_deadline_for_a_late_peer() {
+    if ds_vm::reactor::platform_default().is_none() {
+        return; // the parked twin is the reactor's own; the twin below pins the bound
+    }
+    for _ in 0..8 {
+        let port = free_port();
+        // the peer dials 3x the configured bound late: a bounded park
+        // would have answered the timeout span long before it
+        let peer = late_pong_peer(port, Duration::from_millis(600), b"served");
+        let mut vm = scheduled_vm(vec![serve()]);
+        vm.set_net_timeout(Duration::from_millis(200));
+        let argv = [
+            string(&mut vm, "127.0.0.1"),
+            Value::I64(i64::from(port)),
+            string(&mut vm, "served"),
+        ];
+        let answer = vm.run("server", "serve", &argv).expect("the fixture runs");
+        let message = answer_string(&vm, &answer);
+        if message.starts_with(&format!("net_listen 127.0.0.1:{port}")) {
+            continue; // the parallel suite stole the port
+        }
+        assert_eq!(message, "pong", "the parked accept held past its bound");
+        assert_eq!(peer.join().expect("peer lands"), b"served");
+        return;
+    }
+    panic!("no free loopback port answered the bind");
+}
+
+/// The deadline bound on a listener no peer dials under the blocking
+/// twin: the accept waits its configured bound and answers the timeout
+/// class through the poll — std's listener carries no OS accept
+/// timeout, and without a reactor the configured bound stays the
+/// line the blocking twin draws (a reactor-less or non-Linux embedder
+/// keeps exactly this twin).
+#[test]
+fn a_silent_listener_times_out_within_the_bound_under_the_blocking_twin() {
     let started = std::time::Instant::now();
     let make = || {
-        let mut vm = scheduled_vm(vec![accept_payload()]);
+        let mut vm = Vm::new(server_registry());
         vm.set_net_timeout(Duration::from_millis(200));
         vm
     };

@@ -31,6 +31,7 @@ mod repl;
 mod run;
 mod run_cache;
 mod save;
+mod shutdown;
 mod source;
 mod watch;
 

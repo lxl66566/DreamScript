@@ -541,7 +541,9 @@ pub(crate) fn net_accept_tls_fn(
     }
     // the blocking twin: the bounded accept, then the handshake over
     // the stream's socket timeouts, the registration carrying the
-    // session alongside the stream.
+    // session alongside the stream. A stopped drive (the host's
+    // signal helper flipping the stop flag) answers the shutdown trap
+    // exactly the plain accept's way.
     let timeout = out.net().timeout();
     let mut stream = match out
         .listeners()
@@ -549,6 +551,9 @@ pub(crate) fn net_accept_tls_fn(
         .and_then(|stream| out.net().bounded(stream))
     {
         Ok(stream) => stream,
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+            return Err(Trap::Shutdown);
+        },
         Err(err) => {
             return Ok(net::net_err(
                 heaps,

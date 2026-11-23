@@ -54,7 +54,11 @@
 //! and delivers its answer at the parked site. `net_accept` parks the
 //! same way on the listener's own readability (a pending connection is
 //! readable), the wake performing the accept and registering the
-//! accepted stream like a connecting one. Blocking stays the
+//! accepted stream like a connecting one — but its park carries no
+//! deadline (the 2026-11-24 signal ruling): the signal is the quiet
+//! accept's backstop, so the host's registered shutdown interest (or
+//! the blocking twin's stop flag below) ends a quiet wait, every other
+//! op's deadline discipline unchanged. Blocking stays the
 //! embedder's platform choice: no reactor installed, the natives below
 //! block exactly as before. `net_connect` and the plain `http_get`
 //! exchange park too (the 2026-11-23 ruling): std cannot open a
@@ -113,7 +117,10 @@
 use std::{
     io::{self, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -1428,6 +1435,12 @@ pub(crate) struct Listeners {
     /// installed on the VM flips this, and a bound listener answers
     /// would-block to the thread — never a block.
     parking: bool,
+    /// The host's blocking-drive stop flag (the 2026-11-24 signal
+    /// ruling's non-reactor twin): a host without a reactor keeps the
+    /// blocking rows, so its own signal helper flips this flag and the
+    /// bounded poll observes it between rounds. A host that installs
+    /// none keeps today's behavior — the flag stands false forever.
+    stop: Arc<AtomicBool>,
 }
 
 impl Default for Listeners {
@@ -1437,6 +1450,7 @@ impl Default for Listeners {
             next_id: 0,
             timeout: NET_TIMEOUT,
             parking: false,
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -1446,6 +1460,12 @@ impl Listeners {
     /// table's bound and this one set together, one `set_net_timeout`).
     pub(crate) fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Installs the host's blocking-drive stop flag
+    /// ([`crate::Vm::set_shutdown_flag`]).
+    pub(crate) fn set_stop_flag(&mut self, stop: Arc<AtomicBool>) {
+        self.stop = stop;
     }
 
     /// The configured accept bound.
@@ -1516,13 +1536,20 @@ impl Listeners {
     /// carries no OS accept timeout, so the non-blocking socket polls
     /// to the configured deadline — the same bound every blocking net
     /// wait keeps, polled rather than waited because that is the only
-    /// portable shape.
+    /// portable shape. The host's stop flag answers between rounds
+    /// (the 2026-11-24 signal ruling's blocking twin): a stopped drive
+    /// answers the `Interrupted` marker the accept rows map to the
+    /// shutdown trap, never a net failure span.
     pub(crate) fn accept(&mut self, lid: i64) -> io::Result<TcpStream> {
         let timeout = self.timeout;
+        let stopped = self.stop.clone();
         let listener = self.listener(lid)?;
         let _ = listener.set_nonblocking(true);
         let deadline = std::time::Instant::now() + timeout;
         loop {
+            if stopped.load(Ordering::Relaxed) {
+                return Err(io::Error::new(ErrorKind::Interrupted, "host shutdown"));
+            }
             match listener.accept() {
                 Ok((stream, _)) => return Ok(stream),
                 Err(err) if err.kind() == ErrorKind::WouldBlock => {
@@ -2052,8 +2079,12 @@ pub(crate) fn net_listen_fn(
 /// connection off the bound listener, registering the accepted stream
 /// into the connection table so it owns the `net_handle` face in full.
 /// Under an installed reactor the accept parks on the listener's
-/// readability (the wake performing the accept); otherwise the wait
-/// blocks the thread, bounded by the configured net timeout.
+/// readability (the wake performing the accept) with no deadline — the
+/// 2026-11-24 signal ruling makes the signal the quiet accept's
+/// backstop, every other op's deadline discipline unchanged; otherwise
+/// the wait blocks the thread, bounded by the configured net timeout,
+/// and the host's stop flag answers the shutdown trap between the
+/// poll's rounds.
 pub(crate) fn net_accept_fn(
     heaps: &mut Heaps,
     out: &mut OutputSink,
@@ -2071,16 +2102,12 @@ pub(crate) fn net_accept_fn(
                 &target,
                 &err.to_string(),
             )),
-            NetAttempt::Park => {
-                let deadline = std::time::Instant::now() + out.listeners().timeout();
-                Ok(NativeResult::Park(crate::sched::WorldWait::accept(
-                    lid, deadline,
-                )))
-            },
+            NetAttempt::Park => Ok(NativeResult::Park(crate::sched::WorldWait::accept(lid))),
         };
     }
     match out.listeners().accept(lid) {
         Ok(stream) => Ok(ok(Value::I64(out.net().register(stream)))),
+        Err(err) if err.kind() == ErrorKind::Interrupted => Err(Trap::Shutdown),
         Err(err) => Ok(net_err(
             heaps,
             NetClass::of(&err),

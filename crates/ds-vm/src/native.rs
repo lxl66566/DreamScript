@@ -4031,6 +4031,18 @@ impl OutputSink {
         self.procs.set_timeout(timeout);
     }
 
+    /// Installs the host's blocking-drive stop flag (the 2026-11-24
+    /// signal ruling's non-reactor twin): the bounded blocking accept
+    /// poll observes it between rounds and answers the shutdown trap
+    /// — a reactor-installing host's parked twin rides the registered
+    /// shutdown interest instead and never reads this flag.
+    pub(crate) fn set_shutdown_flag(
+        &mut self,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.listeners.set_stop_flag(stop);
+    }
+
     /// Pins the TLS client of the net face's tls tier (`[crate::tls]`):
     /// custom trust roots for an embedding host or a test, the default
     /// being the webpki root set.
