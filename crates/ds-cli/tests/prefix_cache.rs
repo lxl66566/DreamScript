@@ -4,7 +4,9 @@
 //! the prefix hit and reproduces the cold output byte for byte, an edit
 //! re-keys both, a corrupt prefix falls back and is repaired, the
 //! `--no-cache` switch turns the tier off, a failing program writes
-//! nothing, and `ds build` persists a prefix a later run serves. Every
+//! nothing, `ds build` persists a prefix a later run serves, and the
+//! `--no-ambient` shape composes and serves its own prefix that the
+//! ambient shape over the same source never cross-serves. Every
 //! spawn points `DS_CACHE` at a private temp directory with both debug
 //! observables on, so the tests prove which path a run took without
 //! timing it.
@@ -19,6 +21,13 @@ mod support;
 
 /// A written zero-parameter entry: the shape the caches serve.
 const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n";
+
+/// A self-contained program (no ambient name, no primitive word — the
+/// scalars are ambient declarations): both the ambient and the
+/// `--no-ambient` shapes check it clean, so one source can compare the
+/// two shapes' artifacts.
+const BARE_MAIN: &str = "struct marker { }\n\nimpl marker {\n  fn ping(self) -> () { }\n}\n\nfn \
+                         main() -> () {\n  const m = marker { }\n  const u = m.ping()\n}\n";
 
 /// One private cache root per tag: tests never share a root and never
 /// touch a real user cache directory.
@@ -78,6 +87,82 @@ fn run_path(source: &Path) -> String {
         .to_str()
         .expect("the temp source path is UTF-8")
         .to_owned()
+}
+
+/// The `--no-ambient` shape shares the prefix tier under its own key: a
+/// cold run persists a prefix (its registration the lone member, no
+/// ambient, no host provision), a repeated run serves the dsmod warm,
+/// an evicted dsmod makes the next run serve the persisted prefix (the
+/// cold output byte for byte), and the ambient shape over the same
+/// source persists and serves its own — the shapes never cross-serve.
+#[test]
+fn a_no_ambient_run_serves_its_own_prefix() {
+    let cache = cache_dir("no-ambient");
+    let source = source_file("bare", BARE_MAIN);
+    let (ok, cold_out, cold_err) = ds(&cache, &["run", "--no-ambient", &run_path(&source)]);
+    assert!(ok, "the cold no-ambient run succeeds: {cold_err}");
+    assert!(
+        cold_err.contains("ds prefix cache: miss"),
+        "the cold run misses the prefix: {cold_err}"
+    );
+    assert_eq!(
+        artifacts(&cache, "dsi").len(),
+        1,
+        "one no-ambient prefix persists"
+    );
+
+    // a repeated no-ambient run serves the dsmod warm
+    let (ok, repeat_out, repeat_err) = ds(&cache, &["run", "--no-ambient", &run_path(&source)]);
+    assert!(ok, "the repeated run succeeds: {repeat_err}");
+    assert!(
+        repeat_err.contains("ds run cache: hit"),
+        "the repeated no-ambient run serves the dsmod warm: {repeat_err}"
+    );
+    assert_eq!(cold_out, repeat_out, "the runs print identically");
+
+    // the eviction: only the dsmod artifact goes away, the run below
+    // must re-run the front end over the persisted prefix
+    fs::remove_file(&artifacts(&cache, "dsmod")[0]).expect("the dsmod evicts");
+    let (ok, warm_out, warm_err) = ds(&cache, &["run", "--no-ambient", &run_path(&source)]);
+    assert!(ok, "the warm no-ambient run succeeds: {warm_err}");
+    assert!(
+        warm_err.contains("ds prefix cache: hit"),
+        "the persisted no-ambient prefix serves: {warm_err}"
+    );
+    assert_eq!(cold_out, warm_out, "the runs print identically");
+
+    // the ambient shape over the same source never serves the
+    // no-ambient artifact: its own cold miss persists a second prefix
+    let (ok, _, ambient_err) = ds(&cache, &["run", &run_path(&source)]);
+    assert!(
+        ok,
+        "the ambient run over the same source succeeds: {ambient_err}"
+    );
+    assert_eq!(
+        artifacts(&cache, "dsi").len(),
+        2,
+        "the ambient shape persists its own prefix"
+    );
+
+    // every dsmod evicted, each shape's rerun hits its own prefix
+    for dsmod in artifacts(&cache, "dsmod") {
+        fs::remove_file(&dsmod).expect("the dsmod evicts");
+    }
+    let (ok, _, ambient_err) = ds(&cache, &["run", &run_path(&source)]);
+    assert!(ok, "the ambient rerun succeeds: {ambient_err}");
+    assert!(
+        ambient_err.contains("ds prefix cache: hit"),
+        "the ambient shape serves its own prefix: {ambient_err}"
+    );
+    for dsmod in artifacts(&cache, "dsmod") {
+        fs::remove_file(&dsmod).expect("the dsmod evicts");
+    }
+    let (ok, _, bare_err) = ds(&cache, &["run", "--no-ambient", &run_path(&source)]);
+    assert!(ok, "the no-ambient rerun succeeds: {bare_err}");
+    assert!(
+        bare_err.contains("ds prefix cache: hit"),
+        "the no-ambient shape serves its own prefix: {bare_err}"
+    );
 }
 
 /// A cold run persists one dsmod and one prefix, an evicted dsmod makes

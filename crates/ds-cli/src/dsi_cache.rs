@@ -61,10 +61,13 @@ impl PrefixCache {
     /// Resolves the cache for one package-root compile. `enabled` is
     /// the shared `--no-cache` off switch; `no_ambient` picks the
     /// ambient identity the key folds — a compile without the ambient
-    /// has no composed prefix to serve this round, so it runs uncached;
-    /// `script` follows the session rule the compile's ambient
-    /// registration picks (an entry script session composes the @std
-    /// bodied members back even over a std-declaring graph); `identities` are
+    /// composes its prefix over the no-ambient registration alone (the
+    /// user members by themselves, no host provision), so the key
+    /// folds a zero marker in the ambient's place and never agrees
+    /// with an ambient-shaped fold; `script` follows the session rule
+    /// the compile's ambient registration picks (an entry script session
+    /// composes the @std bodied members back even over a std-declaring
+    /// graph); `identities` are
     /// the resolved graph's dep content identities, which the source
     /// text alone does not determine — a linked package's surface feeds
     /// the front end, so the key folds them and a dep whose resolved
@@ -119,7 +122,7 @@ impl PrefixCache {
     ) -> Self {
         let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
         let cache = Self {
-            root: enabled.then_some(root).flatten().filter(|_| !no_ambient),
+            root: enabled.then_some(root).flatten(),
             ambient: (!no_ambient).then(|| crate::run_cache::ambient_identity(identities, script)),
             deps: identities.clone(),
             artifacts: artifacts.clone(),
@@ -163,7 +166,9 @@ impl PrefixCache {
     /// boundary, so a second declare pass runs here — the write happens
     /// once per changed source), the solved method rows, and the compile's
     /// own effect rows, keyed under the compile's content identity — the
-    /// same hash `lookup` keys on. Every failure is silent — the compile
+    /// same hash `lookup` keys on. A no-ambient compile persists the
+    /// same way, its prefix composing over its own registration under
+    /// the zero marker. Every failure is silent — the compile
     /// already succeeded.
     pub(crate) fn store(
         &self,
@@ -225,7 +230,9 @@ impl PrefixCache {
     ///   re-keys;
     /// - the source hash: the artifact's header pins it;
     /// - the ambient identity: the user member's ids continue the ambient's served spaces, so a
-    ///   drifted ambient text is a different prefix;
+    ///   drifted ambient text is a different prefix; a `--no-ambient` compile folds a zero marker
+    ///   in the ambient's place (its prefix composes over the no-ambient registration alone), so
+    ///   neither shape's key ever answers the other's artifact;
     /// - each resolved dep's link name and content hash in ascending name order: the identities
     ///   package resolution pinned, which the source text alone does not determine — a linked
     ///   package's surface feeds the front end, so a dep whose resolved content changed is another
@@ -311,6 +318,13 @@ mod tests {
          list[u] {\nfn shout(self) -> string {\nvar acc = \"!\"\nfor x in self {\nacc = \
          \"${acc}${x.show()}\"\n}\nacc\n}\n}\n\nfn main() -> () {\nconst c = cell { n: 3, label: \
          \"x\" }\nprintln(\"${[1, 2].shout()} ${[1, 2].key(c)} ${c.show()} ${max(1, 2)}\")\n}\n";
+
+    /// A self-contained program (no ambient name, no primitive word —
+    /// the scalars are ambient declarations): both the ambient and the
+    /// `--no-ambient` shapes check it clean, so one source can compare
+    /// the two shapes' keys and artifacts.
+    const BARE: &str = "struct marker { }\n\nimpl marker {\nfn ping(self) -> () { }\n}\n\nfn \
+                        main() -> () {\nconst m = marker { }\nconst u = m.ping()\n}\n";
 
     /// One private cache root per tag: tests never share a root and never
     /// touch a real user cache directory.
@@ -623,6 +637,54 @@ mod tests {
         assert_eq!(
             persisted[0], persisted[1],
             "two cold compiles must persist identical prefixes"
+        );
+    }
+
+    /// The `--no-ambient` shape composes and serves its own prefix: a
+    /// cold compile persists one over its own registration (the lone
+    /// member, no ambient, no host provision), a warm compile serves
+    /// it (the module bytes identical), and the ambient-shaped fold
+    /// over the same source never agrees — the marker keeps the shapes
+    /// apart, so neither artifact answers the other's lookup.
+    #[test]
+    fn a_no_ambient_compile_round_trips_its_own_prefix() {
+        let root = temp_root("no-ambient");
+        let path = write_source("bare", BARE);
+        let cache = PrefixCache::discover_at(true, true, Some(root));
+        let cold =
+            crate::source::compile(&path, true, Some(&cache), crate::source::BundleAfter::Drop)
+                .expect("compiles");
+        assert!(
+            cache
+                .lookup("bare", Hash128::compute(BARE.as_bytes()), &[
+                    ds_diag::FileId::new(0)
+                ])
+                .is_some(),
+            "the cold no-ambient compile persists a prefix over its own registration"
+        );
+        let warm =
+            crate::source::compile(&path, true, Some(&cache), crate::source::BundleAfter::Drop)
+                .expect("compiles");
+        assert_eq!(
+            ds_mod::write(warm.lowered.module()),
+            ds_mod::write(cold.lowered.module()),
+            "the served prefix must answer the fresh module"
+        );
+    }
+
+    /// The no-ambient marker never serves an ambient key: the ambient
+    /// and no-ambient folds over one source and one registration shape
+    /// stay apart, so a warm artifact of one shape never answers the
+    /// other's compile.
+    #[test]
+    fn the_no_ambient_marker_never_serves_an_ambient_key() {
+        let source = Hash128::compute(BARE.as_bytes());
+        let ambient = PrefixCache::discover_at(false, false, None);
+        let bare = PrefixCache::discover_at(false, true, None);
+        assert_ne!(
+            ambient.key("bare", source),
+            bare.key("bare", source),
+            "the ambient and no-ambient shapes never share a key"
         );
     }
 

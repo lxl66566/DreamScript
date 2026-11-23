@@ -278,8 +278,8 @@ impl RunCache {
     /// store pays once per changed source), the solved method rows, and
     /// the compile's own effect rows, headed by the member's identity —
     /// the same hash the dsmod beside it validates against. A
-    /// `--no-ambient` compile writes nothing (the composed prefix
-    /// composes only over the ambient). Every failure is silent — the
+    /// `--no-ambient` compile persists the same way under the zero
+    /// marker its dep key folds. Every failure is silent — the
     /// run already succeeded.
     pub(crate) fn store_dep_dsi(
         &self,
@@ -290,7 +290,7 @@ impl RunCache {
         declared: &ds_check::DeclaredRows,
         world: &ds_check::WorldCaps,
     ) {
-        if self.root.is_none() || self.ambient.is_none() {
+        if self.root.is_none() {
             return;
         }
         if self.deps.get(name) != Some(&identity) {
@@ -584,6 +584,30 @@ mod tests {
             session.key("app", source),
             package.key("app", source),
             "the session composition is a bytecode input the key folds"
+        );
+    }
+
+    /// The no-ambient marker re-keys both folds: a `--no-ambient`
+    /// graph's root and dep-member keys (the dsmod and the `.dsi` beside
+    /// it) never agree with the ambient-shaped fold over the same
+    /// resolution, so a warm artifact of one shape never serves the
+    /// other's compile.
+    #[test]
+    fn the_no_ambient_marker_rekeys_both_folds() {
+        let source = Hash128::compute(b"fn main() -> () { }");
+        let member = Hash128::compute(b"pub fn twice(n: int) -> int { 2 * n }");
+        let deps = BTreeMap::from([("@lib".to_owned(), Hash128::compute(b"one"))]);
+        let ambient = RunCache::discover_linked(false, false, &deps, &BTreeMap::new(), false);
+        let bare = RunCache::discover_linked(false, true, &deps, &BTreeMap::new(), false);
+        assert_ne!(
+            ambient.key("app", source),
+            bare.key("app", source),
+            "the root fold re-keys on the ambient's absence"
+        );
+        assert_ne!(
+            ambient.dep_key("@lib", member),
+            bare.dep_key("@lib", member),
+            "the dep fold re-keys on the ambient's absence"
         );
     }
 

@@ -28,7 +28,7 @@ Ranked queue: the top item is what the next round takes unless the author redire
 
 ## Plumbing and ambient
 
-30. [M7, S] `.dsi` boundary: the composed prefix composes only over the ambient (`--no-ambient` compiles run uncached), and the body pass over the served trees is a permanent share by G3.5.
+30. [M7, S] `.dsi` boundary: the body pass over the served trees is a permanent share by G3.5.
 63. [M7, M] Packages remainder after the 2026-11-21 marshaling consumption slice (string/bytes parameters riding their call-scoped (pointer, length) pair and unit returns riding the absent word now lower — the pool constant carrying the return's marshaling word, the VM stage marshaling per the staged words' own kinds — and run e2e through `ds run` over the fixture tally family, the refusals re-pinned at the new boundary): string/bytes returns and deinit-carrying handles stay queued (the ownership round), beside generics, a bound extern as a callable value, and the arity cap's lift (libffi; the cap counts C words, a pair occupying two). The fork-join workers' snapshot strips the bound tier, so a foreign call inside a pooled child refuses like a world op (whether pooled foreign calls should run stays open); a `[build]` source-build round stays deferred on the pinned-toolchain reproducibility story, never permanently rejected; a built package artifact through the walk and multi-version coexistence per name stay open. The release wall A/B over the 17-compile graph fixture stays unmeasured, queued for the quiet release host; the registry client's per-file sparse fetch needs a partial-clone-capable server.
 
 ## Performance residuals
