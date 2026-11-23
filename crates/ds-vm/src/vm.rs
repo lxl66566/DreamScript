@@ -4303,15 +4303,35 @@ impl Vm {
 
     fn consume_frame(&mut self, frame: &NurseryDrive) -> (Vec<ChildOutcome>, Option<Delivery>) {
         let outcomes = self.consume_nursery(frame.nursery);
-        // the count and boundary seams take no completed answer: each
-        // discarded span's `Ref` words dec once through the death walk's
-        // no-ledger door (the child's claim row released at its death, the
-        // count left in flight for a receiver that never comes), so the
-        // word's unique death still runs — its free cascade, deinit claims
-        // included. The face seam's outcomes cross to the host driver and
-        // the fork seam's stage adopts its own words, so neither walks
-        // here.
-        if matches!(frame.seam, DriveSeam::Count | DriveSeam::Boundary { .. }) {
+        // A boundary seam about to deliver its collected answers keeps
+        // every completed span for the channel: the join answers list
+        // below adopts the words instead of the walk. Every other
+        // no-answer case — the count seam, a failed boundary (first
+        // failure, interrupted drive), or a joiner that moved on before
+        // consumption — decs each discarded span's `Ref` words once
+        // through the death walk's no-ledger door (the child's claim row
+        // released at its death, the count left in flight for a receiver
+        // that never comes), so the word's unique death still runs — its
+        // free cascade, deinit claims included. The face seam's outcomes
+        // cross to the host driver and the fork seam's stage adopts its
+        // own words, so neither walks here.
+        let boundary_collects = match (
+            &frame.seam,
+            outcomes
+                .iter()
+                .find(|o| matches!(o, ChildOutcome::Trapped(_) | ChildOutcome::Cancelled)),
+        ) {
+            // a clean join with a parked joiner answers the collected
+            // list; a cancelled outcome with no trapped one cannot stand
+            // (the flag only rises at a trapped death), but the scan
+            // stays honest about it
+            (DriveSeam::Boundary { .. }, None) => frame
+                .joiner
+                .is_some_and(|(joiner, resume_pc)| self.joiner_parked(joiner, resume_pc)),
+            _ => false,
+        };
+        if matches!(frame.seam, DriveSeam::Count | DriveSeam::Boundary { .. }) && !boundary_collects
+        {
             for outcome in &outcomes {
                 if let ChildOutcome::Completed(span) = outcome {
                     for word in span.as_slice() {
@@ -4347,11 +4367,84 @@ impl Vm {
                     .iter()
                     .find(|o| matches!(o, ChildOutcome::Trapped(_)))
                 {
-                    None => Some(Delivery::Answer {
-                        call: Value::I64(0),
-                        span: Some((NURSERY_BOUNDARY_OK, vec![Value::I64(0)])),
-                        gone: Value::Tag(NURSERY_BOUNDARY_OK),
-                    }),
+                    None => {
+                        if boundary_collects {
+                            // The join channel [E2, the 2026-11-21
+                            // scheduler ruling]: the children's answer
+                            // spans collect into one list in spawn order
+                            // — the joiner's own heap owns the list, the
+                            // delivered words' claim rows acquire on the
+                            // joiner (the fork stage's crossing), each
+                            // push adopts the span as one element, and
+                            // the in-flight count dies behind it. The
+                            // whole-span element discipline is the fork
+                            // seam's: the first push fixes the stride, a
+                            // mismatching width traps before any count
+                            // moves.
+                            let (joiner_id, _) =
+                                frame.joiner.expect("a collecting boundary parks a joiner");
+                            // The joiner's store owns the collected list:
+                            // swap it live for the allocation (the
+                            // consumption prologue stashed every live
+                            // context back into the pool), the fresh
+                            // word's claim row acquiring on the joiner's
+                            // ledger exactly where the fork stage's
+                            // pre-park allocation did on its caller's.
+                            let result = {
+                                std::mem::swap(
+                                    &mut self.objects,
+                                    &mut self.pool[joiner_id.index()].objects,
+                                );
+                                let mut heaps = Heaps::new(
+                                    joiner_id,
+                                    &mut self.objects,
+                                    &mut self.pool,
+                                    &mut self.claims,
+                                    true,
+                                );
+                                let word = heaps.new_list_id(Vec::new());
+                                std::mem::swap(
+                                    &mut self.objects,
+                                    &mut self.pool[joiner_id.index()].objects,
+                                );
+                                word
+                            };
+                            for outcome in &outcomes {
+                                let ChildOutcome::Completed(answer) = outcome else {
+                                    continue;
+                                };
+                                for word in answer.as_slice() {
+                                    if let Value::Ref(word) = word {
+                                        self.claims[joiner_id.index()].acquire(*word);
+                                    }
+                                }
+                                let mut heaps = self.fork_heaps(joiner_id);
+                                if let Err(trap) = heaps.push_list(result, answer.as_slice()) {
+                                    let _ = heaps.dec(result);
+                                    return (Vec::new(), Some(Delivery::Raise(trap)));
+                                }
+                                for word in answer.as_slice() {
+                                    if let Value::Ref(word) = word
+                                        && let Err(trap) = heaps.dec(*word)
+                                    {
+                                        let _ = heaps.dec(result);
+                                        return (Vec::new(), Some(Delivery::Raise(trap)));
+                                    }
+                                }
+                            }
+                            Some(Delivery::Answer {
+                                call: Value::I64(0),
+                                span: Some((NURSERY_BOUNDARY_OK, vec![Value::Ref(result)])),
+                                gone: Value::Tag(NURSERY_BOUNDARY_OK),
+                            })
+                        } else {
+                            Some(Delivery::Answer {
+                                call: Value::I64(0),
+                                span: Some((NURSERY_BOUNDARY_OK, vec![Value::I64(0)])),
+                                gone: Value::Tag(NURSERY_BOUNDARY_OK),
+                            })
+                        }
+                    },
                     Some(ChildOutcome::Trapped(Trap::NurseryCancelled { payload })) => {
                         // the staged mask is the caller's return-union
                         // member containment set: an error the boundary
@@ -5393,6 +5486,17 @@ impl Vm {
         for (index, value) in tail.iter().enumerate() {
             self.stack[word_of(fp, start + 1 + index, body_len)] = Word::Slot(*value);
         }
+    }
+
+    /// Whether the joiner a drive parked at `resume_pc` still stands
+    /// parked there — the same predicate [`Self::reenter_joiner`]
+    /// applies, read at consumption time so a channel that hands the
+    /// joiner words (the boundary's collected answers list) builds them
+    /// only for a delivery that can land.
+    fn joiner_parked(&self, joiner: FiberId, resume_pc: CodePc) -> bool {
+        self.pool.get(joiner.index()).is_some_and(|f| {
+            f.state == FiberState::Suspended && f.resume.as_ref().is_some_and(|r| r.pc == resume_pc)
+        })
     }
 
     /// Re-enters the joiner a join/boundary drive parked at `resume_pc`,

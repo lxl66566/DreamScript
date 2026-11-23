@@ -173,19 +173,13 @@ impl FnLower<'_, '_, '_> {
                 kind: StmtKind::Expr(expr),
                 ..
             }) => {
-                // A spawned child's non-unit tail answer dies at the
-                // child's own completion like a discarded statement's
-                // value [E2]: the boundary and count joins take no
-                // completed answer, so the value's unique death — a
-                // `~Copyable` answer's deinit claim included — runs
-                // inside the child, the frame answering the unit word.
-                // A unit tail keeps the tail walk below (a native tail
-                // transfer answers nothing and adds no frame hop).
-                if self.spawn_child && !self.is_unit_ty(self.val(expr.span())?.ty) {
-                    self.spawn_child_answer(expr)
-                } else {
-                    self.tail(expr)
-                }
+                // A spawned child's tail answer is the join channel's
+                // element [E2]: the frame returns it, the completion
+                // ledger carries the whole span, and the boundary
+                // collects the answers in spawn order — the plan entry's
+                // return is the body's answer type, so the exit shapes
+                // like any function's tail.
+                self.tail(expr)
             },
             Some(Stmt {
                 kind: StmtKind::Local(local),
@@ -202,20 +196,6 @@ impl FnLower<'_, '_, '_> {
                 self.emit_return(&unit.place, unit.ty, block.span)
             },
         }
-    }
-
-    /// A spawned child's non-unit tail answer [E2]: the joins at the
-    /// boundary and count seams take no completed answer, so the value
-    /// is discarded at the child's own completion — the claim discipline
-    /// a statement's value dies through, its deinit hook included — and
-    /// the frame answers the unit word, so no count rides the
-    /// completion to a receiver that never comes.
-    fn spawn_child_answer(&mut self, expr: &Expr) -> Result<(), LowerError> {
-        let tp = self.value(expr)?;
-        let words = self.discard_words(&tp.place, tp.ty, expr.span())?;
-        self.rc.discard(&mut self.code, &words);
-        let unit = self.canonical_unit()?;
-        self.emit_return(&unit, self.ret_ty, expr.span())
     }
 
     /// An early `return e`: the value leaves through the frame's return

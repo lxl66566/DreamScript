@@ -216,9 +216,14 @@ fn count_chain(depth: u32) -> ModuleRegistry {
 #[test]
 fn a_two_level_boundary_chain_delivers_end_to_end() {
     let mut vm = Vm::new(boundary_chain(2));
-    assert_eq!(
-        vm.run("ic", "level_2", &[]),
-        Ok(FrameAnswer::one(Value::I64(0)))
+    // the root's clean join answers its own collected list's Ref
+    let out = vm.run("ic", "level_2", &[]);
+    assert!(
+        matches!(
+            &out,
+            Ok(FrameAnswer::Words { head, n }) if *n == 1 && matches!(head[0], Value::Ref(_))
+        ),
+        "the chain lands on the collected list's Ref: {out:?}"
     );
     for id in 0..=1 {
         assert_eq!(
@@ -235,9 +240,14 @@ fn a_two_level_boundary_chain_delivers_end_to_end() {
 #[test]
 fn a_three_level_boundary_chain_delivers_end_to_end() {
     let mut vm = Vm::new(boundary_chain(3));
-    assert_eq!(
-        vm.run("ic", "level_3", &[]),
-        Ok(FrameAnswer::one(Value::I64(0)))
+    // the root's clean join answers its own collected list's Ref
+    let out = vm.run("ic", "level_3", &[]);
+    assert!(
+        matches!(
+            &out,
+            Ok(FrameAnswer::Words { head, n }) if *n == 1 && matches!(head[0], Value::Ref(_))
+        ),
+        "the chain lands on the collected list's Ref: {out:?}"
     );
     for id in 0..=2 {
         assert_eq!(
@@ -274,9 +284,15 @@ fn a_count_join_chain_surfaces_each_levels_count() {
 #[test]
 fn a_deep_chain_lands_without_growing_the_rust_stack() {
     let mut vm = Vm::new(boundary_chain(1024));
-    assert_eq!(
-        vm.run("ic", "level_1024", &[]),
-        Ok(FrameAnswer::one(Value::I64(0)))
+    // every nested join's clean channel answers its own collected list,
+    // so the root's answer names the outermost fresh list object
+    let out = vm.run("ic", "level_1024", &[]);
+    assert!(
+        matches!(
+            &out,
+            Ok(FrameAnswer::Words { head, n }) if *n == 1 && matches!(head[0], Value::Ref(_))
+        ),
+        "the deep chain lands on the collected list's Ref: {out:?}"
     );
 }
 

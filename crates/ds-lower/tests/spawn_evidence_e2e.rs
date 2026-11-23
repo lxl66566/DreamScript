@@ -147,8 +147,9 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
     let body = "shows#list[t]#show";
     let placed = lowered.placed(body).expect("the member body lowers");
     // the spawn site stages the child's entry area: n names the capture
-    // block's words — two real captures (the element word and the shared
-    // list) plus the pair's one chain word
+    // block's words — one real capture (the element word, the answers
+    // riding the join channel instead of a shared list) plus the pair's
+    // one chain word
     let closures: Vec<u8> = placed
         .iter()
         .filter_map(|op| match op {
@@ -158,12 +159,12 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
         .collect();
     assert_eq!(
         closures,
-        vec![3],
-        "one spawn over two captures and the pair's one-word evidence"
+        vec![2],
+        "one spawn over one capture and the pair's one-word evidence"
     );
     // the child frame declares the word as a trailing entry parameter:
     // params_len covers the captures plus the evidence word, all I64
-    // trailing the element's raw word and the list's Ref word
+    // trailing the element's raw word
     let child = the_spawn_child(&lowered, body);
     let index = lowered
         .function_index(&child)
@@ -171,12 +172,12 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
     let function = &lowered.module().functions()[index as usize];
     assert_eq!(
         function.layout().params_len(),
-        3,
-        "the entry argument area carries two captures plus the evidence word"
+        2,
+        "the entry argument area carries one capture plus the evidence word"
     );
     let slots = function.layout().slots();
     assert_eq!(
-        slots[2..3],
+        slots[1..2],
         [SlotType::I64; 1],
         "the pair's chain word binds as the entry area's trailing word"
     );
@@ -184,7 +185,7 @@ fn the_spawn_site_stages_the_entry_evidence_words() {
     // slot — the sentinel names the trailing evidence word
     assert_eq!(
         evidence_slot(&lowered, &child),
-        2,
+        1,
         "the sentinel names the child frame's evidence word"
     );
 }

@@ -1,25 +1,28 @@
 // Kernel: the fiber path — spawn/join nursery cycles. The every-cycle
-// burst opens a fresh nursery and spawns two children with tiny bodies:
-// the first computes on a copied-in int capture, the second touches a
-// string Ref capture so the spawn-seam copy-in acquire rides (the
-// label is loop-invariant so string work stays out of the cycle);
-// scope exit joins both. Every 100th cycle a spawned child opens its
-// own nursery while the enclosing drive owns it — the interlock's
-// two-level join-across-levels shape, kept at 1% so the cycle cost
-// dominates. One final walk re-reads the shared out-list through
-// checked get member with .ok/.err extraction to checksum the children's
-// answers; the walk runs once, not per cycle. Every integer
-// intermediate stays non-negative below 2^47.
+// burst opens a fresh nursery and spawns two children answering through
+// the join channel: the first computes on a copied-in int capture, the
+// second touches a string Ref capture so the spawn-seam copy-in acquire
+// rides (the label is loop-invariant so string work stays out of the
+// cycle); the block's value carries the answers in spawn order, and the
+// drive folds them into the shared out-list — a spawned body may never
+// hold a mut window over an outlived binding, so the drive alone writes.
+// Every 100th cycle a spawned child opens its own nursery while the
+// enclosing drive owns it — the interlock's two-level join-across-levels
+// shape, kept at 1% so the cycle cost dominates. One final walk re-reads
+// the out-list through the checked get member with .ok/.err extraction
+// to checksum the children's answers; the walk runs once, not per
+// cycle. Every integer intermediate stays non-negative below 2^47.
 
 fn deep(i: int, label: string) -> int | net_err {
-  var sub: list[int] = list[int]()
-  nursery {
+  const sub = nursery {
     spawn {
-      nursery {
+      const inner = nursery {
         spawn {
-          sub.push(len(label) + i % 7)
+          len(label) + i % 7
         }
       }
+      const cell = inner.get(0)
+      cell.ok((e: int) => e).err((_: none) => 0)
     }
   }
   const cell = sub.get(0)
@@ -33,18 +36,25 @@ fn main() -> () {
   var deep_sum: int = 0
   var i: int = 0
   while i < n {
-    nursery {
+    const got = nursery {
       spawn {
-        out.push((i % 97) + (i % 13))
+        (i % 97) + (i % 13)
       }
       spawn {
-        out.push(len(label) + i % 11)
+        len(label) + i % 11
       }
     }
+    const a = got.get(0)
+    out.push(a.ok((e: int) => e).err((_: none) => 0))
+    const b = got.get(1)
+    out.push(b.ok((e: int) => e).err((_: none) => 0))
     if i % 100 == 99 {
       match deep(i, label) {
         timeout => deep_sum += 0
         refused => deep_sum += 0
+        addr_in_use => deep_sum += 0
+        reset => deep_sum += 0
+        net_other { msg } => deep_sum += 0
         v => deep_sum += v
       }
     }

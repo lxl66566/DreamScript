@@ -1531,6 +1531,10 @@ fn band_cut_module(cut_child: FunctionDef, hook: FunctionDef, extra: Option<Func
                 nargs: 2,
             }
             .into(),
+            // the second boundary joins clean, so its collected answers
+            // list rides overlay word 1 (slot 4): the hand parent takes
+            // the channel's discard dec before answering
+            RcOp::Dec { src: 4 }.into(),
             Uop::Kimm { dst: 4, kidx: k(6) }.into(),
             Uop::Ret { src: 4 }.into(),
         ],

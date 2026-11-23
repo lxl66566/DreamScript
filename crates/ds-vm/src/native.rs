@@ -81,7 +81,7 @@
 //! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) |
 //! | 41    | `nursery_open () -> int` (control seam; the `nursery` block) |
 //! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) |
-//! | 43    | `nursery_boundary (nursery: int, mask: int) -> discriminant + member span` (control seam; the block's join) |
+//! | 43    | `nursery_boundary (nursery: int, mask: int) -> discriminant + answers list or member span` (control seam; the block's join) |
 //! | 44    | `nursery_cancel (e: tag + payload words) -> unit` (control seam; `cancel`, variadic) |
 //! | 45    | `join (parts: list[string], sep: string) -> string` |
 //! | 46    | `partition[t] (xs: list, f: fn(t) -> bool) -> two list refs` (generic; CALLG, reentrant, the tag-less two-word total) |
@@ -522,12 +522,16 @@ pub const BUILTIN_NURSERY_SPAWN: u32 = 42;
 /// nursery's children to death in spawn order (first failure raises the
 /// cancel flag for the rest [E5]), and answers the boundary result: a
 /// two-word span whose word 0 is [`NURSERY_BOUNDARY_OK`] on a clean join
-/// or [`NURSERY_BOUNDARY_ERR`] on a first failure, word 1 the failing
-/// child's error payload. The staged mask is the caller's return-union
-/// member containment set: a failure payload whose tag sits outside it
-/// traps (the boundary refuses to union an uncontained error out); a
-/// trapped child that died by a real trap re-raises that trap on the
-/// joiner (let-it-crash surfaces at the boundary). Never user-callable.
+/// or [`NURSERY_BOUNDARY_ERR`] on a first failure. A clean join's word 1
+/// is the collected answers list's `Ref` — one element per child, each
+/// child's whole answer span in spawn order, the list living in the
+/// joiner's own heap (the join channel of the 2026-11-21 scheduler
+/// rulings); a failure's word 1 begins the failing child's error
+/// payload. The staged mask is the caller's return-union member
+/// containment set: a failure payload whose tag sits outside it traps
+/// (the boundary refuses to union an uncontained error out); a trapped
+/// child that died by a real trap re-raises that trap on the joiner
+/// (let-it-crash surfaces at the boundary). Never user-callable.
 pub const BUILTIN_NURSERY_BOUNDARY: u32 = 43;
 /// `nursery_cancel(e: word) -> unit` — the `cancel(e)` call's seam [E1,
 /// E2]: the current fiber dies trapped carrying the payload, the trap
@@ -817,9 +821,10 @@ pub enum ControlNative {
     NurserySpawn,
     /// `nursery_boundary(nursery, mask)`: the in-language join — park the
     /// caller, drive the nursery to death, re-enter the joiner with the
-    /// boundary span (a clean join or the first failure's error payload,
-    /// contained in the staged mask); a real child trap or an
-    /// uncontained payload re-raises on the joiner.
+    /// boundary span (a clean join's collected answers list, or the
+    /// first failure's error payload contained in the staged mask); a
+    /// real child trap or an uncontained payload re-raises on the
+    /// joiner.
     NurseryBoundary,
     /// `nursery_cancel(payload)`: the current fiber dies trapped carrying
     /// the payload; the trap path raises its nursery's cancel flag. The

@@ -771,7 +771,10 @@ fn a_spawn_copy_in_round_trips_one_captured_count() {
             }
             .into(),
             // boundary: (id, containment mask) — the join drives the
-            // child to death and its exit drop answers the copy-in
+            // child to death and its exit drop answers the copy-in; the
+            // clean join answers the collected answers list's Ref at
+            // overlay word 1 (slot 3), so the hand parent takes the
+            // channel's discard dec before answering
             Uop::Mov { dst: 2, src: 1 }.into(),
             Uop::Kimm { dst: 3, kidx: k(3) }.into(),
             Uop::Call {
@@ -779,6 +782,7 @@ fn a_spawn_copy_in_round_trips_one_captured_count() {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 3 }.into(),
             Uop::Kimm { dst: 1, kidx: k(4) }.into(),
             Uop::Ret { src: 1 }.into(),
         ],
@@ -878,7 +882,10 @@ fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
                 nargs: 2,
             }
             .into(),
-            // the boundary drives the child to death under its two decs
+            // the boundary drives the child to death under its two decs,
+            // answering the collected answers list's Ref at overlay word
+            // 1 (slot 4) on the clean join — the hand parent takes the
+            // channel's discard dec before answering
             Uop::Mov { dst: 3, src: 0 }.into(),
             Uop::Kimm { dst: 4, kidx: k(3) }.into(),
             Uop::Call {
@@ -886,6 +893,7 @@ fn a_spawned_childs_extra_dec_releases_no_claimed_count() {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 4 }.into(),
             Uop::Kimm { dst: 0, kidx: k(6) }.into(),
             Uop::Ret { src: 0 }.into(),
         ],

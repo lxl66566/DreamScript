@@ -17,7 +17,7 @@ fn count_up() -> int {
 }
 ```
 
-`int` is 64-bit signed and `float` 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`), and a width suffix (`42u32`) names a declared type, so an undeclared width refuses and a suffixed literal itself refuses at lowering. Overflow and division by zero trap (`1 / 0` panics), while floats never trap (`1.0 / 0.0` is `+inf`); the float math family rides pure builtins — `sqrt`, `sin`, `cos`, `atan2(y, x)`, `floor`, `ceil`, `pow(base, exp)`, `abs` — each an f64 total (a negative `sqrt` answers `NaN`). Wrapping is explicit (`+%`, `*%`, `-%a`); narrowing is a width-type call (`i32(u)`, `i64(f)`) with `u32.of(x)` the trapping conversion and `u32_of` the checked `u32 | none` (bare `u32(x)` refuses under the F9 namespace priority). `<<`, `>>` shift arithmetically, `&`, `^`, `|` are total, and a shift amount at or past 64 or below zero traps.
+`int` is 64-bit signed and `float` 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`), and a width suffix (`42u32`) names a declared type, so an undeclared width refuses and a suffixed literal itself refuses at lowering. Overflow and division by zero trap (`1 / 0` panics), while floats never trap (`1.0 / 0.0` is `+inf`). Wrapping is explicit (`+%`, `*%`, `-%a`); narrowing is a width-type call (`i32(u)`, `i64(f)`) with `u32.of(x)` the trapping conversion and `u32_of` the checked `u32 | none` (bare `u32(x)` refuses under the F9 namespace priority). `<<`, `>>` shift arithmetically, `&`, `^`, `|` are total, and a shift amount at or past 64 or below zero traps.
 
 Strings are immutable UTF-8 with escapes `\n \t \r \\ \" \' \0 \u{...}`; raw `r"..."` and nestable `r#"..."#` take no escapes and cover multiline needs. `'x'` is a Unicode scalar char and `b'x'` a byte (`\u{..}` spelling 0-255, while a raw non-ASCII byte char refuses); `code_of(c)` reads the char's scalar, and checked `char_of(code)` answers `string | none` (one scalar, a codepoint's UTF-8 bytes not being expressible in ds source). Interpolation is string-only: `"$x"` and `"${e}"` desugar to `str(e)` for a printable primitive (`int`, `float`, `bool`, `char`, `byte`, `string`) or a `show` carrier staged at its own span, a union receiver through its covering impls; a union or optional operand without covering `show` is an error.
 
@@ -69,7 +69,7 @@ type doc = doc_null | doc_bool | doc_num | doc_str | doc_obj
 
 fn port_of(j: doc) -> int | none | bad_port {
   if j is doc_obj {
-    const pv = j.fields.get("port")            // inferred: doc | none
+    const pv = j.fields.map_get("port")        // inferred: doc | none
     if pv is doc_num && pv.value >= 1 && pv.value <= 65535 { pv.value }
     else { bad_port { got: -1 } }
   } else {
@@ -80,7 +80,7 @@ fn port_of(j: doc) -> int | none | bad_port {
 
 Constructors (brace forms, bare tags, generic applications like `list[page]()`) live in the type namespace, functions in the value namespace: a struct `map` and a function `map` coexist, and a call-form name in both is an ambiguity error.
 
-Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `get` member read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
+Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the empty mutable collection; map literals are deferred, maps building by calls, and union values ride the map value channel (the ambient's `json_object` is exactly one). Maps have no iteration, so a list or the checked `map_get` read is the way through them. Ad-hoc aggregates are anonymous tuples (`("host", 8080)`), destructuring in bindings and patterns.
 
 ## Functions
 
@@ -166,7 +166,7 @@ fn report(total: int, failed: int) -> string {
 }
 ```
 
-Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `get` member). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
+Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `map_get`). A `for` over a list freezes the element count at loop entry, and boolean contexts are bool-typed.
 
 ```ts
 fn drill() {
@@ -204,12 +204,12 @@ const cfg = load_config("app.cfg").err((e) => config { host: "localhost", port: 
 const port = cfg.port.unwrap_or(8080)                       // int? -> int, eager fallback
 const p2 = cfg.port.unwrap_or_else(() => 8081)              // lazy variant
 fn require_name(m: map[string, string]) -> string | parse_error {
-  m.get("name").ok_or(missing_field("name"))?              // early exit with a new value
+  map_get(m, "name").ok_or(missing_field("name"))?          // early exit with a new value
 }
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).ok((n: string) => n).err((e) => "?")}")
 ```
 
-The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses. The process face rides the `proc` capability of `platform "std"`: `args()` answers the process arguments `ds run --args` stages, `env(name)` reads one variable into the checked none member, `read_line()` answers stdin's next line, `eprint`/`eprintln` write stderr, and `proc_run(cmd, args)` answers a spawned child's exit status. Beside `die`, the host member `exit(code)` ends the process with a deliberate status — the CLI owns the code: 0 clean, 1 trapped.
+The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses.
 
 ## Linearity
 
@@ -235,27 +235,27 @@ println("${size("x")} ${close(file { fd: 3 })}")
 
 ## Collections and iteration
 
-Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `get` member answers `t | none` whole, fields project out, and the copy closes move whole spans.
+Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, surfaced as a perf note and never an error; persistent structures are ordinary library types, and `bytes`/`vec` are the unboxed unique members of the model. A record element is one unit: the checked `list_get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
 
 ```ts
 var club = list[user]()
-club.push(user { name: "ada", age: 45 })                       // the whole span lands in place
-club.push(user { name: "bob", age: 15 })
-const cell = club.get(0)                                       // user | none, the checked read
+club.list_push(user { name: "ada", age: 45 })                  // the whole span lands in place
+club.list_push(user { name: "bob", age: 15 })
+const cell = list_get(club, 0)                                 // user | none, the checked read
 const who = cell.ok((u: user) => u.name).err((_: none) => "?")  // fields project out
 const grown = cons(user { name: "eve", age: 30 }, tail(club))   // cons and tail move whole spans
 const roster = collect(grown)                                   // the whole-list copy
 for u in roster { println("user ${u.name}") }
 ```
 
-Iteration is combinators (`map`, `filter`, `reduce`, and friends) plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar, and index typing waits on the stdlib types. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. String search answers through the same pure builtins: `contains(s, sub)` the membership bit, the checked `index_of(s, sub)` the first occurrence's char index (composing with `substring`'s indexing), and `replace(s, sub, with)` the one-pass swap. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
+Iteration is combinators (`map`, `filter`, `reduce`, and friends) plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar, and index typing waits on the stdlib types. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
 
 ```ts
 // rows: list[entry]
 var users = list[user]()
 var errors = list[parse_error]()
 for r in rows.map(parse_user) {
-  if r is parse_error { errors.push(r) } else { users.push(r) }
+  if r is parse_error { errors.list_push(r) } else { users.list_push(r) }
 }
 const total = users
   .filter((u) => u.age >= 18)
@@ -422,7 +422,7 @@ The run half is live: `ds run` folds an entry file's top-level statements into a
 
 `ds repl` is the interactive half: declarations append as their own blocks and statements fold into a REPL-owned `main`, each submission printing the value, its inferred type, and its effect row. The frame parks between submissions and resumes at the new statement, so prior statements run once. A trapping line rolls back without committing, its deinit-carrying bindings firing once on the drain. `:drop <name>` fires one live binding's deinit, `:reset` clears the session, `:quit` leaves.
 
-`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself, a loop-driving entry parking at its back edge every watch round, so no language spelling exists; every saved edit recompiles and swaps the module in place, the parked frame's next call running the new code. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` carries the process arguments the program reads through `args()` as `ds run` does.
+`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself, a loop-driving entry parking at its back edge every watch round, so no language spelling exists; every saved edit recompiles and swaps the module in place, the parked frame's next call running the new code. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` stages the entry's parameters as `ds run` does.
 
 `ds lsp` answers, over stdio, the hovering position's checked type with its effect row, preceded by the declaration's `.dsi` signature line when the position names an exported one; a word an import selection names but the open documents alone leave unknown answers its line from the linked dependency's cached `.dsi` artifact.
 
@@ -432,23 +432,21 @@ A bound extern calls the installed library: `extern "math" fn ds_add(left: int, 
 
 ## Concurrency
 
-Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
+Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. The block's value is the children's answers collected in spawn order — one list element per `spawn`, the body's own answer the element — so results flow through the join channel, never through a shared mutable binding (a spawned body may not hold a `mut` window over a binding that outlives the block). Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
 
 ```ts
 fn fetch_all(urls: list[string]) -> list[page] | net_err {
-  var pages = list[page]()
   nursery {
     for url in urls {
       spawn {
         match fetch_body(url) {
           timeout => cancel(timeout),
           refused => cancel(refused),
-          p       => pages.push(p),
+          p       => p,
         }
       }
     }
   }
-  pages
 }
 ```
 

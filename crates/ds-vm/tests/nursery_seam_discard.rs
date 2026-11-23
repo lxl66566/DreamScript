@@ -1,17 +1,23 @@
 //! The discard seams' count accounting: a spawned child's completed
 //! answer is taken over by exactly three receivers — the fork stage, the
 //! host face, and a claims-crossing re-acquire — while the in-language
-//! boundary and the debug count join take no answer at all. Those two
-//! seams owe every `Ref` word of each discarded `Completed` span one
-//! no-ledger dec (the child's claim row released at its death, the count
-//! left in flight for a receiver that never comes), so the word's unique
-//! death still runs at the join: the child's heap drains with the
-//! parent's, and no output observes the discard.
+//! boundary collects every completed span into its answers list (the
+//! join channel) and the debug count join takes no answer at all. The
+//! count seam owes every `Ref` word of each discarded `Completed` span
+//! one no-ledger dec (the child's claim row released at its death, the
+//! count left in flight for a receiver that never comes), so the word's
+//! unique death still runs at the join; the boundary's list adopts the
+//! words instead, and the joiner's own dec of the delivered list frees
+//! them — either way the child's heap drains with the parent's, and no
+//! output observes the discard.
 
 use ds_vm::{
     Const, ConstFuncRef, FIBER_ROOT, FiberId, FrameAnswer, FunctionDef, ModuleRegistry,
     ModuleVersion, Platform, Value, Vm,
-    abi::{ConstIdx, FrameLayout, Inst, SlotType, uop::Uop},
+    abi::{
+        ConstIdx, FrameLayout, Inst, SlotType,
+        uop::{Uop, rc::RcOp},
+    },
     assemble, native,
     native::{
         BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
@@ -99,6 +105,11 @@ fn a_boundary_join_drains_the_discarded_completed_answer() {
                 nargs: 2,
             }
             .into(),
+            // the clean join answers the collected list at overlay word 1
+            // (slot 4): the hand parent takes the channel's discard
+            // discipline — one dec of the delivered Ref, the lowered
+            // statement's own shape — before answering
+            Inst::Rc(RcOp::Dec { src: 4 }).into(),
             Uop::Kimm { dst: 4, kidx: k(4) }.into(),
             Uop::Ret { src: 4 }.into(),
         ],

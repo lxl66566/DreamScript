@@ -73,6 +73,17 @@ impl<V> ScopedMap<V> {
         self.undo.len()
     }
 
+    /// The live keys, for a scope-entry snapshot a later walk compares
+    /// against: the bindings a nursery block, say, did not itself
+    /// introduce — every key present and not hidden by a clear.
+    pub(crate) fn live_keys(&self) -> Vec<Span> {
+        self.entries
+            .iter()
+            .filter(|(_, (_, ver))| *ver >= self.epoch)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
     /// Replays the log back to a mark, in reverse. Marks nest (a scope's
     /// mark is only ever restored before any enclosing mark), which the
     /// checker's lexical snapshot/restore pairing guarantees.

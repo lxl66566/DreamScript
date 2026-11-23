@@ -34,19 +34,17 @@ fn fetch_body(url: url) -> page | net_err {
 // the union shapes lower (the list member is a heap-ref application
 // word); the fetch extern seam keeps the item at typecheck
 fn fetch_all(urls: list[url]) -> list[page] | net_err {
-  var pages = list[page]()
   nursery {
     for url in urls {
       spawn {
         match fetch_body(url) {
           timeout => cancel(timeout)
           refused => cancel(refused)
-          p => pages.push(p)
+          p => p
         }
       }
     }
   }
-  pages
 }
 
 // the retry loop's shapes (for over a range, the leading-binding arm,

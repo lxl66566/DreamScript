@@ -908,9 +908,17 @@ fn seam_vm(child: u32, mask: i64) -> Vm {
 #[test]
 fn the_boundary_seam_answers_a_clean_join_span() {
     let mut vm = seam_vm(1, 1);
-    assert_eq!(
-        vm.run("sb", "seam_parent", &[]),
-        Ok(FrameAnswer::one(Value::I64(0)))
+    // the clean join answers the discriminant plus the collected
+    // answers list's Ref at overlay word 1 — the hand parent returns
+    // that word, so the run's answer names the fresh list object
+    let out = vm.run("sb", "seam_parent", &[]);
+    let Ok(FrameAnswer::Words { head, n }) = &out else {
+        panic!("the clean join answers a span: {out:?}")
+    };
+    assert_eq!(*n, 1, "one answer word");
+    assert!(
+        matches!(head[0], Value::Ref(_)),
+        "the boundary's clean-join payload is the collected list's Ref, not {head:?}"
     );
 }
 

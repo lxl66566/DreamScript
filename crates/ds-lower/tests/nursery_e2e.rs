@@ -136,31 +136,47 @@ fn refused(source: &str, needle: &str) {
     }
 }
 
-/// Three spawns into one nursery append to a shared list through their
-/// captured Ref: join drives children in spawn order (1, 2, 3), the
-/// shared object carries the mutation, and the heap drains when the run
-/// ends — the child frames' capture counts balance their copy-in incs.
+/// The checker refuses with the exact reason naming the span.
+fn check_refused(source: &str, needle: &str) {
+    let mut files = Files::new();
+    let amb = files.add_source("ambient.ds", AMBIENT);
+    let id = files.add_source("probe.ds", source);
+    let asts = [
+        parse(&files, amb).expect("the ambient parses"),
+        parse(&files, id).expect("the fixture parses"),
+    ];
+    let analyzed = analyze(&files, &asts);
+    let text = analyzed
+        .checked
+        .diags
+        .iter()
+        .map(|diag| human(diag, &files))
+        .collect::<String>();
+    assert!(
+        text.contains(needle),
+        "the check refuses with `{needle}`, got: {text}"
+    );
+}
+
+/// Three spawns into one nursery answer through the join channel: the
+/// children's answer spans collect into one list in spawn order (1, 2,
+/// 3) — the 2026-11-21 ruling's nursery result channel — and the heap
+/// drains when the run ends, the collected list's own count included.
 #[test]
-fn spawns_join_in_spawn_order_over_a_shared_list() {
+fn spawns_join_collecting_answers_in_spawn_order() {
     let (vm, out) = run_main(
         r"
 fn main() -> () {
-  var xs = list[int]()
-  nursery {
-    spawn {
-      xs.list_push(1)
-    }
-    spawn {
-      xs.list_push(2)
-    }
-    spawn {
-      xs.list_push(3)
-    }
+  const xs = nursery {
+    spawn { 1 }
+    spawn { 2 }
+    spawn { 3 }
   }
   println(str_int(xs.list_len()))
   for x in xs {
     println(str_int(x))
   }
+  ()
 }
 ",
         false,
@@ -183,7 +199,6 @@ fn first_failure_cancels_siblings_at_safe_points_and_unions_out() {
     let (_, out) = run_main(
         r#"
 fn fetch_all(n: int) -> int | net_err {
-  var xs = list[int]()
   nursery {
     spawn {
       cancel(timeout)
@@ -191,13 +206,12 @@ fn fetch_all(n: int) -> int | net_err {
     spawn {
       var i = 0
       while i < n {
-        xs.list_push(i)
         i = i + 1
       }
+      i
     }
   }
-  const kept = xs.list_len()
-  kept
+  0
 }
 
 fn main() -> () {
@@ -213,18 +227,19 @@ fn main() -> () {
     assert_eq!(out, "caught timeout\n");
 }
 
-/// A clean nursery with cancelling children keeps the later siblings'
-/// completed values: first failure is spawn-drive order, so a completing
-/// first child's pushes survive a later child's failure.
+/// A completing first child lands before a later failure cancels: first
+/// failure is spawn-drive order, so the first child's observable work
+/// (its print) stands, and the failed join takes no collected answers —
+/// the answer that completed dies at the boundary instead of riding out.
 #[test]
 fn a_completed_first_child_lands_before_a_later_failure_cancels() {
-    let (_, out) = run_main(
+    let (vm, out) = run_main(
         r#"
 fn mixed(n: int) -> int | net_err {
-  var xs = list[int]()
   nursery {
     spawn {
-      xs.list_push(7)
+      println("first landed")
+      7
     }
     spawn {
       cancel(refused)
@@ -232,26 +247,30 @@ fn mixed(n: int) -> int | net_err {
     spawn {
       var i = 0
       while i < n {
-        xs.list_push(i)
         i = i + 1
       }
+      i
     }
   }
-  const kept = xs.list_len()
-  kept
+  0
 }
 
 fn main() -> () {
   match mixed(500000) {
-    timeout => println("caught timeout"),
-    refused => println("caught refused"),
+    timeout => println("t"),
+    refused => println("r"),
     n => println("kept ${n}")
   }
 }
 "#,
         false,
     );
-    assert_eq!(out, "caught refused\n");
+    assert_eq!(out, "first landed\nr\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
 }
 
 /// A deep tail-looping child runs unbounded self-recursion at a constant
@@ -320,6 +339,7 @@ fn main() -> () {
       println("child ran ${h.id}")
     }
   }
+  ()
 }
 "#,
         false,
@@ -332,14 +352,13 @@ fn main() -> () {
     );
 }
 
-/// A spawned child's tail answer dies as a discarded statement's value
-/// [E2 composes with C5]: the boundary join takes no completed answer,
-/// so each answer's `~Copyable` deinit claim fires exactly once at the
-/// child's own completion — the call answer, the literal answer, and a
-/// join of two answers alike — and the run's heap drains.
+/// The join channel's element discipline: a `~Copyable` answer refuses
+/// at the spawn site exactly like a list literal element — the
+/// collected list's edge retention owns counts, never claims, so the
+/// answer's deinit hook has no drop position inside the channel.
 #[test]
-fn a_spawned_tail_answer_fires_its_deinit_claim_once() {
-    let (vm, out) = run_main(
+fn a_deinit_carrying_spawn_answer_refuses() {
+    refused(
         r#"
 struct claimed: ~Copyable {
   id: int
@@ -353,19 +372,11 @@ fn work(n: int) -> claimed { claimed { id: n } }
 fn main() -> () {
   nursery {
     spawn { work(7) }
-    spawn { claimed { id: 8 } }
-    spawn { if true { work(9) } else { work(10) } }
   }
-  println("done")
+  ()
 }
 "#,
-        false,
-    );
-    assert_eq!(out, "freed 7\nfreed 8\nfreed 9\ndone\n");
-    assert!(
-        vm.objects().is_empty(),
-        "the heap drains when the run ends ({} live)",
-        vm.objects().len()
+        "per-span deinit claims own the seam",
     );
 }
 
@@ -391,6 +402,99 @@ fn main() -> () {
         false,
     );
     assert_eq!(out, "done\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The tutorial's fetch shape over the channel: the spawned bodies'
+/// match answers ride the join in spawn order while the cancel arms
+/// union out at the boundary on failure — the clean run collects the
+/// pages in url order, the failing run catches the member, and the heap
+/// drains both times.
+#[test]
+fn the_tutorial_fetch_shape_collects_pages_and_unions_errors() {
+    let (vm, out) = run_main(
+        r#"
+fn fetch_body(u: string) -> string | net_err {
+  if u == "https://down.example" {
+    refused
+  } else {
+    if u == "https://slow.example" {
+      timeout
+    } else {
+      "body of ${u}"
+    }
+  }
+}
+
+fn fetch_all(urls: list[string]) -> list[string] | net_err {
+  nursery {
+    for u in urls {
+      spawn {
+        match fetch_body(u) {
+          timeout => cancel(timeout)
+          refused => cancel(refused)
+          body => body
+        }
+      }
+    }
+  }
+}
+
+fn main() -> () {
+  const good = ["https://ds.dev", "https://example.org"]
+  match fetch_all(good) {
+    timeout => println("caught timeout")
+    refused => println("caught refused")
+    bodies => {
+      println("kept ${bodies.list_len()}")
+      for b in bodies {
+        println(b)
+      }
+    }
+  }
+  const bad = ["https://ds.dev", "https://down.example", "https://slow.example"]
+  match fetch_all(bad) {
+    timeout => println("caught timeout")
+    refused => println("caught refused")
+    bodies => println("kept ${bodies.list_len()}")
+  }
+}
+"#,
+        false,
+    );
+    assert_eq!(
+        out,
+        "kept 2\nbody of https://ds.dev\nbody of https://example.org\ncaught refused\n"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// A nursery with no spawn answers the empty list: the join channel
+/// stands open with nothing to collect, the unit element typing the
+/// block's value.
+#[test]
+fn an_empty_nursery_answers_the_empty_list() {
+    let (vm, out) = run_main(
+        r#"
+fn main() -> () {
+  const xs = nursery {
+    println("no children stand")
+  }
+  println(str_int(xs.list_len()))
+  ()
+}
+"#,
+        false,
+    );
+    assert_eq!(out, "no children stand\n0\n");
     assert!(
         vm.objects().is_empty(),
         "the heap drains when the run ends ({} live)",
@@ -602,12 +706,10 @@ fn a_question_mark_inside_a_nursery_refuses() {
     refused(
         r#"
 fn f() -> int | none {
-  var xs = list[int]()
   nursery {
-    spawn {
-      xs.list_push(1)
-    }
-    println(str_int(xs.list_get(0)?))
+    spawn { 1 }
+    const maybe = list_get(list[int](), 0)
+    println(str_int(maybe?))
   }
   0
 }
@@ -625,10 +727,12 @@ fn main() -> () {
 
 /// A spawned body's own `?` refuses: the child's frame returns its own
 /// completion value, and the enclosing function's return union is not
-/// the child's.
+/// the child's. The tail is the join channel's answer, so the exit
+/// refuses at the check — the value-position rule names the consumed
+/// position — before the lowering's own spawn-exit guard ever stands.
 #[test]
 fn a_question_mark_inside_a_spawn_body_refuses() {
-    refused(
+    check_refused(
         r#"
 fn f(n: int | net_err) -> int | net_err {
   nursery {
@@ -647,7 +751,7 @@ fn main() -> () {
   }
 }
 "#,
-        "a spawned body runs as its own fiber and completes with its own value",
+        "return in a value position",
     );
 }
 
@@ -660,17 +764,15 @@ fn every_nursery_site_is_one_plain_seam_call() {
     let (_, lowered) = build_vm(
         r#"
 fn f() -> int | net_err {
-  var xs = list[int]()
   nursery {
     spawn {
-      xs.list_push(1)
+      1
     }
     spawn {
       cancel(refused)
     }
   }
-  const kept = xs.list_len()
-  kept
+  0
 }
 
 fn main() -> () {
@@ -740,11 +842,8 @@ fn main() -> () {
 fn the_script_entry_runs_nurseries_too() {
     let (_, out) = run_main(
         r"
-var xs = list[int]()
-nursery {
-  spawn {
-    xs.list_push(9)
-  }
+const xs = nursery {
+  spawn { 9 }
 }
 println(str_int(xs.list_len()))
 ",

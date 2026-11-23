@@ -40,11 +40,10 @@ impl shows for string {
 
 impl[t: shows] shows for list[t] {
   fn show(self) -> string {
-    var acc = list[string]()
-    nursery {
+    const acc = nursery {
       spawn {
         const parts = self.map((x) => x.show())
-        acc.list_push(join(parts, "+"))
+        join(parts, "+")
       }
     }
     join(acc, ";")

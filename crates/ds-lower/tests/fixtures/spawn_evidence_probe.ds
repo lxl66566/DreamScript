@@ -41,16 +41,12 @@ impl shows for string {
 
 impl[t: shows] shows for list[t] {
   fn show(self) -> string {
-    var acc = list[string]()
-    nursery {
+    const parts = nursery {
       for x in self {
-        spawn {
-          const s = x.show()
-          acc.list_push(s)
-        }
+        spawn { x.show() }
       }
     }
-    join(acc, ";")
+    join(parts, ";")
   }
 }
 

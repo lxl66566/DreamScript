@@ -23,8 +23,8 @@
 # cost; small-real - trivial is first-allocation cost).
 #
 # Numbers are meaningful ONLY under an exclusive lock with the machine
-# otherwise idle (same discipline as run.sh bench; in the parallel
-# worktree setup, via the shared withlock helper). A single run is
+# otherwise idle (same discipline as run.sh bench: an exclusive `flock` on
+# the machine-wide lock file). A single run is
 # noise; medians under ~30 runs on a loaded machine are indicative
 # only. Timings are printed, never committed — performance rounds
 # record the medians in commit messages.

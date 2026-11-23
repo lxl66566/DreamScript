@@ -731,9 +731,10 @@ impl Plan {
     /// Registers one `spawn` expression's block as a synthesized child
     /// function [E2] and returns its table index plus the captures its
     /// body will bind: the block becomes a zero-parameter lambda over the
-    /// same capture list the lambda construction uses. The child's
-    /// checked unit type rides the spawn expression's own span, so the
-    /// plan entry carries the return directly. A child lexically inside a
+    /// same capture list the lambda construction uses. The plan entry's
+    /// return is the body's answer type — the value the frame's exit
+    /// carries out for the join to collect in spawn order. A child
+    /// lexically inside a
     /// generic impl body carries its own runtime-evidence pairs (staged
     /// from the spawning frame's slots into the entry argument area) and
     /// inherits the impl's bounds so its nested lambdas and spawns
@@ -1971,11 +1972,15 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// The innermost open nurseries' id words [E2], innermost last: the
     /// `spawn` sites of one `nursery` block stage the top word.
     nurseries: Vec<u8>,
+    /// Whether this frame is a spawned child [E2]: the child's own
+    /// return is its answer type, not the enclosing function's union,
+    /// so the cancel-containment proof belongs to the parent's spawn
+    /// site instead of this frame.
+    spawn_child: bool,
     /// Whether this frame is a `spawn` expression's child [E2]: the
     /// parent's spawn site owns the `cancel`-payload containment checks
     /// against the nursery-owning function's return union, so the child's
     /// own lowering skips them.
-    spawn_child: bool,
     /// The frame's canonical unit word: allocated at its first use, its
     /// single `Kimm 0` spliced at the frame top in `finalize`. Every unit
     /// value in the frame is this one place.
@@ -4767,7 +4772,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.seam_call(
             join,
             &[(id_word, SlotType::I64), (mask_word, SlotType::I64)],
-            &[SlotType::Tag, SlotType::Tag],
+            &[SlotType::Tag, SlotType::Ref],
         )?;
         let answer = if mask != 0 {
             let words = self.shapes.words(self.ret_ty)?.clone();
@@ -4785,7 +4790,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // the exit consumes the placement state; the continuation
             // forks from before it
             let ok_state = self.rc.save();
-            let unit = self.unit_value(*span)?.place;
+            let answers = self.boundary_answers_mov()?;
             let done = self.label();
             self.emit(Op::Jmp { target: done });
             self.bind_label(fail);
@@ -4868,15 +4873,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             });
             self.rc.restore(ok_state);
             self.bind_label(done);
-            unit
+            // the fail paths exited on the pre-channel state, so the
+            // collected list's ownership registers here alone — the
+            // word the clean path moved, owned by the continuation that
+            // reads it
+            self.rc.produced(answers);
+            Place {
+                base: answers,
+                shape: PlaceShape::Word(SlotType::Ref),
+            }
         } else {
             // no contained error member can answer, so the span is
-            // always the clean-join word; bug traps ride the call's own
-            // trap path
-            self.unit_value(*span)?.place
+            // always the clean-join word and the answers list; bug traps
+            // ride the call's own trap path
+            let answers = self.boundary_answers_mov()?;
+            self.rc.produced(answers);
+            Place {
+                base: answers,
+                shape: PlaceShape::Word(SlotType::Ref),
+            }
         };
         self.scope_pop();
         Ok(answer)
+    }
+
+    /// The join channel's clean-join value [E2]: the boundary seam
+    /// collects the children's answer spans into one list in spawn
+    /// order and delivers its `Ref` at overlay word 1, beside the
+    /// discriminant. The move alone emits here; the word's ownership
+    /// registers at the caller's join point (the fail paths exit on the
+    /// pre-channel state), and the delivered reference's claim row is
+    /// the joiner's own from the death handoff, so the block's value
+    /// dies through the ordinary placement discipline when the consumer
+    /// discards it.
+    fn boundary_answers_mov(&mut self) -> Result<u8, LowerError> {
+        let word = self.temp_word(SlotType::Ref)?;
+        self.emit(Op::Mov {
+            dst: Slot::body(word),
+            src: Slot::overlay(1),
+        });
+        Ok(word)
     }
 
     /// The join's containment mask [E2]: one bit per bare member of the
@@ -4951,7 +4987,32 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  `return` and `?` through the enclosing function",
             ));
         }
-        let ret = self.val(*span)?.ty;
+        // The child function's return is its body's answer [E2, the
+        // join channel]: the checker recorded the body's value at its
+        // own span, and the frame's exit carries the answer span the
+        // boundary collects in spawn order. A body that only cancels
+        // keeps the unit return — its exit code is unreachable, and the
+        // empty type shapes nothing.
+        let ret = {
+            let answer = self.val(body.span)?;
+            if answer.diverges || self.members(answer.ty).is_empty() {
+                self.val(*span)?.ty
+            } else {
+                answer.ty
+            }
+        };
+        // The join channel's element discipline: the collected list's
+        // edge retention owns counts, never claims, so a deinit-carrying
+        // answer refuses exactly like a list literal element — the hook
+        // has no drop position inside the channel.
+        if self.deinit_hook(ret, *span)?.is_some() {
+            return Err(LowerError::unsupported(
+                *span,
+                "a spawn body's answer",
+                "a deinit-carrying answer's hook has no claim inside the join channel's list \
+                 retention; per-span deinit claims own the seam",
+            ));
+        }
         // the body's `cancel` payloads union out through THIS function's
         // return at the enclosing nursery's join: prove the containment
         // at the spawn site, where the return union is in scope

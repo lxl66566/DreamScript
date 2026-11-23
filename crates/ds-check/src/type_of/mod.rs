@@ -108,6 +108,16 @@ enum IterBind {
     Def(DefId),
 }
 
+/// One enclosing nursery block's scope entry: the local binder spans
+/// live when the block opened — exactly the bindings whose lifetime
+/// outlives the block, since every binder the block itself introduces
+/// dies with it after the join.
+#[derive(Clone)]
+struct NurseryScope {
+    outlived: Vec<Span>,
+    at: Span,
+}
+
 /// One scope boundary's rollback point: both binder tables' undo-log
 /// marks, the assumption stack's length, and the enclosing return union.
 /// Cheap by construction — restoring replays only what the scope changed.
@@ -569,6 +579,9 @@ where
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
             for_iters: Vec::new(),
+            nursery_scopes: Vec::new(),
+            spawn_answers: Vec::new(),
+            spawn_depth: 0,
             refined: ScopedMap::default(),
             type_vars: Vec::new(),
             assumptions: Vec::new(),
@@ -619,6 +632,9 @@ where
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
             for_iters: Vec::new(),
+            nursery_scopes: Vec::new(),
+            spawn_answers: Vec::new(),
+            spawn_depth: 0,
             refined: ScopedMap::default(),
             type_vars: Vec::new(),
             assumptions: Vec::new(),
@@ -794,6 +810,21 @@ struct Bodies<'a> {
     /// popped around each body walk, so the stack is empty at every
     /// frame boundary.
     for_iters: Vec<IterWindow>,
+    /// The enclosing nursery blocks' scope entries, innermost last: the
+    /// locals live at each block's entry are the bindings that outlive
+    /// it, so a spawned body's `mut` window over one of them refuses
+    /// [E2].
+    nursery_scopes: Vec<NurseryScope>,
+    /// Each enclosing nursery block's spawned-body answers, innermost
+    /// last: the block's value is the collected answers' list, so every
+    /// `spawn` inside it records its body's answer here. A lambda frame
+    /// clears the stack for its body — a `spawn` inside a lambda names
+    /// no nursery.
+    spawn_answers: Vec<Vec<Val>>,
+    /// Depth of spawned-body frames being walked: gates the
+    /// spawn-scoped refinements (a `cancel` arm never answers inside a
+    /// spawned body) and the outlived-binding refusal.
+    spawn_depth: usize,
     /// The refinement overlay, keyed by binder span (B2).
     refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
@@ -1666,10 +1697,11 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
-            Expr::Nursery { body, .. } => self.fiber_block(body, false),
+            Expr::Nursery { body, span } => self.nursery_block(body, *span),
             // A spawned body runs as its own fiber: its loop exits stay
-            // inside its frame.
-            Expr::Spawn { body, .. } => self.fiber_block(body, true),
+            // inside its frame, and its answer rides the join's
+            // collected list.
+            Expr::Spawn { body, .. } => self.spawned_block(body),
             Expr::Defer { body, .. } => {
                 self.value_pos = false;
                 self.block(body);
@@ -2527,10 +2559,21 @@ impl Bodies<'_> {
         // the context — they evaluate inside the same compile-time run.
         let outer_ctx = self.comptime;
         self.comptime.ctx |= comptime_fn;
+        // A real lambda's body is its own frame: a `spawn` lexically
+        // inside it names no nursery (the entry lowers as its own
+        // function), so the answer collector clears for the body and
+        // restores after. The script entry's synthesized `main` keeps
+        // the stack — its body is the file's top level, where a nursery
+        // stands exactly like one inside a declared fn.
+        let outer_answers =
+            (span.start != span.end).then(|| std::mem::take(&mut self.spawn_answers));
         // The lambda's body is its own frame's statement stream: its tail
         // may exit early like any function body's.
         self.value_pos = false;
         let body_val = self.expr(body, self.ret);
+        if let Some(outer_answers) = outer_answers {
+            self.spawn_answers = outer_answers;
+        }
         self.comptime = outer_ctx;
         if let Some(frame) = frame {
             self.exit_frame(frame);
@@ -3179,7 +3222,8 @@ impl Bodies<'_> {
                     if let Some(Res::Def(def)) = self.res.get(only.span) {
                         let def = *def;
                         if self.decls.fns.contains_key(&def) {
-                            return self.call_def(def, None, args, trailing.as_deref(), *span);
+                            let val = self.call_def(def, None, args, trailing.as_deref(), *span);
+                            return self.spawn_cancel_refines(def, val);
                         }
                         // A minted case constructs by call form [B3]; a
                         // bare case falls through to the tag error below.
@@ -3919,6 +3963,23 @@ impl Bodies<'_> {
             .map(|window| window.iter_at)
     }
 
+    /// The spawn-scoped `cancel` refinement [E2]: inside a spawned body
+    /// a `cancel` call is the child's deliberate failure — the fiber
+    /// dies at the call, so it never answers, and the staging
+    /// signature's unit drops out of the body's own unions (a match's
+    /// `cancel` arm contributes nothing to the answer the join
+    /// collects). Outside spawned bodies the declared signature stands
+    /// unchanged. The spelling is recognized like the ambient's other
+    /// compiler-required names (`none`): by its name — the ambient's
+    /// `cancel` is the only declaration honest code reaches inside a
+    /// spawned body.
+    fn spawn_cancel_refines(&mut self, def: DefId, mut val: Val) -> Val {
+        if self.spawn_depth > 0 && self.package.def(def).name == "cancel" {
+            val.diverges = true;
+        }
+        val
+    }
+
     /// A `mut` window parameter over a copyable binding takes only a
     /// `var` receiver (D2, C3): copyable Ref words alias with no
     /// checker-visible trace, so exclusivity is proven by spelling the
@@ -3969,6 +4030,42 @@ impl Bodies<'_> {
                     )
                     .with_primary(only.span, "mut window over the iterated binding")
                     .with_secondary(iter_at, "iterated here"),
+                );
+                continue;
+            }
+            // A `mut` window over a binding outliving the enclosing
+            // nursery block refuses inside a spawned body [E2, the
+            // 2026-11-21 scheduler ruling]: once a child can park on a
+            // world op the drive interleaves siblings, so a mutation of
+            // a binding that survives the join has no sequenced
+            // observer — the refusal permanent and drive-independent.
+            // Bindings the block itself introduced die with it after
+            // the join, so a window over one of those stays legal, and
+            // the parent's own statements in the block sequence with
+            // its spawns by construction, so only the spawned body is
+            // refused. A top-level `var` always outlives the block.
+            if self.spawn_depth > 0
+                && let Some((outlives, nursery_at)) = self.nursery_scopes.last().map(|scope| {
+                    let outlives = match &res {
+                        Res::Local { bind } => scope.outlived.contains(bind),
+                        Res::Def(def) => self.package.def(*def).kind == DefKind::Var,
+                        _ => false,
+                    };
+                    (outlives, scope.at)
+                })
+                && outlives
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::SpawnOutlivedMutWindow,
+                        format!(
+                            "`{}` outlives this nursery block; a spawned body may never hold a \
+                             `mut` window over it [E2]",
+                            only.name
+                        ),
+                    )
+                    .with_primary(only.span, "mut window over an outlived binding")
+                    .with_secondary(nursery_at, "the nursery block joins here"),
                 );
                 continue;
             }
@@ -6547,19 +6644,74 @@ impl Bodies<'_> {
             .unwrap_or_else(|_| self.empty())
     }
 
-    /// A nursery or spawn block: the body checks in a fresh scope. A
-    /// spawned body starts its own frame, since it runs as its own
-    /// fiber.
-    fn fiber_block(&mut self, body: &BlockExpr, own_frame: bool) -> Val {
+    /// A nursery block [E2]: the body checks in a fresh scope over the
+    /// block's own nursery scope entry, every `spawn` inside it records
+    /// its body's answer, and the block's value is the collected
+    /// answers' list — the join channel's checker face. The element
+    /// type is the union of the spawned bodies' answers (a body that
+    /// only cancels never answers, so it contributes nothing); a block
+    /// whose spawns never answer at all keeps the unit element, the
+    /// empty list's honest inhabitant.
+    fn nursery_block(&mut self, body: &BlockExpr, span: Span) -> Val {
+        self.nursery_scopes.push(NurseryScope {
+            outlived: self.locals.live_keys(),
+            at: span,
+        });
+        self.spawn_answers.push(Vec::new());
         let saved = self.snapshot();
         self.refined.clear();
-        let frame = own_frame.then(|| self.enter_frame());
         self.value_pos = false;
         self.block(body);
-        if let Some(frame) = frame {
-            self.exit_frame(frame);
-        }
         self.restore(saved);
+        self.nursery_scopes.pop();
+        let answers = self
+            .spawn_answers
+            .pop()
+            .expect("the nursery pushed its collector");
+        let mut elem = self.empty();
+        let mut answering = false;
+        for answer in answers {
+            if !answer.diverges {
+                elem = self.decls.universe.union(elem, answer.ty);
+                answering = true;
+            }
+        }
+        // a block whose spawns never answer at all (every body cancels,
+        // or no spawn stands) keeps the unit element — the empty list's
+        // honest inhabitant
+        if !answering {
+            elem = self.unit();
+        }
+        let ty = self.applied_list_ty(elem).unwrap_or_else(|| self.unit());
+        Val {
+            ty,
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
+    /// A spawned body [E2]: its own frame, its tail checked as the
+    /// child's answer, and the spawn-scoped `cancel` refinement — a
+    /// `cancel` arm inside a spawned body never answers, so it drops
+    /// out of the body's own unions instead of polluting the answer
+    /// channel with the staging signature's unit. The expression itself
+    /// stays unit: the answers collect at the enclosing nursery's join.
+    fn spawned_block(&mut self, body: &BlockExpr) -> Val {
+        let saved = self.snapshot();
+        self.refined.clear();
+        let frame = self.enter_frame();
+        self.spawn_depth += 1;
+        self.value_pos = true;
+        let val = self.block(body);
+        self.spawn_depth -= 1;
+        self.exit_frame(frame);
+        self.restore(saved);
+        // the body's answer lands on the span the lowerer plans the
+        // child function's return from
+        self.expr_types.insert(body.span, val);
+        if let Some(answers) = self.spawn_answers.last_mut() {
+            answers.push(val);
+        }
         Val {
             ty: self.unit(),
             diverges: false,

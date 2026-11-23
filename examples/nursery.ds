@@ -1,8 +1,9 @@
 // The tutorial's concurrency block, end to end: `fetch_all` fans the
-// fetches out over `spawn` inside a `nursery`, scope exit joins in
-// spawn order, the first failure cancels the in-flight sibling at its
-// next backward branch, and the child error unions out at the boundary
-// into the caller's match. The deterministic fetch_body stands in for
+// fetches out over `spawn` inside a `nursery`, each child's answer
+// riding the join channel (the block's value is the collected answers
+// in spawn order), the first failure cancels the in-flight sibling at
+// its next backward branch, and the child error unions out at the
+// boundary into the caller's match. The deterministic fetch_body stands in for
 // the net capability: the unreachable host refuses, the slow one times
 // out, everything else answers a body.
 
@@ -19,14 +20,13 @@ fn fetch_body(u: string) -> string | net_err {
 }
 
 fn fetch_all(urls: list[string]) -> int | net_err {
-  var bodies = list[string]()
-  nursery {
+  const bodies = nursery {
     for u in urls {
       spawn {
         match fetch_body(u) {
           timeout => cancel(timeout)
           refused => cancel(refused)
-          body => bodies.push(body)
+          body => body
         }
       }
     }
