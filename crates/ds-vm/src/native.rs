@@ -4038,6 +4038,20 @@ impl OutputSink {
         self.net.set_tls_config(config);
     }
 
+    /// Pins the TLS server identity of the net face's tls tier
+    /// (`[crate::tls]`'s server half): no default identity exists, the
+    /// unprovisioned `net_accept_tls` answering its own refusal.
+    pub fn set_tls_server_config(&mut self, config: std::sync::Arc<rustls::ServerConfig>) {
+        self.net.set_tls_server_config(config);
+    }
+
+    /// Advances one parked accept-tls machine one step (the machine's
+    /// row and its session the connection table owns, the accept stage
+    /// probing the listener table it names).
+    pub(crate) fn tls_accept_wake(&mut self, accept: i64) -> crate::net::AcceptWake {
+        self.net.tls_accept_wake(accept, &mut self.listeners)
+    }
+
     /// Writes `text` with no newline.
     ///
     /// # Errors

@@ -629,6 +629,19 @@ pub extern fn net_listen (host: string, port: int) -> net_listener
 pub extern fn net_accept (lid: int) -> net_handle
 pub extern fn net_listener_close (lid: int) -> ()
 pub extern fn net_local_addr (lid: int) -> string
+// The server half's tls upgrade (the tls capability's own op, the
+// 2026-11-23 ruling): the accepted connection upgraded over the
+// host-pinned rustls server identity, registering with its session so
+// it owns the same `net_handle` face in full — the send/recv over the
+// tls records, the closing deinit the plain accepted connection's
+// own. The host pins the identity (no default exists, a server
+// certificate being the host's own), the unprovisioned call answering
+// its own net_err; the tls-omitting host keeps the op unserved. The
+// total spelling `accept` keeps is this op's too (C5: the handle is
+// deinit-carrying, so a union member holding it refuses), so a failed
+// accept or handshake halts on the net error line; a non-halting
+// upgrade needs the same optional-over-linear union seam.
+pub extern fn net_accept_tls (lid: int) -> net_handle
 pub fn accept (l: net_listener) -> net_handle {
   const conn = net_accept(l.lid)
   conn
@@ -644,6 +657,14 @@ pub fn close_listener (l: net_listener) -> () {
 pub fn local_addr (l: net_listener) -> string {
   const addr = net_local_addr(l.lid)
   addr
+}
+// The listener's tls upgrade: the raw seam's id word out the same way
+// `accept` reads it, answering the upgraded connection's own
+// `net_handle` — the total spelling the raw extern keeps, a failed
+// accept or handshake halting on the net error line.
+pub fn accept_tls (l: net_listener) -> net_handle {
+  const conn = net_accept_tls(l.lid)
+  conn
 }
 
 // The process face's capture half: the same discipline as the other

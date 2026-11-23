@@ -125,6 +125,38 @@ fn a_failed_bind_halts_on_the_total_spellings_error_line() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The unprovisioned upgrade's printing halt: the CLI host pins no
+/// server identity (a server certificate is the host's own to pin),
+/// so `accept_tls` answers its own refusal and the total spelling
+/// halts on the net error line exactly the failed bind's way — the
+/// raw span's message the fixture round pins.
+#[test]
+fn an_unprovisioned_accept_tls_halts_on_the_net_error_line() {
+    let dir = support::guarded_dir("ds-cli-net-accept-tls-");
+    fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("accept_tls.ds");
+    fs::write(
+        &file,
+        "fn main() -> int {\n  const l = net_listen(\"127.0.0.1\", 0)\n  const c = \
+         accept_tls(l)\n  0\n}\n",
+    )
+    .expect("source writes");
+    let out = ds().arg("run").arg(&file).output().expect("ds run spawns");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !out.status.success(),
+        "the refused upgrade never reads as clean success: status {:?}",
+        out.status.code()
+    );
+    assert!(
+        stdout.contains(
+            "net error: net_accept_tls 0: tls refused: the host installed no server config"
+        ),
+        "the total spelling's failure halts on the net error line: stdout {stdout:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_scheduled_run_parks_its_accept_and_serves_the_peer() {
     let dir = support::guarded_dir("ds-cli-net-server-");

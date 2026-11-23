@@ -23,16 +23,33 @@
 //! below — the session is a synchronous state machine, so the
 //! transport drives it a step per readiness wake, the session's own
 //! wants-write/wants-read naming the interest each step watches.
+//!
+//! The server half (ruled 2026-11-23) rides the same capability: the
+//! host or test pins the rustls [`ServerConfig`] through
+//! [`crate::Vm::set_tls_server_config`] (no default identity — a
+//! server certificate is the host's own to pin, the unprovisioned
+//! call answering its own refusal), and `net_accept_tls` takes one
+//! pending connection off the bound listener and upgrades it over
+//! that identity — the staged handshake the client round's own shape
+//! (the same wants naming each wake's interest), the completion
+//! registering the accepted stream with its session so the connection
+//! owns the full `net_handle` face over the tls records, and a
+//! non-Linux host or a no-reactor embedder keeping the blocking twin.
 
 use std::{
     io::{self, Read, Write},
+    net::TcpStream,
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, pki_types::ServerName};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConnection, StreamOwned,
+    pki_types::ServerName,
+};
 
 use crate::{
-    native::{NativeResult, OutputSink, ref_arg},
+    native::{NativeResult, OutputSink, i64_arg, ref_arg},
     net::{self, Scheme},
     object::Heaps,
     value::Value,
@@ -167,7 +184,7 @@ fn fetch(out: &mut OutputSink, url: &str, https_only: bool) -> Result<String, io
 /// discipline: a peer ending the connection without TLS close_notify
 /// (the common HTTP/1.0 server behavior) reads as an orderly close —
 /// the same EOF the plain exchange takes — never an error.
-struct CloseTolerant(StreamOwned<ClientConnection, std::net::TcpStream>);
+struct CloseTolerant(StreamOwned<ClientConnection, TcpStream>);
 
 impl Read for CloseTolerant {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -446,6 +463,418 @@ fn parked_tls_fetch(
             url,
             &err.to_string(),
         )),
+    }
+}
+
+/// `net_accept_tls(lid: int) -> int | net_err` (the raw seam behind the
+/// ambient's total `accept_tls`): takes one pending connection off the
+/// bound listener and upgrades it over the tls capability's server
+/// half — the host-pinned rustls server identity
+/// ([`crate::Vm::set_tls_server_config`], no default) answering the
+/// accepted connection's handle, the stream registering with its
+/// session so the connection owns the full `net_handle` face over
+/// the tls records. The ambient keeps the total spelling the
+/// deinit-carrying handle forces (C5), so a failed accept or
+/// handshake halts on the net error line — `net_listen`'s own
+/// printing-halt pairing.
+pub(crate) fn net_accept_tls_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let lid = i64_arg(args, 0)?;
+    let target = lid.to_string();
+    let Some(config) = out.net().tls_server_config() else {
+        return Ok(net::net_err(
+            heaps,
+            net::NetClass::Other,
+            "net_accept_tls",
+            &target,
+            "tls refused: the host installed no server config",
+        ));
+    };
+    let mut session = match ServerConnection::new(config) {
+        Ok(session) => session,
+        Err(err) => {
+            return Ok(net::net_err(
+                heaps,
+                net::NetClass::Other,
+                "net_accept_tls",
+                &target,
+                &err.to_string(),
+            ))
+        },
+    };
+    // the parked machine: the accept parks on the listener's own
+    // readable door (`net_accept`'s own), the rustls handshake
+    // advancing one step per readiness wake over the accepted stream
+    // — the client tier's own discipline, the session's wants naming
+    // the interest each wake watches. The linux driver's own; any
+    // other host keeps the blocking twin under any reactor.
+    #[cfg(target_os = "linux")]
+    {
+        if out.listeners().parking() {
+            let deadline = std::time::Instant::now() + out.listeners().timeout();
+            return match out.listeners().try_accept(lid) {
+                net::NetAttempt::Done(Err(err)) => Ok(net::net_err(
+                    heaps,
+                    net::NetClass::of(&err),
+                    "net_accept_tls",
+                    &target,
+                    &err.to_string(),
+                )),
+                net::NetAttempt::Done(Ok(stream)) => {
+                    let conn = out.net().start_tls_accept(lid, None, session, Some(stream));
+                    Ok(NativeResult::Park(crate::sched::WorldWait::tls_accept(
+                        conn, target, deadline,
+                    )))
+                },
+                net::NetAttempt::Park => {
+                    let listener_handle = out.listeners().raw_handle(lid);
+                    let conn = out
+                        .net()
+                        .start_tls_accept(lid, listener_handle, session, None);
+                    Ok(NativeResult::Park(crate::sched::WorldWait::tls_accept(
+                        conn, target, deadline,
+                    )))
+                },
+            };
+        }
+    }
+    // the blocking twin: the bounded accept, then the handshake over
+    // the stream's socket timeouts, the registration carrying the
+    // session alongside the stream.
+    let timeout = out.net().timeout();
+    let mut stream = match out
+        .listeners()
+        .accept(lid)
+        .and_then(|stream| out.net().bounded(stream))
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            return Ok(net::net_err(
+                heaps,
+                net::NetClass::of(&err),
+                "net_accept_tls",
+                &target,
+                &err.to_string(),
+            ))
+        },
+    };
+    if let Err(err) = blocking_handshake(&mut stream, &mut session, timeout) {
+        return Ok(net::net_err(
+            heaps,
+            net::NetClass::of(&err),
+            "net_accept_tls",
+            &target,
+            &err.to_string(),
+        ));
+    }
+    let conn = out.net().adopt_blocking_tls(stream, session);
+    Ok(net::ok(Value::I64(conn)))
+}
+
+/// The blocking twin's handshake: the same session state machine the
+/// parked steps drive, run to its end over the stream's socket
+/// timeouts — a silent peer's expired bound answering the same
+/// timeout span the parked steps re-arm per wake, a TCP EOF before
+/// the handshake completes the peer-close refusal.
+fn blocking_handshake(
+    stream: &mut TcpStream,
+    session: &mut ServerConnection,
+    timeout: Duration,
+) -> Result<(), io::Error> {
+    loop {
+        while session.wants_write() {
+            match session.write_tls(stream) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the transport closed under the session",
+                    ))
+                },
+                Ok(_) => {},
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("timed out after {timeout:?}"),
+                    ))
+                },
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+                Err(err) => return Err(err),
+            }
+        }
+        if !session.is_handshaking() {
+            return Ok(());
+        }
+        match session.read_tls(stream) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "the peer closed before the tls handshake completed",
+                ))
+            },
+            Ok(_) => {
+                session
+                    .process_new_packets()
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            },
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("timed out after {timeout:?}"),
+                ))
+            },
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// The parked accept-tls machine (the server twin of [`TlsFetch`]):
+/// the accepted stream and its rustls session advancing one step per
+/// readiness wake, the session's own wants-write/wants-read naming
+/// the interest each step watches — the listener's readable door first
+/// (a pending connection stands), the accepted stream's flights after.
+/// The completion registers the stream with its session under the
+/// pre-minted id the parked caller saw; every failure closes the
+/// stream with the row's drop. The linux driver's own machine; no
+/// other host mints the wait.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct TlsAccept {
+    /// The pre-minted connection id the machine registers under — the
+    /// row's own key, the completion's answer.
+    conn: i64,
+    /// The bound listener the accept stage takes from.
+    listener: i64,
+    /// The accepted stream once the accept stage ran.
+    stream: Option<TcpStream>,
+    /// The current transport's registration key: the listener's fd
+    /// until a connection stands, the accepted stream's after.
+    handle: Option<crate::reactor::IoHandle>,
+    /// The rustls server session, the machine's own state.
+    pub(crate) session: ServerConnection,
+}
+
+#[cfg(target_os = "linux")]
+impl TlsAccept {
+    /// The machine's construction (the row's storage the connection
+    /// table owns, `net::start_tls_accept`): the pre-minted id it
+    /// registers under, `stream` a connection the accept already
+    /// took, `listener_handle` the parked accept's own key otherwise.
+    pub(crate) fn new(
+        conn: i64,
+        listener: i64,
+        listener_handle: Option<crate::reactor::IoHandle>,
+        session: ServerConnection,
+        stream: Option<TcpStream>,
+    ) -> Self {
+        let handle = match stream.as_ref() {
+            Some(stream) => net::stream_handle(stream),
+            None => listener_handle,
+        };
+        Self {
+            conn,
+            listener,
+            stream,
+            handle,
+            session,
+        }
+    }
+
+    /// The current transport's registration key, the park's interest.
+    pub(crate) fn handle(&self) -> Option<crate::reactor::IoHandle> {
+        self.handle
+    }
+
+    /// The accepted stream, the completion's registration handoff.
+    pub(crate) fn take_stream(&mut self) -> Option<TcpStream> {
+        self.stream.take()
+    }
+}
+
+/// Advances one parked accept-tls machine as far as the readiness
+/// takes it: the accept stage's readable door first (a pending
+/// connection stands), then the session loop — drain what the
+/// session owes the socket, feed what it awaits — until the OS
+/// answers would-block (the interest named) or the handshake
+/// answers. The completion registers; every failure closes the
+/// stream with the machine's row.
+#[cfg(target_os = "linux")]
+pub(crate) fn accept_step(
+    machine: &mut TlsAccept,
+    listeners: &mut net::Listeners,
+) -> net::AcceptWake {
+    use crate::reactor::Direction;
+    loop {
+        if machine.stream.is_none() {
+            match listeners.try_accept(machine.listener) {
+                net::NetAttempt::Park => {
+                    return net::AcceptWake::Pending {
+                        watch: Direction::Read,
+                    }
+                },
+                net::NetAttempt::Done(Err(err)) => return net::AcceptWake::Done(Err(err)),
+                net::NetAttempt::Done(Ok(stream)) => {
+                    // the reactor owns readiness from here: the stream
+                    // answers would-block to the thread
+                    let _ = stream.set_nonblocking(true);
+                    machine.handle = net::stream_handle(&stream);
+                    machine.stream = Some(stream);
+                },
+            }
+        }
+        let Some(stream) = machine.stream.as_mut() else {
+            unreachable!("the accept stage set the stream")
+        };
+        while machine.session.wants_write() {
+            match machine.session.write_tls(stream) {
+                Ok(0) => {
+                    return net::AcceptWake::Done(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the transport closed under the session",
+                    )))
+                },
+                Ok(_) => {},
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return net::AcceptWake::Pending {
+                        watch: Direction::Write,
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+                Err(err) => return net::AcceptWake::Done(Err(err)),
+            }
+        }
+        if machine.session.is_handshaking() {
+            // mid-handshake with neither want naming work is the
+            // session's own backpressure state; the read interest is
+            // the safe wait (level-triggered readiness corrects a wrong
+            // guess at the next poll)
+            if !machine.session.wants_read() {
+                return net::AcceptWake::Pending {
+                    watch: Direction::Read,
+                };
+            }
+            match machine.session.read_tls(stream) {
+                Ok(0) => {
+                    return net::AcceptWake::Done(Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "the peer closed before the tls handshake completed",
+                    )))
+                },
+                Ok(_) => {
+                    if let Err(err) = machine.session.process_new_packets() {
+                        return net::AcceptWake::Done(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            err,
+                        )));
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return net::AcceptWake::Pending {
+                        watch: Direction::Read,
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+                Err(err) => return net::AcceptWake::Done(Err(err)),
+            }
+            continue;
+        }
+        return net::AcceptWake::Done(Ok(machine.conn));
+    }
+}
+
+/// One session-backed connection's recv step: the session's buffered
+/// plaintext first (a record larger than the read leaves its
+/// remainder for the next call), then the ciphertext reads that
+/// refill it — the close-tolerant EOF discipline the client tier
+/// keeps (the peer's TCP EOF without close_notify and the clean
+/// close_notify both the orderly close), a socket would-block the
+/// park. The connection table's own twins route here; the blocking
+/// one answers the park as its expired bound.
+pub(crate) fn server_recv_step(
+    session: &mut ServerConnection,
+    sock: &mut TcpStream,
+    max: usize,
+) -> net::NetAttempt<Vec<u8>> {
+    loop {
+        let mut buf = vec![0; max];
+        match session.reader().read(&mut buf) {
+            // the clean close: the session received close_notify and
+            // its plaintext is drained
+            Ok(0) => return net::NetAttempt::Done(Ok(Vec::new())),
+            Ok(n) => {
+                buf.truncate(n);
+                return net::NetAttempt::Done(Ok(buf));
+            },
+            // the peer's close without close_notify: the client
+            // tier's CloseTolerant mapping, the orderly close
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                return net::NetAttempt::Done(Ok(Vec::new()));
+            },
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {},
+            Err(err) => return net::NetAttempt::Done(Err(err)),
+        }
+        match session.read_tls(sock) {
+            // a TCP EOF the same orderly close
+            Ok(0) => return net::NetAttempt::Done(Ok(Vec::new())),
+            Ok(_) => {
+                if let Err(err) = session.process_new_packets() {
+                    return net::NetAttempt::Done(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        err,
+                    )));
+                }
+            },
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return net::NetAttempt::Park,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+            Err(err) => return net::NetAttempt::Done(Err(err)),
+        }
+    }
+}
+
+/// One session-backed connection's send step: the session's owed
+/// records drain to the socket before any plaintext stages — a park
+/// always carries the unstaged remainder, the next wake draining
+/// what the session already sealed, so no answer lands while bytes
+/// the session owes stand. The staging flushes into records the
+/// drain takes.
+pub(crate) fn server_send_step(
+    session: &mut ServerConnection,
+    sock: &mut TcpStream,
+    data: &mut Vec<u8>,
+) -> net::NetAttempt<()> {
+    loop {
+        while session.wants_write() {
+            match session.write_tls(sock) {
+                Ok(0) => {
+                    return net::NetAttempt::Done(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the transport closed under the session",
+                    )))
+                },
+                Ok(_) => {},
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return net::NetAttempt::Park,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+                Err(err) => return net::NetAttempt::Done(Err(err)),
+            }
+        }
+        if data.is_empty() {
+            return net::NetAttempt::Done(Ok(()));
+        }
+        match session.writer().write(data) {
+            Ok(0) => {
+                return net::NetAttempt::Done(Err(io::Error::other("the session accepted no bytes")))
+            },
+            Ok(took) => {
+                data.drain(..took);
+            },
+            Err(err) => return net::NetAttempt::Done(Err(err)),
+        }
+        if let Err(err) = session.writer().flush() {
+            return net::NetAttempt::Done(Err(err));
+        }
     }
 }
 

@@ -90,6 +90,18 @@ pub enum WorldWait {
         target: String,
         deadline: Instant,
     },
+    /// `net_accept_tls(lid)`'s machine: the accept on the listener's
+    /// readability, then the staged rustls handshake over the accepted
+    /// stream — the tls tier's server machine, one step per wake
+    /// (each step re-aiming the interest and re-arming the bound),
+    /// the completion registering the stream with its session under
+    /// the pre-minted id; `accept` carries the machine row's id (that
+    /// same id), `target` the listener id the error spans name.
+    TlsAccept {
+        accept: i64,
+        target: String,
+        deadline: Instant,
+    },
     /// `proc_read`/`proc_read_err(pid, max)` (the 2026-11-23 ruling):
     /// the child's pipe IS an fd, so the readable wake performs one
     /// read (at most `max` bytes) and answers its string span; the
@@ -207,6 +219,18 @@ impl WorldWait {
         }
     }
 
+    /// An accept-tls wait's constructor: the machine's row id, the
+    /// listener id the error spans name, and the first stage's bound
+    /// (every later step re-arming it).
+    #[must_use]
+    pub fn tls_accept(accept: i64, target: String, deadline: Instant) -> Self {
+        Self::TlsAccept {
+            accept,
+            target,
+            deadline,
+        }
+    }
+
     /// A proc read wait's constructor: the child's handle, the pipe
     /// the read addresses, the clamped max, and the process face's
     /// configured bound as the deadline.
@@ -237,6 +261,7 @@ impl WorldWait {
             | Self::Connect { deadline, .. }
             | Self::Fetch { deadline, .. }
             | Self::TlsFetch { deadline, .. }
+            | Self::TlsAccept { deadline, .. }
             | Self::ProcRead { deadline, .. }
             | Self::ProcWait { deadline, .. }
             | Self::Sleep { deadline } => *deadline,
@@ -257,7 +282,10 @@ impl WorldWait {
             },
             Self::Accept { listener, .. } => Some(*listener),
             Self::ProcRead { pid, .. } | Self::ProcWait { pid, .. } => Some(*pid),
-            Self::Fetch { .. } | Self::TlsFetch { .. } | Self::Sleep { .. } => None,
+            Self::Fetch { .. }
+            | Self::TlsFetch { .. }
+            | Self::TlsAccept { .. }
+            | Self::Sleep { .. } => None,
         }
     }
 
@@ -269,7 +297,8 @@ impl WorldWait {
         match self {
             Self::Connect { target, .. }
             | Self::Fetch { target, .. }
-            | Self::TlsFetch { target, .. } => target.clone(),
+            | Self::TlsFetch { target, .. }
+            | Self::TlsAccept { target, .. } => target.clone(),
             _ => self.conn().map(|conn| conn.to_string()).unwrap_or_default(),
         }
     }
@@ -280,10 +309,12 @@ impl WorldWait {
     pub fn direction(&self) -> Option<Direction> {
         match self {
             // the readable wakes: a received connection, a bound
-            // listener's pending accept, a pipe holding the child's
+            // listener's pending accept (the tls accept machine's own
+            // first stage the same door), a pipe holding the child's
             // bytes, a pidfd holding its exit
             Self::Recv { .. }
             | Self::Accept { .. }
+            | Self::TlsAccept { .. }
             | Self::ProcRead { .. }
             | Self::ProcWait { .. } => Some(Direction::Read),
             // a connect parks on the writability its completion
@@ -308,6 +339,7 @@ impl WorldWait {
             Self::Connect { .. } => "net_connect",
             Self::Fetch { .. } => "http_get",
             Self::TlsFetch { op, .. } => op,
+            Self::TlsAccept { .. } => "net_accept_tls",
             Self::ProcRead { pipe, .. } => pipe.op_name(),
             Self::ProcWait { .. } => "proc_wait",
             Self::Sleep { .. } => "time_sleep",

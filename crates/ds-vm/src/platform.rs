@@ -48,8 +48,10 @@ pub enum Capability {
     /// The clock surface (no op exists yet).
     Time,
     /// The TLS surface (H5.5's 2026-11-17 ruling): https over rustls,
-    /// selected or omitted per host — the `https_get` op and the
-    /// https-routing `http_get` body.
+    /// selected or omitted per host — the `https_get` op, the
+    /// https-routing `http_get` body, and the server half's
+    /// `net_accept_tls` (the accepted connection's upgrade over the
+    /// host-pinned identity, ruled 2026-11-23).
     Tls,
     /// The process surface (the CLI process surface, ruled 2026-11-21):
     /// string argv, the environment read, process spawn (the piped
@@ -191,9 +193,14 @@ pub const OP_PROC_TRY_WAIT: u32 = 36;
 /// `net_local_addr`: net (the bound listener's local address, the
 /// port-0 bind's report — the `net_listener` face's one address op).
 pub const OP_NET_LOCAL_ADDR: u32 = 37;
+/// `net_accept_tls`: tls (takes one pending connection off the bound
+/// listener, upgrades it over the host-pinned rustls server identity,
+/// answers the accepted connection's handle word — the raw seam
+/// behind the ambient's total `accept_tls`).
+pub const OP_NET_ACCEPT_TLS: u32 = 38;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 38;
+pub const OP_COUNT: u32 = 39;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -249,6 +256,7 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "proc_read_err", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_err_fn },
     Op { name: "proc_try_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_try_wait_fn },
     Op { name: "net_local_addr", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_local_addr_fn },
+    Op { name: "net_accept_tls", capability: Capability::Tls, params: &[SlotType::I64], result_words: 2, func: crate::tls::net_accept_tls_fn },
 ];
 
 macro_rules! unserved {
@@ -301,6 +309,7 @@ unserved!(unserved_op_34 at 34);
 unserved!(unserved_op_35 at 35);
 unserved!(unserved_op_36 at 36);
 unserved!(unserved_op_37 at 37);
+unserved!(unserved_op_38 at 38);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -314,7 +323,7 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
     unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
     unserved_op_32, unserved_op_33, unserved_op_34, unserved_op_35,
-    unserved_op_36, unserved_op_37,
+    unserved_op_36, unserved_op_37, unserved_op_38,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -476,6 +485,8 @@ mod tests {
         );
         assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].name, "net_local_addr");
         assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].capability, Capability::Net);
+        assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].name, "net_accept_tls");
+        assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].capability, Capability::Tls);
         assert_eq!(
             OPS[OP_NET_LISTENER_CLOSE as usize].capability,
             Capability::Net
@@ -570,6 +581,8 @@ mod tests {
             OP_NET_LISTEN,
             OP_NET_ACCEPT,
             OP_NET_LISTENER_CLOSE,
+            OP_NET_LOCAL_ADDR,
+            OP_NET_ACCEPT_TLS,
         ] {
             assert!(!console.serves(index), "a console platform refuses net");
         }
@@ -609,8 +622,10 @@ mod tests {
             OP_NET_LISTEN,
             OP_NET_ACCEPT,
             OP_NET_LISTENER_CLOSE,
+            OP_NET_LOCAL_ADDR,
             OP_TIME,
             OP_HTTPS_GET,
+            OP_NET_ACCEPT_TLS,
             OP_ARGS,
             OP_ENV,
             OP_PROC_RUN,
@@ -643,13 +658,18 @@ mod tests {
 
     /// The tls capability's host-level selection: a net-without-tls
     /// platform serves `http_get` with the plain body and keeps the
-    /// `https_get` op as its reserved trap, while the default platform
-    /// carries the routing body and the served op.
+    /// `https_get` and `net_accept_tls` ops as their reserved traps,
+    /// while the default platform carries the routing body and both
+    /// served ops.
     #[test]
     fn the_tls_capability_selects_the_https_bodies() {
         let no_tls = Platform::new("embed", &[Capability::Net]);
         assert!(no_tls.serves(OP_HTTP_GET), "net serves http_get");
         assert!(!no_tls.serves(OP_HTTPS_GET), "the tls op stays unserved");
+        assert!(
+            !no_tls.serves(OP_NET_ACCEPT_TLS),
+            "the server half's tls op stays unserved"
+        );
         let plain = platform_module(&no_tls);
         let plain_body: NativeFn = net::http_get_fn;
         assert_eq!(
@@ -667,10 +687,20 @@ mod tests {
             std[OP_HTTPS_GET as usize].func as usize, https_body as usize,
             "a providing host serves the https op"
         );
+        let accept_body: NativeFn = crate::tls::net_accept_tls_fn;
+        assert_eq!(
+            std[OP_NET_ACCEPT_TLS as usize].func as usize, accept_body as usize,
+            "a providing host serves the server half's tls op"
+        );
         let trap = plain[OP_HTTPS_GET as usize].func;
         assert_eq!(
             trap as usize, UNSERVED[OP_HTTPS_GET as usize] as usize,
             "an omitting host keeps the https op's reserved trap"
+        );
+        assert_eq!(
+            plain[OP_NET_ACCEPT_TLS as usize].func as usize,
+            UNSERVED[OP_NET_ACCEPT_TLS as usize] as usize,
+            "an omitting host keeps the server half's tls op's reserved trap"
         );
     }
 

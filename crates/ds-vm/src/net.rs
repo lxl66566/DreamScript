@@ -90,6 +90,15 @@
 //! body (after the `\r\n\r\n` header terminator) is the success payload;
 //! the status line is not inspected, and only close-delimited HTTP/1.0
 //! responses decode (no chunked transfer).
+//!
+//! The server half (ruled 2026-11-23) rides the same capability: the
+//! host or test pins the rustls server identity
+//! ([`crate::Vm::set_tls_server_config`], no default), and
+//! `net_accept_tls` upgrades the accepted connection over it — the
+//! staged handshake parking a step per wake under the reactor (the
+//! linux driver's own, the blocking twin anywhere else), the
+//! completion registering the stream with its session so the
+//! connection's `net_send`/`net_recv` ride the tls records.
 
 use std::{
     io::{self, ErrorKind, Read, Write},
@@ -138,6 +147,17 @@ pub(crate) struct Connections {
     /// The pinned TLS client of a host or test that overrides the
     /// webpki-rooted default ([`crate::tls`]); `None` serves the default.
     tls: Option<Arc<rustls::ClientConfig>>,
+    /// The pinned TLS server identity of a host or test
+    /// ([`crate::Vm::set_tls_server_config`], the tls tier's server
+    /// half); `None` answers the unprovisioned refusal — no default
+    /// identity exists, a server certificate being the host's own to
+    /// pin.
+    tls_server: Option<Arc<rustls::ServerConfig>>,
+    /// The accepted connections' rustls sessions, keyed by their
+    /// connection handles — a handle with a row here routes its data
+    /// natives through the session (the tls records,
+    /// [`crate::tls`]'s close-tolerant discipline the same).
+    tls_servers: Vec<(i64, rustls::ServerConnection)>,
     /// Whether the parking discipline owns the data natives: a reactor
     /// installed on the VM flips this, new registrations go
     /// non-blocking, and `net_recv`/`net_send` answer park requests on
@@ -159,6 +179,12 @@ pub(crate) struct Connections {
     /// [`crate::tls`], the transport this table owns).
     #[cfg(target_os = "linux")]
     tls_fetches: Vec<(i64, crate::tls::TlsFetch)>,
+    /// The parked accept-tls machines, keyed by the pre-minted handle
+    /// ids their completion registers under (the accepted stream and
+    /// its rustls session closing with the row — [`crate::tls`]'s
+    /// server machine, the transport this table owns).
+    #[cfg(target_os = "linux")]
+    tls_accepts: Vec<(i64, crate::tls::TlsAccept)>,
 }
 
 impl Default for Connections {
@@ -168,6 +194,8 @@ impl Default for Connections {
             next_id: 0,
             timeout: NET_TIMEOUT,
             tls: None,
+            tls_server: None,
+            tls_servers: Vec::new(),
             parking: false,
             #[cfg(target_os = "linux")]
             connecting: Vec::new(),
@@ -175,6 +203,8 @@ impl Default for Connections {
             fetches: Vec::new(),
             #[cfg(target_os = "linux")]
             tls_fetches: Vec::new(),
+            #[cfg(target_os = "linux")]
+            tls_accepts: Vec::new(),
         }
     }
 }
@@ -213,6 +243,22 @@ pub(crate) enum FetchWake {
     /// The exchange answered: the body after the header terminator, or
     /// the failure (the transport closed either way).
     Done(Result<String, io::Error>),
+}
+
+/// One parked accept-tls machine's wake outcome: the direction the
+/// next step watches (the staged handshake [`crate::tls`]'s own
+/// discipline — the accept's readable door first, the session's wants
+/// after), or the machine's end — the accepted connection's registered
+/// handle on success, the failure the class mapping reads its class
+/// off (the accepted stream closing with the row either way).
+#[derive(Debug)]
+pub(crate) enum AcceptWake {
+    /// The machine advanced as far as the readiness took it; `watch`
+    /// names the direction the next step waits on.
+    Pending { watch: crate::reactor::Direction },
+    /// The handshake answered: the registered connection on success,
+    /// the failure otherwise.
+    Done(Result<i64, io::Error>),
 }
 
 /// One parked plain-http exchange's machine: the staged connect (the
@@ -423,6 +469,20 @@ impl Connections {
         self.tls.clone().unwrap_or_else(crate::tls::webpki_client)
     }
 
+    /// Pins the TLS server identity ([`crate::tls`]'s server half): the
+    /// embedder and test seam ([`crate::Vm::set_tls_server_config`]) —
+    /// no default identity exists, the unprovisioned `net_accept_tls`
+    /// answering its own refusal.
+    pub(crate) fn set_tls_server_config(&mut self, config: Arc<rustls::ServerConfig>) {
+        self.tls_server = Some(config);
+    }
+
+    /// The pinned TLS server identity, `None` when no host set one.
+    #[must_use]
+    pub(crate) fn tls_server_config(&self) -> Option<Arc<rustls::ServerConfig>> {
+        self.tls_server.clone()
+    }
+
     /// Opens a connected, timeout-bounded stream to `host:port` without
     /// registering it (the `http_get` ephemeral path).
     pub(crate) fn open(&self, host: &str, port: u16) -> io::Result<TcpStream> {
@@ -469,7 +529,13 @@ impl Connections {
     /// One non-blocking read attempt on handle `conn`: at most `max`
     /// bytes, one read (the empty vec the orderly close), `Park` when
     /// the socket would block. The parked twin of [`Connections::recv`].
+    /// A session-backed row (the tls tier's accepted connection) routes
+    /// through the rustls session instead — the plaintext drain first,
+    /// the ciphertext reads the park.
     pub(crate) fn try_recv(&mut self, conn: i64, max: usize) -> NetAttempt<Vec<u8>> {
+        if let Some(at) = self.tls_row(conn) {
+            return self.try_recv_tls(conn, at, max);
+        }
         let timeout = self.timeout;
         let Ok(stream) = self.stream(conn) else {
             return NetAttempt::Done(Err(unknown(conn)));
@@ -490,8 +556,14 @@ impl Connections {
     /// as far as the socket buffer takes it: the loop stops at the first
     /// would-block with the remainder kept in `data` (level-triggered
     /// readiness reports again once the buffer drains), `Park` while
-    /// bytes remain. The parked twin of [`Connections::send`].
+    /// bytes remain. The parked twin of [`Connections::send`]. A
+    /// session-backed row (the tls tier's accepted connection) routes
+    /// through the rustls session instead — the owed records draining
+    /// before any plaintext stages.
     pub(crate) fn try_send(&mut self, conn: i64, data: &mut Vec<u8>) -> NetAttempt<()> {
+        if let Some(at) = self.tls_row(conn) {
+            return self.try_send_tls(conn, at, data);
+        }
         let timeout = self.timeout;
         let Ok(stream) = self.stream(conn) else {
             return NetAttempt::Done(Err(unknown(conn)));
@@ -512,6 +584,38 @@ impl Connections {
             data.drain(..sent);
         }
         if data.is_empty() { NetAttempt::Done(Ok(())) } else { NetAttempt::Park }
+    }
+
+    /// The session row of a session-backed connection (the tls tier's
+    /// accepted connection), its position in the table.
+    fn tls_row(&self, conn: i64) -> Option<usize> {
+        self.tls_servers.iter().position(|(id, _)| *id == conn)
+    }
+
+    /// One non-blocking recv attempt on a session-backed row: the tls
+    /// tier's own step ([`crate::tls`]) — the buffered plaintext first
+    /// (an answer at once, no park), the ciphertext reads the wait.
+    fn try_recv_tls(&mut self, conn: i64, at: usize, max: usize) -> NetAttempt<Vec<u8>> {
+        let Some(sa) = self.streams.iter().position(|(id, _)| *id == conn) else {
+            return NetAttempt::Done(Err(unknown(conn)));
+        };
+        let _ = self.streams[sa].1.set_nonblocking(true);
+        let (_, sock) = &mut self.streams[sa];
+        let (_, session) = &mut self.tls_servers[at];
+        crate::tls::server_recv_step(session, sock, max)
+    }
+
+    /// One non-blocking send attempt on a session-backed row: the tls
+    /// tier's own step — the session's owed records drain before any
+    /// plaintext stages, a park carrying the unstaged remainder.
+    fn try_send_tls(&mut self, conn: i64, at: usize, data: &mut Vec<u8>) -> NetAttempt<()> {
+        let Some(sa) = self.streams.iter().position(|(id, _)| *id == conn) else {
+            return NetAttempt::Done(Err(unknown(conn)));
+        };
+        let _ = self.streams[sa].1.set_nonblocking(true);
+        let (_, sock) = &mut self.streams[sa];
+        let (_, session) = &mut self.tls_servers[at];
+        crate::tls::server_send_step(session, sock, data)
     }
 
     /// The OS-level handle of one registered connection, the reactor's
@@ -904,8 +1008,136 @@ impl Connections {
         }
     }
 
-    /// Installs this table's read/write timeouts on `stream`.
-    fn bounded(&self, stream: TcpStream) -> io::Result<TcpStream> {
+    /// Starts one parked accept-tls machine: the rustls server session
+    /// the caller built over its pinned identity, the accepted stream
+    /// when the native's own attempt already took one (the machine
+    /// parking straight into its handshake), the listener's
+    /// registration key when the accept itself still stands. Answers
+    /// the machine row's id — the pre-minted connection id its
+    /// completion registers under.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_tls_accept(
+        &mut self,
+        listener: i64,
+        listener_handle: Option<crate::reactor::IoHandle>,
+        session: rustls::ServerConnection,
+        stream: Option<TcpStream>,
+    ) -> i64 {
+        // the reactor owns readiness from here: a stream the native's
+        // own attempt already took goes non-blocking now, the parked
+        // steps' would-block answers the machine's own gates
+        if let Some(stream) = stream.as_ref() {
+            let _ = stream.set_nonblocking(true);
+        }
+        let conn = self.next_id;
+        self.next_id = conn + 1;
+        self.tls_accepts.push((
+            conn,
+            crate::tls::TlsAccept::new(conn, listener, listener_handle, session, stream),
+        ));
+        conn
+    }
+
+    /// Advances one parked accept-tls machine as far as the readiness
+    /// takes it: the accept stage's readable door first, then the
+    /// session's own wants steering the handshake's steps ([`crate::tls`]).
+    /// A pending step answers the direction the next wake watches; the
+    /// machine's end registers the stream with its session under the
+    /// pre-minted id, or closes the stream with the failure.
+    pub(crate) fn tls_accept_wake(&mut self, accept: i64, listeners: &mut Listeners) -> AcceptWake {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(at) = self.tls_accepts.iter().position(|(id, _)| *id == accept) else {
+                return AcceptWake::Done(Err(unknown_accept(accept)));
+            };
+            // the row comes out for the step: the machine's accept
+            // stage probes the listener table
+            let (_, mut machine) = self.tls_accepts.remove(at);
+            let wake = crate::tls::accept_step(&mut machine, listeners);
+            match wake {
+                AcceptWake::Pending { .. } => self.tls_accepts.push((accept, machine)),
+                AcceptWake::Done(Ok(conn)) => {
+                    let stream = machine
+                        .take_stream()
+                        .expect("the handshake owned the accepted stream");
+                    self.adopt_tls(conn, stream, machine.session);
+                },
+                // the failure closes the accepted stream with the
+                // machine's drop
+                AcceptWake::Done(Err(_)) => {},
+            }
+            wake
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (accept, listeners);
+            AcceptWake::Done(Err(io::Error::other(
+                "the parked accept is the linux driver's own",
+            )))
+        }
+    }
+
+    /// Drops one parked accept-tls machine (a cancel, a deadline — the
+    /// accepted stream and session closing with the row), total over
+    /// an unknown id.
+    pub(crate) fn cancel_tls_accept(&mut self, accept: i64) {
+        #[cfg(target_os = "linux")]
+        self.tls_accepts.retain(|(id, _)| *id != accept);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = accept;
+        }
+    }
+
+    /// The current transport's registration key of one parked
+    /// accept-tls machine — the listener's fd while the accept stands,
+    /// the accepted stream's after — the park's interest.
+    pub(crate) fn raw_tls_accept_handle(
+        &mut self,
+        accept: i64,
+    ) -> Option<crate::reactor::IoHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            self.tls_accepts
+                .iter()
+                .find(|(id, _)| *id == accept)
+                .and_then(|(_, machine)| machine.handle())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = accept;
+            None
+        }
+    }
+
+    /// Registers the handshake-completed stream and its session under
+    /// the pre-minted id the parked caller saw (the accept machine's
+    /// own completion).
+    #[cfg(target_os = "linux")]
+    fn adopt_tls(&mut self, conn: i64, stream: TcpStream, session: rustls::ServerConnection) {
+        if self.parking {
+            let _ = stream.set_nonblocking(true);
+        }
+        self.streams.push((conn, stream));
+        self.tls_servers.push((conn, session));
+    }
+
+    /// Registers the blocking twin's handshake-completed stream under
+    /// a fresh id, the session row alongside — the same face the
+    /// parked completion answers.
+    pub(crate) fn adopt_blocking_tls(
+        &mut self,
+        stream: TcpStream,
+        session: rustls::ServerConnection,
+    ) -> i64 {
+        let conn = self.register(stream);
+        self.tls_servers.push((conn, session));
+        conn
+    }
+
+    /// Installs this table's read/write timeouts on `stream` (the
+    /// tls server half's blocking handshake included).
+    pub(crate) fn bounded(&self, stream: TcpStream) -> io::Result<TcpStream> {
         stream.set_read_timeout(Some(self.timeout))?;
         stream.set_write_timeout(Some(self.timeout))?;
         Ok(stream)
@@ -920,8 +1152,13 @@ impl Connections {
             .ok_or_else(|| unknown(conn))
     }
 
-    /// Writes `data` on handle `conn`'s socket.
+    /// Writes `data` on handle `conn`'s socket. A session-backed row
+    /// (the tls tier's accepted connection) routes through the rustls
+    /// session instead — the records the session seals.
     pub(crate) fn send(&mut self, conn: i64, data: &[u8]) -> io::Result<()> {
+        if let Some(at) = self.tls_row(conn) {
+            return self.send_tls(conn, at, data);
+        }
         let timeout = self.timeout;
         let stream = self.stream(conn)?;
         stream
@@ -929,9 +1166,34 @@ impl Connections {
             .map_err(|err| normalize(err, timeout))
     }
 
+    /// The blocking send on a session-backed row: the tls tier's step
+    /// machine driven to its answer, a would-block the socket timeout's
+    /// own expiry rendering the timeout span.
+    fn send_tls(&mut self, conn: i64, at: usize, data: &[u8]) -> io::Result<()> {
+        let timeout = self.timeout;
+        let Some(sa) = self.streams.iter().position(|(id, _)| *id == conn) else {
+            return Err(unknown(conn));
+        };
+        let (_, sock) = &mut self.streams[sa];
+        let (_, session) = &mut self.tls_servers[at];
+        let mut pending = data.to_vec();
+        match crate::tls::server_send_step(session, sock, &mut pending) {
+            NetAttempt::Done(answer) => answer.map_err(|err| normalize(err, timeout)),
+            NetAttempt::Park => Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("timed out after {timeout:?}"),
+            )),
+        }
+    }
+
     /// Reads at most `max` bytes on handle `conn`'s socket: one read, so
-    /// an empty answer means an orderly close.
+    /// an empty answer means an orderly close. A session-backed row
+    /// (the tls tier's accepted connection) routes through the rustls
+    /// session instead — the plaintext the session decodes.
     pub(crate) fn recv(&mut self, conn: i64, max: usize) -> io::Result<Vec<u8>> {
+        if let Some(at) = self.tls_row(conn) {
+            return self.recv_tls(conn, at, max);
+        }
         let timeout = self.timeout;
         let stream = self.stream(conn)?;
         let mut buf = vec![0; max];
@@ -944,10 +1206,31 @@ impl Connections {
         }
     }
 
-    /// Closes handle `conn` and removes it from the table; later uses of
-    /// the handle answer "unknown connection". Total and idempotent: an
+    /// The blocking recv on a session-backed row: the tls tier's step
+    /// machine driven to its answer, a would-block the socket timeout's
+    /// own expiry rendering the timeout span.
+    fn recv_tls(&mut self, conn: i64, at: usize, max: usize) -> io::Result<Vec<u8>> {
+        let timeout = self.timeout;
+        let Some(sa) = self.streams.iter().position(|(id, _)| *id == conn) else {
+            return Err(unknown(conn));
+        };
+        let (_, sock) = &mut self.streams[sa];
+        let (_, session) = &mut self.tls_servers[at];
+        match crate::tls::server_recv_step(session, sock, max) {
+            NetAttempt::Done(answer) => answer.map_err(|err| normalize(err, timeout)),
+            NetAttempt::Park => Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("timed out after {timeout:?}"),
+            )),
+        }
+    }
+
+    /// Closes handle `conn` and removes it from the table (the session
+    /// row of a tls-adopted connection with it); later uses of the
+    /// handle answer "unknown connection". Total and idempotent: an
     /// unknown handle is a no-op (the deinit pairing's contract).
     pub(crate) fn close(&mut self, conn: i64) {
+        self.tls_servers.retain(|(id, _)| *id != conn);
         self.streams.retain(|(id, _)| *id != conn);
     }
 }
@@ -1151,6 +1434,36 @@ fn unknown_listener(lid: i64) -> io::Error {
 /// wait already ended through another door).
 fn unknown_fetch(fetch: i64) -> io::Error {
     io::Error::other(format!("unknown fetch {fetch}"))
+}
+
+/// The "unknown accept" error: a parked accept-tls machine's row is
+/// gone (its wait already ended through another door).
+fn unknown_accept(accept: i64) -> io::Error {
+    io::Error::other(format!("unknown accept {accept}"))
+}
+
+/// The OS-level registration key of one stream not yet owned by a
+/// table (the accept-tls machine's accepted stream) — the raw_handle
+/// twins' own rendering.
+pub(crate) fn stream_handle(stream: &TcpStream) -> Option<crate::reactor::IoHandle> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        u64::try_from(stream.as_raw_fd())
+            .ok()
+            .map(crate::reactor::IoHandle)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        u64::try_from(stream.as_raw_socket())
+            .ok()
+            .map(crate::reactor::IoHandle)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 /// Renders a timed-out wait as its own detail instead of the OS's

@@ -1009,6 +1009,23 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 37,
         shape: NativeShape::Total(SlotType::Ref),
     },
+    Native {
+        // the listener face's tls upgrade (the tls capability's own
+        // op): the accepted connection's handle word on success, the
+        // net error class on failure — the ambient's total `accept_tls`
+        // spelling over the deinit-carrying `net_handle`, the
+        // printing-halt pairing `net_accept` keeps (a failed accept or
+        // handshake halting on the net error line)
+        name: "net_accept_tls",
+        module: NativeModule::Platform,
+        index: 38,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,
+            fail_payload: SlotType::Ref,
+            err_prefix: "net error: ",
+            classes: NET_CLASSES,
+        },
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.

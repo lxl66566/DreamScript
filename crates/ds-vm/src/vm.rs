@@ -2994,6 +2994,14 @@ impl Vm {
         self.out.set_tls_config(config);
     }
 
+    /// Pins the TLS server identity of the net face's tls tier (the
+    /// server half, ruled 2026-11-23): no default identity exists — a
+    /// server certificate is the host's own to pin, the unprovisioned
+    /// `net_accept_tls` answering its own refusal.
+    pub fn set_tls_server_config(&mut self, config: Arc<rustls::ServerConfig>) {
+        self.out.set_tls_server_config(config);
+    }
+
     /// Installs a module version into its two-slot table (hot reload swap):
     /// the swap re-checks run first (a reordering table re-keys the staged
     /// words whose identity survived while refusing a dropped one, and a
@@ -5506,6 +5514,7 @@ impl Vm {
             WorldWait::Connect { conn, .. } => self.out.net().raw_connect_handle(*conn),
             WorldWait::Fetch { fetch, .. } => self.out.net().raw_fetch_handle(*fetch),
             WorldWait::TlsFetch { fetch, .. } => self.out.net().raw_tls_fetch_handle(*fetch),
+            WorldWait::TlsAccept { accept, .. } => self.out.net().raw_tls_accept_handle(*accept),
             #[cfg(target_os = "linux")]
             WorldWait::ProcRead { pid, pipe, .. } => self.out.procs().raw_pipe_handle(*pid, *pipe),
             #[cfg(target_os = "linux")]
@@ -5572,6 +5581,7 @@ impl Vm {
             WorldWait::Connect { conn, .. } => self.out.net().cancel_connect(*conn),
             WorldWait::Fetch { fetch, .. } => self.out.net().cancel_fetch(*fetch),
             WorldWait::TlsFetch { fetch, .. } => self.out.net().cancel_tls_fetch(*fetch),
+            WorldWait::TlsAccept { accept, .. } => self.out.net().cancel_tls_accept(*accept),
             _ => {},
         }
     }
@@ -5599,9 +5609,14 @@ impl Vm {
     }
 
     /// Re-arms one staged machine's pending step (a fetch exchange,
-    /// plain or tls): the bound resets to the step-grained deadline the
-    /// blocking twin's socket timeouts keep, and the standing interest
-    /// re-aims at the direction the machine named.
+    /// plain or tls, or the tls accept machine): the bound resets to
+    /// the step-grained deadline the blocking twin's socket timeouts
+    /// keep, and the standing interest re-aims at the direction the
+    /// machine named. A machine whose registration key moved under
+    /// the step (the tls accept's listener fd becoming the accepted
+    /// stream's) swaps the stored handle and deregisters the stale
+    /// key — a left level-triggered interest would wake every poll
+    /// with a dead token and busy-loop the executor.
     fn rearm_step(
         &mut self,
         token: u64,
@@ -5612,21 +5627,27 @@ impl Vm {
         if let Some(live) = self.sched.waits.get_mut(&token)
             && let WorldWait::Fetch {
                 deadline: armed, ..
-            } = &mut live.wait
-        {
-            *armed = deadline;
-        }
-        if let Some(live) = self.sched.waits.get_mut(&token)
-            && let WorldWait::TlsFetch {
+            }
+            | WorldWait::TlsFetch {
+                deadline: armed, ..
+            }
+            | WorldWait::TlsAccept {
                 deadline: armed, ..
             } = &mut live.wait
         {
             *armed = deadline;
         }
-        self.sched.arm(deadline, token);
-        if let Some(installed) = self.reactor.as_mut()
-            && let Some(handle) = handle
+        if let Some(live) = self.sched.waits.get_mut(&token)
+            && live.handle != handle
         {
+            let stale = live.handle;
+            live.handle = handle;
+            if let (Some(stale), Some(installed)) = (stale, self.reactor.as_mut()) {
+                let _ = installed.driver().deregister(stale);
+            }
+        }
+        self.sched.arm(deadline, token);
+        if let (Some(installed), Some(handle)) = (self.reactor.as_mut(), handle) {
             let _ = installed.driver().register(handle, watch, token);
         }
     }
@@ -5892,6 +5913,31 @@ impl Vm {
                         },
                         crate::net::FetchWake::Pending { watch } => {
                             self.rearm_step(token, entry.handle, watch);
+                            return;
+                        },
+                    }
+                },
+                // the tls accept's machine: the accept on the listener's
+                // readable door, the staged handshake over the accepted
+                // stream after — the completion registering the stream
+                // with its session under the pre-minted id (the machine's
+                // registration key moving under the step, so the re-arm
+                // re-resolves it); every failure the error span answers
+                // and the row's drop closes the stream
+                WorldWait::TlsAccept { accept, .. } => {
+                    let _ = ready;
+                    match self.out.tls_accept_wake(accept) {
+                        crate::net::AcceptWake::Done(Ok(conn)) => crate::net::ok(Value::I64(conn)),
+                        crate::net::AcceptWake::Done(Err(err)) => {
+                            let class = crate::net::NetClass::of(&err);
+                            let detail = err.to_string();
+                            self.complete_in_store(fiber, |heaps| {
+                                crate::net::net_err(heaps, class, op, &target, &detail)
+                            })
+                        },
+                        crate::net::AcceptWake::Pending { watch } => {
+                            let handle = self.out.net().raw_tls_accept_handle(accept);
+                            self.rearm_step(token, handle, watch);
                             return;
                         },
                     }
