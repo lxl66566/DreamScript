@@ -20,18 +20,21 @@ One Cargo workspace at the repository root; a crate appears in the milestone tha
 | `ds-abi` | Frame layout, call ABI, CALLT, entry descriptors | M0 |
 | `ds-mod` | dsmod reader/writer, mmap loader, blake3, cache paths | M0 |
 | `ds-query` | Memoized queries, block/package invalidation | M1, grows every milestone |
+| `ds-stdlib` | The ambient stdlib sources, declared rows, and embedded serve artifacts | M3 |
 | `ds-parse` | Lexer, pest grammar, lossless AST, separator blocks | M1 |
 | `ds-fmt` | Block-aware zero-option formatter, on-type formatting | M1 |
+| `ds-corpus-path` | Run-time corpus resolution for the workspace's test binaries | M1 |
 | `ds-check` | Set algebra, disjointness, refinement, affine, trait coherence | M2 |
 | `ds-lower` | Frame layouts, uop bytecode, dup/drop placement | M3 |
 | `ds-vm` | Tier-1 interpreter, fibers, nurseries, module table, inline caches, natives | M0 skeleton, M3 real, M5 fibers |
 | `ds-rt` | Arenas, non-atomic RC, reuse threading, object layout | M4 |
 | `ds-meta` | Derives, comptime evaluator, static reflection | M6 |
+| `ds-dsi` | The `.dsi` checked-prefix artifact: reader, writer, blob serve | M7 |
 | `ds-pkg` | Manifests, MVS resolution, content-addressed store, script mode | M7 |
 | `ds-ffi` | `extern` declarations, `ds bind`, embedding API | M7 |
 | `ds-jit` | SSA lowering, copy-and-patch stencils, Cranelift/wasm | M8, SSA may start M7 |
 | `ds-pins` | gungraun instruction pins and their pin-bake gate | M9 |
-| `ds-cli` | The `ds` binary: run, build, info, fmt, dev, save, bind, link | grows from M3 |
+| `ds-cli` | The `ds` binary: run, build, check, info, fmt, save, bind, dev, repl, lsp | grows from M3 |
 | `ds-lsp` | LSP server over `ds-query` | M7 |
 
 Supporting directories: `conformance/` (seed corpus, stage expectations, goldens) from M1, `fuzz/`, `benchmarks/`. Consumption runs ds-parse -> ds-query -> ds-check -> ds-lower -> ds-vm -> ds-jit, ds-abi beneath the lowerer, VM and JIT, ds-mod beneath the VM loader and package store, ds-diag beneath everything.
@@ -39,7 +42,7 @@ Supporting directories: `conformance/` (seed corpus, stage expectations, goldens
 ## 3. Dependency policy
 House-preferred crates plus domain needs; new dependencies enter at the latest version via `cargo add`.
 
-- `pest` + `pest_derive` for the parser; if the arrow-heavy grammar fights PEG, escalate to hand-written recursive descent behind the same `parse` query, then to fallback F1(b).
+- `pest` + `pest_derive` for the parser; if the arrow-heavy grammar fights PEG, escalate to hand-written recursive descent behind the same `parse` query, then to fallback F1b.
 - `blake3` for source and package hashing [G3.5, H6] with `hex-simd`; `memmap2` for the dsmod mmap path; `mimalloc` under the reuse path [C4]; `tempfile` for atomic store writes.
 - `clap` (derive) for the CLI; `thiserror` for library errors, anyhow in the binary only.
 - The registry's remote client shells out to the system `git` over https (`file://` locally); an unvetted git dependency queues on the author's policy like `notify`.
@@ -83,10 +86,10 @@ The milestone order is the schedule; each statement is its scope and acceptance 
 ## 7. Risks and recorded fallbacks
 | Risk | Trigger | Fallback |
 |---|---|---|
-| Disjointness machinery slips schedule [B1] | emptiness checker not converging in M2 | B1(b) nominal-only core |
-| Arrow-assignment grammar fights the parser [F1] | pest prototyping dead-ends in M1 | recursive descent behind `parse`, then F1(b) Gleam/Roc brace headlines |
-| Per-arch stencil toolchain unacceptable [H1] | windows-msvc stencil build unstable in M8 | H1(b) single method-JIT tier |
-| Affine friction worse than expected [C1] | corpus code drowning in move errors by M5 | C4(b) generational references |
+| Disjointness machinery slips schedule [B1] | emptiness checker not converging in M2 | B1b nominal-only core |
+| Arrow-assignment grammar fights the parser [F1] | pest prototyping dead-ends in M1 | recursive descent behind `parse`, then F1b Gleam/Roc brace headlines |
+| Per-arch stencil toolchain unacceptable [H1] | windows-msvc stencil build unstable in M8 | H1b single method-JIT tier |
+| Affine friction worse than expected [C1] | corpus code drowning in move errors by M5 | C4b generational references |
 | Sub-10ms startup missed [G3.5] | cold-run bench above target in M7 | profile the mmap path, strip debug spans, lazy section loading |
 | RC/arena soundness bugs [C4] | any use-after-free or double-free in fuzzing | the diagnostic layer stays shippable behind a flag |
 

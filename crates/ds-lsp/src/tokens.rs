@@ -34,7 +34,7 @@ use ds_parse::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use tower_lsp::lsp_types as lsp;
 
-use crate::convert;
+use crate::{completion::is_type_head, convert};
 
 /// The token classes this slice answers, in legend order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -890,13 +890,6 @@ impl Walker<'_> {
         }
     }
 
-    /// Whether one expression is a bare path naming a package type — the
-    /// head a constructor application resolves through.
-    fn is_type_head(&self, recv: &Expr) -> bool {
-        matches!(recv, Expr::Path { path, .. } if path.segments.len() == 1
-            && self.package.lookup_type(&path.segments[0].name).is_some())
-    }
-
     /// One bracketed constructor argument: a type spelled in expression
     /// position, the resolver's own shapes.
     fn ctor_type_arg(&mut self, arg: &Expr) {
@@ -991,7 +984,7 @@ impl Walker<'_> {
                 self.value_use(name);
             },
             Expr::Index { recv, index, .. } => {
-                if self.is_type_head(recv) {
+                if is_type_head(self.package, recv) {
                     if let Expr::Path { path, .. } = recv.as_ref() {
                         self.type_use(&path.segments[0]);
                     }

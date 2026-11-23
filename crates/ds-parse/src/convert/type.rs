@@ -9,65 +9,42 @@ use crate::{Rule, ast::*};
 impl Ctx {
     // ===== types =====
 
+    /// Folds one flat n-ary type chain (`type_union`, `type_inter`,
+    /// `type_diff`) left-associatively into `ctor` nodes, guarded by the
+    /// chain budget. The three grammar rules are the same repetition with a
+    /// different connector, so one fold serves all three.
+    fn type_chain(
+        &mut self,
+        p: Pair<'_, Rule>,
+        ctor: impl Fn(Span, Box<Type>, Box<Type>) -> Type,
+    ) -> Type {
+        let span = self.span(&p);
+        let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
+        if self.chain_guard(terms.len(), span) {
+            return Type::TypeKw(span);
+        }
+        let mut iter = terms.into_iter();
+        let first = iter
+            .next()
+            .map_or(Type::TypeKw(span), |c| self.type_expr(c));
+        iter.map(|c| self.type_expr(c)).fold(first, |acc, t| {
+            ctor(join(acc.span(), t.span()), Box::new(acc), Box::new(t))
+        })
+    }
+
     pub(super) fn type_expr(&mut self, p: Pair<'_, Rule>) -> Type {
         match p.as_rule() {
             Rule::type_union => {
-                let span = self.span(&p);
-                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
-                if self.chain_guard(terms.len(), span) {
-                    return Type::TypeKw(span);
-                }
-                let mut iter = terms.into_iter();
-                let first = iter
-                    .next()
-                    .map_or(Type::TypeKw(span), |c| self.type_expr(c));
-                iter.map(|c| self.type_expr(c)).fold(first, |acc, t| {
-                    let s = join(acc.span(), t.span());
-                    Type::Union {
-                        span: s,
-                        left: Box::new(acc),
-                        right: Box::new(t),
-                    }
-                })
+                self.type_chain(p, |span, left, right| Type::Union { span, left, right })
             },
             Rule::type_inter => {
-                let span = self.span(&p);
-                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
-                if self.chain_guard(terms.len(), span) {
-                    return Type::TypeKw(span);
-                }
-                let mut iter = terms.into_iter();
-                let first = iter
-                    .next()
-                    .map_or(Type::TypeKw(span), |c| self.type_expr(c));
-                iter.map(|c| self.type_expr(c)).fold(first, |acc, t| {
-                    let s = join(acc.span(), t.span());
-                    Type::Intersect {
-                        span: s,
-                        left: Box::new(acc),
-                        right: Box::new(t),
-                    }
-                })
+                self.type_chain(p, |span, left, right| Type::Intersect { span, left, right })
             },
-            Rule::type_diff => {
-                let span = self.span(&p);
-                let terms: Vec<Pair<'_, Rule>> = inner(&p).filter(|c| is_type_rule(c)).collect();
-                if self.chain_guard(terms.len(), span) {
-                    return Type::TypeKw(span);
-                }
-                let mut iter = terms.into_iter();
-                let first = iter
-                    .next()
-                    .map_or(Type::TypeKw(span), |c| self.type_expr(c));
-                iter.map(|c| self.type_expr(c)).fold(first, |acc, t| {
-                    let s = join(acc.span(), t.span());
-                    Type::Difference {
-                        span: s,
-                        left: Box::new(acc),
-                        right: Box::new(t),
-                    }
-                })
-            },
+            Rule::type_diff => self.type_chain(p, |span, left, right| Type::Difference {
+                span,
+                left,
+                right,
+            }),
             Rule::type_postfix => {
                 let span = self.span(&p);
                 let mut inner_ty = Type::TypeKw(span);
@@ -206,7 +183,6 @@ impl Ctx {
             Rule::type_kw => Type::TypeKw(self.span(&p)),
             // type_expr / type_arg wrappers and anything unexpected.
             _ => match inner(&p).next() {
-                Some(c) if is_type_rule(&c) => self.type_expr(c),
                 Some(c) => self.type_expr(c),
                 None => Type::TypeKw(self.span(&p)),
             },

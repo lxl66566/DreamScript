@@ -210,9 +210,7 @@ fn bytecode_target_and_empty_module_round_trip() {
 #[test]
 fn checked_hash_validation_accepts_and_rejects() {
     let bytes = write(&sample_module());
-    let module = read_checked(&bytes, SOURCE).expect("matching source");
-    assert!(module.matches_source(SOURCE));
-    assert!(!module.matches_source(b"edited source"));
+    read_checked(&bytes, SOURCE).expect("matching source");
     let error = read_checked(&bytes, b"edited source").expect_err("hash must mismatch");
     assert_eq!(error, ds_mod::ReadError::HashMismatch {
         stored: Hash128::compute(SOURCE),

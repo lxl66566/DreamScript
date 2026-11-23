@@ -10,7 +10,9 @@
 //! Non-atomicity is sound under thread confinement: a block and its count are
 //! only ever touched by the thread owning the [`crate::Heap`], because E3's
 //! fork-join transfers ownership of whole values (and whole heaps) rather than
-//! sharing them. `RcHeader` is accordingly not `Sync` by construction.
+//! sharing them. The header itself carries no synchronization; the confinement
+//! rides the owning heap being `!Sync` (auto traits alone do not keep a plain
+//! header off a shared thread).
 
 use core::{marker::PhantomData, ptr::NonNull};
 

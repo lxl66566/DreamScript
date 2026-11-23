@@ -26,7 +26,9 @@
 //! - A call whose only argument is the trailing block (F7) renders without a parenthesis pair of
 //!   its own (`with_file(p, f) { ... }`); `else if` chains keep the `if`.
 //! - There is NO wrapping: long lines stay long. A braced container renders inline iff its span
-//!   lies on one source line; otherwise it opens up.
+//!   lies on one source line; otherwise it opens up — the exceptions are struct literals and a
+//!   tag's struct payload, which fold to one line whatever the source spelled (their field lists
+//!   are comma-only in the grammar, so folding keeps one canonical spelling).
 //! - Layout line breaks are bare LF; string and raw-string literals, comments, and foreign types
 //!   re-emit their source spans byte for byte, line endings included — [`format_source_tracked`]
 //!   names those ranges so an EOL fold can leave them alone.

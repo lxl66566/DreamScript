@@ -143,21 +143,23 @@ impl Db {
 
     /// Creates an empty database with the computes for
     /// [`QueryKey::ParseFile`], [`QueryKey::BlockIndex`],
-    /// [`QueryKey::BlockSource`], [`QueryKey::Expanded`],
-    /// [`QueryKey::Resolve`], [`QueryKey::CheckedPackage`],
-    /// [`QueryKey::Analyzed`], [`QueryKey::PackageLinearity`],
-    /// [`QueryKey::PackageEffects`], [`QueryKey::TypeOf`],
-    /// [`QueryKey::LinearityCheck`], [`QueryKey::EffectsOf`], and
-    /// [`QueryKey::PlatformCheck`] registered: `ds-parse` for the tree and
+    /// [`QueryKey::BlockSource`], [`QueryKey::ScopeIndex`],
+    /// [`QueryKey::Expanded`], [`QueryKey::Resolve`],
+    /// [`QueryKey::CheckedPackage`], [`QueryKey::Analyzed`],
+    /// [`QueryKey::PackageLinearity`], [`QueryKey::PackageEffects`],
+    /// [`QueryKey::TypeOf`], [`QueryKey::LinearityCheck`],
+    /// [`QueryKey::EffectsOf`], [`QueryKey::PlatformCheck`], and
+    /// [`QueryKey::PooledCheck`] registered: `ds-parse` for the tree and
     /// diagnostics, the tree's block spans for the index, the block-text
-    /// seam for sources, the ds-check derive expansion of every parse
-    /// (G1), the ds-check collection and resolution passes over the
-    /// expanded trees (G3), the bidirectional check (B2) once, in the
-    /// checked package whose bundle the analyzed query slices — the value
-    /// the run path lowers from — the M2 affine pass (C1, C5) over the
-    /// expanded trees, the ds-check effects pass over the expanded trees
-    /// (E1), and the per-definition slices of those (see the crate
-    /// docs).
+    /// seam for sources, the ds-check scope walk for the local frames, the
+    /// ds-check derive expansion of every parse (G1), the ds-check
+    /// collection and resolution passes over the expanded trees (G3), the
+    /// bidirectional check (B2) once, in the checked package whose bundle
+    /// the analyzed query slices — the value the run path lowers from —
+    /// the M2 affine pass (C1, C5) over the expanded trees, the ds-check
+    /// effects pass over the expanded trees (E1), the platform and
+    /// pooled-body checks over the same trees, and the per-definition
+    /// slices of the check and linearity passes (see the crate docs).
     #[must_use]
     pub fn new() -> Self {
         let mut db = Self::default();
@@ -277,12 +279,6 @@ impl Db {
     #[must_use]
     pub fn file_content(&self, file: FileId) -> Option<&str> {
         self.is_registered(file).then(|| self.files.source(file))
-    }
-
-    /// The name `file` was registered under, if it exists.
-    #[must_use]
-    pub fn file_name(&self, file: FileId) -> Option<&str> {
-        self.is_registered(file).then(|| self.files.name(file))
     }
 
     /// Replaces the compute function of a query kind: the hook tests and
@@ -427,12 +423,6 @@ impl Ctx<'_> {
     #[must_use]
     pub fn files(&self) -> &Files {
         &self.db.files
-    }
-
-    /// The current global revision.
-    #[must_use]
-    pub fn revision(&self) -> Revision {
-        self.db.revision
     }
 
     fn record(&mut self, dep: Dependency) {

@@ -596,13 +596,6 @@ impl Module {
             .push(DebugSpan::new(start, end));
         self
     }
-
-    /// Whether the checked source hash matches `source` (G3.5); identity is
-    /// hash-based, never mtime.
-    #[must_use]
-    pub fn matches_source(&self, source: &[u8]) -> bool {
-        self.source_hash == Hash128::compute(source)
-    }
 }
 
 #[cfg(test)]

@@ -207,16 +207,6 @@ impl Lowered {
             .map(|facts| facts.value_ends.as_slice())
     }
 
-    /// One binder's registered body slots in the named function: the
-    /// `:drop` seam's word discovery. Borrowed registrations (an alias of
-    /// another binding's value) answer none.
-    #[must_use]
-    pub fn binder_slots(&self, name: &str, span: Span) -> Option<&[u8]> {
-        self.function_index(name)
-            .and_then(|index| self.facts.get(index as usize))
-            .and_then(|facts| facts.registered.get(&span).map(Vec::as_slice))
-    }
-
     /// The named function's whole registration map: binder span to body
     /// slots, owning registrations only.
     #[must_use]

@@ -504,7 +504,7 @@ impl Walker<'_> {
             // `map` head by the grammar.
             Expr::Index { recv, index, .. } => {
                 self.expr(recv);
-                if self.is_type_head(recv) {
+                if is_type_head(self.package, recv) {
                     self.mark(index.span());
                 }
             },
@@ -591,13 +591,13 @@ impl Walker<'_> {
             Expr::Block(block) => self.block(block),
         }
     }
+}
 
-    /// Whether one expression is a bare path naming a package type — the
-    /// head a constructor application resolves through (F9).
-    fn is_type_head(&self, recv: &Expr) -> bool {
-        matches!(recv, Expr::Path { path, .. } if path.segments.len() == 1
-            && self.package.lookup_type(&path.segments[0].name).is_some())
-    }
+/// Whether one expression is a bare path naming a package type — the
+/// head a constructor application resolves through (F9).
+pub(crate) fn is_type_head(package: &Package, recv: &Expr) -> bool {
+    matches!(recv, Expr::Path { path, .. } if path.segments.len() == 1
+        && package.lookup_type(&path.segments[0].name).is_some())
 }
 
 /// Whether one scope kind declares into the type namespace (F9): the
@@ -839,6 +839,40 @@ pub(crate) fn rank(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A constructor application's argument brackets are a type position
+    /// through the shared type-head predicate: the cursor inside
+    /// `box[t]` answers the enclosing declaration's type variable, while
+    /// the same brackets over a name the package never declared as a type
+    /// stay an ordinary expression position.
+    #[test]
+    fn constructor_argument_brackets_answer_type_variables() {
+        let source =
+            "struct box { v: int }\nfn wrap[t](v: t) -> t? {\n  const xs = box[t]()\n  none\n}\n";
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("probe.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the probe parses");
+        let (package, ..) = ds_check::resolve_package(std::slice::from_ref(&ast));
+        let at = u32::try_from(
+            source.find("box[t]").expect("the application is placed") + "box[".len() + 1,
+        )
+        .expect("an offset fits u32");
+        let vars = type_vars(&ast, &package, file, at).expect("the brackets are a type position");
+        assert_eq!(vars.names.first().map(|(name, _)| name.as_str()), Some("t"));
+        assert!(!vars.self_in_scope);
+        // The same brackets over an undeclared head mark nothing: the
+        // walk answers no type position for an ordinary index.
+        let plain = source.replace("box[t]", "xs[t]");
+        let file = files.add_source("plain.ds", &plain);
+        let ast = ds_parse::parse(&files, file).expect("the plain probe parses");
+        let (package, ..) = ds_check::resolve_package(std::slice::from_ref(&ast));
+        let at = u32::try_from(plain.find("xs[t]").expect("the index is placed") + "xs[".len() + 1)
+            .expect("an offset fits u32");
+        assert!(
+            type_vars(&ast, &package, file, at).is_none(),
+            "an undeclared head's brackets stay an expression position"
+        );
+    }
 
     /// Resolves one snippet's syntax to plain surface: every placeholder
     /// keeps its default spelling, bare tab stops drop out.

@@ -1,12 +1,14 @@
 //! The scalar C-ABI marshaling face (H5): one bound symbol called over
 //! a scalar signature — `int`, `bool`, and `float` in and out, the
-//! i64, u8, and f64 words H5 rules — the landed slice the VM stage
-//! calls today. A signature wider than four words refuses
+//! i64, u8, and f64 words H5 rules — the first landed slice, kept as
+//! the scalar-only shape; the VM stage marshals through the widened
+//! face beside it, so no in-tree stage calls this one today. A
+//! signature wider than four words refuses
 //! ([`ScalarError`]); the lowering seam refuses the same shape before
 //! any run starts, so the refusal here is the backstop, never the
 //! diagnostic a source sees. The widened encodings (string/bytes
-//! pairs, unit returns) live in the marshaling face beside this one,
-//! over the same enumerated transmute.
+//! pairs, unit returns) live in the marshaling face over the same
+//! enumerated transmute.
 //!
 //! The H5 contract clauses live at this seam: a bound extern means
 //! panic=abort — a foreign abort kills the process, the VM never

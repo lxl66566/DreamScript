@@ -7,12 +7,13 @@
 //! pair parameter occupies two, so two pair parameters fill the
 //! enumerated transmute's envelope exactly.
 //!
-//! This is the encoding face alone. The language-side consumption —
-//! the pool constant and the VM stage — still refuses these shapes at
-//! the lowering seam, so nothing in a `.ds` source reaches here yet;
-//! the face serves the marshaling round the lowering will later lower
-//! onto. The returning direction (a foreign `char*` answer needing an
-//! ownership story) and deinit-carrying handles stay queued with it.
+//! The language-side consumption runs over this face: the lowering
+//! seam admits the pair encodings and the unit return at the
+//! bound-extern declaration (the pool constant carrying the return's
+//! marshaling word), and the VM stage marshals each staged word per
+//! its own kind onto the signature below. The returning direction (a
+//! foreign `char*` answer needing an ownership story) and
+//! deinit-carrying handles stay queued with the ownership round.
 
 use crate::{
     MAX_PARAMS, Symbol,

@@ -62,8 +62,8 @@ impl RegistryClient {
     pub fn from_env() -> Option<Self> {
         let value = std::env::var_os("DS_REGISTRY").filter(|value| !value.is_empty())?;
         Some(match value.to_str() {
-            Some(value) if value.contains("://") => Self::Git(GitRegistry::open(value)),
-            _ => Self::Index(Registry::open(Path::new(&value))),
+            Some(value) => Self::parse(value),
+            None => Self::Index(Registry::open(Path::new(&value))),
         })
     }
 
@@ -122,12 +122,6 @@ impl Registry {
         Self {
             root: root.to_path_buf(),
         }
-    }
-
-    /// The registry root.
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// The row file of one name: the package name verbatim below the

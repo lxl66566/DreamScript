@@ -17,7 +17,7 @@
 //! ```text
 //! offset  size  field
 //! 0       4     magic "\0DSM"
-//! 4       1     format version (currently 4)
+//! 4       1     format version (currently 5)
 //! 5       1     target class: 0 = bytecode, 1 = wasm, 2 = triple
 //! 6       1     flags bitset: bit0 STRIP, bit1 FFI_USED, bit2 HAS_JIT_METADATA
 //! 7       1     collector flags (reserved; bit 0 = two-hook interface active)
@@ -44,7 +44,9 @@
 //! dependency-list position, 0 the enclosing module itself, `n` the
 //! `n-1`-th dependency entry; selector 1 a uleb-length native-surface
 //! name), then a uleb function index within the addressed module's
-//! blocks payload.
+//! blocks payload; 5 = Bound extern (a uleb-length `[artifacts]` module
+//! name, a uleb symbol index in that module's export enumeration, and
+//! a return-marshaling byte: 0 the absent word, 1 int, 2 float, 3 bool).
 //!
 //! The section directory lists kinds in the writer's canonical order
 //! (blocks, constants, type metadata, effect rows, then optionally debug
@@ -60,17 +62,17 @@
 //! checksum) are committed fields with pending values: writers emit 0
 //! until M3 defines their computation, and the reader accepts and
 //! round-trips non-zero values without validating them. The blocks payload
-//! is version 3 (below); the type-metadata and effect-rows payloads remain
+//! is version 4 (below); the type-metadata and effect-rows payloads remain
 //! versioned minimal placeholders (payload version 0 plus a reserved zero
 //! uleb), completed at M2/M3 inside the locked framing by bumping their
 //! per-section payload version. Debug spans are a list of byte-offset
 //! spans into the source and the only strippable section: a module built
 //! with [`Flags::STRIP`] set carries no debug-spans section.
 //!
-//! # Blocks payload, version 3 `[BL-5, BL-6, BL-7]`
+//! # Blocks payload, version 4 `[BL-5, BL-6, BL-7]`
 //!
 //! ```text
-//! u8    payload version = 3
+//! u8    payload version = 4
 //! uleb  function count
 //! per function:
 //!   uleb len + UTF-8   local function name (the qualified module path is
@@ -156,7 +158,10 @@ pub const MAGIC: [u8; 4] = *b"\0DSM";
 /// dependency-position key (0 the enclosing module) addresses uop
 /// dependencies, a native-by-name key covers the native surfaces; the
 /// constants payload is locked and carries no payload version of its
-/// own, so any change visible in it bumps this version. Version 5
+/// own, so any change visible in it bumps this version. The Bound
+/// constants-pool kind (tag 5) joined under version 4 without a bump —
+/// a reader that predates it rejects the unknown tag as malformed data,
+/// never misreads the entry. Version 5
 /// retires the entry staging table (the process surface's string argv
 /// superseded entry-parameter staging). Files of older versions are
 /// rejected.

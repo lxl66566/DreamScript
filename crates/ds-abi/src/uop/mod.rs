@@ -45,6 +45,7 @@
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
 //! | BoolCmp (0x5)        | EQBOOL, NEQBOOL         | dst slot | lhs slot   | rhs slot   | —
 //! | Ref (0xD)            | EQSTR, NEQSTR, STRCAT,  | dst slot | lhs slot   | rhs slot   | —
+//! |                      | STRCAT_ARENA,           |          | lhs slot   | rhs slot   |
 //! |                      | CLOSURE_NEW              |          | or fn slot | or capture |
 //! |                      |                          |          | (NEW only) | count (NEW)|
 //! | Tag (0x6)            | TAG_TEST(_NOT), TAG_NEW | dst slot | src slot   | tag id     | —
@@ -52,7 +53,9 @@
 //! |                      |                         |          | tag (NEW)  |            |
 //! | Cvt (0x7)            | CVTI2F, CVTF2I          | dst slot | src slot   | —          | —
 //! | Mov (0x8)            | MOV                     | dst slot | src slot   | —          | —
-//! | Ctl (0x9)            | JMPIF, JMPIF_NOT, JMP   | cond / — | —          | —          | jump bias
+//! | Ctl (0x9)            | JMPIF, JMPIF_NOT, JMP,  | cond / — /  | —          | —          | jump bias  |
+//! |                      | ARENA_MARK, ARENA_      | mark slot / |            |            | / —        |
+//! |                      | RESTORE                 | restore slot|            |            |            |
 //! | Call (0xA)           | CALL, CALLT, RET,       | nargs /  | callee slot  | span       | const idx    |
 //! |                      | RETSPAN, CALLG, CALLTG, | src slot | (CALLS only) | (RETSPAN)  | (CALL/       |
 //! |                      | CALLS                   |          |             |            | CALLT/CALLG/ |
@@ -405,9 +408,8 @@ pub enum Uop {
     /// (module id plus function index, zero RC cost); a Ref slot holds a
     /// closure object whose header word is the FuncRef and whose following
     /// words are the capture block. The slot's static classification selects
-    /// the read, never a runtime value test (BL-1). Reserved with the
-    /// encoding locked (2026-11-10): no tier-1 dispatch and no lowering
-    /// emit it yet. `c` is reserved zero.
+    /// the read, never a runtime value test (BL-1). The encoding is locked
+    /// (2026-11-10). `c` is reserved zero.
     Calls { callee_slot: u8, nargs: u8 },
     /// `0xA.2` — return `slots[src]`; the word overlays slot 0 of the
     /// caller's outgoing-argument area (H2).

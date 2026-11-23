@@ -44,12 +44,6 @@ impl GitRegistry {
         }
     }
 
-    /// The remote's URL spelling.
-    #[must_use]
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
     /// One fetch-hook demand: the snapshot clone serves the local
     /// index's fetch unchanged, so every verification and taxonomy the
     /// index enforces holds over the remote's bytes too. A clone the

@@ -27,8 +27,11 @@
 //! [`Heap::payload`]/[`Heap::payload_mut`]) so its own death order runs
 //! between the count reaching zero and the payload dying; the header layout
 //! is the committed `repr(C)` format carrying the dormant two-hook collector
-//! word. The arena half stays unconsumed until the temporaries stage lands
-//! (per-frame marks and chunk-append growth already fit the fiber substrate).
+//! word. The arena half is the temporaries substrate: each fiber owns one
+//! arena serving its designated concatenation results (`alloc_concat`, with
+//! `bytes_at` behind the packed-handle reads), frames stage their entry
+//! marks through `push_frame_mark`/`pop_frame_mark`, and the death doors
+//! release whole through `release_all`.
 //!
 //! Confinement: this crate is the unsafe core of the runtime (`ds-rt` in the
 //! implementation plan); the rest of the workspace consumes it through safe
