@@ -83,9 +83,10 @@
 //! over the impossible receiver and answering the driver's empty
 //! document. The walk refuses: a field whose
 //! type spells no write (a tuple, a union, a shape the case vocabulary
-//! does not name) or an optional nested inside a part (a `t?` list
-//! element, an optional payload field — the M3 member dispatch has no
-//! runtime contract for either).
+//! does not name). An optional nested inside
+//! a part (a `t?` list element, an optional payload field) narrows at
+//! its consumer — the presence narrow over the element binder or the
+//! payload binder, absence contributing nothing.
 //! `==` refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
@@ -2815,8 +2816,10 @@ fn field_rows(
 /// application type dispatches its own `from_json` member (the
 /// `is parse_err` narrow, since the `?` kept-set assumes word
 /// payloads); a list reads the array then walks one element per
-/// position into a fresh accumulator; an optional reads absence as
-/// `none` and presence through its inner read — a list inner through
+/// position into a fresh accumulator, a `t?` element narrowing at its
+/// push (the presence narrow over the per-element binder, absence
+/// contributing nothing — to_json's mirror); an optional reads
+/// absence as `none` and presence through its inner read — a list inner through
 /// the statement-position member row (to_json's mirror, since the
 /// array walk's statements spell no value-position else that carries
 /// them). Every other shape refuses at the attribute.
@@ -3065,7 +3068,11 @@ fn type_keyed_decode(mint: &mut Mint, recv: &Expr, source: &str) -> Expr {
 /// The array walk over a `list[t]` field: read the array, then one
 /// element read per position into a fresh accumulator, the element read
 /// keyed by the element's own type (an element shape spelling no read
-/// refusing at the attribute).
+/// refusing at the attribute). A `t?` element narrows at its push —
+/// the presence narrow over the per-element binder, presence reading
+/// and pushing, absence contributing nothing to the list (to_json's
+/// mirror); the raw per-element read keeps its own `none` side for
+/// the narrow to test (the tuple-payload item's discipline).
 // the inputs are the field's element shape, the reads' source and
 // binder counter, and the refusal vocabulary: one flat list where
 // each parameter names a fact
@@ -3116,28 +3123,62 @@ fn list_read(
     let array_read = path_expr(&array, mint.span());
     let index_read = path_expr(&index, mint.span());
     let get = member_call(array_read, "get", vec![index_read], mint);
-    let elem = Expr::Call {
-        span: mint.span(),
-        callee: Box::new(Expr::Field {
+    // An optional element keeps the raw read's own `none` side: the
+    // narrow below tests absence off it, so the unwrap to the seed
+    // must not run first (a required element unwraps, a missing
+    // element answering the seed document whose read fails into
+    // `parse_err`); the tuple-payload item reads the same shape.
+    let elem = if matches!(paren_free(element), Type::Optional { .. }) {
+        get
+    } else {
+        Expr::Call {
             span: mint.span(),
-            recv: Box::new(get),
-            name: Ident {
+            callee: Box::new(Expr::Field {
                 span: mint.span(),
-                name: "unwrap_or".to_owned(),
-            },
-        }),
-        args: vec![CallArg {
-            span: mint.span(),
-            name: None,
-            value: path_expr(SEED, mint.span()),
-        }],
-        trailing: None,
+                recv: Box::new(get),
+                name: Ident {
+                    span: mint.span(),
+                    name: "unwrap_or".to_owned(),
+                },
+            }),
+            args: vec![CallArg {
+                span: mint.span(),
+                name: None,
+                value: path_expr(SEED, mint.span()),
+            }],
+            trailing: None,
+        }
     };
-    let read = value_read(element, &at, mint, fresh, span, part, what, fail, diags)?;
     let mut loop_body = vec![local(mint, &at, elem, false)];
-    loop_body.extend(read.0);
-    let out_read = path_expr(&out, mint.span());
-    loop_body.push(expr_stmt(member_call(out_read, "push", vec![read.1], mint)));
+    if let Type::Optional { inner, .. } = paren_free(element) {
+        // A `t?` element narrows at its push: the presence narrow
+        // over the element binder, presence reading through the
+        // element's own reader and pushing, absence contributing
+        // nothing to the list (to_json's mirror); a present
+        // wrong-shape element (a json null) answers `parse_err`
+        // through its reader like the tuple-payload item.
+        let inner_name = fresh_binder(fresh, "n");
+        let (rows, value) = value_read(
+            inner,
+            &inner_name,
+            mint,
+            fresh,
+            span,
+            part,
+            what,
+            fail,
+            diags,
+        )?;
+        let mut arm = rows;
+        let out_read = path_expr(&out, mint.span());
+        arm.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+        loop_body.push(presence_narrow(mint, &at, &inner_name, arm));
+    } else {
+        let (rows, value) = value_read(element, &at, mint, fresh, span, part, what, fail, diags)?;
+        loop_body.extend(rows);
+        let out_read = path_expr(&out, mint.span());
+        loop_body.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+    }
     loop_body.push(assign_add(mint, &index));
     let index_cmp = path_expr(&index, mint.span());
     let array_len_arg = path_expr(&array, mint.span());
@@ -3339,22 +3380,33 @@ fn case_decode_arm(
                 let array_read = path_expr(&array, mint.span());
                 let index_arg = int_answer(mint, &index.to_string());
                 let get = member_call(array_read, "get", vec![index_arg], mint);
-                let elem = Expr::Call {
-                    span: mint.span(),
-                    callee: Box::new(Expr::Field {
+                // an optional item keeps its element read's own `none`
+                // side: the optional test below reads absence off it,
+                // so the unwrap to the seed must not run first (a
+                // required item unwraps, a missing element answering
+                // the seed document whose read fails into `parse_err`);
+                // the field rows read this same shape over the member
+                // probe
+                let elem = if matches!(paren_free(item), Type::Optional { .. }) {
+                    get
+                } else {
+                    Expr::Call {
                         span: mint.span(),
-                        recv: Box::new(get),
-                        name: Ident {
+                        callee: Box::new(Expr::Field {
                             span: mint.span(),
-                            name: "unwrap_or".to_owned(),
-                        },
-                    }),
-                    args: vec![CallArg {
-                        span: mint.span(),
-                        name: None,
-                        value: path_expr(SEED, mint.span()),
-                    }],
-                    trailing: None,
+                            recv: Box::new(get),
+                            name: Ident {
+                                span: mint.span(),
+                                name: "unwrap_or".to_owned(),
+                            },
+                        }),
+                        args: vec![CallArg {
+                            span: mint.span(),
+                            name: None,
+                            value: path_expr(SEED, mint.span()),
+                        }],
+                        trailing: None,
+                    }
                 };
                 stmts.push(local(mint, &at, elem, false));
                 let read = value_read(
@@ -3525,8 +3577,10 @@ fn narrow_test(mint: &mut Mint, name: &str, member: &str, fail: &str) -> Stmt {
 /// type's own `to_json` member (a type carrying none failing at the
 /// synthesized call with the standard missing-member diagnostic, the
 /// bare-name precedent); a shape the walk cannot spell refuses at the
-/// attribute, and so does an optional the M3 member dispatch cannot
-/// carry (a `t?` list element, an optional payload field). Refuses
+/// attribute. An optional nested inside a part (a `t?` list element,
+/// an optional payload field) narrows at its consumer: the presence
+/// narrow over the element or payload binder, absence contributing
+/// nothing (the decode mirror). Refuses
 /// otherwise like from_json: a generic declaration, a non-data
 /// declaration, a function-typed or `~Copyable` part; a tag
 /// carries no members to walk, so it refuses naming itself.
@@ -3764,10 +3818,12 @@ fn member_set(mint: &mut Mint, map: &str, key: Expr, value: Expr) -> Stmt {
 /// or application type dispatches its own `to_json` member (a type
 /// carrying none failing at the synthesized call with the standard
 /// missing-member diagnostic); a list walks one json element per
-/// position into a fresh array. An optional nested inside a part (a
-/// `t?` list element, a doubly-optional field) refuses: the word-union
-/// member dispatch has no M3 runtime contract, so no spelling the walk
-/// can build lowers. Every other shape refuses at the attribute too.
+/// position into a fresh array — a `t?` element narrowing at its
+/// consumer, absence skipping the element (the decode mirror). Every
+/// other shape refuses at the attribute; an optional reaching here
+/// directly (a nested optional its consumer sites do not narrow)
+/// keeps the refusal, since the narrow wraps the consumer's own
+/// statement and this walk cannot spell it twice.
 fn json_value(
     ty: &Type,
     source: Expr,
@@ -3786,8 +3842,8 @@ fn json_value(
                 "to_json",
                 what,
                 part,
-                "an optional nested inside a write spells no M3 lowering (the word-union member \
-                 dispatch has no runtime contract)",
+                "a nested optional the consumer sites do not narrow spells no second presence \
+                 narrow at this walk",
             ));
             None
         },
@@ -3880,7 +3936,9 @@ fn type_keyed_encode(mint: &mut Mint, recv: &Expr, source: Expr) -> Expr {
 /// The array walk over a `list[t]` part: one json element per position
 /// into a fresh accumulator, the element write keyed by the element's
 /// own type (an element shape spelling no write refusing at the
-/// attribute).
+/// attribute). A `t?` element narrows at the push — the presence
+/// narrow over the for-bound element, absence skipping the element
+/// (the decode mirror: the element never reads back).
 fn list_write(
     element: &Type,
     source: Expr,
@@ -3903,19 +3961,30 @@ fn list_write(
         args: Vec::new(),
         trailing: None,
     };
-    let (rows, value) = json_value(
-        element,
-        path_expr(&at, mint.span()),
-        mint,
-        fresh,
-        span,
-        part,
-        what,
-        diags,
-    )?;
-    let mut body = rows;
-    let out_read = path_expr(&out, mint.span());
-    body.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+    let body = if let Type::Optional { inner, .. } = paren_free(element) {
+        let inner_name = fresh_binder(fresh, "n");
+        let narrowed = path_expr(&inner_name, mint.span());
+        let (rows, value) = json_value(inner, narrowed, mint, fresh, span, part, what, diags)?;
+        let mut arm = rows;
+        let out_read = path_expr(&out, mint.span());
+        arm.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+        vec![presence_narrow(mint, &at, &inner_name, arm)]
+    } else {
+        let (rows, value) = json_value(
+            element,
+            path_expr(&at, mint.span()),
+            mint,
+            fresh,
+            span,
+            part,
+            what,
+            diags,
+        )?;
+        let mut body = rows;
+        let out_read = path_expr(&out, mint.span());
+        body.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+        body
+    };
     let pat_span = mint.span();
     let walk = Expr::For {
         span: mint.span(),
@@ -4026,24 +4095,6 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                     member_call(seed, "enc_string", vec![name], mint)
                 },
                 EnumPayload::Struct(fields) => {
-                    // An optional payload field's nested member dispatch
-                    // has no M3 runtime contract (the payload-bound
-                    // word traps), so the walk refuses it at the
-                    // attribute — the honest boundary until the seam
-                    // lands.
-                    for field in fields {
-                        if matches!(paren_free(&field.ty), Type::Optional { .. }) {
-                            diags.push(part_refused(
-                                field.span,
-                                "to_json",
-                                "enum case payload",
-                                &field.name.name,
-                                "an optional payload field spells no M3 lowering (the \
-                                 payload-bound member dispatch has no runtime contract)",
-                            ));
-                            return None;
-                        }
-                    }
                     let map = fresh_binder(&mut fresh, "m");
                     let rows = member_rows(
                         &fields
@@ -4088,19 +4139,49 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                     };
                     let mut stmts = vec![local(mint, &out, empty, true)];
                     for (index, item) in items.iter().enumerate() {
-                        let (rows, value) = json_value(
-                            item,
-                            binder_use(&binders[index], mint),
-                            mint,
-                            &mut fresh,
-                            case.span,
-                            &case.name.name,
-                            "enum case",
-                            diags,
-                        )?;
-                        stmts.extend(rows);
-                        let out_read = path_expr(&out, mint.span());
-                        stmts.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+                        // a `t?` tuple-payload item narrows at its push —
+                        // the presence narrow over the payload binder,
+                        // absence skipping the position (the decode
+                        // mirror: the element never reads back)
+                        let position = if let Type::Optional { inner, .. } = paren_free(item) {
+                            let inner_name = fresh_binder(&mut fresh, "n");
+                            let narrowed = path_expr(&inner_name, mint.span());
+                            let (rows, value) = json_value(
+                                inner,
+                                narrowed,
+                                mint,
+                                &mut fresh,
+                                case.span,
+                                &case.name.name,
+                                "enum case",
+                                diags,
+                            )?;
+                            let mut arm = rows;
+                            let out_read = path_expr(&out, mint.span());
+                            arm.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+                            vec![presence_narrow(
+                                mint,
+                                &binders[index].name,
+                                &inner_name,
+                                arm,
+                            )]
+                        } else {
+                            let (rows, value) = json_value(
+                                item,
+                                binder_use(&binders[index], mint),
+                                mint,
+                                &mut fresh,
+                                case.span,
+                                &case.name.name,
+                                "enum case",
+                                diags,
+                            )?;
+                            let mut set = rows;
+                            let out_read = path_expr(&out, mint.span());
+                            set.push(expr_stmt(member_call(out_read, "push", vec![value], mint)));
+                            set
+                        };
+                        stmts.extend(position);
                     }
                     let out_read = path_expr(&out, mint.span());
                     let seed = path_expr(SEED, mint.span());

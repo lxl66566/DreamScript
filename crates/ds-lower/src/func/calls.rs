@@ -253,13 +253,31 @@ impl<'a> FnLower<'a, '_, '_> {
     /// drop hands the count to the list (the push window's flush); a live
     /// element
     /// keeps its frame count and the list holds the acquired one.
-    pub(super) fn list_literal(&mut self, e: &Expr) -> Result<Place, LowerError> {
+    pub(super) fn list_literal(&mut self, e: &Expr, list_ty: Ty) -> Result<Place, LowerError> {
         let Expr::List { items, .. } = e else {
             return Err(mismatch("a list literal"));
         };
+        // A union element stages its whole tag-plus-region span (the
+        // element-slot argument's own rule): the literal's bare member
+        // items re-span into the channel's element type first, or the
+        // first push fixes the stride at one word and every later read
+        // mis-stages the member's payload as the tag.
+        let element = self.shapes.list_element(list_ty);
         let list = self.list_new_word()?;
         self.list_push_each(list, items.iter(), |this, item| {
-            Ok((this.value(item)?, item.span()))
+            let mut arg = this.value(item)?;
+            if let Some(element) = element
+                && element != arg.ty
+                && this.is_union_ty(element)?
+            {
+                let temp = this.temp_span(element)?;
+                this.widen_into(&temp, element, &arg, item.span())?;
+                arg = TypedPlace {
+                    place: temp,
+                    ty: element,
+                };
+            }
+            Ok((arg, item.span()))
         })?;
         Ok(Place {
             base: list,
@@ -1386,13 +1404,19 @@ impl<'a> FnLower<'a, '_, '_> {
                 defaulted.push(staged.len());
             }
             // a union-typed parameter takes its member's whole region: a
-            // bare member (a literal or an un-annotated binding) or a
-            // strict sub-union argument re-spans into a staging temp of
-            // the parameter's own region here, mirroring the annotated
-            // binding's widening write, so the staged words match the
-            // callee's parameter span
+            // bare member (a literal or an un-annotated binding), a
+            // strict sub-union argument, or an equal-typed argument
+            // whose place keeps a wider union's physical layout (an
+            // is-narrowed binder over the answer union) re-spans into a
+            // staging temp of the parameter's own region here, mirroring
+            // the annotated binding's widening write, so the staged
+            // words match the callee's parameter span
             let arg_val = match param_types.as_ref().and_then(|types| types.get(index)) {
-                Some(&param_ty) if param_ty != arg_val.ty && self.is_union_ty(param_ty)? => {
+                Some(&param_ty)
+                    if self.is_union_ty(param_ty)?
+                        && (param_ty != arg_val.ty
+                            || !self.place_layout_matches(&arg_val.place, param_ty)?) =>
+                {
                     // a union member cannot carry a deinit yet (the
                     // callee's own parameter shapes refuse first), so
                     // this guard is the staging temp's backstop for the
@@ -2181,11 +2205,16 @@ impl<'a> FnLower<'a, '_, '_> {
                 defaulted.push(staged.len());
             }
             // a union-typed parameter takes its member's whole region: a
-            // bare member or a strict sub-union argument re-spans into
-            // a staging temp of the parameter's region, the named-callee
-            // widening family's value-site spelling
+            // bare member, a strict sub-union argument, or an equal-typed
+            // argument whose place keeps a wider union's physical layout
+            // re-spans into a staging temp of the parameter's region,
+            // the named-callee widening family's value-site spelling
             let arg_val = match params.get(index) {
-                Some(&param_ty) if param_ty != arg_val.ty && self.is_union_ty(param_ty)? => {
+                Some(&param_ty)
+                    if self.is_union_ty(param_ty)?
+                        && (param_ty != arg_val.ty
+                            || !self.place_layout_matches(&arg_val.place, param_ty)?) =>
+                {
                     // the same staging-temp backstop as the named
                     // callee path
                     if self.deinit_claim(arg_val.ty, arg.span())?.is_some() {

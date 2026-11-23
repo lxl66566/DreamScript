@@ -1,0 +1,77 @@
+// purpose: the json derive families' optional-in-part rows, end to
+// end over the real ambient and the @std json driver (every row
+// printing <decl>.to_json(v).to_json()): a `t?` list element encodes
+// through the presence narrow over the for-bound element (absence
+// skipping the element) and decodes through the narrow over the
+// per-element binder (presence reading through the element's own
+// reader and pushing, absence contributing nothing to the list, a
+// present json null refusing like any other value no reader takes), a
+// nested optional list element composing the array walk inside the
+// narrow both ways, and an optional payload field encodes through the
+// narrow over the payload binder (absence leaving the member out) and
+// decodes absence as `none` — so every declaration roundtrips both
+// ways, the tuple payload's optional item decoding absence as a
+// missing position.
+
+#[derive(from_json, to_json)]
+struct holes { xs: list[int?], ys: list[list[int]?] }
+
+#[derive(from_json, to_json)]
+enum pulse { quiet, tick { at: int? } }
+
+#[derive(from_json, to_json)]
+enum beat { rest, bpm(int?, string?) }
+
+fn doc (text: string) -> json {
+  const j = parse_json(text)
+  if j is parse_err { json_null } else { j }
+}
+
+fn holes_round (text: string) -> () {
+  const h = holes.from_json(doc(text))
+  if h is parse_err { println("parse_err") } else {
+    println(holes.to_json(h).to_json())
+  }
+}
+
+fn pulse_round (text: string) -> () {
+  const r = pulse.from_json(doc(text))
+  if r is parse_err { println("parse_err") } else {
+    println(pulse.to_json(r).to_json())
+  }
+}
+
+fn beat_round (text: string) -> () {
+  const r = beat.from_json(doc(text))
+  if r is parse_err { println("parse_err") } else {
+    println(beat.to_json(r).to_json())
+  }
+}
+
+fn main() -> () {
+  const h1 = holes { xs: [1, none, 3], ys: [[2], none, [3, 4]] }
+  println(holes.to_json(h1).to_json())
+  const h2 = holes { xs: [none], ys: [none] }
+  println(holes.to_json(h2).to_json())
+  holes_round("{\"xs\": [1, 3], \"ys\": [[2], [3, 4]]}")
+  holes_round("{\"xs\": [], \"ys\": []}")
+  holes_round("{\"xs\": [1, null], \"ys\": []}")
+  holes_round("{\"xs\": [\"x\"], \"ys\": []}")
+  holes_round("{\"xs\": 5, \"ys\": []}")
+  holes_round("{\"ys\": []}")
+  holes_round("3")
+  println(pulse.to_json(quiet).to_json())
+  println(pulse.to_json(tick(at: 7)).to_json())
+  println(pulse.to_json(tick(at: none)).to_json())
+  pulse_round("{\"at\": 3}")
+  pulse_round("{}")
+  pulse_round("\"quiet\"")
+  pulse_round("[3]")
+  println(beat.to_json(rest).to_json())
+  println(beat.to_json(bpm(120, "x")).to_json())
+  println(beat.to_json(bpm(none, none)).to_json())
+  beat_round("[120, \"x\"]")
+  beat_round("[]")
+  beat_round("\"rest\"")
+  beat_round("[null]")
+}

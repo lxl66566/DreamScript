@@ -4575,7 +4575,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     shape: PlaceShape::Word(SlotType::Ref),
                 }
             },
-            Expr::List { .. } => self.list_literal(e)?,
+            Expr::List { .. } => self.list_literal(e, val.ty)?,
             Expr::Path { path, .. } => self.path_value(path, e.span(), val.ty)?,
             Expr::Paren { inner, .. } => return self.value(inner),
             Expr::Block(block) => return self.block_value(block),

@@ -1596,8 +1596,26 @@ impl FnLower<'_, '_, '_> {
                     // a bare tag arm tests membership [F9]; nothing binds
                     return Ok(());
                 }
-                self.binders.insert(*span, scrut.place.clone());
-                self.rc_bind(*span, &scrut.place, scrut.ty)?;
+                // a union scrutinee whose place is the union's own tag
+                // word alone (an enum payload binder, a struct field
+                // bound through a member pattern) binds the catchall
+                // over the union's whole span at that word: the field's
+                // span is the union's own words, so the use path re-spans
+                // onto the member's payload region exactly the
+                // wider-scrutinee case — the bare tag word would
+                // otherwise stage the tag as the member's payload
+                let place = if self.is_span_ty(scrut.ty)
+                    && matches!(scrut.place.shape, PlaceShape::Word(SlotType::Tag))
+                {
+                    Place {
+                        base: scrut.place.base,
+                        shape: PlaceShape::Span(scrut.ty),
+                    }
+                } else {
+                    scrut.place.clone()
+                };
+                self.binders.insert(*span, place.clone());
+                self.rc_bind(*span, &place, scrut.ty)?;
                 self.scope_insert(&name.name, *span);
                 Ok(())
             },

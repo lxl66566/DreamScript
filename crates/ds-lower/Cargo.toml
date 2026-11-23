@@ -29,6 +29,8 @@ thiserror.workspace = true
 criterion.workspace = true
 # the derive-expanding analyze entries the e2e tests run raw sources through
 ds-meta             = { path = "../ds-meta" }
+# the ambient core source the union-element probes compose beside a user file
+ds-stdlib           = { workspace = true }
 ds-vm               = { path = "../ds-vm" }
 
 [lints]

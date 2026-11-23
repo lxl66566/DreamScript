@@ -595,6 +595,7 @@ dependencies = [
  "ds-meta",
  "ds-mod",
  "ds-parse",
+ "ds-stdlib",
  "ds-vm",
  "thiserror",
 ]

@@ -565,7 +565,14 @@ impl FnLower<'_, '_, '_> {
         span: Span,
     ) -> Result<(), LowerError> {
         self.transfer_claim(dst.base, &src.place, src.ty)?;
-        if src.ty == dst_ty {
+        // A place keyed to a wider union can keep a different layout,
+        // so an equal checked type is not always an in-place move: the
+        // flat path would stage the operand's words over the
+        // destination's own region (a narrowed binder over an answer
+        // union whose payload interleaves differently). Only a place
+        // whose layout is the type's own takes the fast path; the rest
+        // re-span member-wise below.
+        if src.ty == dst_ty && self.place_layout_matches(&src.place, src.ty)? {
             let addrs = self.word_addrs(&src.place, src.ty)?;
             if addrs.is_empty() {
                 return Ok(());
@@ -717,6 +724,28 @@ impl FnLower<'_, '_, '_> {
                 }
                 Ok(())
             },
+        }
+    }
+}
+
+impl FnLower<'_, '_, '_> {
+    /// Whether a place's physical words are the type's own union
+    /// layout: a span place keyed to that very type, a single word, or
+    /// a wider union whose region the type's members claim identically
+    /// (an extra payload-free member adds no words). A wider union that
+    /// interleaves its payload differently keeps a different layout,
+    /// so re-spanning into the type's own region needs the
+    /// member-dispatch path.
+    pub(super) fn place_layout_matches(
+        &mut self,
+        place: &Place,
+        ty: Ty,
+    ) -> Result<bool, LowerError> {
+        match place.shape {
+            PlaceShape::Span(underlying) if underlying != ty => {
+                Ok(self.shapes.words(underlying)? == self.shapes.words(ty)?)
+            },
+            _ => Ok(true),
         }
     }
 }

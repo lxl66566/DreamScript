@@ -40,8 +40,8 @@
 // tj-plain: stage: typecheck
 // tj-plain-holder: stage: reject a nested field whose type carries no to_json member fails at the synthesized call with the standard missing-member diagnostic
 // tj-scalars: stage: run
-// tj-opt-elem: stage: reject an optional nested inside a write (a list element) spells no M3 lowering, naming the field [G1]
-// tj-opt-payload: stage: reject an optional payload field spells no M3 lowering, naming the field [G1]
+// tj-opt-elem: stage: run an optional list element encodes through the presence narrow over the for-bound element, absence skipping the element (the decode mirror)
+// tj-opt-payload: stage: run an optional payload field encodes through the presence narrow over the payload binder, absence leaving the member out
 
 #[derive(show)]
 struct point { x: int, y: int }
@@ -112,6 +112,11 @@ fn main() -> int {
   const tjs0 = tj_soft { rows: none }
   const tjs = tj_soft.to_json(tjs0)
   const tjt = tj_turn.to_json(tj_off)
+  const tjoe = tj_opt_elem { xs: [1, none, 3] }
+  const tjoev = tj_opt_elem.to_json(tjoe)
+  const tjoph0 = tj_opt_payload.to_json(tj_quiet)
+  const tjoph1 = tj_opt_payload.to_json(tj_hold(p: 9))
+  const tjoph2 = tj_opt_payload.to_json(tj_hold(p: none))
   0
 }
 

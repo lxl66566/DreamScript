@@ -229,18 +229,6 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
             "DS2004",
             "type `tj_plain` carries no member `to_json`",
         ),
-        (
-            "tj-opt-elem",
-            "DS2026",
-            "derive `to_json` refuses the field `xs`: an optional nested inside a write spells no \
-             M3 lowering (the word-union member dispatch has no runtime contract) [G1, B9]",
-        ),
-        (
-            "tj-opt-payload",
-            "DS2026",
-            "derive `to_json` refuses the enum case payload `p`: an optional payload field spells \
-             no M3 lowering (the payload-bound member dispatch has no runtime contract) [G1, B9]",
-        ),
     ];
     assert_eq!(rejects.len(), expected.len(), "one reject per class");
     for ((id, _what, diag), (want_id, code, message)) in rejects.iter().zip(expected) {
