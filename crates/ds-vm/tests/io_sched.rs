@@ -14,6 +14,9 @@
 //! - parked-IO cancellation: a sibling's trap raises the flag and the drive's next sweep cuts the
 //!   world-parked child at the resume-shaped point — its reactor interest deregistered, the
 //!   boundary reporting `Cancelled` beside the failing `Trapped`.
+//! - the close wake (item 79): a connection closed while a recv parks on it wakes the waiter now —
+//!   the close deregisters the interest and delivers the closed handle's own error span at the
+//!   parked call site, the deadline never the line.
 //! - tail-position parks: a helper whose tail call is the recv parks through the frame pop and
 //!   lands its answer on the caller, and the entry frame's own tail park delivers the completed
 //!   answer as the run's own result.
@@ -226,6 +229,20 @@ fn send_probe_def() -> FunctionDef {
             nargs: 2,
         },
         Uop::Ret { src: 2 },
+    ])
+}
+
+/// `(conn: int) -> int`: one close of the staged handle — the total
+/// seam, its unit word answered.
+fn close_conn_def() -> FunctionDef {
+    def("close_conn", &[I64, Raw, Raw], 1, 1, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Call {
+            callee: k(3),
+            nargs: 1,
+        },
+        Uop::Ret { src: 1 },
     ])
 }
 
@@ -485,6 +502,53 @@ fn a_parked_recv_wakes_at_its_deadline_with_the_timeout_span() {
     // names the wait it drew
     let text = answer_string(&vm, &answer);
     assert!(text.contains("timed out"), "the timeout message: {text}");
+    drop(peer);
+}
+
+/// A connection closed while a recv parks on it wakes the waiter now:
+/// the close's wake door deregisters the interest and delivers the
+/// closed handle's own span at the parked call site — the
+/// unknown-connection net floor, never the deadline's timeout span
+/// (the bound set far past the close, so only the wake can end the
+/// park). The parked twin is the reactor's own; a driver-less host
+/// keeps the blocking recv, whose serialized drive the suite leaves
+/// to the blocking fixtures.
+#[test]
+fn a_conn_closed_under_a_parked_recv_wakes_before_its_deadline() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), recv_child_def(), close_conn_def()]);
+    let (conn, peer) = connect(&mut vm, &listener, &addr);
+    let nursery = vm.open_root_nursery();
+    let parked = vm
+        .spawn_fiber_in(nursery, "io", "recv_child", &[Value::I64(conn)])
+        .expect("the parked child spawns");
+    let closer = vm
+        .spawn_fiber_in(nursery, "io", "close_conn", &[Value::I64(conn)])
+        .expect("the closing child spawns");
+    assert_ne!(parked, closer);
+    let started = Instant::now();
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    let elapsed = started.elapsed();
+    match joined {
+        ds_vm::JoinOutcome::Joined(answers) => {
+            assert_eq!(answers.len(), 2, "both children landed");
+            let text = answer_string(&vm, &answers[0].clone());
+            assert!(
+                text.contains("net_recv") && text.contains("unknown connection"),
+                "the close wake answered the closed handle's own span: {text}"
+            );
+        },
+        other @ ds_vm::JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
+    }
+    // the configured bound is the 90s runaway floor, so a deadline
+    // wake answers past 30s: only the close wake lands this fast
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the wake ended the park before its bound ({elapsed:?})"
+    );
     drop(peer);
 }
 

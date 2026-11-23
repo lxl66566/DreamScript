@@ -2026,7 +2026,9 @@ pub(crate) fn recv_answer(heaps: &mut Heaps, conn: i64, bytes: Vec<u8>) -> Nativ
 /// ds-source `close_conn` handler and the `net_handle` struct's deinit
 /// call — removes the handle, closing the socket. Total and idempotent:
 /// an unknown handle is a no-op (mirroring `close_raw`, so a deinit
-/// firing on an already-closed handle stays clean).
+/// firing on an already-closed handle stays clean). The close notes
+/// the handle for the wake door: a parked wait on it wakes now
+/// (item 79), its deadline never the line.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn net_close_fn(
     _heaps: &mut Heaps,
@@ -2035,6 +2037,7 @@ pub(crate) fn net_close_fn(
 ) -> Result<NativeResult, Trap> {
     if let Value::I64(conn) = args.first().copied().unwrap_or(Value::I64(0)) {
         out.net().close(conn);
+        out.note_closed(crate::sched::CloseSeam::NetConn, conn);
     }
     // the inert unit word
     Ok(NativeResult::Word(Value::I64(0)))
@@ -2119,7 +2122,9 @@ pub(crate) fn net_accept_fn(
 }
 
 /// `net_listener_close(lid: int) -> ()`: the raw idempotent-close seam
-/// the `net_listener` deinit pairs with, `net_close`'s own contract.
+/// the `net_listener` deinit pairs with, `net_close`'s own contract —
+/// the close noting the listener for the wake door, so a parked
+/// accept on it ends now instead of at its (unbounded) park.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn net_listener_close_fn(
     _heaps: &mut Heaps,
@@ -2128,6 +2133,7 @@ pub(crate) fn net_listener_close_fn(
 ) -> Result<NativeResult, Trap> {
     if let Value::I64(lid) = args.first().copied().unwrap_or(Value::I64(0)) {
         out.listeners().close(lid);
+        out.note_closed(crate::sched::CloseSeam::NetListener, lid);
     }
     // the inert unit word
     Ok(NativeResult::Word(Value::I64(0)))

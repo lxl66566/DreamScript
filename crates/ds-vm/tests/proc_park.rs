@@ -13,6 +13,10 @@
 //!   orderly end.
 //! - a parked `proc_wait` wakes on the child's exit: the pidfd readable, the wake reaping the
 //!   status non-blockingly and answering it, a second wait the reaped word again.
+//! - the close wake (item 79): a handle closed while a read or wait parks on it wakes the waiter
+//!   now — the read as the pipe's orderly end (the empty string, the HUP wake's own answer over the
+//!   killed child), the wait as the closed handle's io floor (the blocking twin's post-close
+//!   answer), the deadline never the line.
 //! - the deadline: a parked row with no wake answers the timeout io span at its configured bound —
 //!   the bounded-wait discipline over the wheel, the process face's own member shape.
 //! - parked-IO cancellation: a sibling's trap cuts the world-parked child, its interest gone with
@@ -327,6 +331,75 @@ fn a_parked_wait_wakes_on_the_childs_exit() {
     assert_eq!(answer_i64(&again), 7, "the reaped word again");
     vm.run("io", "close_child", &[Value::I64(pid)])
         .expect("the close lands");
+}
+
+/// A handle closed while a read parks on its pipe wakes as the
+/// orderly end: the close kills the child holding the write end, and
+/// the wake door answers the HUP ruling's empty string at the parked
+/// call site — never the closed table's io floor, and never the
+/// deadline's timeout span (the bound set far past the close, so only
+/// the wake can end the park).
+#[test]
+fn a_close_under_a_parked_read_wakes_as_the_orderly_end() {
+    let mut vm = scheduled_vm(vec![spawn_def(), read_child_def(), close_child_def()]);
+    let pid = spawn(&mut vm, "sleep 30");
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "io", "read_child", &[Value::I64(pid)])
+        .expect("the reader child spawns");
+    vm.spawn_fiber_in(nursery, "io", "close_child", &[Value::I64(pid)])
+        .expect("the closing child spawns");
+    let started = Instant::now();
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    let elapsed = started.elapsed();
+    match joined {
+        JoinOutcome::Joined(answers) => {
+            assert_eq!(answers.len(), 2, "both children landed");
+            assert_eq!(
+                answer_string(&vm, &answers[0].clone()),
+                "",
+                "the close wake answered the pipe's orderly end"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
+    }
+    // the configured bound is the 90s runaway floor, so a deadline
+    // wake answers past 30s: only the close wake lands this fast
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the wake ended the park before its bound ({elapsed:?})"
+    );
+}
+
+/// A handle closed while a wait parks on its exit answers the closed
+/// handle's io floor — the blocking twin's post-close answer — the
+/// wake door ending the park now instead of the deadline.
+#[test]
+fn a_close_under_a_parked_wait_answers_the_closed_handle_floor() {
+    let mut vm = scheduled_vm(vec![spawn_def(), wait_child_def(), close_child_def()]);
+    let pid = spawn(&mut vm, "sleep 30");
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "io", "wait_child", &[Value::I64(pid)])
+        .expect("the waiting child spawns");
+    vm.spawn_fiber_in(nursery, "io", "close_child", &[Value::I64(pid)])
+        .expect("the closing child spawns");
+    let started = Instant::now();
+    let joined = vm.join_nursery(nursery).expect("the join lands");
+    let elapsed = started.elapsed();
+    match joined {
+        JoinOutcome::Joined(answers) => {
+            assert_eq!(answers.len(), 2, "both children landed");
+            let text = answer_string(&vm, &answers[0].clone());
+            assert!(
+                text.contains("proc_wait") && text.contains("unknown process"),
+                "the close wake answered the closed handle's own floor: {text}"
+            );
+        },
+        other @ JoinOutcome::Failed(_) => panic!("the join failed: {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the wake ended the park before its bound ({elapsed:?})"
+    );
 }
 
 /// A parked row with no wake answers the timeout io span at its

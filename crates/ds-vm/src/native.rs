@@ -3903,6 +3903,12 @@ pub struct OutputSink {
     procs: crate::proc::Procs,
     /// The file-handle table of the fsys natives (`crate::fsys`).
     files: crate::fsys::Files,
+    /// The close seams' wake notes (item 79): each close native notes
+    /// the handle it closed, the dispatcher's native call site draining
+    /// the notes to wake the parked waits the closed handles name — the
+    /// one door the sink's own state reaches the wait table through,
+    /// since a native body sees exactly the store and the sink.
+    closed: Vec<(crate::sched::CloseSeam, i64)>,
 }
 
 /// The write target of an [`OutputSink`].
@@ -3939,6 +3945,7 @@ impl OutputSink {
             listeners: crate::net::Listeners::default(),
             procs: crate::proc::Procs::default(),
             files: crate::fsys::Files::default(),
+            closed: Vec::new(),
         }
     }
 
@@ -3998,6 +4005,19 @@ impl OutputSink {
     /// The file-handle table of the fsys natives (`crate::fsys`).
     pub(crate) fn files(&mut self) -> &mut crate::fsys::Files {
         &mut self.files
+    }
+
+    /// Notes one close seam's handle for the wake door (the close
+    /// native's own half of the wake-on-close contract).
+    pub(crate) fn note_closed(&mut self, seam: crate::sched::CloseSeam, id: i64) {
+        self.closed.push((seam, id));
+    }
+
+    /// Takes the close seams' notes: the dispatcher's native call site
+    /// drains the journal after every native call, so a note never
+    /// outlives the call that wrote it.
+    pub(crate) fn take_closed(&mut self) -> Vec<(crate::sched::CloseSeam, i64)> {
+        std::mem::take(&mut self.closed)
     }
 
     /// Bounds every blocking net wait ([`crate::net`]) — the connect,

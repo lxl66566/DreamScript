@@ -133,6 +133,21 @@ pub enum WorldWait {
     Sleep { deadline: Instant },
 }
 
+/// Which handle table one close seam closed: the close natives note
+/// the id under its seam, the dispatcher's wake door reading the note
+/// to find the parked waits the closed handle names (the net data
+/// waits a connection, the accept a listener, the proc waits a
+/// child).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseSeam {
+    /// `net_close` — the connection table's id a recv or send names.
+    NetConn,
+    /// `net_listener_close` — the listener table's id an accept names.
+    NetListener,
+    /// `proc_close` — the process table's id a proc wait names.
+    Proc,
+}
+
 /// Which of a spawned child's pipes a proc read waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcPipe {
@@ -296,6 +311,21 @@ impl WorldWait {
             | Self::TlsFetch { .. }
             | Self::TlsAccept { .. }
             | Self::Sleep { .. } => None,
+        }
+    }
+
+    /// Whether the wait watches the handle `seam` names as closed — the
+    /// close-wake door's filter (the staged machines' rows name ids no
+    /// close seam addresses, so they never wake here).
+    #[must_use]
+    pub(crate) fn watches(&self, seam: CloseSeam, id: i64) -> bool {
+        match (seam, self) {
+            (CloseSeam::NetConn, Self::Recv { conn, .. } | Self::Send { conn, .. }) => *conn == id,
+            (CloseSeam::NetListener, Self::Accept { listener }) => *listener == id,
+            (CloseSeam::Proc, Self::ProcRead { pid, .. } | Self::ProcWait { pid, .. }) => {
+                *pid == id
+            },
+            _ => false,
         }
     }
 
@@ -563,6 +593,30 @@ mod tests {
         assert_eq!(wait.direction(), None, "no readiness direction");
         assert_eq!(wait.op_name(), "time_sleep");
         assert_eq!(wait, WorldWait::Sleep { deadline: at });
+    }
+
+    /// The close-wake filter: each seam names only its own table's
+    /// waits, so a shared numeric id across tables never wakes the
+    /// other face's waiter.
+    #[test]
+    fn the_close_wake_filter_names_only_its_own_table() {
+        let at = Instant::now() + Duration::from_millis(5);
+        let recv = WorldWait::recv(4, 8, at);
+        let send = WorldWait::send(4, vec![b'x'], at);
+        let accept = WorldWait::accept(4);
+        let read = WorldWait::proc_read(4, ProcPipe::Out, 8, at);
+        let wait = WorldWait::proc_wait(4, at);
+        let connect = WorldWait::connect(4, "h:1".into(), at);
+        assert!(recv.watches(CloseSeam::NetConn, 4));
+        assert!(send.watches(CloseSeam::NetConn, 4));
+        assert!(!recv.watches(CloseSeam::NetConn, 5));
+        assert!(!accept.watches(CloseSeam::NetConn, 4));
+        assert!(accept.watches(CloseSeam::NetListener, 4));
+        assert!(!accept.watches(CloseSeam::Proc, 4));
+        assert!(read.watches(CloseSeam::Proc, 4));
+        assert!(wait.watches(CloseSeam::Proc, 4));
+        assert!(!read.watches(CloseSeam::NetConn, 4));
+        assert!(!connect.watches(CloseSeam::NetConn, 4));
     }
 
     /// The quiet accept's shape: the listener its interest watches, no

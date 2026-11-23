@@ -329,6 +329,20 @@ fn accept_lid() -> FunctionDef {
     ])
 }
 
+/// `(lid: int) -> int`: one listener close over a host-bound
+/// listener — the total seam, its unit word answered.
+fn close_lid() -> FunctionDef {
+    def("close_lid", &[I64, Raw, Raw], 1, 1, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Call {
+            callee: k(2),
+            nargs: 1,
+        },
+        Uop::Ret { src: 1 },
+    ])
+}
+
 fn server_registry() -> ModuleRegistry {
     registry(vec![serve(), accept_payload(), closed_accept(), bind_tag()])
 }
@@ -600,6 +614,60 @@ fn a_second_parked_accept_over_one_listener_answers_the_refusal_span() {
             },
         }
         peer.join().expect("the dialer lands");
+        return;
+    }
+    panic!("no free loopback port answered the bind");
+}
+
+/// A listener closed while an accept parks on it ends the park now:
+/// the quiet accept's park carries no wheel entry (the signal its
+/// backstop), so without the close wake it would stand forever — the
+/// close's wake door deregisters the interest and delivers the
+/// unknown-listener span at the parked call site (item 79), the join
+/// landing both answers.
+#[test]
+fn a_listener_closed_under_a_parked_accept_ends_the_park() {
+    if ds_vm::reactor::platform_default().is_none() {
+        return; // the parked twin is the reactor's own
+    }
+    for _ in 0..8 {
+        let port = free_port();
+        let mut vm = scheduled_vm(vec![bind_lid(), accept_lid(), close_lid()]);
+        let host = string(&mut vm, "127.0.0.1");
+        let bound = vm
+            .run("server", "bind_lid", &[host, Value::I64(i64::from(port))])
+            .expect("the bind fixture runs");
+        let [Value::I64(lid)] = bound.as_slice() else {
+            continue; // the parallel suite stole the port: the bind refused
+        };
+        let lid = *lid;
+        let nursery = vm.open_root_nursery();
+        vm.spawn_fiber_in(nursery, "server", "accept_lid", &[Value::I64(lid)])
+            .expect("the acceptor spawns");
+        vm.spawn_fiber_in(nursery, "server", "close_lid", &[Value::I64(lid)])
+            .expect("the closer spawns");
+        let joined = vm.join_nursery(nursery).expect("the nursery joins");
+        match joined {
+            ds_vm::JoinOutcome::Joined(answers) => {
+                assert_eq!(answers.len(), 2, "both children landed");
+                let [Value::Ref(word)] = answers[0].as_slice() else {
+                    panic!("the accept answered its payload: {:?}", answers[0]);
+                };
+                let message = vm
+                    .objects_of(*word)
+                    .str_at(word.id())
+                    .expect("the close wake names a string")
+                    .to_owned();
+                assert_eq!(
+                    message,
+                    format!("net_accept {lid}: unknown listener {lid}"),
+                    "the close wake answered the closed handle's own span"
+                );
+            },
+            other @ ds_vm::JoinOutcome::Failed(_) => {
+                panic!("the join failed: {other:?}")
+            },
+        }
         return;
     }
     panic!("no free loopback port answered the bind");

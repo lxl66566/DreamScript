@@ -581,8 +581,10 @@ impl Procs {
     }
 }
 
-/// The "unknown process" error, shared by every handle lookup.
-fn unknown_process(pid: i64) -> std::io::Error {
+/// The "unknown process" error, shared by every handle lookup and the
+/// close-wake door's exit-wait answer (the blocking twin's post-close
+/// answer).
+pub(crate) fn unknown_process(pid: i64) -> std::io::Error {
     std::io::Error::other(format!("unknown process {pid}"))
 }
 
@@ -872,7 +874,8 @@ pub(crate) fn proc_try_wait_fn(
 /// and reaps a still-running child, drops the pipe ends, and removes
 /// the handle. Total and idempotent: an unknown handle is a no-op
 /// (mirroring `close_raw`, so a deinit firing on an already-closed
-/// handle stays clean).
+/// handle stays clean). The close notes the handle for the wake door:
+/// a parked read or wait on it wakes now (item 79).
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn proc_close_fn(
     _heaps: &mut Heaps,
@@ -881,6 +884,7 @@ pub(crate) fn proc_close_fn(
 ) -> Result<NativeResult, Trap> {
     if let Value::I64(pid) = args.first().copied().unwrap_or(Value::I64(0)) {
         out.procs().close(pid);
+        out.note_closed(crate::sched::CloseSeam::Proc, pid);
     }
     // the inert unit word
     Ok(NativeResult::Word(Value::I64(0)))

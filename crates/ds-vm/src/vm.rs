@@ -5549,14 +5549,14 @@ impl Vm {
     /// slot's store swaps into the context for the step and back (the
     /// switch-in ownership dance without the rest of a switch), so an
     /// allocation the completion makes — the answer string, the error
-    /// message — lands in the store its `Ref` word names. The context
-    /// is released whenever the scheduler runs (`wait_world` releases
-    /// it on entry), so the pool slots hold every fiber's true store.
+    /// message — lands in the store its `Ref` word names. The swap
+    /// itself is the ownership discipline: the scheduler's completions
+    /// run over released contexts (the pool slots hold every fiber's
+    /// true store) and the close-wake door's over a live drive (the
+    /// closing fiber's context stands, the parked waiter's slot still
+    /// its true store) — a completion allocates, it never drives, so
+    /// no re-entrancy crosses the swap either way.
     fn complete_in_store<T>(&mut self, fiber: FiberId, run: impl FnOnce(&mut Heaps<'_>) -> T) -> T {
-        debug_assert!(
-            !self.ctx_live || self.current == fiber,
-            "the scheduler runs over released contexts"
-        );
         std::mem::swap(&mut self.objects, &mut self.pool[fiber.index()].objects);
         let mut heaps = Heaps::new(
             fiber,
@@ -5705,6 +5705,97 @@ impl Vm {
             self.pool[fiber.index()].state = FiberState::Suspended;
             self.sched.deliveries.insert(fiber, result);
             self.sched.push_ready(fiber);
+        }
+    }
+
+    /// The close seam's wake door (item 79): the close natives note the
+    /// handle they closed into the sink, and the dispatcher's native
+    /// call site drains the notes here — every parked wait the closed
+    /// handle names deregisters its interest and enters the run queue
+    /// NOW, its answer staged for the resume point, so the deadline
+    /// never bounds a wait whose subject is gone (the quiet accept's
+    /// unbounded park included: its listener's close ends it). The
+    /// answer is the surface's own closed-handle span: the net data and
+    /// accept waits complete through the wake door itself (a synthetic
+    /// readiness runs the op against the closed row, the completion
+    /// rendering the error span a wake on the closed handle answers —
+    /// the unknown-connection or unknown-listener net floor), the proc
+    /// read the pipe's orderly end (the HUP ruling's empty string — the
+    /// close killed the child holding the write end), the proc wait
+    /// the closed handle's io floor (the blocking twin's post-close
+    /// answer). The wake never resurrects a dead fiber: a released
+    /// waiter's waits died with its release door, and a fiber not
+    /// world-parked keeps its row for whatever door owns it.
+    fn wake_closed(&mut self) {
+        let closed = self.out.take_closed();
+        for (seam, id) in closed {
+            let tokens: Vec<u64> = self
+                .sched
+                .waits
+                .iter()
+                .filter(|(_, entry)| entry.wait.watches(seam, id))
+                .map(|(token, _)| *token)
+                .collect();
+            for token in tokens {
+                let Some(entry) = self.sched.waits.get(&token).cloned() else {
+                    continue;
+                };
+                if self.pool[entry.fiber.index()].state != FiberState::WorldParked {
+                    continue;
+                }
+                match entry.wait {
+                    // the data and accept waits take the wake door: the
+                    // synthetic readiness performs the op against the
+                    // closed row, the completion answering the error
+                    // span the surface rules for the closed handle
+                    WorldWait::Recv { .. } | WorldWait::Accept { .. } => {
+                        self.complete_wait(
+                            token,
+                            Some(crate::reactor::TokenEvent {
+                                token,
+                                read: true,
+                                write: false,
+                                hup: false,
+                            }),
+                        );
+                    },
+                    WorldWait::Send { .. } => {
+                        self.complete_wait(
+                            token,
+                            Some(crate::reactor::TokenEvent {
+                                token,
+                                read: false,
+                                write: true,
+                                hup: false,
+                            }),
+                        );
+                    },
+                    // the child died with its handle: the read wakes as
+                    // the pipe's orderly end (the empty string, the
+                    // HUP wake's own answer), never the closed table's
+                    // io floor; the exit wait answers that floor — the
+                    // blocking twin's post-close answer
+                    WorldWait::ProcRead { pid, .. } => {
+                        let op = entry.wait.op_name();
+                        let result = self.complete_in_store(entry.fiber, |heaps| {
+                            crate::proc::read_answer(heaps, op, pid, Vec::new())
+                        });
+                        self.finish_wait(token, result);
+                    },
+                    WorldWait::ProcWait { pid, .. } => {
+                        let op = entry.wait.op_name();
+                        let target = pid.to_string();
+                        let err = crate::proc::unknown_process(pid);
+                        let result = self.complete_in_store(entry.fiber, |heaps| {
+                            crate::native::io_err(heaps, op, &target, &err)
+                        });
+                        self.finish_wait(token, result);
+                    },
+                    // the staged machines name rows no close seam
+                    // addresses: their own doors own them
+                    _ => {},
+                }
+            }
         }
     }
 
@@ -9594,6 +9685,10 @@ impl Vm {
                                         },
                                         other => other,
                                     };
+                                    // the close seams' wake door (item
+                                    // 79): a native that closed a handle
+                                    // wakes the parked waits on it now
+                                    self.wake_closed();
                                     overlay_native(result, &mut self.stack, &f.layout, fp)
                                         .map_err(|e| (e, pc))?;
                                     pc.0 += 1;
@@ -9756,6 +9851,10 @@ impl Vm {
                             },
                             other => other,
                         };
+                        // the close seams' wake door (item 79): a native
+                        // that closed a handle wakes the parked waits on
+                        // it now — the tail call's own return flows on
+                        self.wake_closed();
                         // the answer's whole word span rides a
                         // boundary return (the hosted seam's result
                         // channel); every other outcome keeps its
