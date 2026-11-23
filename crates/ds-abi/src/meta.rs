@@ -102,12 +102,12 @@ impl TailChain {
 /// can be read or truncated independently of each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ElisionRecord {
-    /// The function that performed the tail call — the elided frame.
+    /// The function that performed the tail call — the elided frame. The
+    /// next record's `caller` (the live frame, for the last record) names
+    /// this frame's callee, so the chain needs no separate target word.
     pub caller: FuncId,
     /// The CALLT instruction's code position.
     pub call_pc: CodePc,
-    /// The tail-call target — the next frame in the chain.
-    pub callee: FuncId,
 }
 
 #[cfg(test)]
@@ -165,22 +165,19 @@ mod tests {
 
     #[test]
     fn materialize_replays_recorded_frames_oldest_first() {
-        let (f0, f1, f2, f3) = (FuncId(0), FuncId(1), FuncId(2), FuncId(3));
+        let (f0, f1, f2) = (FuncId(0), FuncId(1), FuncId(2));
         let records = [
             ElisionRecord {
                 caller: f0,
                 call_pc: CodePc(3),
-                callee: f1,
             },
             ElisionRecord {
                 caller: f1,
                 call_pc: CodePc(4),
-                callee: f2,
             },
             ElisionRecord {
                 caller: f2,
                 call_pc: CodePc(5),
-                callee: f3,
             },
         ];
         let mut tail = TailChain::default();

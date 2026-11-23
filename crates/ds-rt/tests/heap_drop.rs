@@ -58,10 +58,13 @@ fn pooled_rows_release_whole_at_drop() {
         let heap = Heap::new();
         // More live blocks of one class than the pool's depth cap, so
         // their deaths leave the row full and one block released direct.
-        let refs: Vec<_> = (0..=POOL_DEPTH)
-            .map(|_| heap.alloc_box(0u64, None))
+        let blocks: Vec<_> = (0..=POOL_DEPTH)
+            .map(|_| heap.alloc_store(0u64, None))
             .collect();
-        drop(refs);
+        for header in blocks {
+            assert!(heap.rc_dec_count(header));
+            heap.rc_dispose::<u64>(header);
+        }
         assert_eq!(
             heap.stats().pooled_blocks,
             usize::from(POOL_DEPTH),

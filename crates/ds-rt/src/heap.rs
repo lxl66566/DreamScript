@@ -21,11 +21,10 @@
 //! interior is live across user code - the same discipline the arena half
 //! follows.
 //!
-//! Two consumer surfaces over the same blocks: lexical scopes take
-//! [`Heap::alloc_box`] (the returned [`RcRef`] owns the count), while stores
-//! that keep their own id-to-block mapping (the VM's object table) take
-//! [`Heap::alloc_store`] and drive the count lifecycle through the split dec
-//! ([`Heap::rc_dec_count`] plus [`Heap::rc_dispose`]) so their own death order
+//! One consumer surface over the blocks: the store that keeps its own
+//! id-to-block mapping (the VM's object table) takes [`Heap::alloc_store`]
+//! and drives the count lifecycle through the split dec
+//! ([`Heap::rc_dec_count`] plus [`Heap::rc_dispose`]) so its own death order
 //! can run between the count reaching zero and the payload dying.
 
 use core::{
@@ -38,7 +37,7 @@ use std::alloc::{alloc, dealloc};
 
 use crate::{
     arena::{Arena, ArenaStats, MIN_ALIGN},
-    rc::{DeinitFn, RcHeader, RcRef},
+    rc::{DeinitFn, RcHeader},
 };
 
 /// Smallest reuse size class; blocks are always MIN_ALIGN-aligned and sized to
@@ -195,26 +194,11 @@ impl Heap {
         self.arena().frame()
     }
 
-    /// Allocates `value` as a freshly unique counted block with `deinit` as
-    /// its static death hook (C4/C5).
-    ///
-    /// # Panics
-    /// If the global allocator returns null or the block exceeds u32 bytes.
-    pub fn alloc_box<T>(&self, value: T, deinit: Option<DeinitFn>) -> RcRef<'_, T> {
-        let header = self.alloc_store(value, deinit);
-        let offset = payload_offset::<T>();
-        // SAFETY: the block carries at least the layout `block_layout`
-        // computed; `offset` is that same layout math, in-bounds and aligned.
-        let payload = unsafe { header.byte_add(offset) }.cast::<T>();
-        RcRef::new(self, header, payload)
-    }
-
     /// Allocates `value` as a freshly unique counted block whose count
-    /// lifecycle the caller (a store, not a lexical scope) drives: the raw
-    /// form of [`Heap::alloc_box`]. The birth count is 1; a unique death the
-    /// store observes through [`Heap::rc_dec_count`] owes exactly one
-    /// [`Heap::rc_dispose`], which runs `deinit` and pools or releases the
-    /// block.
+    /// lifecycle the caller (a store, not a lexical scope) drives: the birth
+    /// count is 1; a unique death the store observes through
+    /// [`Heap::rc_dec_count`] owes exactly one [`Heap::rc_dispose`], which
+    /// runs `deinit` and pools or releases the block.
     ///
     /// # Panics
     /// If the global allocator returns null or the block exceeds u32 bytes.
@@ -238,7 +222,7 @@ impl Heap {
     /// # Misuse contract
     /// `header` must name a live block of this heap carrying a `T` payload;
     /// the reference must not outlive the block's death, which only the
-    /// owning store or a dropping [`RcRef`] can drive.
+    /// owning store can drive.
     #[must_use]
     pub fn payload<T>(&self, header: NonNull<RcHeader>) -> &T {
         let offset = payload_offset::<T>();
@@ -273,31 +257,11 @@ impl Heap {
     }
 
     /// Raw `rc_inc` (C4): one more owner for the block `header` names. The
-    /// compiler-inserted dup pairs with [`Heap::rc_dec_raw`]; both take the
-    /// heap for surface symmetry with the dec side.
+    /// compiler-inserted dup pairs with the count half of the split dec
+    /// ([`Heap::rc_dec_count`]); both take the heap for surface symmetry.
     #[allow(clippy::unused_self)]
     pub fn rc_inc_raw(&self, header: NonNull<RcHeader>) {
         RcHeader::inc_at(header);
-    }
-
-    /// Raw `rc_dec` (C4): drops one owner. A unique death runs the block's
-    /// `deinit` exactly once (C5), then threads the block to the reuse pool or
-    /// returns it to the system allocator. Returns whether the death was
-    /// unique.
-    ///
-    /// `payload` is the payload address (the argument `deinit` receives); the
-    /// caller computes it from the static type, exactly like `alloc_box`.
-    ///
-    /// # Panics (diag only)
-    /// On count underflow (double drop, or a dec through a pooled block - the
-    /// pool tombstones the count to zero) or at death with a borrow outstanding.
-    ///
-    /// # Misuse contract
-    /// `header` must name a live block owned by this heap; a dec on a dead
-    /// block is undefined behavior the diag layer flags where detectable.
-    #[must_use = "the death flag drives drop-glue-free callers; ignoring it misses unique death"]
-    pub fn rc_dec_raw(&self, header: NonNull<RcHeader>, payload: NonNull<u8>) -> bool {
-        self.dec(header, payload)
     }
 
     /// The count move of `rc_dec` without the death work: one owner drops, and
@@ -307,7 +271,8 @@ impl Heap {
     /// matching [`Heap::rc_dispose`].
     ///
     /// # Panics (diag only)
-    /// On count underflow (double drop) or at death with a borrow outstanding.
+    /// On count underflow (double drop, or a dec through a pooled block -
+    /// the pool tombstones the count to zero).
     ///
     /// # Misuse contract
     /// `header` must name a live block owned by this heap.
@@ -317,10 +282,7 @@ impl Heap {
         // this thread, and the borrow ends before any user code runs.
         let h = unsafe { &mut *header.as_ptr() };
         #[cfg(feature = "diag")]
-        {
-            assert!(h.rc > 0, "ds-rt diag: rc underflow (double drop)");
-            h.assert_no_borrows();
-        }
+        assert!(h.rc > 0, "ds-rt diag: rc underflow (double drop)");
         h.rc -= 1;
         h.rc == 0
     }
@@ -338,16 +300,6 @@ impl Heap {
         // SAFETY: same layout math as the allocation; in-bounds and aligned.
         let payload = unsafe { header.byte_add(offset) }.cast::<u8>();
         self.dispose(header, payload);
-    }
-
-    /// The dec path the drop glue also takes; no `must_use` so drops can
-    /// ignore the death flag.
-    pub(crate) fn dec(&self, header: NonNull<RcHeader>, payload: NonNull<u8>) -> bool {
-        if !self.rc_dec_count(header) {
-            return false;
-        }
-        self.dispose(header, payload);
-        true
     }
 
     /// The shared death tail: the block's `deinit` runs once while the block

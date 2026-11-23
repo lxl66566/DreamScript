@@ -6,18 +6,17 @@
 //!   on every pop path; chunk-append growth keeps captured frame addresses stable; marks are
 //!   per-fiber so fiber switching needs no arena action. The arena module's docs carry the full
 //!   contract mapping from the design record (`[C4]`, `[H4]` in `docs/en/design-decisions.md`).
-//! - Precise non-atomic reference counting for boxed/shared values ([`RcHeader`], [`RcRef`]):
-//!   `rc_inc` at each explicit clone, `rc_dec` at each unique death; the dying block becomes a
-//!   reuse candidate threaded to the next compatible allocation (the `alloc_at` pattern), with the
-//!   system allocator as fallback; `deinit` runs exactly once at the unique death on every path -
-//!   normal, early return, panic unwind (`[C5]`). The counts are non-atomic and sound because
-//!   values are thread-confined; E3's fork-join transfers ownership of whole heaps, never shares
-//!   them.
+//! - Precise non-atomic reference counting for boxed/shared values ([`RcHeader`]): `rc_inc` at each
+//!   explicit clone, `rc_dec` at each owner drop; the dying block becomes a reuse candidate
+//!   threaded to the next compatible allocation (the `alloc_at` pattern), with the system allocator
+//!   as fallback; `deinit` runs exactly once at the unique death (`[C5]`). The counts are
+//!   non-atomic and sound because values are thread-confined; E3's fork-join transfers ownership of
+//!   whole heaps, never shares them.
 //!
 //! The `diag` feature (default off) adds the debugging instrument for the
-//! whole memory story: rc underflow/overflow tripwires, rc==1 assertions
-//! before destructive operations, and an Inko-style borrow counter that flags
-//! use during an exclusive window.
+//! whole memory story: rc underflow/overflow tripwires, the underflow
+//! tombstone included (a dec through a pooled block reads the zero the pool
+//! wrote).
 //!
 //! VM seam: ds-vm's object store consumes the block half as its object
 //! substrate - the store keeps the stable id table (the `Value::Ref`
@@ -51,4 +50,4 @@ mod rc;
 pub use arena::{Arena, ArenaMisuse, ArenaStats, FIRST_CHUNK, MAX_CHUNK, MIN_ALIGN, Mark};
 pub use guard::RestoreOnDrop;
 pub use heap::{Heap, HeapStats, MAX_REUSE_CLASS, MIN_CLASS, POOL_DEPTH};
-pub use rc::{DeinitFn, ExclusiveBorrow, RcHeader, RcRef, SharedBorrow, drop_deinit};
+pub use rc::{DeinitFn, RcHeader, drop_deinit};

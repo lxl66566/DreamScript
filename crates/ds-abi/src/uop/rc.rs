@@ -105,14 +105,6 @@ impl RcOp {
             Self::Inc { src } | Self::Dec { src } => *src,
         }
     }
-
-    /// RC ops are never pure: they mutate the shared count, so reordering
-    /// or duplicating one breaks the dup/drop balance (the same ruling as
-    /// KSTR/STRCAT in [`Uop::is_pure`](super::Uop::is_pure)).
-    #[must_use]
-    pub fn is_pure(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -184,10 +176,9 @@ mod tests {
     }
 
     #[test]
-    fn effects_read_one_slot_and_never_purify() {
+    fn effects_read_one_slot() {
         for op in samples() {
             assert_eq!(op.src(), op.src(), "the source is addressable");
-            assert!(!op.is_pure(), "RC ops break the balance if reordered");
         }
     }
 

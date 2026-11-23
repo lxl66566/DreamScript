@@ -479,7 +479,7 @@ pub enum BuiltinInstance {
 // above makes the narrowing exact
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[must_use = "the bias arithmetic is the contract; use or test the field"]
-pub fn jump_field(target: u32, pc: u32) -> Result<u16, EncodeError> {
+pub(crate) fn jump_field(target: u32, pc: u32) -> Result<u16, EncodeError> {
     let offset = i64::from(target) - (i64::from(pc) + 1);
     if !(-0x8000..=0x7fff).contains(&offset) {
         return Err(EncodeError::JumpOutOfRange { pc, target });
