@@ -4016,6 +4016,21 @@ impl OutputSink {
         self.listeners.enable_parking();
     }
 
+    /// Flips the process face's blocking rows to the parking
+    /// discipline (a reactor was installed on the VM): the read rows
+    /// answer park requests on a would-block over the child's pipes,
+    /// the wait row over its pidfd — Linux alone, the pipes owning no
+    /// portable non-blocking shape (`crate::proc`).
+    pub(crate) fn enable_proc_parking(&mut self) {
+        self.procs.enable_parking();
+    }
+
+    /// Bounds every parked proc wait ([`crate::proc`]); the blocking
+    /// twins stay unbounded whatever the bound.
+    pub(crate) fn set_proc_timeout(&mut self, timeout: Duration) {
+        self.procs.set_timeout(timeout);
+    }
+
     /// Pins the TLS client of the net face's tls tier (`[crate::tls]`):
     /// custom trust roots for an embedding host or a test, the default
     /// being the webpki root set.

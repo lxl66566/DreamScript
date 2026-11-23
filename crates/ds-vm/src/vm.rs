@@ -2883,6 +2883,12 @@ impl Vm {
     /// blocking natives: the same source, the embedder's choice.
     pub fn install_reactor(&mut self, reactor: Box<dyn Reactor>) {
         self.out.enable_net_parking();
+        // the process face's blocking rows park the same way on Linux
+        // (the 2026-11-23 ruling): the child's pipes and its pidfd are
+        // fds, the reactor's own readiness interests; any other host
+        // keeps the rows' blocking twins under whatever reactor it
+        // installs
+        self.out.enable_proc_parking();
         self.reactor = Some(InstalledReactor(reactor));
     }
 
@@ -2967,6 +2973,16 @@ impl Vm {
     /// hung interpreter.
     pub fn set_net_timeout(&mut self, timeout: std::time::Duration) {
         self.out.set_net_timeout(timeout);
+    }
+
+    /// Bounds every parked proc wait ([`crate::proc`]): the blocking
+    /// twins stay unbounded whatever the bound, and the default is the
+    /// far backstop — a wait sees any child out, the deadline wheel
+    /// holding only the wake guarantee. A host wanting the net face's
+    /// tight bounded discipline sets its own bound, the deadline then
+    /// answering the timeout span.
+    pub fn set_proc_timeout(&mut self, timeout: std::time::Duration) {
+        self.out.set_proc_timeout(timeout);
     }
 
     /// Pins the TLS client of the net face's tls tier: custom trust
@@ -5477,18 +5493,23 @@ impl Vm {
     /// class), the deadline armed on the wheel. The fiber keeps its
     /// `WorldParked` state until a wake moves it to the run queue.
     pub(crate) fn register_wait(&mut self, fiber: FiberId, wait: WorldWait) {
-        let op = wait.op_name();
-        let target = wait.target();
         let deadline = wait.deadline();
         // the wait's IO interest resolves through the table its handle
         // names: the connection table for the data ops, the listener
         // table for the accept, the pending-connect row for a parked
-        // connect, the exchange machine's own transport for a fetch
+        // connect, the exchange machine's own transport for a fetch,
+        // the process table for the proc rows (a pid names no
+        // connection — the pipe's own fd for a read, the entry's
+        // pidfd for the exit)
         let handle = match &wait {
             WorldWait::Accept { listener, .. } => self.out.listeners().raw_handle(*listener),
             WorldWait::Connect { conn, .. } => self.out.net().raw_connect_handle(*conn),
             WorldWait::Fetch { fetch, .. } => self.out.net().raw_fetch_handle(*fetch),
             WorldWait::TlsFetch { fetch, .. } => self.out.net().raw_tls_fetch_handle(*fetch),
+            #[cfg(target_os = "linux")]
+            WorldWait::ProcRead { pid, pipe, .. } => self.out.procs().raw_pipe_handle(*pid, *pipe),
+            #[cfg(target_os = "linux")]
+            WorldWait::ProcWait { pid, .. } => self.out.procs().raw_exit_handle(*pid),
             _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
         };
         let token = self.sched.mint();
@@ -5500,9 +5521,7 @@ impl Vm {
                 )),
             };
             if let Err(err) = registered {
-                let result = self.complete_in_store(fiber, |heaps| {
-                    crate::net::net_err(heaps, crate::net::NetClass::Refused, op, &target, &err.0)
-                });
+                let result = self.wait_error_span(fiber, &wait, false, &err.0);
                 self.sched.waits.insert(token, WaitEntry {
                     fiber,
                     wait,
@@ -5612,6 +5631,45 @@ impl Vm {
         }
     }
 
+    /// One wait's deadline-or-refusal span rendered in its own face's
+    /// member shape, allocated in the parked fiber's own store: the
+    /// net face answers the net span, the process face the io span —
+    /// the deadline naming its bound either way, the refusal carrying
+    /// the caller's detail.
+    fn wait_error_span(
+        &mut self,
+        fiber: FiberId,
+        wait: &WorldWait,
+        timed_out: bool,
+        refusal: &str,
+    ) -> NativeResult {
+        let op = wait.op_name();
+        let target = wait.target();
+        if wait.is_proc() {
+            if timed_out {
+                let bound = self.out.procs().timeout();
+                return self.complete_in_store(fiber, |heaps| {
+                    crate::proc::timeout_err(heaps, op, &target, bound)
+                });
+            }
+            return self.complete_in_store(fiber, |heaps| {
+                crate::native::io_err(heaps, op, &target, &std::io::Error::other(refusal))
+            });
+        }
+        let (class, detail) = if timed_out {
+            let bound = self.out.net().timeout();
+            (
+                crate::net::NetClass::Timeout,
+                format!("timed out after {bound:?}"),
+            )
+        } else {
+            (crate::net::NetClass::Refused, refusal.to_owned())
+        };
+        self.complete_in_store(fiber, |heaps| {
+            crate::net::net_err(heaps, class, op, &target, &detail)
+        })
+    }
+
     /// Attempts one wait's completion: the deadline answers the timeout
     /// span, an fd readiness runs the op's non-blocking completion
     /// against the parked fiber's own store, a spurious wake (wrong
@@ -5633,21 +5691,65 @@ impl Vm {
         let target = entry.wait.target();
         let op = entry.wait.op_name();
         if entry.wait.deadline() <= Instant::now() {
-            let bound = self.out.net().timeout();
-            let result = self.complete_in_store(fiber, |heaps| {
-                crate::net::net_err(
-                    heaps,
-                    crate::net::NetClass::Timeout,
-                    op,
-                    &target,
-                    &format!("timed out after {bound:?}"),
-                )
-            });
+            let result = self.wait_error_span(fiber, &entry.wait, true, "");
             self.finish_wait(token, result);
             return;
         }
         let result =
             match entry.wait {
+                // the process face's read: the pipe's readable wake
+                // performs the one read against the parked fiber's own
+                // store; the HUP wake answers too — a pipe whose write
+                // end closed reads as the orderly empty string, and
+                // the kernel reports the drained pipe as HUP alone,
+                // no IN bit; a spurious wake (the readiness consumed
+                // elsewhere) leaves the wait standing for the next poll
+                #[cfg(target_os = "linux")]
+                WorldWait::ProcRead {
+                    pid: id, pipe, max, ..
+                } => {
+                    let Some(event) = ready.filter(|event| event.read || event.hup) else {
+                        return;
+                    };
+                    let _ = event;
+                    match self.out.procs().try_read(id, pipe, max) {
+                        crate::net::NetAttempt::Done(Ok(bytes)) => self
+                            .complete_in_store(fiber, |heaps| {
+                                crate::proc::read_answer(heaps, op, id, bytes)
+                            }),
+                        crate::net::NetAttempt::Done(Err(err)) => self
+                            .complete_in_store(fiber, |heaps| {
+                                crate::native::io_err(heaps, op, &target, &err)
+                            }),
+                        // spurious: the readiness was consumed elsewhere,
+                        // the wait stands for the next poll
+                        crate::net::NetAttempt::Park => return,
+                    }
+                },
+                // the exit interest: the pidfd's readable wake reaps
+                // the status non-blockingly (the idempotent word a
+                // later wait answers again), the HUP wake the same
+                // completion (a gone peer answers its word now); a
+                // spurious wake (the child still runs) leaves the wait
+                // standing
+                #[cfg(target_os = "linux")]
+                WorldWait::ProcWait { pid: id, .. } => {
+                    let Some(event) = ready.filter(|event| event.read || event.hup) else {
+                        return;
+                    };
+                    let _ = event;
+                    match self.out.procs().try_wait(id) {
+                        Some(status) => crate::net::ok(Value::I64(status)),
+                        None => return,
+                    }
+                },
+                // the proc parked twins are the linux driver's own: the
+                // parking flag never flips anywhere else, so no wait of
+                // these shapes can stand
+                #[cfg(not(target_os = "linux"))]
+                WorldWait::ProcRead { .. } | WorldWait::ProcWait { .. } => {
+                    unreachable!("the proc parked twins are the linux driver's own")
+                },
                 // the timer-only wait completed at its own arm above; the
                 // arm keeps this match total
                 WorldWait::Sleep { .. } => unreachable!("the sleep completed at its own arm"),
@@ -5873,18 +5975,12 @@ impl Vm {
                         if matches!(entry.wait, WorldWait::Sleep { .. }) {
                             continue;
                         }
-                        let detail = format!("reactor: {}", err.0);
-                        let target = entry.wait.target();
-                        let op = entry.wait.op_name();
-                        let result = self.complete_in_store(entry.fiber, |heaps| {
-                            crate::net::net_err(
-                                heaps,
-                                crate::net::NetClass::Refused,
-                                op,
-                                &target,
-                                &detail,
-                            )
-                        });
+                        let result = self.wait_error_span(
+                            entry.fiber,
+                            &entry.wait,
+                            false,
+                            &format!("reactor: {}", err.0),
+                        );
                         self.finish_wait(token, result);
                     }
                 },

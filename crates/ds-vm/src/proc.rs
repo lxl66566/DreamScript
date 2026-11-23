@@ -16,22 +16,34 @@
 //! output (the empty string the pipe's orderly end), `proc_read_err`
 //! its captured diagnostics the same way, and `proc_wait` answers the
 //! exit status idempotently (`proc_try_wait` the non-blocking poll
-//! over the same reaped word). The rows block the calling fiber
-//! exactly like `proc_run`'s own wait: no portable reactor interest
-//! shape exists for a child's pipe or exit, so the parked twins stay
-//! the io-scheduler round's own. `proc_close_in` is the stdin-close
+//! over the same reaped word). The blocking rows park on Linux under
+//! an installed reactor (the 2026-11-23 ruling): a child's pipe IS an
+//! fd, so `proc_read`/`proc_read_err` watch its readability, and the
+//! exit rides a pidfd (`pidfd_open`, readable once the child exits) —
+//! the net face's own parked-twin discipline, the wake performing the
+//! op once and delivering its answer at the parked site. A kernel
+//! without pidfd (or a non-Linux host, or no reactor) keeps the
+//! blocking twin: the rows block the calling fiber exactly `proc_run`'s
+//! own wait. `proc_close_in` is the stdin-close
 //! seam — the child's end-of-input while the handle stays live — and
 //! `proc_close` the raw idempotent-close seam the `proc_handle` deinit
 //! pairs with: a close of a still-running child kills and reaps it, so
 //! a dropped handle leaks neither a child nor a zombie.
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    time::Duration,
+};
 
 use ds_abi::SlotType;
 
 use crate::{
-    native::{NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_NONE, i64_arg, io_err, ref_arg},
+    native::{
+        NativeResult, OutputSink, PLATFORM_IO_OK, PLATFORM_IO_TIMED_OUT, PLATFORM_NONE, i64_arg,
+        io_err, ref_arg,
+    },
     object::Heaps,
+    sched::ProcPipe,
     value::Value,
     vm::Trap,
 };
@@ -140,6 +152,75 @@ pub(crate) fn exit_fn(
 /// across calls, the `net_recv` discipline).
 pub const PROC_CAP: usize = 1024 * 1024;
 
+/// The default bound on every parked proc wait — the far backstop: the
+/// blocking twins are unbounded (a wait sees any child out), so the
+/// parked twin's default keeps every realistic wait unbounded too
+/// while the deadline wheel still holds its wake guarantee. A host
+/// wanting the net face's tight bound sets it
+/// ([`crate::Vm::set_proc_timeout`]), the deadline then answering the
+/// timeout span.
+pub const PROC_PARK_TIMEOUT: Duration = Duration::from_hours(24);
+
+/// The process face's raw OS binding (the 2026-11-23 ruling):
+/// `pidfd_open` for the exit interest and `fcntl(O_NONBLOCK)` for the
+/// pipes — libc's own symbols over no crate, the epoll driver's
+/// OS-own-symbols precedent (`crate::net`'s raw_sock the same
+/// discipline). The parked twins are the linux reactor's own this
+/// round; a non-linux host keeps the blocking twins under any reactor.
+#[cfg(target_os = "linux")]
+mod raw_proc {
+    use std::{
+        ffi::{c_int, c_long},
+        io,
+        os::fd::{FromRawFd as _, OwnedFd},
+    };
+
+    // the kernel ABI constants: the fcntl commands and the
+    // non-blocking flag, the pidfd_open syscall number (the generic
+    // table every live arch shares, Linux 5.3's own)
+    pub const F_GETFL: c_int = 3;
+    pub const F_SETFL: c_int = 4;
+    pub const O_NONBLOCK: c_int = 0o4000;
+    const SYS_PIDFD_OPEN: c_long = 434;
+
+    unsafe extern "C" {
+        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+        fn syscall(num: c_long, ...) -> c_long;
+    }
+
+    /// Opens the exit-interest fd of `pid`: readable once the process
+    /// exits (a zombie included), epoll-able like any fd, and
+    /// close-on-exec by the kernel's own default. An error names a
+    /// kernel without pidfd (EINVAL/ENOSYS) or a refused fd — the
+    /// caller's blocking twin the answer either way.
+    pub fn pidfd_open(pid: u32) -> io::Result<OwnedFd> {
+        // SAFETY: the plain syscall trap; a negative answer is the OS
+        // refusal, a nonnegative one the fd the owned handle adopts
+        let fd = unsafe { syscall(SYS_PIDFD_OPEN, c_long::from(pid), 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = c_int::try_from(fd).map_err(|_| io::Error::other("pidfd out of range"))?;
+        // SAFETY: the fd is owned from here, closed exactly once
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Flips one pipe fd non-blocking (idempotent): F_GETFL's own set
+    /// merged with the flag, so no other disposition is lost.
+    pub fn set_nonblocking(fd: c_int) -> io::Result<()> {
+        // SAFETY: the plain flag read
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the plain flag write over the merged set
+        if unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 /// One spawned child of the capture half: the process, the parent's
 /// ends of its pipes, and the reaped status once a wait answered
 /// (`None` while the child runs).
@@ -150,6 +231,11 @@ struct ProcEntry {
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
     status: Option<i64>,
+    /// The exit-interest fd of the parked wait twin, opened lazily at
+    /// the first parked wait and living with the entry — the pipes'
+    /// own lifetime rule, closed at the entry's close.
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
 }
 
 /// The process table of the capture half: the piped children
@@ -162,10 +248,32 @@ struct ProcEntry {
 /// on it answers the io floor "unknown process". `close` is total and
 /// idempotent: an unknown handle is a no-op (the deinit pairing's
 /// contract, `close_raw`'s own).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Procs {
-    procs: Vec<(i64, ProcEntry)>,
+    table: Vec<(i64, ProcEntry)>,
     next_id: i64,
+    /// Whether the blocking rows park (a reactor was installed on a
+    /// Linux host): the read rows answer park requests on a
+    /// would-block, the wait row on the child's not-yet-exit. The
+    /// pipes own no portable non-blocking shape, so the flag flips on
+    /// Linux alone — any other host keeps the blocking twins under
+    /// whatever reactor it installs.
+    parking: bool,
+    /// The parked rows' wait bound ([`PROC_PARK_TIMEOUT`] the
+    /// default), the blocking twin's own unbounded wait restated as
+    /// the wheel's far backstop.
+    timeout: Duration,
+}
+
+impl Default for Procs {
+    fn default() -> Self {
+        Self {
+            table: Vec::new(),
+            next_id: 0,
+            parking: false,
+            timeout: PROC_PARK_TIMEOUT,
+        }
+    }
 }
 
 impl Procs {
@@ -177,19 +285,52 @@ impl Procs {
         let stderr = child.stderr.take();
         let id = self.next_id;
         self.next_id = id + 1;
-        self.procs.push((id, ProcEntry {
+        self.table.push((id, ProcEntry {
             child,
             stdin,
             stdout,
             stderr,
             status: None,
+            #[cfg(target_os = "linux")]
+            pidfd: None,
         }));
         id
     }
 
+    /// Flips the blocking rows to the parking discipline (a reactor
+    /// was installed on a Linux host); any other platform keeps the
+    /// blocking twins — the pipes own no portable non-blocking shape.
+    pub(crate) fn enable_parking(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.parking = true;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // the blocking twin stays: no portable pipe interest
+            let _ = self;
+        }
+    }
+
+    /// Whether the blocking rows park (a Linux reactor stands).
+    pub(crate) fn parking(&self) -> bool {
+        self.parking
+    }
+
+    /// The parked rows' wait bound.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Bounds every parked proc wait (the blocking twins stay
+    /// unbounded whatever the bound).
+    pub(crate) fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     /// The entry of handle `pid`.
     fn entry(&mut self, pid: i64) -> std::io::Result<&mut ProcEntry> {
-        self.procs
+        self.table
             .iter_mut()
             .find(|(id, _)| *id == pid)
             .map(|(_, entry)| entry)
@@ -214,7 +355,7 @@ impl Procs {
     /// closing deinit whose kill it spares: an unknown handle is a
     /// no-op, and a stdin already closed changes nothing.
     pub(crate) fn close_in(&mut self, pid: i64) {
-        if let Some((_, entry)) = self.procs.iter_mut().find(|(id, _)| *id == pid) {
+        if let Some((_, entry)) = self.table.iter_mut().find(|(id, _)| *id == pid) {
             entry.stdin = None;
         }
     }
@@ -257,6 +398,129 @@ impl Procs {
             },
             Err(err) => Err(err),
         }
+    }
+
+    /// One non-blocking read of at most `max` bytes from handle
+    /// `pid`'s child on `pipe` — the parked twin of
+    /// [`Procs::read`]/[`Procs::read_err`]: the pipe flips
+    /// non-blocking at the attempt (the flag living on the open file
+    /// description, the flip idempotent), the would-block answering
+    /// `Park` (the reactor owns the wait over the pipe's own
+    /// readability).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn try_read(
+        &mut self,
+        pid: i64,
+        pipe: ProcPipe,
+        max: usize,
+    ) -> crate::net::NetAttempt<Vec<u8>> {
+        use std::os::fd::AsRawFd as _;
+        let entry = match self.entry(pid) {
+            Ok(entry) => entry,
+            Err(err) => return crate::net::NetAttempt::Done(Err(err)),
+        };
+        let mut buf = vec![0; max];
+        let read = match (pipe, entry.stdout.as_mut(), entry.stderr.as_mut()) {
+            (ProcPipe::Out, Some(out), _) => {
+                if let Err(err) = raw_proc::set_nonblocking(out.as_raw_fd()) {
+                    return crate::net::NetAttempt::Done(Err(err));
+                }
+                out.read(&mut buf)
+            },
+            (ProcPipe::Err, _, Some(err_end)) => {
+                if let Err(err) = raw_proc::set_nonblocking(err_end.as_raw_fd()) {
+                    return crate::net::NetAttempt::Done(Err(err));
+                }
+                err_end.read(&mut buf)
+            },
+            (pipe, ..) => {
+                let which = match pipe {
+                    ProcPipe::Out => "stdout",
+                    ProcPipe::Err => "stderr",
+                };
+                return crate::net::NetAttempt::Done(Err(std::io::Error::other(format!(
+                    "process {pid} {which} already closed"
+                ))));
+            },
+        };
+        match read {
+            Ok(n) => {
+                buf.truncate(n);
+                crate::net::NetAttempt::Done(Ok(buf))
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                crate::net::NetAttempt::Park
+            },
+            Err(err) => crate::net::NetAttempt::Done(Err(err)),
+        }
+    }
+
+    /// The staged wait of the parked `wait` twin: the status answers
+    /// now (the reaped word or the failure), `Park` once the pidfd
+    /// stands (the registration resolves it), `Block` where the kernel
+    /// refuses a pidfd (the blocking twin the answer — Linux before
+    /// 5.3, or a refused fd).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn try_wait_park(&mut self, pid: i64) -> ProcWaitAttempt {
+        let Some(entry) = self
+            .table
+            .iter_mut()
+            .find(|(id, _)| *id == pid)
+            .map(|(_, entry)| entry)
+        else {
+            return ProcWaitAttempt::Done(Err(unknown_process(pid)));
+        };
+        if let Some(status) = entry.status {
+            return ProcWaitAttempt::Done(Ok(status));
+        }
+        match entry.child.try_wait() {
+            Ok(Some(exit)) => {
+                let status = i64::from(exit.code().unwrap_or(-1));
+                entry.status = Some(status);
+                ProcWaitAttempt::Done(Ok(status))
+            },
+            // the child runs: the exit interest rides the pidfd, opened
+            // lazily here and living with the entry (the pipes' own
+            // lifetime rule)
+            Ok(None) => {
+                if entry.pidfd.is_none() {
+                    match raw_proc::pidfd_open(entry.child.id()) {
+                        Ok(fd) => entry.pidfd = Some(fd),
+                        Err(_) => return ProcWaitAttempt::Block,
+                    }
+                }
+                ProcWaitAttempt::Park
+            },
+            Err(err) => ProcWaitAttempt::Done(Err(err)),
+        }
+    }
+
+    /// The read interest's IO handle: the child pipe's own fd (the
+    /// registration site of a parked read).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn raw_pipe_handle(
+        &mut self,
+        pid: i64,
+        pipe: ProcPipe,
+    ) -> Option<crate::reactor::IoHandle> {
+        let entry = self.entry(pid).ok()?;
+        let fd = match pipe {
+            ProcPipe::Out => entry.stdout.as_ref().map(std::os::fd::AsRawFd::as_raw_fd),
+            ProcPipe::Err => entry.stderr.as_ref().map(std::os::fd::AsRawFd::as_raw_fd),
+        }?;
+        Some(crate::reactor::IoHandle(u64::try_from(fd).ok()?))
+    }
+
+    /// The exit interest's IO handle: the entry's own pidfd, opened by
+    /// the parked wait's staging.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn raw_exit_handle(&mut self, pid: i64) -> Option<crate::reactor::IoHandle> {
+        use std::os::fd::AsRawFd as _;
+        let entry = self.entry(pid).ok()?;
+        let fd = entry.pidfd.as_ref()?;
+        Some(crate::reactor::IoHandle(
+            u64::try_from(fd.as_raw_fd()).ok()?,
+        ))
     }
 
     /// Waits for handle `pid`'s child and answers its exit status — a
@@ -303,7 +567,7 @@ impl Procs {
     /// a close of a still-running child kills and reaps it — a dropped
     /// handle never leaks a child or a zombie.
     pub(crate) fn close(&mut self, pid: i64) {
-        let Some((_, entry)) = self.procs.iter_mut().find(|(id, _)| *id == pid) else {
+        let Some((_, entry)) = self.table.iter_mut().find(|(id, _)| *id == pid) else {
             return;
         };
         if entry.status.is_none() {
@@ -313,13 +577,24 @@ impl Procs {
         entry.stdin = None;
         entry.stdout = None;
         entry.stderr = None;
-        self.procs.retain(|(id, _)| *id != pid);
+        self.table.retain(|(id, _)| *id != pid);
     }
 }
 
 /// The "unknown process" error, shared by every handle lookup.
 fn unknown_process(pid: i64) -> std::io::Error {
     std::io::Error::other(format!("unknown process {pid}"))
+}
+
+/// The staged wait of the parked `wait` twin's one attempt.
+#[cfg(target_os = "linux")]
+pub(crate) enum ProcWaitAttempt {
+    /// The wait answers now: the reaped status or the lookup failure.
+    Done(std::io::Result<i64>),
+    /// The pidfd stands: park on its readability.
+    Park,
+    /// No pidfd (the kernel refuses one): the blocking twin answers.
+    Block,
 }
 
 /// `proc_spawn(cmd, args) -> proc_handle` (the ambient's total
@@ -385,6 +660,86 @@ pub(crate) fn proc_write_fn(
     })
 }
 
+/// The read rows' answer shape, shared by the blocking twins and the
+/// parked wakes: a string native answers a string, so the empty string
+/// is the pipe's orderly end while mid-code-point truncation and
+/// binary output surface as errors, not as silently mangled text.
+pub(crate) fn read_answer(heaps: &mut Heaps, op: &str, pid: i64, bytes: Vec<u8>) -> NativeResult {
+    match String::from_utf8(bytes) {
+        Ok(text) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: heaps.new_str(text),
+        },
+        Err(_) => io_err(
+            heaps,
+            op,
+            &pid.to_string(),
+            &std::io::Error::other("invalid UTF-8 in the captured bytes"),
+        ),
+    }
+}
+
+/// The parked rows' timeout span, the deadline path's answer: the net
+/// face's own bounded-wait discipline over the process face's io
+/// member shape.
+pub(crate) fn timeout_err(
+    heaps: &mut Heaps,
+    op: &str,
+    target: &str,
+    bound: Duration,
+) -> NativeResult {
+    NativeResult::Tag {
+        tag: PLATFORM_IO_TIMED_OUT,
+        payload: heaps.new_str(format!("{op} {target}: timed out after {bound:?}")),
+    }
+}
+
+/// The read rows' one step over `pipe`, the blocking twin and the
+/// parked twin the two halves: one read of at most `max_bytes` bytes
+/// (clamped to [`PROC_CAP`]), the parking discipline answering the
+/// park request on a would-block where a Linux reactor stands.
+fn read_step(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    pid: i64,
+    max: i64,
+    pipe: ProcPipe,
+) -> NativeResult {
+    let op = pipe.op_name();
+    if max < 1 {
+        return io_err(
+            heaps,
+            op,
+            &pid.to_string(),
+            &std::io::Error::other("max_bytes must be positive"),
+        );
+    }
+    let max = usize::try_from(max).unwrap_or(PROC_CAP).min(PROC_CAP);
+    #[cfg(target_os = "linux")]
+    if out.procs().parking() {
+        // the parking discipline: one non-blocking attempt, the
+        // would-block answered as the park request (the scheduler owns
+        // the wait over the pipe's own readability, the process face's
+        // bound the deadline)
+        return match out.procs().try_read(pid, pipe, max) {
+            crate::net::NetAttempt::Done(Ok(bytes)) => read_answer(heaps, op, pid, bytes),
+            crate::net::NetAttempt::Done(Err(err)) => io_err(heaps, op, &pid.to_string(), &err),
+            crate::net::NetAttempt::Park => {
+                let deadline = std::time::Instant::now() + out.procs().timeout();
+                NativeResult::Park(crate::sched::WorldWait::proc_read(pid, pipe, max, deadline))
+            },
+        };
+    }
+    let bytes = match pipe {
+        ProcPipe::Out => out.procs().read(pid, max),
+        ProcPipe::Err => out.procs().read_err(pid, max),
+    };
+    match bytes {
+        Ok(bytes) => read_answer(heaps, op, pid, bytes),
+        Err(err) => io_err(heaps, op, &pid.to_string(), &err),
+    }
+}
+
 /// `proc_read(pid, max_bytes) -> string | io_err`: one read of at most
 /// `max_bytes` bytes from the child's stdout pipe (clamped to
 /// [`PROC_CAP`]); the empty string is the pipe's orderly end. A
@@ -395,47 +750,51 @@ pub(crate) fn proc_read_fn(
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let pid = i64_arg(args, 0)?;
-    let max = i64_arg(args, 1)?;
-    if max < 1 {
-        return Ok(io_err(
-            heaps,
-            "proc_read",
-            &pid.to_string(),
-            &std::io::Error::other("max_bytes must be positive"),
-        ));
-    }
-    let max = usize::try_from(max).unwrap_or(PROC_CAP).min(PROC_CAP);
-    let bytes = match out.procs().read(pid, max) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(io_err(heaps, "proc_read", &pid.to_string(), &err)),
-    };
-    Ok(match String::from_utf8(bytes) {
-        Ok(text) => NativeResult::Tag {
-            tag: PLATFORM_IO_OK,
-            payload: heaps.new_str(text),
-        },
-        Err(_) => io_err(
-            heaps,
-            "proc_read",
-            &pid.to_string(),
-            &std::io::Error::other("invalid UTF-8 in the captured bytes"),
-        ),
-    })
+    Ok(read_step(
+        heaps,
+        out,
+        i64_arg(args, 0)?,
+        i64_arg(args, 1)?,
+        ProcPipe::Out,
+    ))
 }
 
 /// `proc_wait(pid) -> int | io_err`: waits for the child and answers
 /// its exit status — a child ended without a status code answering -1,
 /// `proc_run`'s convention — idempotently, so a second wait answers
-/// the reaped status again. The wait blocks the calling fiber exactly
-/// like `proc_run`'s own; no portable reactor interest shape exists
-/// for a child's exit.
+/// the reaped status again. Under a Linux reactor the wait parks on
+/// the child's pidfd (the readable wake reaping the status
+/// non-blockingly); a kernel refusing a pidfd keeps the blocking twin
+/// below, the wait blocking the calling fiber exactly `proc_run`'s
+/// own.
 pub(crate) fn proc_wait_fn(
     heaps: &mut Heaps,
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let pid = i64_arg(args, 0)?;
+    #[cfg(target_os = "linux")]
+    if out.procs().parking() {
+        match out.procs().try_wait_park(pid) {
+            ProcWaitAttempt::Done(Ok(status)) => {
+                return Ok(NativeResult::Tag {
+                    tag: PLATFORM_IO_OK,
+                    payload: Value::I64(status),
+                });
+            },
+            ProcWaitAttempt::Done(Err(err)) => {
+                return Ok(io_err(heaps, "proc_wait", &pid.to_string(), &err));
+            },
+            ProcWaitAttempt::Park => {
+                let deadline = std::time::Instant::now() + out.procs().timeout();
+                return Ok(NativeResult::Park(crate::sched::WorldWait::proc_wait(
+                    pid, deadline,
+                )));
+            },
+            // the kernel refuses a pidfd: the blocking twin below
+            ProcWaitAttempt::Block => {},
+        }
+    }
     Ok(match out.procs().wait(pid) {
         Ok(status) => NativeResult::Tag {
             tag: PLATFORM_IO_OK,
@@ -474,33 +833,13 @@ pub(crate) fn proc_read_err_fn(
     out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let pid = i64_arg(args, 0)?;
-    let max = i64_arg(args, 1)?;
-    if max < 1 {
-        return Ok(io_err(
-            heaps,
-            "proc_read_err",
-            &pid.to_string(),
-            &std::io::Error::other("max_bytes must be positive"),
-        ));
-    }
-    let max = usize::try_from(max).unwrap_or(PROC_CAP).min(PROC_CAP);
-    let bytes = match out.procs().read_err(pid, max) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(io_err(heaps, "proc_read_err", &pid.to_string(), &err)),
-    };
-    Ok(match String::from_utf8(bytes) {
-        Ok(text) => NativeResult::Tag {
-            tag: PLATFORM_IO_OK,
-            payload: heaps.new_str(text),
-        },
-        Err(_) => io_err(
-            heaps,
-            "proc_read_err",
-            &pid.to_string(),
-            &std::io::Error::other("invalid UTF-8 in the captured bytes"),
-        ),
-    })
+    Ok(read_step(
+        heaps,
+        out,
+        i64_arg(args, 0)?,
+        i64_arg(args, 1)?,
+        ProcPipe::Err,
+    ))
 }
 
 /// `proc_try_wait(pid) -> int | none`: the child's exit status under
@@ -1026,7 +1365,7 @@ mod tests {
                 polled = Some(status);
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(
             polled,
@@ -1050,6 +1389,16 @@ mod tests {
             "a second poll answers the reaped status again"
         );
         proc_close_fn(&mut heaps, &mut out, &[Value::I64(pid)]).expect("the close is total");
+    }
+
+    /// The exit interest's raw syscall shape: a pidfd opens on a live
+    /// process (the test's own), the syscall number and ABI the only
+    /// moving parts — a kernel without pidfd names itself in the
+    /// refusal, the parked wait's blocking fallback the answer there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_exit_interest_opens_a_pidfd() {
+        raw_proc::pidfd_open(std::process::id()).expect("a 5.3+ kernel opens a self pidfd");
     }
 
     /// A spawn failure answers the io class the OS names: a missing

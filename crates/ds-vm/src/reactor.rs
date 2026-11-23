@@ -41,6 +41,12 @@ pub struct TokenEvent {
     pub read: bool,
     /// Readiness was reported for writing.
     pub write: bool,
+    /// The handle's peer is gone (EPOLLHUP) or the handle errored
+    /// (EPOLLERR): a read interest answers now — the pipe's orderly
+    /// end or the error word — so a read-direction wake must take it.
+    /// The kernel reports a pipe whose write end closed with an empty
+    /// buffer as HUP alone, no IN bit.
+    pub hup: bool,
 }
 
 /// A driver's refusal, rendered: the OS detail, never a panic — a
@@ -120,6 +126,8 @@ mod epoll_imp {
     pub const EPOLL_CTL_MOD: c_int = 3;
     pub const EPOLLIN: u32 = 0x001;
     pub const EPOLLOUT: u32 = 0x004;
+    pub const EPOLLERR: u32 = 0x008;
+    pub const EPOLLHUP: u32 = 0x010;
     pub const EPOLL_CLOEXEC: c_int = 0x80000;
 
     /// The kernel's epoll_event is `__attribute__((packed))`: 12 bytes,
@@ -306,6 +314,7 @@ impl Reactor for Epoll {
                 token: event.data(),
                 read: event.events & epoll_imp::EPOLLIN != 0,
                 write: event.events & epoll_imp::EPOLLOUT != 0,
+                hup: event.events & (epoll_imp::EPOLLHUP | epoll_imp::EPOLLERR) != 0,
             });
         }
         Ok(())
@@ -346,6 +355,39 @@ mod tests {
 
     fn handle(stream: &TcpStream) -> IoHandle {
         IoHandle(u64::try_from(stream.as_raw_fd()).expect("fd fits u64"))
+    }
+
+    /// A pipe whose writer closed with its buffer drained reports the
+    /// hangup: the kernel spells that pipe's end HUP alone — no IN bit
+    /// — so the decode must surface it as `hup`, a read wake answering
+    /// the pipe's orderly end over it (the parked proc read's lost
+    /// wake over a child's exit).
+    #[test]
+    fn a_drained_pipe_reports_its_hangup() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("the child spawns");
+        let mut out = child.stdout.take().expect("the pipe's read end");
+        child.wait().expect("the child exits");
+        let pipe = IoHandle(u64::try_from(out.as_raw_fd()).expect("fd fits u64"));
+        let mut reactor = Epoll::new().expect("epoll set");
+        reactor
+            .register(pipe, Direction::Read, 13)
+            .expect("register");
+        let mut events = Vec::new();
+        reactor
+            .poll(Some(Duration::from_millis(200)), &mut events)
+            .expect("poll");
+        assert_eq!(events.len(), 1, "the closed pipe reports");
+        assert_eq!(events[0].token, 13);
+        assert!(events[0].hup, "the drained pipe's end spells HUP");
+        let mut buf = [0; 8];
+        assert_eq!(out.read(&mut buf).expect("the hup pipe reads"), 0);
+        drop(reactor);
+        drop(out);
     }
 
     /// Readiness follows the data: a registered reader sits quiet

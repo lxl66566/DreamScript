@@ -90,11 +90,48 @@ pub enum WorldWait {
         target: String,
         deadline: Instant,
     },
+    /// `proc_read`/`proc_read_err(pid, max)` (the 2026-11-23 ruling):
+    /// the child's pipe IS an fd, so the readable wake performs one
+    /// read (at most `max` bytes) and answers its string span; the
+    /// empty string is the pipe's orderly end. Linux parked twin only
+    /// — the pipes own no portable non-blocking shape elsewhere.
+    ProcRead {
+        pid: i64,
+        pipe: ProcPipe,
+        max: usize,
+        deadline: Instant,
+    },
+    /// `proc_wait(pid)`: the exit interest rides a pidfd (the
+    /// 2026-11-23 ruling) — the readable wake (the child exited)
+    /// reaps the status non-blockingly and answers it idempotently
+    /// over the reaped word; a spurious wake (the child still runs)
+    /// leaves the wait standing.
+    ProcWait { pid: i64, deadline: Instant },
     /// `sleep(nanos)`: the timer-only wait — no IO interest, no
     /// deregistration target, the wheel's own firing IS the
     /// completion, answering the unit word (the time face's op, the
     /// 2026-11-21 timer ruling).
     Sleep { deadline: Instant },
+}
+
+/// Which of a spawned child's pipes a proc read waits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcPipe {
+    /// The child's stdout.
+    Out,
+    /// The child's stderr.
+    Err,
+}
+
+impl ProcPipe {
+    /// The read row's own name, the error span's prefix.
+    #[must_use]
+    pub fn op_name(self) -> &'static str {
+        match self {
+            Self::Out => "proc_read",
+            Self::Err => "proc_read_err",
+        }
+    }
 }
 
 impl WorldWait {
@@ -170,6 +207,26 @@ impl WorldWait {
         }
     }
 
+    /// A proc read wait's constructor: the child's handle, the pipe
+    /// the read addresses, the clamped max, and the process face's
+    /// configured bound as the deadline.
+    #[must_use]
+    pub fn proc_read(pid: i64, pipe: ProcPipe, max: usize, deadline: Instant) -> Self {
+        Self::ProcRead {
+            pid,
+            pipe,
+            max,
+            deadline,
+        }
+    }
+
+    /// A proc wait wait's constructor: the child's handle and the
+    /// process face's configured bound restated as the deadline.
+    #[must_use]
+    pub fn proc_wait(pid: i64, deadline: Instant) -> Self {
+        Self::ProcWait { pid, deadline }
+    }
+
     /// The wait's deadline.
     #[must_use]
     pub fn deadline(&self) -> Instant {
@@ -180,6 +237,8 @@ impl WorldWait {
             | Self::Connect { deadline, .. }
             | Self::Fetch { deadline, .. }
             | Self::TlsFetch { deadline, .. }
+            | Self::ProcRead { deadline, .. }
+            | Self::ProcWait { deadline, .. }
             | Self::Sleep { deadline } => *deadline,
         }
     }
@@ -197,6 +256,7 @@ impl WorldWait {
                 Some(*conn)
             },
             Self::Accept { listener, .. } => Some(*listener),
+            Self::ProcRead { pid, .. } | Self::ProcWait { pid, .. } => Some(*pid),
             Self::Fetch { .. } | Self::TlsFetch { .. } | Self::Sleep { .. } => None,
         }
     }
@@ -219,7 +279,13 @@ impl WorldWait {
     #[must_use]
     pub fn direction(&self) -> Option<Direction> {
         match self {
-            Self::Recv { .. } | Self::Accept { .. } => Some(Direction::Read),
+            // the readable wakes: a received connection, a bound
+            // listener's pending accept, a pipe holding the child's
+            // bytes, a pidfd holding its exit
+            Self::Recv { .. }
+            | Self::Accept { .. }
+            | Self::ProcRead { .. }
+            | Self::ProcWait { .. } => Some(Direction::Read),
             // a connect parks on the writability its completion
             // reports; a fetch starts at its connect-or-write stage,
             // the machine re-aiming the interest at its later steps
@@ -242,8 +308,19 @@ impl WorldWait {
             Self::Connect { .. } => "net_connect",
             Self::Fetch { .. } => "http_get",
             Self::TlsFetch { op, .. } => op,
+            Self::ProcRead { pipe, .. } => pipe.op_name(),
+            Self::ProcWait { .. } => "proc_wait",
             Self::Sleep { .. } => "time_sleep",
         }
+    }
+
+    /// Whether the wait belongs to the process face (the io error
+    /// span) rather than the net face (the net error span): the
+    /// deadline, refusal, and reactor-failure paths render each
+    /// face's own member shape.
+    #[must_use]
+    pub fn is_proc(&self) -> bool {
+        matches!(self, Self::ProcRead { .. } | Self::ProcWait { .. })
     }
 }
 
@@ -379,6 +456,32 @@ mod tests {
             "the later deadline once due, stale-free"
         );
         assert_eq!(sched.next_deadline(), None);
+    }
+
+    /// The proc waits' shape: the readable direction both interests
+    /// watch, the pid the target and key, the op names the row, and
+    /// the face discriminator tells the deadline path which member
+    /// shape to render.
+    #[test]
+    fn the_proc_waits_name_their_pipe_and_exit_interests() {
+        let at = Instant::now() + Duration::from_millis(5);
+        let read = WorldWait::proc_read(3, ProcPipe::Out, 4096, at);
+        assert_eq!(read.deadline(), at);
+        assert_eq!(read.conn(), Some(3));
+        assert_eq!(read.direction(), Some(Direction::Read));
+        assert_eq!(read.op_name(), "proc_read");
+        assert_eq!(read.target(), "3");
+        assert!(read.is_proc());
+        let err = WorldWait::proc_read(3, ProcPipe::Err, 4096, at);
+        assert_eq!(err.op_name(), "proc_read_err");
+        let wait = WorldWait::proc_wait(3, at);
+        assert_eq!(wait.deadline(), at);
+        assert_eq!(wait.conn(), Some(3));
+        assert_eq!(wait.direction(), Some(Direction::Read));
+        assert_eq!(wait.op_name(), "proc_wait");
+        assert!(wait.is_proc());
+        assert!(!WorldWait::recv(1, 8, at).is_proc());
+        assert!(!WorldWait::sleep(at).is_proc());
     }
 
     /// The timer-only wait's shape: no connection to deregister, no
