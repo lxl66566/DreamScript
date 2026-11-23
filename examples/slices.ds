@@ -6,7 +6,9 @@
 // fn-typed parameter's list-returning signature never solves from a
 // concrete lambda at the call site (B2 binds a bare return variable
 // alone), so the flat spelling composes as flatten over map's hosted
-// lambda, the nested-empty edge included.
+// lambda, the nested-empty edge included — and the fluent spelling
+// chains the same pair through a dot-call's receiver, the map call
+// staging its hosted lambda inside the position flatten reads.
 
 fn main() -> () {
   const xs = [1, 2, 3, 4, 5]
@@ -16,5 +18,6 @@ fn main() -> () {
   println("edges ${drop(list[int](), 2).len()} ${xs.drop(4).len()}")
   const nested = xs.map((x: int) => [x, x * 10])
   println("flat ${flatten(nested).len()} ${nested.flatten().len()}")
+  println("fluent ${xs.map((x: int) => [x, x * 10]).flatten().len()}")
   println("empty ${flatten(list[list[int]]()).len()} ${flatten([[1], list[int](), [2, 3]]).len()}")
 }

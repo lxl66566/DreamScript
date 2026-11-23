@@ -1627,6 +1627,14 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
             ..
         } => {
             let inlines = inlines_lambda_arg(analyzed, plan, ctx.res, callee, *span);
+            // The callee first, in the receiver-first order the walk
+            // stages its arguments: a dot-call's receiver holds whole
+            // call shapes (the fluent spelling `xs.map(f).len()`), and
+            // the lambdas and spawns inside them mint here exactly
+            // where the walk lowers them — callee shapes the walk
+            // refuses (a computed callee) lower no module, so their
+            // records never reach a table.
+            discover_expr(plan, analyzed, ctx, callee);
             let mut effective: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
             if let Some(block) = trailing {
                 effective.push(block);

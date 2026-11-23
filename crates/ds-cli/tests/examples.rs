@@ -411,10 +411,11 @@ fn slice_members_clamp_and_flatten_composes_over_map() {
     // composes the flat spelling over map's hosted lambda — the
     // fn-typed parameter's list-returning signature never solves from a
     // concrete lambda at the call site (B2), so flatten is the half
-    // that lands — the nested-empty edge included
+    // that lands — the nested-empty edge included, and the fluent
+    // spelling chains the same pair through a dot-call's receiver
     assert_eq!(
         run_ok(ds().arg("run").arg(example("slices.ds"))),
-        "take 2 0 5 0\nedges 0 3\ndrop 3 5 0 5\nedges 0 1\nflat 10 10\nempty 0 3\n0\n",
+        "take 2 0 5 0\nedges 0 3\ndrop 3 5 0 5\nedges 0 1\nflat 10 10\nfluent 10\nempty 0 3\n0\n",
         "the slices clamp at their bounds, and flatten composes"
     );
 }

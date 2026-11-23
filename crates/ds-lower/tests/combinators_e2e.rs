@@ -874,6 +874,96 @@ fn main() -> int {
     );
 }
 
+/// The receiver-shaped mint site (the fluent spelling): a dot-call's
+/// callee holds the whole inner call, and the CALLG lambda argument
+/// inside it mints exactly one plan record — the discovery pass and
+/// the lowering walk agree on the receiver position the outer call
+/// stages as its first argument. The hosted body runs per element
+/// through the reentrant dispatcher like any CALLG site, and the record
+/// count pins the seam's one-mint truth: the walk reads the plan,
+/// never mints.
+#[test]
+fn the_fluent_receiver_spelling_mints_one_record_and_runs() {
+    let source = "
+tag int
+tag string
+tag bool
+struct list[t]
+extern fn println (s: string) -> ()
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn len[t] (xs: t) -> int
+
+fn main() -> int {
+  const xs = [1, 2, 3, 4]
+  const fluent = xs.map((x: int) => x * 2).len()
+  println(\"fluent ${fluent}\")
+  0
+}";
+    let (mut vm, lowered) = run_inline("fluent_receiver", source);
+    assert_eq!(
+        vm.run("fluent_receiver", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "the fluent spelling runs end to end"
+    );
+    assert_eq!(vm.captured_output(), b"fluent 4\n");
+    let records = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.contains('$'))
+        .count();
+    assert_eq!(records, 1, "one lambda site mints exactly one record");
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
+/// A chain of hosted calls nests receiver positions: the middle map's
+/// callee holds the inner map call and the outer len's callee holds the
+/// whole chain, so every CALLG lambda inside mints one record at its
+/// own site — a capturing lambda included, its closure word staging
+/// through the same plan answer.
+#[test]
+fn a_chained_receiver_mints_each_lambda_once() {
+    let source = "
+tag int
+tag string
+tag bool
+struct list[t]
+extern fn println (s: string) -> ()
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn len[t] (xs: t) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn main() -> int {
+  const xs = [1, 2, 3, 4]
+  const bias = 100
+  const chained = xs.map((x: int) => x + 1).map((y: int) => y * 3)
+  println(\"chained ${chained.len()} ${at(chained, 0)} ${at(chained, 3)}\")
+  const lifted = xs.map((x: int) => x + bias).len()
+  println(\"lifted ${lifted}\")
+  0
+}";
+    let (mut vm, lowered) = run_inline("chained_receiver", source);
+    assert_eq!(
+        vm.run("chained_receiver", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "the chained spellings run end to end"
+    );
+    assert_eq!(vm.captured_output(), b"chained 4 6 15\nlifted 4\n");
+    // the chain's two map lambdas plus the capturing one: one record
+    // each — the ok/err handler bodies inline, minting none
+    let records = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.contains('$'))
+        .count();
+    assert_eq!(records, 3, "each lambda site mints exactly one record");
+    assert!(vm.objects().is_empty(), "the heap drains");
+}
+
 /// `partition` over tuple elements: the element's positional span rides
 /// the predicate each step, the two-answer total destructures at the
 /// call site, and the sides read back through destructuring (the
