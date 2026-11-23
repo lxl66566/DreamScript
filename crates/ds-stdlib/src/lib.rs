@@ -112,6 +112,12 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("read_raw", "fsys")
         .with("close_raw", "fsys")
         .with("time", "time")
+        .with("eprintln", "console")
+        .with("eprint", "console")
+        .with("read_line", "console")
+        .with("args", "proc")
+        .with("env", "proc")
+        .with("proc_run", "proc")
 });
 
 /// The ambient functions' world-capability attribution (E1, H5): the
@@ -122,11 +128,12 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 /// here is an unattributed world touch, which licenses on any
 /// world-bearing platform.
 ///
-/// * `console`: the printing pair.
+/// * `console`: the printing pair, the stderr twins, and the stdin read.
 /// * `fsys`: the file readers, writers, and the handle face (`open_file`, `read_raw`, `close_raw`).
 /// * `net`: the TCP surface, its linear handle face (`net_connect` answering `net_handle`, the
 ///   ds-source `send`/`recv`/`close_conn` handlers over it), and `http_get`.
 /// * `time`: the clock op.
+/// * `proc`: the CLI process surface — string argv, the environment read, and process spawn.
 ///
 /// The table is built on first read and shared: a consumer that must own
 /// one clones it.
@@ -261,6 +268,12 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("parse_json", error)
         .with("println", world)
         .with("print", world)
+        .with("eprintln", world)
+        .with("eprint", world)
+        .with("read_line", world)
+        .with("args", world)
+        .with("env", world)
+        .with("proc_run", error | world)
         .with("parse_int", error)
         .with("cancel", EffectRow::of(Effect::Cancel))
         // the trap primitive's private spelling (the u32 conversion's
@@ -275,7 +288,8 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 ///
 /// * `error`: failure handed to the caller — the parse and IO readers.
 /// * `world`: the world-touching capability surface — IO, the file and net handle faces (the reads
-///   and connects fallible, the two idempotent close seams total), the clock, and printing.
+///   and connects fallible, the two idempotent close seams total), the clock, printing (stdout,
+///   stderr, stdin), and the process face (argv, the environment read, process spawn).
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 /// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
 ///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
@@ -403,6 +417,11 @@ mod tests {
         assert_eq!(rows.row("close_raw").render(), "world");
         assert_eq!(rows.row("time").render(), "world");
         assert_eq!(rows.row("println").render(), "world");
+        assert_eq!(rows.row("eprintln").render(), "world");
+        assert_eq!(rows.row("read_line").render(), "world");
+        assert_eq!(rows.row("args").render(), "world");
+        assert_eq!(rows.row("env").render(), "world");
+        assert_eq!(rows.row("proc_run").render(), "error | world");
         assert_eq!(rows.row("cancel").render(), "cancel");
         assert_eq!(
             rows.row("trap").render(),

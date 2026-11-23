@@ -5,8 +5,8 @@ use ds_abi::{
     uop::{ConstIdx, Uop},
 };
 use ds_mod::{
-    Constant, EntryArg, Flags, FuncRefKey, Function, FunctionError, Hash128, Module, TargetClass,
-    read, read_checked, read_mmap, write,
+    Constant, Flags, FuncRefKey, Function, FunctionError, Hash128, Module, TargetClass, read,
+    read_checked, read_mmap, write,
 };
 
 const SOURCE: &[u8] = b"fn even(n: int) -> Bool {\n  n == 0 || odd(n - 1)\n}\n";
@@ -160,43 +160,16 @@ fn bl7_fields_default_pending_and_round_trip() {
 }
 
 #[test]
-fn tag_and_entry_tables_round_trip() {
-    // The blocks payload's version-3 tables: the name side of the tag
-    // ids and the run entries' per-parameter staging plans.
-    let module = sample_module()
-        .with_tag("none", 0)
-        .with_tag("int", 1)
-        .with_entry("main", vec![EntryArg::OptionalInt])
-        .with_entry("worker", vec![
-            EntryArg::Int,
-            EntryArg::Float,
-            EntryArg::Bool,
-            EntryArg::Foreign,
-        ]);
+fn the_tag_table_round_trips() {
+    // The blocks payload's tag table: the name side of the tag ids.
+    let module = sample_module().with_tag("none", 0).with_tag("int", 1);
     let bytes = write(&module);
-    let read_back = read(&bytes).expect("tables round trip");
+    let read_back = read(&bytes).expect("the table round trips");
     assert_eq!(write(&read_back), bytes, "byte-stable across the read");
     assert_eq!(read_back.tags().len(), 2);
     assert_eq!(read_back.tag_id("none"), Some(0));
     assert_eq!(read_back.tag_id("int"), Some(1));
     assert_eq!(read_back.tag_id("zzz"), None);
-    assert_eq!(
-        read_back.entry_args("main"),
-        Some(&[EntryArg::OptionalInt][..])
-    );
-    assert_eq!(
-        read_back.entry_args("worker"),
-        Some(
-            &[
-                EntryArg::Int,
-                EntryArg::Float,
-                EntryArg::Bool,
-                EntryArg::Foreign
-            ][..]
-        )
-    );
-    assert_eq!(read_back.entry_args("nope"), None);
-    assert_eq!(read_back.entries().len(), 2);
 }
 
 #[test]
@@ -223,7 +196,6 @@ fn bytecode_target_and_empty_module_round_trip() {
     assert_eq!(read_back.deps(), []);
     assert_eq!(read_back.constants(), []);
     assert_eq!(read_back.tags(), []);
-    assert_eq!(read_back.entries(), []);
     assert_eq!(read_back.debug_spans(), None);
     assert_eq!(write(&read_back), bytes);
 

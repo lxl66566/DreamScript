@@ -11,12 +11,15 @@
 //! the walk's dep demands across runs under keys that fold the root's
 //! own member identity and the graph's dep identities.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
-use anyhow::{Context, Error, Result, anyhow};
+use anyhow::{Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
-use ds_mod::{EntryArg, Module, ReadError, read};
+use ds_mod::{Module, ReadError, read};
 use ds_vm::{
     ArenaMisuse, ArenaPackError, FIBER_ROOT, FramePc, LoadError as VmLoadError, ModuleBuildError,
     ModuleRegistry, StagedSite, Trap, Value, Vm,
@@ -27,11 +30,7 @@ use ds_vm::{
     platform::Platform,
 };
 
-use crate::{
-    package,
-    run_cache::{RunCache, ServedPlan},
-    source,
-};
+use crate::{package, run_cache::RunCache, source};
 
 /// The CLI is the platform provider (H5, E1): every run installs the
 /// default `std` platform handler (console, fsys, net, time) into its
@@ -49,8 +48,8 @@ fn provide_platform(registry: &mut ModuleRegistry) {
     registry.install_platform(Platform::embed());
 }
 
-/// The `ds run` surface: one module or source file, one entry name, i64
-/// arguments.
+/// The `ds run` surface: one module or source file, one entry name, and
+/// the string arguments the program reads through `args()`.
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Path to the .dsmod module file or the .ds source file
@@ -58,9 +57,10 @@ pub struct RunArgs {
     /// Entry function to execute
     #[arg(long, default_value = "main")]
     entry: String,
-    /// i64 arguments staged into the entry's parameter slots
-    #[arg(long, num_args = 0.., value_name = "I64")]
-    args: Vec<i64>,
+    /// String arguments the running program reads through `args()` (the
+    /// CLI process surface)
+    #[arg(long, num_args = 0.., value_name = "STRING")]
+    args: Vec<String>,
     /// Compile without the stdlib ambient package member (source files only)
     #[arg(long)]
     no_ambient: bool,
@@ -72,11 +72,17 @@ pub struct RunArgs {
 
 /// Runs one module: the dsmod path mmaps and installs; the source path
 /// compiles in-process first. Both then resolve one entry and run it.
-pub fn run(args: &RunArgs) -> Result<()> {
+/// The host owns the exit code (the CLI process surface, ruled
+/// 2026-11-21): a clean completion exits 0, a trap or an unhandled
+/// failure 1, and an `exit(code)` call answers its deliberate status.
+pub fn run(args: &RunArgs) -> Result<ExitCode> {
     let mut prepared = match source_or_module(&args.file)? {
         FileKind::Dsmod => read_dsmod(args)?,
         FileKind::Source => run_source(args)?,
     };
+    // the process arguments stage on the VM once, the `args()` op
+    // reading them verbatim whatever the entry
+    prepared.vm.set_argv(args.args.clone());
     resolve_and_run(&mut prepared, &args.entry)
 }
 
@@ -105,11 +111,10 @@ fn source_or_module(path: &Path) -> Result<FileKind> {
     }
 }
 
-/// One run prepared for execution: the VM holding the installed module,
-/// the staged entry arguments, and the module's name and function names.
+/// One run prepared for execution: the VM holding the installed module
+/// and the module's name and function names.
 struct PreparedRun {
     vm: Vm,
-    staged: Vec<Value>,
     name: String,
     functions: Vec<String>,
 }
@@ -124,14 +129,12 @@ fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
         .map_err(|error| anyhow!("cannot open module `{}`: {error}", args.file.display()))?;
     let module =
         read(&bytes).map_err(|error| anyhow!("{}", render_read_error(&args.file, &error)))?;
-    install_module(module, args)
+    install_module(module)
 }
 
 /// Installs one finished module into a fresh VM with the default std
-/// platform and stages `--args` as raw i64 words — the dsmod path's
-/// rule, and the cache hit path's: the entry classes the cache serves
-/// are exactly those whose source-path staging is this spelling.
-fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
+/// platform — the dsmod path's rule, and the cache hit path's.
+fn install_module(module: Module) -> Result<PreparedRun> {
     let name = module.name().to_owned();
     let functions: Vec<String> = module
         .functions()
@@ -144,10 +147,9 @@ fn install_module(module: Module, args: &RunArgs) -> Result<PreparedRun> {
     vm.install_dsmod(module)
         .map_err(|error| install_error(&name, functions.len(), &error))?;
     Ok(PreparedRun {
-        staged: args.args.iter().map(|&value| Value::I64(value)).collect(),
-        functions,
-        name,
         vm,
+        name,
+        functions,
     })
 }
 
@@ -171,18 +173,17 @@ fn run_source(args: &RunArgs) -> Result<PreparedRun> {
     }
     let cache = RunCache::discover(!args.no_cache, args.no_ambient);
     let prefix = crate::dsi_cache::PrefixCache::discover(!args.no_cache, args.no_ambient);
-    if let Some((module, plan)) = cache.lookup(&args.file, &args.entry) {
-        return run_cached(module, &plan, args);
+    if let Some(module) = cache.lookup(&args.file) {
+        return run_cached(module);
     }
     let compiled = source::compile(
         &args.file,
-        &args.entry,
         args.no_ambient,
         Some(&prefix),
         source::BundleAfter::Keep,
     )?;
-    cache.store(&args.entry, compiled.lowered.module());
-    compile_source(args, compiled)
+    cache.store(compiled.lowered.module());
+    compile_source(compiled)
 }
 
 /// The package path — a manifest-resolved graph or the bare script's
@@ -214,8 +215,8 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
     // identities do: a manifest root composes every member of its
     // namespace (G3), and the composed fold re-keys on a sibling edit
     let members = package::root_members(&args.file)?;
-    if let Some((module, plan)) = cache.lookup_root(&args.file, &members, &args.entry) {
-        return run_cached_package(module, &plan, graph, &cache, args);
+    if let Some(module) = cache.lookup_root(&args.file, &members) {
+        return run_cached_package(module, graph, &cache);
     }
     // the same dep identities, artifact pins, and session shape key the
     // prefix tier: a prefix linked against a dep's old content never
@@ -227,20 +228,10 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
         &pins,
         script,
     );
-    let compiled = package::compile_root(
-        &args.file,
-        &args.entry,
-        graph,
-        script,
-        Some(&prefix),
-        Some(&cache),
-    )?;
+    let compiled = package::compile_root(&args.file, graph, script, Some(&prefix), Some(&cache))?;
     let name = compiled.name.clone();
     let functions = compiled.lowered.functions().to_vec();
-    let int_member = compiled.lowered.tag("int");
-    let none_member = compiled.lowered.tag("none");
-    let entry_args = compiled.entry_args;
-    cache.store(&args.entry, compiled.lowered.module());
+    cache.store(compiled.lowered.module());
     let vm = install_package_root(
         compiled.lowered.into_module(),
         graph,
@@ -249,16 +240,9 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
         functions.len(),
     )?;
     Ok(PreparedRun {
-        staged: stage_source_args(
-            &name,
-            entry_args.as_deref(),
-            int_member,
-            none_member,
-            &args.args,
-        )?,
-        functions,
-        name,
         vm,
+        name,
+        functions,
     })
 }
 
@@ -336,14 +320,11 @@ fn install_error_bound(
 
 /// The package hit path: install the served artifact through the same
 /// deps-first walk as the compile path — its link table pins the
-/// identities the key folded — and stage exactly as the compile path
-/// does.
+/// identities the key folded.
 fn run_cached_package(
     module: Module,
-    plan: &ServedPlan,
     graph: &package::Graph,
     cache: &RunCache,
-    args: &RunArgs,
 ) -> Result<PreparedRun> {
     let name = module.name().to_owned();
     let functions: Vec<String> = module
@@ -351,70 +332,32 @@ fn run_cached_package(
         .iter()
         .map(|function| function.name().to_owned())
         .collect();
-    let (entry_args, int_member, none_member) = plan.entry_facts();
     let vm = install_package_root(module, graph, cache, &name, functions.len())?;
     Ok(PreparedRun {
-        staged: stage_source_args(&name, entry_args, int_member, none_member, &args.args)?,
-        functions,
-        name,
         vm,
+        name,
+        functions,
     })
 }
 
-/// The hit path: install the cached module and stage exactly as the
-/// compile path would. A recorded entry's served plan carries the
-/// artifact's per-parameter staging facts plus the int and none member
-/// tags its optional arm stages, so staging runs through the same
-/// function with the same failure order — install first, then the
-/// staging refusals.
-fn run_cached(module: Module, plan: &ServedPlan, args: &RunArgs) -> Result<PreparedRun> {
-    let name = module.name().to_owned();
-    let functions: Vec<String> = module
-        .functions()
-        .iter()
-        .map(|function| function.name().to_owned())
-        .collect();
-    let (entry_args, int_member, none_member) = plan.entry_facts();
-    let mut registry = ModuleRegistry::new();
-    provide_platform(&mut registry);
-    let mut vm = Vm::new(registry);
-    vm.install_dsmod(module)
-        .map_err(|error| install_error(&name, functions.len(), &error))?;
-    Ok(PreparedRun {
-        staged: stage_source_args(&name, entry_args, int_member, none_member, &args.args)?,
-        functions,
-        name,
-        vm,
-    })
+/// The hit path: install the cached module.
+fn run_cached(module: Module) -> Result<PreparedRun> {
+    install_module(module)
 }
 
-/// Installs one compiled source and stages the entry's arguments per the
-/// entry parameters' checked types. The install consumes the lowered
-/// module, so the staging plan's inputs (the entry plan and the two member
-/// tags the optional-int arm stages) are read first, keeping the install
-/// first in the failure order.
-fn compile_source(args: &RunArgs, compiled: source::CompiledSource) -> Result<PreparedRun> {
+/// Installs one compiled source.
+fn compile_source(compiled: source::CompiledSource) -> Result<PreparedRun> {
     let name = compiled.name.clone();
     let functions = compiled.lowered.functions().to_vec();
-    let int_member = compiled.lowered.tag("int");
-    let none_member = compiled.lowered.tag("none");
-    let entry_args = compiled.entry_args;
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
     let mut vm = Vm::new(registry);
     vm.install_dsmod(compiled.lowered.into_module())
         .map_err(|error| install_error(&name, functions.len(), &error))?;
     Ok(PreparedRun {
-        staged: stage_source_args(
-            &name,
-            entry_args.as_deref(),
-            int_member,
-            none_member,
-            &args.args,
-        )?,
-        functions,
-        name,
         vm,
+        name,
+        functions,
     })
 }
 
@@ -427,8 +370,11 @@ fn compile_source(args: &RunArgs, compiled: source::CompiledSource) -> Result<Pr
 /// one word per line instead of a truncated head. A trapped run reports
 /// first — the backtrace reads the kept frames — and then releases the
 /// interrupted root, so the kept frames' deinit hooks fire exactly once
-/// and their claims drain before the run exits nonzero.
-fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
+/// and their claims drain before the run exits nonzero. The host owns
+/// the exit code (the CLI process surface): a clean completion exits 0,
+/// a trap or an unhandled failure 1, and an `exit(code)` call ends the
+/// run with its deliberate status, no report printed.
+fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
     if prepared
         .vm
         .registry()
@@ -441,7 +387,7 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
             prepared.functions.join(", ")
         ));
     }
-    match prepared.vm.run(&prepared.name, entry, &prepared.staged) {
+    match prepared.vm.run(&prepared.name, entry, &[]) {
         Ok(answer) => match answer.as_slice() {
             // the failure tags and the checked read's `none` member ride
             // the answer's head word
@@ -465,14 +411,21 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
             // its name, not the platform reservation's raw id.
             [Value::Tag(tag), ..] if *tag == PLATFORM_NONE => {
                 println!("none");
-                Ok(())
+                Ok(ExitCode::SUCCESS)
             },
             _ => {
                 for value in answer.as_slice() {
                     print_value(value);
                 }
-                Ok(())
+                Ok(ExitCode::SUCCESS)
             },
+        },
+        Err(Trap::Exit { code }) => {
+            // the deliberate status: no report, the exit member's own
+            // contract — the interrupted root still releases so the
+            // kept frames' deinit hooks fire and their claims drain
+            prepared.vm.release_interrupted(FIBER_ROOT);
+            Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)))
         },
         Err(trap) => {
             let report = trap_error(&prepared.vm, &trap);
@@ -483,79 +436,6 @@ fn resolve_and_run(prepared: &mut PreparedRun, entry: &str) -> Result<()> {
             Err(report)
         },
     }
-}
-
-/// Stages `--args` onto the entry's parameter words per the parameters'
-/// checked types (the source pipeline's plan, served warm from the
-/// artifact's recorded facts): the scalar atoms stage their word, an
-/// `int | none` parameter stages its two-word union span — a staged
-/// value presenting the int member, an absent value presenting none. The
-/// plan and the two member tags are read before the install consumes the
-/// module. Without a plan (the entry is not a source function) every
-/// value stages as its own i64 word, the dsmod rule.
-// the i64->f64 staging of --args is a lossy host conversion by design
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn stage_source_args(
-    entry: &str,
-    plans: Option<&[EntryArg]>,
-    int_member: Option<u8>,
-    none_member: Option<u8>,
-    raw: &[i64],
-) -> Result<Vec<Value>> {
-    let Some(plans) = plans else {
-        return Ok(raw.iter().map(|&value| Value::I64(value)).collect());
-    };
-    if raw.len() > plans.len() {
-        return Err(anyhow!(
-            "--args stages {} value(s) but entry `{entry}` takes {} parameter(s)",
-            raw.len(),
-            plans.len()
-        ));
-    }
-    let member = |tag: Option<u8>, name: &str| {
-        tag.with_context(|| {
-            format!(
-                "the `{name}` member has no module tag id; construct an \\
-                 int|none somewhere so lowering assigns one"
-            )
-        })
-    };
-    let mut staged = Vec::new();
-    for (index, plan) in plans.iter().enumerate() {
-        let value = raw.get(index).copied();
-        // the scalar plans share one missing-word refusal; the optional and
-        // foreign plans read absence their own way
-        let required = || {
-            value.ok_or_else(|| {
-                anyhow!(
-                    "entry `{entry}` parameter {} expects an --args value",
-                    index + 1
-                )
-            })
-        };
-        match plan {
-            EntryArg::Int => staged.push(Value::I64(required()?)),
-            EntryArg::Float => staged.push(Value::F64(required()? as f64)),
-            EntryArg::Bool => staged.push(Value::Bool(required()? != 0)),
-            EntryArg::OptionalInt => {
-                if let Some(value) = value {
-                    staged.push(Value::Tag(member(int_member, "int")?));
-                    staged.push(Value::I64(value));
-                } else {
-                    staged.push(Value::Tag(member(none_member, "none")?));
-                    staged.push(Value::I64(0));
-                }
-            },
-            EntryArg::Foreign => {
-                return Err(anyhow!(
-                    "--args cannot stage entry `{entry}`'s parameter {} (int, float, bool, and \\
-                     int|none parameters stage)",
-                    index + 1
-                ));
-            },
-        }
-    }
-    Ok(staged)
 }
 
 /// Renders a [`ReadError`] as a human diagnostic against the file's bytes.
@@ -786,6 +666,10 @@ fn describe_trap(trap: &Trap) -> String {
         // the message prints through the trap report and the run exits
         // failed, exactly the io|net|utf8 halt rows' contract
         Trap::Die { message } => format!("die: {message}"),
+        // the deliberate status (the CLI process surface): the run path
+        // intercepts this trap ahead of the report; a host that does
+        // not (the dev loop, the REPL) renders the note here
+        Trap::Exit { code } => format!("exit: {code}"),
         Trap::UnknownFunction { module, func } => {
             format!("module `{module}` has no function `{func}`")
         },

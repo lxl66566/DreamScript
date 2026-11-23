@@ -806,7 +806,6 @@ impl Graph {
             name,
             &sources,
             identity,
-            "main",
             false,
             false,
             self.no_ambient,
@@ -1105,7 +1104,6 @@ impl Graph {
 /// validation refusal of the recorded imports.
 pub(crate) fn compile_root(
     file: &Path,
-    entry: &str,
     graph: &Graph,
     script: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
@@ -1131,7 +1129,6 @@ pub(crate) fn compile_root(
         &name,
         &sources,
         identity,
-        entry,
         script,
         true,
         graph.no_ambient,

@@ -332,6 +332,15 @@ pub enum Trap {
         /// The message the spelling staged.
         message: String,
     },
+    /// The `exit(code)` host member's deliberate process status (the
+    /// CLI process surface, ruled 2026-11-21): like `Die`, the engine
+    /// decides nothing — the code rides the trap out and the host's
+    /// exit-code policy applies above it. The native clamps the staged
+    /// word to the portable 0..=255 range.
+    Exit {
+        /// The requested process status.
+        code: i64,
+    },
     /// A print/println write failed at the output sink.
     OutputWrite {
         /// The class of the underlying io failure.
@@ -2720,6 +2729,13 @@ impl Vm {
     #[must_use]
     pub fn captured_output(&self) -> &[u8] {
         self.out.captured_bytes()
+    }
+
+    /// Stages the process arguments the `args` world op answers — the
+    /// host's own wording of the run's command line (the CLI passes its
+    /// `--args` words verbatim).
+    pub fn set_argv(&mut self, argv: Vec<String>) {
+        self.out.set_argv(argv);
     }
 
     /// The current fiber's heap object store: hosts and tests inspect run

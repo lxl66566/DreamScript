@@ -259,12 +259,7 @@ fn run_executes_main_and_named_entries() {
     assert!(ok, "ds run exits 0 (stderr: {err})");
     assert_eq!(out, "true\n");
 
-    // a named entry with staged i64 arguments
-    let (ok, out, err) = ds_run(&["run", file, "--entry", "odd", "--args", "11"]);
-    assert!(ok, "ds run --entry odd (stderr: {err})");
-    assert_eq!(out, "true\n");
-
-    // i64 and f64 results print
+    // a named entry
     let (ok, out, err) = ds_run(&["run", file, "--entry", "answer"]);
     assert!(ok, "ds run --entry answer (stderr: {err})");
     assert_eq!(out, "42\n");

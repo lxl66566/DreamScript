@@ -8,9 +8,7 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Uop},
 };
-use ds_mod::{
-    Constant, EntryArg, Flags, FuncRefKey, Function, Hash128, Module, TargetClass, read, write,
-};
+use ds_mod::{Constant, Flags, FuncRefKey, Function, Hash128, Module, TargetClass, read, write};
 
 /// xorshift64* PRNG: deterministic, no dependency, good enough for byte noise.
 struct Rng(u64);
@@ -147,19 +145,6 @@ fn random_module(u: &mut Unstructured) -> Module {
     // The blocks payload's tag table: dense first-use ids by construction.
     for id in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
         module = module.with_tag(random_string(u, 10), id);
-    }
-    // The entry table: index-prefixed names so rows stay distinct.
-    for index in 0..u8::arbitrary(u).unwrap_or(0) % 4 {
-        let args = (0..u8::arbitrary(u).unwrap_or(0) % 4)
-            .map(|_| match u8::arbitrary(u).unwrap_or(0) % 5 {
-                0 => EntryArg::Int,
-                1 => EntryArg::Float,
-                2 => EntryArg::Bool,
-                3 => EntryArg::OptionalInt,
-                _ => EntryArg::Foreign,
-            })
-            .collect();
-        module = module.with_entry(format!("e{index}{}", random_string(u, 8)), args);
     }
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 9 {
         let (a, b) = (

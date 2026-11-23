@@ -372,27 +372,17 @@ mod tests {
         let root = temp_root("round-trip");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-        let cold = crate::source::compile(
-            &path,
-            "main",
-            false,
-            Some(&cache),
-            crate::source::BundleAfter::Drop,
-        )
-        .expect("compiles");
+        let cold =
+            crate::source::compile(&path, false, Some(&cache), crate::source::BundleAfter::Drop)
+                .expect("compiles");
         let artifact = the_artifact(&root);
         let persisted = std::fs::read(&artifact).expect("the persisted prefix reads");
 
         // The warm compile serves the persisted prefix and answers the cold
         // module byte for byte.
-        let warm = crate::source::compile(
-            &path,
-            "main",
-            false,
-            Some(&cache),
-            crate::source::BundleAfter::Drop,
-        )
-        .expect("compiles");
+        let warm =
+            crate::source::compile(&path, false, Some(&cache), crate::source::BundleAfter::Drop)
+                .expect("compiles");
         assert_eq!(
             ds_mod::write(warm.lowered.module()),
             ds_mod::write(cold.lowered.module()),
@@ -465,14 +455,8 @@ mod tests {
         let root = temp_root("equivalence");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root));
-        crate::source::compile(
-            &path,
-            "main",
-            false,
-            Some(&cache),
-            crate::source::BundleAfter::Drop,
-        )
-        .expect("compiles");
+        crate::source::compile(&path, false, Some(&cache), crate::source::BundleAfter::Drop)
+            .expect("compiles");
 
         let [ambient, user, host] = registered_ids();
         let served = cache
@@ -632,14 +616,8 @@ mod tests {
         let mut persisted = Vec::new();
         for root in &roots {
             let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-            crate::source::compile(
-                &path,
-                "main",
-                false,
-                Some(&cache),
-                crate::source::BundleAfter::Drop,
-            )
-            .expect("compiles");
+            crate::source::compile(&path, false, Some(&cache), crate::source::BundleAfter::Drop)
+                .expect("compiles");
             persisted.push(std::fs::read(the_artifact(root)).expect("the artifact reads"));
         }
         assert_eq!(
@@ -656,14 +634,8 @@ mod tests {
         let root = temp_root("misses");
         let path = write_source("gate", GATE);
         let cache = PrefixCache::discover_at(true, false, Some(root.clone()));
-        crate::source::compile(
-            &path,
-            "main",
-            false,
-            Some(&cache),
-            crate::source::BundleAfter::Drop,
-        )
-        .expect("compiles");
+        crate::source::compile(&path, false, Some(&cache), crate::source::BundleAfter::Drop)
+            .expect("compiles");
         let artifact = the_artifact(&root);
         let [ambient, user, host] = registered_ids();
 

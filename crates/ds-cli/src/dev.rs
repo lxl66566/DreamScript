@@ -51,10 +51,10 @@
 //! dep name the registry never held installs through the walk as
 //! ever. One module's dep list linking one name at two hashes stays
 //! refused (the walk's link-table rule; same-name multi-hash
-//! coexistence stays refused per G3.5). `--args` stages the entry's
-//! parameters per their checked types — the same staging `ds run
-//! --args` drives — re-derived on every reload, so a restart stages
-//! exactly what a fresh run of the same version would.
+//! coexistence stays refused per G3.5). `--args` carries the verbatim
+//! process arguments the program reads through `args()`, staged once
+//! on the session VM, so a restart reads exactly what a fresh run of
+//! the same version would.
 //!
 //! The watch is a poll read (`--poll-ms`, default 100ms) against the
 //! last loaded bytes — no fs-watcher dependency this round; changes land
@@ -108,11 +108,10 @@ pub struct DevArgs {
     /// The watch poll interval, in milliseconds
     #[arg(long, default_value_t = 100)]
     poll_ms: u64,
-    /// i64 arguments staged onto the entry's parameters per their
-    /// checked types, the same staging `ds run --args` drives —
-    /// re-derived on every reload
-    #[arg(long, num_args = 0.., value_name = "I64")]
-    args: Vec<i64>,
+    /// String arguments the dev-served program reads through `args()`
+    /// (the CLI process surface), staged verbatim on the session VM
+    #[arg(long, num_args = 0.., value_name = "STRING")]
+    args: Vec<String>,
 }
 
 /// What the loop watches and how a changed round recompiles: a bare
@@ -145,12 +144,6 @@ struct DevSession {
     loaded: Option<String>,
     name: String,
     entry: String,
-    /// The `--args` words, staged per the entry's checked parameter
-    /// types on every reload.
-    args: Vec<i64>,
-    /// The staged entry words of the installed version; a restart
-    /// spawns with them.
-    staged: Vec<Value>,
     no_ambient: bool,
     vm: Vm,
     fiber: Option<FiberId>,
@@ -189,16 +182,18 @@ impl DevSession {
                 file,
             }
         };
+        let mut vm = repl::fresh_vm();
+        // the process arguments stage once: every round's installed
+        // version reads the same `args()` answer
+        vm.set_argv(args.args.clone());
         Self {
             watch,
             path: args.file.clone(),
             loaded: None,
             name: name.to_owned(),
             entry: args.entry.clone(),
-            args: args.args.clone(),
-            staged: Vec::new(),
             no_ambient: args.no_ambient,
-            vm: repl::fresh_vm(),
+            vm,
             fiber: None,
             clean: false,
             failed: false,
@@ -221,8 +216,7 @@ impl DevSession {
         if let Some(watched) = watched.filter(|watched| self.loaded.as_deref() != Some(watched)) {
             self.loaded = Some(watched.to_owned());
             match self.reload(watched)? {
-                Some(staged) => {
-                    self.staged = staged;
+                Some(()) => {
                     self.clean = true;
                     installed = true;
                 },
@@ -252,25 +246,16 @@ impl DevSession {
     }
 
     /// One changed round's recompile over whichever target the loop
-    /// watches, answering the round's staged entry words when it
-    /// installs and `None` when it refuses. The borrows stay on
-    /// disjoint fields: the watch's database on one hand, the VM on
-    /// the other.
-    fn reload(&mut self, watched: &str) -> Result<Option<Vec<Value>>> {
+    /// watches, answering `Some(())` when it installs and `None` when it
+    /// refuses. The borrows stay on disjoint fields: the watch's
+    /// database on one hand, the VM on the other.
+    fn reload(&mut self, watched: &str) -> Result<Option<()>> {
         match &mut self.watch {
-            Watch::Script { db, file } => Self::reload_script(
-                db,
-                *file,
-                watched,
-                &self.name,
-                &self.entry,
-                &self.args,
-                &mut self.vm,
-            ),
+            Watch::Script { db, file } => {
+                Self::reload_script(db, *file, watched, &self.name, &mut self.vm)
+            },
             Watch::Package => Ok(Self::reload_package(
                 &self.path,
-                &self.entry,
-                &self.args,
                 self.no_ambient,
                 &mut self.vm,
             )),
@@ -279,20 +264,15 @@ impl DevSession {
 
     /// One changed script round: recompiles through the memoized
     /// queries and installs the lowered module over its own retiring
-    /// version. The entry's staging plan re-derives per round, so
-    /// `--args` stages this version's own parameter facts; a staging
-    /// refusal keeps the installed version like any other refused
-    /// round. Answers `None` when the round refuses — diagnostics
+    /// version. Answers `None` when the round refuses — diagnostics
     /// printed, the installed version untouched.
     fn reload_script(
         db: &mut Db,
         file: FileId,
         text: &str,
         name: &str,
-        entry: &str,
-        args: &[i64],
         vm: &mut Vm,
-    ) -> Result<Option<Vec<Value>>> {
+    ) -> Result<Option<()>> {
         db.set_file_content(file, text)?;
         let reports = Self::check(db, file)?;
         if !reports.is_empty() {
@@ -337,25 +317,11 @@ impl DevSession {
                 return Ok(None);
             },
         };
-        let plans = source::entry_staging_plan(&analyzed.asts, &analyzed, entry);
-        let staged = match run::stage_source_args(
-            name,
-            plans.as_deref(),
-            lowered.tag("int"),
-            lowered.tag("none"),
-            args,
-        ) {
-            Ok(staged) => staged,
-            Err(error) => {
-                eprintln!("dev: {error:#}");
-                return Ok(None);
-            },
-        };
         if let Err(error) = vm.install_dsmod(lowered.into_module()) {
             eprintln!("dev: installing the reload refused: {error:?}");
             return Ok(None);
         }
-        Ok(Some(staged))
+        Ok(Some(()))
     }
 
     /// One changed package-root round: the manifest graph re-resolves
@@ -373,13 +339,7 @@ impl DevSession {
     /// The compile is cold every round, the package run's own rule.
     /// Answers `None` when the round refuses — reported, the installed
     /// version untouched.
-    fn reload_package(
-        path: &Path,
-        entry: &str,
-        args: &[i64],
-        no_ambient: bool,
-        vm: &mut Vm,
-    ) -> Option<Vec<Value>> {
+    fn reload_package(path: &Path, no_ambient: bool, vm: &mut Vm) -> Option<()> {
         let graph = match package::open(path, no_ambient) {
             Ok(Some(graph)) => graph,
             Ok(None) => {
@@ -403,7 +363,7 @@ impl DevSession {
         for (name, module) in modules {
             vm.install_bound(&name, module);
         }
-        let compiled = match package::compile_root(path, entry, &graph, false, None, None) {
+        let compiled = match package::compile_root(path, &graph, false, None, None) {
             Ok(compiled) => compiled,
             Err(error) => {
                 eprintln!("dev: {error:#}");
@@ -446,19 +406,6 @@ impl DevSession {
                 return None;
             }
         }
-        let staged = match run::stage_source_args(
-            &compiled.name,
-            compiled.entry_args.as_deref(),
-            compiled.lowered.tag("int"),
-            compiled.lowered.tag("none"),
-            args,
-        ) {
-            Ok(staged) => staged,
-            Err(error) => {
-                eprintln!("dev: {error:#}");
-                return None;
-            },
-        };
         // a member that fails to compile refuses through the walk's
         // provider miss, so its failure rides the stash out of the
         // provider closure
@@ -480,7 +427,7 @@ impl DevSession {
             eprintln!("dev: installing the reload refused: {error:?}");
             return None;
         }
-        Some(staged)
+        Some(())
     }
 
     /// The memoized query pass over the watched file (the same surface
@@ -547,11 +494,10 @@ impl DevSession {
     }
 
     /// Spawns the entry fiber: resolves through the current slot, so a
-    /// restart runs the version this round installed, staging the words
-    /// this round derived (a reload that changed the entry's shape
-    /// staged against the new parameters).
+    /// restart runs the version this round installed. The entry binds no
+    /// parameters — the program reads `args()` off the process surface.
     fn spawn_entry(&mut self) -> Option<FiberId> {
-        match self.vm.spawn_fiber(&self.name, &self.entry, &self.staged) {
+        match self.vm.spawn_fiber(&self.name, &self.entry, &[]) {
             Ok(fiber) => Some(fiber),
             Err(trap) => {
                 eprintln!("dev: {}", run::trap_error(&self.vm, &trap));

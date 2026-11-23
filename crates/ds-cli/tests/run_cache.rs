@@ -3,12 +3,11 @@
 //! reproduces the cold output byte for byte, an edit re-keys, a corrupt
 //! artifact falls back and is repaired, a failing program writes
 //! nothing, an unusable cache root still runs, the off switch forces
-//! the cold path, a parameterized entry — staging from the
-//! artifact's recorded entry plan and member-tag table — serves warm
-//! with arguments staged identically to the cold path, an entry spelling
-//! the artifact records no plan for (a synthesized member) stays cold,
-//! and both artifact writers record the dep list a deps-first load walk
-//! resolves over the cached artifact. Every spawn points `DS_CACHE` at
+//! the cold path, an `args()`-reading program answers the verbatim
+//! process arguments identically warm and cold, an entry flag onto a
+//! zero-parameter lambda or a synthesized member serves warm, and both
+//! artifact writers record the dep list a deps-first load walk resolves
+//! over the cached artifact. Every spawn points `DS_CACHE` at
 //! a private temp directory with the debug observable on, so the tests
 //! prove which path a run took without timing it.
 
@@ -23,10 +22,11 @@ use ds_mod::Hash128;
 /// A written zero-parameter entry: the shape the cache serves.
 const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n";
 
-/// A parameterized entry: stages from the artifact's recorded plan (the
-/// optional's two-word union span and its member tags).
-const PARAM_MAIN: &str = "fn main(port: int?) -> () {\n  if port is none {\n    println(\"no \
-                          port\")\n  } else {\n    println(\"port\")\n  }\n}\n";
+/// An `args()`-reading entry: the verbatim process arguments, the CLI
+/// process surface's argv (the `get` member is the subset's checked read).
+const ARGS_MAIN: &str = "fn main() -> () {\n  const argv = args()\n  if len(argv) == 0 {\n    \
+                         println(\"no port\")\n  } else {\n    println(\"port \
+                         ${argv.get(0).ok((w: string) => w).err((_: none) => \"?\")}\")\n  }\n}\n";
 
 /// One private cache root per tag: tests never share a root and never
 /// touch a real user cache directory.
@@ -136,24 +136,32 @@ fn cold_writes_one_artifact_and_warm_hits_identically() {
 }
 
 #[test]
-fn staged_args_on_a_served_entry_refuse_identically() {
-    // a zero-parameter entry with a staged argument list refuses at the
-    // staging plan's count diagnostic on both paths
-    let cache = cache_dir("args");
-    let source = source_file("args", WRITTEN_MAIN);
-    let (ok, _, err) = ds_run(&cache, &["run", &run_path(&source)]);
-    assert!(ok, "the cold run succeeds (stderr: {err})");
+fn a_parameterized_entry_reports_the_vm_refusal() {
+    // entries bind no parameters: a parameterized `main` refuses at the
+    // VM's argument-count gate, cold and warm alike
+    let cache = cache_dir("refusal");
+    let source = source_file(
+        "refusal",
+        "fn main(name: string) -> () {\n  println(name)\n}\n",
+    );
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(!ok, "the cold parameterized entry fails");
+    assert_eq!(out, "", "stdout stays clean");
+    assert!(
+        err.contains("callee expects 1 argument(s)"),
+        "the cold run answers the VM's refusal: {err}"
+    );
 
-    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source), "--args", "7"]);
-    assert!(!ok, "a staged list against a zero-parameter entry fails");
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    assert!(!ok, "the warm parameterized entry fails");
     assert_eq!(out, "", "stdout stays clean");
     assert!(
         err.contains("cache: hit"),
         "the artifact still serves: {err}"
     );
     assert!(
-        err.contains("--args stages 1 value(s) but entry `args` takes 0 parameter(s)"),
-        "the hit path answers the compile path's count refusal: {err}"
+        err.contains("callee expects 1 argument(s)"),
+        "the warm run answers the same refusal: {err}"
     );
     let _ = fs::remove_dir_all(&cache);
 }
@@ -321,66 +329,58 @@ fn no_cache_disables_the_lookup_and_the_store() {
 }
 
 #[test]
-fn a_parameterized_entry_stages_identically_warm_and_cold() {
-    // the staged optional's cold output, from a fresh root, is the
+fn argv_reaches_the_program_identically_warm_and_cold() {
+    // the argv-bearing cold output, from a fresh root, is the
     // byte-identical reference the warm run must reproduce
-    let cold = cache_dir("param-cold");
-    let cold_source = source_file("paramcold", PARAM_MAIN);
+    let cold = cache_dir("argv-cold");
+    let cold_source = source_file("argvcold", ARGS_MAIN);
     let (ok, cold_out, err) = ds_run(&cold, &["run", &run_path(&cold_source), "--args", "8080"]);
-    assert!(ok, "the cold staged optional runs (stderr: {err})");
-    assert_eq!(cold_out, "port\n0\n");
+    assert!(ok, "the cold argv run succeeds (stderr: {err})");
+    assert_eq!(cold_out, "port 8080\n0\n");
     let _ = fs::remove_dir_all(&cold);
 
-    let cache = cache_dir("param");
-    let source = source_file("param", PARAM_MAIN);
+    let cache = cache_dir("argv");
+    let source = source_file("argv", ARGS_MAIN);
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
-    assert!(ok, "the parameterized entry runs (stderr: {err})");
+    assert!(ok, "the args-reading entry runs (stderr: {err})");
     assert_eq!(out, "no port\n0\n");
     assert!(
         err.contains("cache: miss"),
         "the first run compiles in-process: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 1, "the parameterized entry caches");
+    assert_eq!(artifacts(&cache).len(), 1, "the args-reading entry caches");
 
     let (ok, warm_out, warm_err) = ds_run(&cache, &["run", &run_path(&source)]);
-    assert!(ok, "the warm parameterized entry runs (stderr: {warm_err})");
+    assert!(ok, "the warm args-reading entry runs (stderr: {warm_err})");
     assert_eq!(warm_out, out, "the warm run prints the cold output");
     assert!(
         warm_err.contains("cache: hit"),
-        "the parameterized entry serves warm: {warm_err}"
+        "the args-reading entry serves warm: {warm_err}"
     );
 
-    let (ok, staged_out, staged_err) =
-        ds_run(&cache, &["run", &run_path(&source), "--args", "8080"]);
-    assert!(ok, "the warm staged optional runs (stderr: {staged_err})");
+    let (ok, argv_out, argv_err) = ds_run(&cache, &["run", &run_path(&source), "--args", "8080"]);
+    assert!(ok, "the warm argv run succeeds (stderr: {argv_err})");
     assert_eq!(
-        staged_out, cold_out,
-        "the warm staged run prints the cold staged output"
+        argv_out, cold_out,
+        "the warm argv run prints the cold argv output"
     );
     assert!(
-        staged_err.contains("cache: hit"),
-        "the staged optional serves warm: {staged_err}"
+        argv_err.contains("cache: hit"),
+        "the argv run serves warm: {argv_err}"
     );
     assert_eq!(artifacts(&cache).len(), 1, "the hit path writes nothing");
     let _ = fs::remove_dir_all(&cache);
 }
 
 #[test]
-fn an_entry_flag_onto_a_parameterized_lambda_serves_warm() {
+fn an_entry_flag_onto_a_lambda_serves_warm() {
     let cache = cache_dir("entryflag");
     let source = source_file(
         "entryflag",
-        "fn worker(n: int) -> int {\n  n +% 1\n}\nfn main() -> () {\n  println(\"string \
-         ${worker(1)}\")\n}\n",
+        "fn worker() -> int {\n  41 +% 1\n}\nfn main() -> () {\n  println(\"string \
+         ${worker()}\")\n}\n",
     );
-    let (ok, out, err) = ds_run(&cache, &[
-        "run",
-        &run_path(&source),
-        "--entry",
-        "worker",
-        "--args",
-        "41",
-    ]);
+    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source), "--entry", "worker"]);
     assert!(ok, "the flagged entry runs cold (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(
@@ -389,83 +389,41 @@ fn an_entry_flag_onto_a_parameterized_lambda_serves_warm() {
     );
     assert_eq!(artifacts(&cache).len(), 1);
 
-    let (ok, warm_out, warm_err) = ds_run(&cache, &[
-        "run",
-        &run_path(&source),
-        "--entry",
-        "worker",
-        "--args",
-        "41",
-    ]);
+    let (ok, warm_out, warm_err) =
+        ds_run(&cache, &["run", &run_path(&source), "--entry", "worker"]);
     assert!(ok, "the flagged entry runs warm (stderr: {warm_err})");
     assert_eq!(warm_out, out, "the warm flagged run prints the cold output");
     assert!(
         warm_err.contains("cache: hit"),
-        "the flagged parameterized lambda serves warm: {warm_err}"
+        "the flagged lambda serves warm: {warm_err}"
     );
     let _ = fs::remove_dir_all(&cache);
 }
 
 #[test]
-fn an_entry_flag_on_a_synthesized_member_stays_cold() {
-    // `unit#make` is a parameterized function the artifact records no
-    // entry plan for (synthesized member spelling), so every run
-    // bypasses the artifact and compiles — staging raw, exactly as the
-    // compile path does for a name that is no source binding
+fn an_entry_flag_on_a_synthesized_member_serves_warm() {
+    // `unit#make` is a zero-parameter synthesized member spelling; like
+    // every zero-parameter entry it serves warm from the artifact
     let cache = cache_dir("member");
     let source = source_file(
         "member",
-        "struct unit {}\nimpl unit {\n  fn make(w: int) -> int {\n    w +% w\n  }\n}\nfn main() \
-         -> () {\n  println(\"string ${unit.make(21)}\")\n}\n",
+        "struct unit {}\nimpl unit {\n  fn make() -> int {\n    21 +% 21\n  }\n}\nfn main() -> () \
+         {\n  println(\"string ${unit.make()}\")\n}\n",
     );
     let (ok, _, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the plain run succeeds (stderr: {err})");
     assert_eq!(artifacts(&cache).len(), 1);
 
     for _ in 0..2 {
-        let (ok, out, err) = ds_run(&cache, &[
-            "run",
-            &run_path(&source),
-            "--entry",
-            "unit#make",
-            "--args",
-            "21",
-        ]);
+        let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source), "--entry", "unit#make"]);
         assert!(ok, "the synthesized-member entry runs (stderr: {err})");
         assert_eq!(out, "42\n");
         assert!(
-            err.contains("cache: bypassed"),
-            "a synthesized member spelling never serves: {err}"
+            err.contains("cache: hit"),
+            "the flagged synthesized member serves warm: {err}"
         );
     }
-    assert_eq!(artifacts(&cache).len(), 1, "the bypass path writes nothing");
-    let _ = fs::remove_dir_all(&cache);
-}
-
-#[test]
-fn a_foreign_parameter_refuses_identically_warm_and_cold() {
-    // a Foreign plan rides the artifact as a refusal fact, so the warm
-    // run answers the compile path's staging refusal verbatim
-    let cache = cache_dir("foreign");
-    let source = source_file(
-        "foreign",
-        "fn main(name: string) -> () {\n  println(name)\n}\n",
-    );
-    let (_, cold_out, cold_err) = ds_run(&cache, &["run", &run_path(&source), "--args", "7"]);
-    assert!(
-        cold_err.contains("--args cannot stage entry `foreign`'s parameter 1"),
-        "the cold run refuses the string parameter: {cold_err}"
-    );
-    let (_, warm_out, warm_err) = ds_run(&cache, &["run", &run_path(&source), "--args", "7"]);
-    assert!(
-        warm_err.contains("cache: hit"),
-        "the foreign-parameter entry still serves: {warm_err}"
-    );
-    assert_eq!(warm_out, cold_out, "stdout stays clean on both paths");
-    assert!(
-        warm_err.contains("--args cannot stage entry `foreign`'s parameter 1"),
-        "the warm run answers the same refusal: {warm_err}"
-    );
+    assert_eq!(artifacts(&cache).len(), 1, "the hit path writes nothing");
     let _ = fs::remove_dir_all(&cache);
 }
 

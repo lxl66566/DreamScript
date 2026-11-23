@@ -35,8 +35,10 @@
 
 // The default platform (H5, E1): the `ds` CLI is this platform's
 // provider, and the checker verifies the package's world usage stays
-// inside what it provides.
-platform "std" provides <console, fsys, net, time>
+// inside what it provides. The `proc` capability is the CLI process
+// surface (ruled 2026-11-21): string argv, the environment read, and
+// process spawn.
+platform "std" provides <console, fsys, net, time, proc>
 
 pub trait Copyable { }
 
@@ -455,6 +457,13 @@ pub extern fn char_hash (c: char) -> int
 pub extern fn bytes_hash (b: bytes) -> int
 pub extern fn println (msg: string) -> ()
 pub extern fn print (msg: string) -> ()
+// The console face's stderr twins and stdin read (the CLI process
+// surface, 2026-11-21): the error stream mirrors the stdout pair, and
+// `read_line` answers one stdin line per call, the checked none member
+// at end of input.
+pub extern fn eprintln (msg: string) -> ()
+pub extern fn eprint (msg: string) -> ()
+pub extern fn read_line () -> string | none
 pub extern fn read_file (path: string) -> string | io_err
 pub extern fn write_file (path: string, contents: string) -> ()
 pub extern fn file_exists (path: string) -> bool
@@ -466,6 +475,18 @@ pub extern fn close_raw (fd: int) -> ()
 // The clock: the `time` capability's one op, epoch nanoseconds (the
 // minimal face — a monotonic or zone-aware clock layers over this word).
 pub extern fn time () -> int
+// The process face (the CLI process surface, 2026-11-21): `args`
+// answers the process arguments the host staged (`ds run`'s `--args`
+// words) as a list of strings, `env` reads one process environment
+// variable into the checked none member when unset, and `proc_run`
+// spawns one child over the argument list — inheriting the standard
+// streams — and answers its exit status, a spawn failure riding the
+// io_err union and a child ended without a status code answering -1.
+// The `exit(code)` spelling is the CLI host's own provision beside
+// `die` (the host owns the exit code), never an ambient declaration.
+pub extern fn args () -> list[string]
+pub extern fn env (name: string) -> string | none
+pub extern fn proc_run (cmd: string, args: list[string]) -> int | io_err
 pub extern fn net_connect (host: string, port: int) -> net_handle
 pub extern fn net_send (conn: int, data: string) -> () | net_err
 pub extern fn net_recv (conn: int, max_bytes: int) -> string | net_err

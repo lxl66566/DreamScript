@@ -209,7 +209,7 @@ fn require_name(m: map[string, string]) -> string | parse_error {
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).ok((n: string) => n).err((e) => "?")}")
 ```
 
-The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses.
+The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses. The process face rides the `proc` capability of `platform "std"`: `args()` answers the process arguments `ds run --args` stages, `env(name)` reads one variable into the checked none member, `read_line()` answers stdin's next line, `eprint`/`eprintln` write stderr, and `proc_run(cmd, args)` answers a spawned child's exit status. Beside `die`, the host member `exit(code)` ends the process with a deliberate status — the CLI owns the code: 0 clean, 1 trapped.
 
 ## Linearity
 
@@ -422,7 +422,7 @@ The run half is live: `ds run` folds an entry file's top-level statements into a
 
 `ds repl` is the interactive half: declarations append as their own blocks and statements fold into a REPL-owned `main`, each submission printing the value, its inferred type, and its effect row. The frame parks between submissions and resumes at the new statement, so prior statements run once. A trapping line rolls back without committing, its deinit-carrying bindings firing once on the drain. `:drop <name>` fires one live binding's deinit, `:reset` clears the session, `:quit` leaves.
 
-`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself, a loop-driving entry parking at its back edge every watch round, so no language spelling exists; every saved edit recompiles and swaps the module in place, the parked frame's next call running the new code. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` stages the entry's parameters as `ds run` does.
+`ds dev file.ds --hot` is the running-program half: the dev host injects the suspension itself, a loop-driving entry parking at its back edge every watch round, so no language spelling exists; every saved edit recompiles and swaps the module in place, the parked frame's next call running the new code. A `ds.pkg` beside the file turns the watch over the package root it names, and `--args` carries the process arguments the program reads through `args()` as `ds run` does.
 
 `ds lsp` answers, over stdio, the hovering position's checked type with its effect row, preceded by the declaration's `.dsi` signature line when the position names an exported one; a word an import selection names but the open documents alone leave unknown answers its line from the linked dependency's cached `.dsi` artifact.
 

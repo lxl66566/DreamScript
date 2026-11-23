@@ -9,7 +9,7 @@ use ds_abi::{
     FrameLayout, SlotType,
     uop::{ConstIdx, Uop},
 };
-use ds_mod::{Constant, EntryArg, Flags, Function, FuncRefKey, Hash128, Module, TargetClass, write};
+use ds_mod::{Constant, Flags, Function, FuncRefKey, Hash128, Module, TargetClass, write};
 
 /// xorshift64* PRNG: deterministic, no dependency, good enough for byte noise.
 struct Rng(u64);
@@ -159,19 +159,6 @@ fn random_module(rng: &mut Rng) -> Module {
     // the blocks payload's tag table: dense first-use ids by construction
     for id in 0..rng.byte() % 5 {
         module = module.with_tag(random_string(rng, 10), id);
-    }
-    // the entry table: index-prefixed names so rows stay distinct
-    for index in 0..rng.byte() % 4 {
-        let args = (0..rng.byte() % 4)
-            .map(|_| match rng.byte() % 5 {
-                0 => EntryArg::Int,
-                1 => EntryArg::Float,
-                2 => EntryArg::Bool,
-                3 => EntryArg::OptionalInt,
-                _ => EntryArg::Foreign,
-            })
-            .collect();
-        module = module.with_entry(format!("e{index}{}", random_string(rng, 8)), args);
     }
     for _ in 0..rng.byte() % 9 {
         let (a, b) = (rng.next_u64() as u32, rng.next_u64() as u32);

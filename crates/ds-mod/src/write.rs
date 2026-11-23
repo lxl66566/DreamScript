@@ -5,17 +5,18 @@ use crate::{
     FORMAT_VERSION, MAGIC,
     header::{SectionKind, TargetClass},
     module::{
-        Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
-        bound_ret_tag, entry_arg_tag, slot_tag,
+        Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, MemberTag, Module, bound_ret_tag,
+        slot_tag,
     },
     varint::{put_uleb, uleb_len},
 };
 
 /// The blocks-section payload version this crate writes and reads.
 /// Version 2 appends the module-level evidence-chain table after the
-/// function records; version 3 appends the tag table and the entry
-/// staging table after the chains.
-pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 3;
+/// function records; version 3 appends the tag table; version 4 retires
+/// the entry staging table (the process surface's string argv
+/// superseded entry-parameter staging).
+pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 4;
 
 /// Serializes `module` deterministically: equal modules produce equal
 /// bytes, and reading the output back yields a module that serializes to
@@ -31,13 +32,7 @@ pub fn write(module: &Module) -> Vec<u8> {
     entries.push((
         SectionKind::Blocks,
         measure(|out| {
-            blocks_into(
-                out,
-                module.functions(),
-                module.chains(),
-                module.tags(),
-                module.entries(),
-            );
+            blocks_into(out, module.functions(), module.chains(), module.tags());
         }),
     ));
     entries.push((
@@ -103,13 +98,9 @@ pub fn write(module: &Module) -> Vec<u8> {
             "{kind} payload must start at its directory offset"
         );
         match kind {
-            SectionKind::Blocks => blocks_into(
-                &mut out,
-                module.functions(),
-                module.chains(),
-                module.tags(),
-                module.entries(),
-            ),
+            SectionKind::Blocks => {
+                blocks_into(&mut out, module.functions(), module.chains(), module.tags());
+            },
             SectionKind::Constants => constants_into(&mut out, module.constants()),
             SectionKind::TypeMetadata | SectionKind::EffectRows => placeholder_into(&mut out),
             SectionKind::DebugSpans => {
@@ -224,16 +215,14 @@ fn placeholder_into<S: Sink>(out: &mut S) {
     out.uleb(0);
 }
 
-/// The blocks payload, version 3 (BL-7): per-function records over the
-/// BL-5 uop set and BL-6 frame layouts, then the module-level
-/// evidence-chain table, the tag table, and the entry staging table. See
-/// the crate docs for the byte layout.
+/// The blocks payload, version 4: per-function records over the BL-5
+/// uop set and BL-6 frame layouts, then the module-level evidence-chain
+/// table and the tag table. See the crate docs for the byte layout.
 fn blocks_into<S: Sink>(
     out: &mut S,
     functions: &[Function],
     chains: &[EvidenceChain],
     tags: &[MemberTag],
-    entries: &[EntryPlan],
 ) {
     out.push(BLOCKS_PAYLOAD_VERSION);
     out.uleb(uleb64(functions.len()));
@@ -270,14 +259,6 @@ fn blocks_into<S: Sink>(
     for tag in tags {
         put_str(out, &tag.name);
         out.uleb(u64::from(tag.id));
-    }
-    out.uleb(uleb64(entries.len()));
-    for entry in entries {
-        put_str(out, &entry.name);
-        out.uleb(uleb64(entry.args.len()));
-        for arg in &entry.args {
-            out.push(entry_arg_tag(*arg));
-        }
     }
 }
 

@@ -582,28 +582,32 @@ fn an_empty_source_reports_its_own_diagnostic() {
     );
 }
 
-/// A parameterized entry stages `--args` per its checked parameters, the
-/// same staging `ds run --args` drives: the first round runs the staged
-/// values, and after the entry completes, a changed round restarts it
-/// with the same values re-derived — the reload's restart prints exactly
-/// what a fresh `ds run` of the updated source prints.
+/// The process arguments reach the entry through `args()` on every
+/// version: the first round runs the argv the session staged, and after
+/// the entry completes, a changed round restarts it reading the same
+/// argv — the reload's restart prints exactly what a fresh `ds run` of
+/// the updated source prints.
 #[test]
-fn an_args_entry_survives_a_reload_with_its_staged_arguments() {
+fn an_argv_entry_survives_a_reload_reading_the_process_arguments() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let prog = dir.path().join("prog.ds");
-    let v1 = "fn main(n: int) -> int {\n  println(\"got ${n}\")\n  return n * 2\n}\n";
-    let v2 = "fn main(n: int) -> int {\n  println(\"got ${n}\")\n  return n * 10\n}\n";
+    let v1 = "fn main() -> int {\n  const n = args().get(0).ok((w: string) => w).err((_: none) => \
+              \"0\").parse_int().err((_: parse_err) => 0)\n  println(\"got ${n}\")\n  return n * \
+              2\n}\n";
+    let v2 = "fn main() -> int {\n  const n = args().get(0).ok((w: string) => w).err((_: none) => \
+              \"0\").parse_int().err((_: parse_err) => 0)\n  println(\"got ${n}\")\n  return n * \
+              10\n}\n";
     std::fs::write(&prog, v1).expect("the source writes");
     let mut command = ds();
     command.arg("dev").arg(&prog).arg("--args").arg("21");
     let mut dev = Dev::launch(command, 100);
-    assert_eq!(dev.line(), "got 21", "the first round stages --args");
+    assert_eq!(dev.line(), "got 21", "the first round reads --args");
     assert_eq!(dev.line(), "42", "the completed entry answers n * 2");
     std::fs::write(&prog, v2).expect("the change writes");
     assert_eq!(
         dev.line(),
         "got 21",
-        "the restarted entry re-stages the same arguments"
+        "the restarted entry reads the same process arguments"
     );
     assert_eq!(dev.line(), "210", "the new version answers n * 10");
     dev.kill();
@@ -649,14 +653,19 @@ fn root_manifest(lib: Hash128) -> String {
 /// The root program the package-root session drives: `work` is the
 /// same-module helper whose fully-qualified call redirects through the
 /// swapped slot, `twice` the linked dep the walk installs, and `main` a
-/// parameterized entry whose staged `--args` survive every reload.
+/// zero-parameter entry reading its `n` off the process arguments
+/// (`args()`), the same argv on every version.
 fn root_program(work: &str, main_tail: bool) -> String {
     let mut text = String::new();
     text.push_str("import @lib/helper (twice)\n\n");
     text.push_str("fn work(n: int) -> int {\n  ");
     text.push_str(work);
     text.push_str("\n}\n\n");
-    text.push_str("fn main(n: int) -> int {\n");
+    text.push_str("fn main() -> int {\n");
+    text.push_str(
+        "  const n = args().get(0).ok((w: string) => w).err((_: none) => \
+         \"0\").parse_int().err((_: parse_err) => 0)\n",
+    );
     if main_tail {
         text.push_str("  println(\"${work(n)}\")\n  return n\n");
     } else {
@@ -674,7 +683,7 @@ fn root_program(work: &str, main_tail: bool) -> String {
 /// store through the deps-first walk. A member edit swaps mid-run (the
 /// parked frame's next `work` call resolves through the current slot),
 /// a refused round keeps the installed version running, and the
-/// completed entry's restart re-stages `--args` on the new version.
+/// completed entry's restart reads the same argv on the new version.
 #[test]
 fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -747,12 +756,12 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
         "the parked frame's next call runs v2's work"
     );
     assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
-    // the completed entry restarts on the next change, re-staging --args
+    // the completed entry restarts on the next change, reading argv
     std::fs::write(&entry, &v3).expect("the restart writes");
     assert_eq!(
         dev.line(),
         "42",
-        "the restart re-stages n and runs v3's work"
+        "the restart reads the same argv and runs v3's work"
     );
     assert_eq!(dev.line(), "21", "the restarted entry answers n");
     dev.kill();
@@ -777,8 +786,9 @@ fn a_package_root_sibling_edit_hot_reloads() {
     let entry = root.join("app.ds");
     std::fs::write(
         &entry,
-        "fn main(n: int) -> int {\n  var i = 0\n  while i < 10 {\n    println(\"${work(n)}\")\n    \
-         i = i + 1\n  }\n  return 0\n}\n",
+        "fn main() -> int {\n  const n = args().get(0).ok((w: string) => w).err((_: none) => \
+         \"0\").parse_int().err((_: parse_err) => 0)\n  var i = 0\n  while i < 10 {\n    \
+         println(\"${work(n)}\")\n    i = i + 1\n  }\n  return 0\n}\n",
     )
     .expect("the source writes");
 

@@ -28,7 +28,7 @@ use ds_parse::{Ast, ItemKind, PlatformDecl};
 use crate::effects::{Effect, Effects};
 
 /// The world capability vocabulary (H5's provides list), in bit order.
-pub const CAPABILITIES: [&str; 4] = ["console", "fsys", "net", "time"];
+pub const CAPABILITIES: [&str; 5] = ["console", "fsys", "net", "time", "proc"];
 
 /// One capability's bit in a `[Caps]` set.
 #[must_use]

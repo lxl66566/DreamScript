@@ -721,6 +721,59 @@ pub(crate) const NATIVES: &[Native] = &[
         index: 15,
         shape: NativeShape::Total(SlotType::I64), // epoch nanoseconds
     },
+    Native {
+        // the stdin read's checked span: one line under the ok member,
+        // the none member at end of input
+        name: "read_line",
+        module: NativeModule::Platform,
+        index: 17,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        name: "eprintln",
+        module: NativeModule::Platform,
+        index: 18,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        name: "eprint",
+        module: NativeModule::Platform,
+        index: 19,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the host-staged process arguments, one list object
+        name: "args",
+        module: NativeModule::Platform,
+        index: 20,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        // the environment read's checked span: the value under the ok
+        // member, the none member when unset
+        name: "env",
+        module: NativeModule::Platform,
+        index: 21,
+        shape: NativeShape::Checked,
+    },
+    Native {
+        name: "proc_run",
+        module: NativeModule::Platform,
+        index: 22,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64, // the child's exit status
+            err_prefix: "io error: ",
+        },
+    },
+    Native {
+        // the `exit(code)` host member's seam (the CLI process surface):
+        // the unit shape only satisfies the call site's width check,
+        // the native never answers — the status rides the trap out
+        name: "exit",
+        module: NativeModule::Platform,
+        index: 23,
+        shape: NativeShape::Total(SlotType::I64),
+    },
     // The nursery surface's internal seams [E2]: no ambient spelling
     // declares these, so no call site resolves them by name — the
     // `nursery`/`spawn`/`cancel` emissions synthesize the pool FuncRefs.
@@ -1204,7 +1257,7 @@ mod drift {
         assert_eq!(DEFAULT_PLATFORM_NAME, ds_vm::platform::STD_NAME);
         assert_eq!(
             ds_vm::platform::Platform::std().capabilities().len(),
-            5,
+            6,
             "the default platform serves every capability"
         );
         assert_eq!(PLATFORM_IO_OK, ds_vm::native::PLATFORM_IO_OK);

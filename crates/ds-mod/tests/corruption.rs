@@ -55,9 +55,9 @@ fn bad_version_rejected() {
     assert_eq!(error, ReadError::UnsupportedVersion { found: 9 });
     assert_diagnostic(&error, ErrorCode::ModuleVersionUnsupported);
     // Format versions 1 (pre BL-7 header fields), 2 (pre FuncRef
-    // constants kind), and 3 (pre selector-led FuncRef keys) are
-    // rejected too.
-    for version in 1..=3 {
+    // constants kind), 3 (pre selector-led FuncRef keys), and 4 (pre
+    // entry-table retirement) are rejected too.
+    for version in 1..=4 {
         bytes[4] = version;
         assert_eq!(
             read(&bytes).expect_err(&format!("version {version} rejected")),
@@ -396,43 +396,6 @@ fn jump_out_of_body_rejected() {
 }
 
 #[test]
-fn unknown_entry_plan_rejected() {
-    // One recorded entry "zebra" with one Int plan: the name, the plan
-    // count 1, and the plan byte 0 sit contiguously in the blocks
-    // payload's entry table; patch the plan byte past the vocabulary.
-    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
-        .with_entry("zebra", vec![ds_mod::EntryArg::Int]);
-    let mut bytes = write(&module);
-    let needle: &[u8] = b"zebra\x01\x00";
-    let pos = bytes
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .expect("entry record present");
-    bytes[pos + needle.len() - 1] = 5;
-    let error = read(&bytes).expect_err("unknown plan byte");
-    assert!(matches!(error, ReadError::Malformed {
-        reason: "unknown entry plan",
-        ..
-    }));
-    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
-}
-
-#[test]
-fn duplicate_entry_name_rejected() {
-    // The builder accepts the duplicate (the writer is not a validator);
-    // the reader refuses the entry table's second row.
-    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
-        .with_entry("dup", Vec::new())
-        .with_entry("dup", vec![ds_mod::EntryArg::Int]);
-    let error = read(&write(&module)).expect_err("duplicate entry name");
-    assert!(matches!(error, ReadError::Malformed {
-        reason: "duplicate entry-table name",
-        ..
-    }));
-    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
-}
-
-#[test]
 fn duplicate_tag_rows_rejected() {
     for (first, second) in [
         (("a", 0u8), ("a", 1u8)), // same name, different ids
@@ -468,10 +431,10 @@ fn code_word_count_beyond_u32_rejected() {
     let dir_entries_at = bytes.len();
     bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
     let blocks_at = bytes.len();
-    // blocks payload v3: one function "f" with no params, slots, or
+    // blocks payload v4: one function "f" with no params, slots, or
     // constants, then the over-range code count uleb (2^32) — the count
     // rejects before the trailing tables are reached
-    bytes.extend_from_slice(&[3, 1, 1, b'f', 0, 0, 0, 0]);
+    bytes.extend_from_slice(&[4, 1, 1, b'f', 0, 0, 0, 0]);
     bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
     let blocks_len = bytes.len() - blocks_at;
     let constants_at = bytes.len();
@@ -545,9 +508,9 @@ fn huge_chain_count_rejected() {
     let dir_entries_at = bytes.len();
     bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
     let blocks_at = bytes.len();
-    // blocks payload v3: zero functions, then the chain count uleb (2^40)
+    // blocks payload v4: zero functions, then the chain count uleb (2^40)
     // — the first chain record is absent, so the stream ends there
-    bytes.extend_from_slice(&[3, 0]);
+    bytes.extend_from_slice(&[4, 0]);
     bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x20]);
     let blocks_len = bytes.len() - blocks_at;
     let constants_at = bytes.len();

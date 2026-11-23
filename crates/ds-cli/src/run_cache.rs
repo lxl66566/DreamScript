@@ -19,9 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ds_mod::{
-    EntryArg, FORMAT_VERSION, Hash128, LoadError, MappedModule, Module, cache_path, read_mmap,
-};
+use ds_mod::{FORMAT_VERSION, Hash128, LoadError, MappedModule, Module, cache_path, read_mmap};
 
 /// The segment below `$DS_CACHE/ir` holding script artifacts. The source
 /// pipeline emits portable bytecode-class modules, so the segment names
@@ -158,17 +156,15 @@ impl RunCache {
         cache
     }
 
-    /// The cached artifact for this source together with the staging
-    /// plan shape it serves; `None` is the miss every caller falls back
-    /// from. An unreadable source, an unreadable, stale, or corrupt
-    /// artifact, and a parameterized function the artifact carries no
-    /// recorded plan for are all misses or bypasses — never errors.
-    pub(crate) fn lookup(&self, file: &Path, entry: &str) -> Option<(Module, ServedPlan)> {
+    /// The cached artifact for this source; `None` is the miss every
+    /// caller falls back from. An unreadable source and an unreadable,
+    /// stale, or corrupt artifact are all misses — never errors.
+    pub(crate) fn lookup(&self, file: &Path) -> Option<Module> {
         let root = self.root.as_ref()?;
         // a source that cannot be read is a miss; the compile path reports it
         let source = std::fs::read_to_string(file).ok()?;
         let name = module_stem(file)?;
-        self.lookup_at(root, &name, Hash128::compute(source.as_bytes()), entry)
+        self.lookup_at(root, &name, Hash128::compute(source.as_bytes()))
     }
 
     /// The cached artifact for one package root's composed member set
@@ -183,24 +179,17 @@ impl RunCache {
         &self,
         file: &Path,
         members: &[crate::package::Member],
-        entry: &str,
-    ) -> Option<(Module, ServedPlan)> {
+    ) -> Option<Module> {
         let root = self.root.as_ref()?;
         let name = module_stem(file)?;
         let identity = crate::package::member_identity(members);
-        self.lookup_at(root, &name, identity, entry)
+        self.lookup_at(root, &name, identity)
     }
 
     /// One cached artifact's keyed read for `(name, identity)`: the fold
     /// already keys on both, so the header check pins the artifact
     /// honestly against the demand.
-    fn lookup_at(
-        &self,
-        root: &Path,
-        name: &str,
-        identity: Hash128,
-        entry: &str,
-    ) -> Option<(Module, ServedPlan)> {
+    fn lookup_at(&self, root: &Path, name: &str, identity: Hash128) -> Option<Module> {
         let artifact = cache_path(root, TARGET_SEGMENT, self.key(name, identity));
         let Ok(mapped) = read_artifact(&artifact) else {
             return self.miss(Family::Run, &artifact);
@@ -209,35 +198,16 @@ impl RunCache {
         if module.source_hash() != identity || module.name() != name {
             return self.miss(Family::Run, &artifact);
         }
-        let plan = match entry_staging(module, entry) {
-            EntryStaging::Raw => ServedPlan::Raw,
-            EntryStaging::NoParams => ServedPlan::Empty,
-            EntryStaging::Args(plans) => ServedPlan::Args {
-                plans: plans.to_vec(),
-                int: module.tag_id("int"),
-                none: module.tag_id("none"),
-            },
-            EntryStaging::FrontEndOnly => {
-                self.report(Family::Run, "bypassed", &artifact);
-                return None;
-            },
-        };
         self.report(Family::Run, "hit", &artifact);
-        Some((mapped.into_module(), plan))
+        Some(mapped.into_module())
     }
 
-    /// Writes one successfully compiled module under its key. A run
-    /// whose entry the cache can never serve does not write: a
-    /// parameterized function with no recorded entry plan would stage
-    /// differently warm than the compile path does. Every failure is
-    /// silent — the run already succeeded.
-    pub(crate) fn store(&self, entry: &str, module: &Module) {
+    /// Writes one successfully compiled module under its key. Every
+    /// failure is silent — the run already succeeded.
+    pub(crate) fn store(&self, module: &Module) {
         let Some(root) = &self.root else {
             return;
         };
-        if matches!(entry_staging(module, entry), EntryStaging::FrontEndOnly) {
-            return;
-        }
         let name = module.name();
         let hash = module.source_hash();
         let artifact = cache_path(root, TARGET_SEGMENT, self.key(name, hash));
@@ -471,84 +441,6 @@ impl Family {
             Family::Run => "ds run cache",
             Family::Dep => "ds dep cache",
         }
-    }
-}
-
-/// The staging plan shape a served artifact carries, which is the whole
-/// plan: the artifact's entry table records each candidate entry's
-/// per-parameter staging facts and its tag table the int and none member
-/// ids, so the hit path stages exactly as the compile path does; entries
-/// the table does not record fall back to the function table's shape (no
-/// function of the name is raw staging, a zero-parameter function stages
-/// nothing).
-#[derive(Clone)]
-pub(crate) enum ServedPlan {
-    /// No function of the entry name: the compile path found no entry
-    /// binding, and `--args` stage as raw i64 words (the run refuses at
-    /// entry resolution).
-    Raw,
-    /// The entry function takes no parameter words: nothing stages when
-    /// `--args` is empty, and a staged list answers the compile path's
-    /// parameter-count refusal.
-    Empty,
-    /// The artifact's recorded plan for the entry: one staging fact per
-    /// parameter, plus the int and none member tags the optional arm
-    /// stages.
-    Args {
-        /// The per-parameter staging facts, in parameter order.
-        plans: Vec<EntryArg>,
-        /// The `int` member's module tag id.
-        int: Option<u8>,
-        /// The `none` member's module tag id.
-        none: Option<u8>,
-    },
-}
-
-impl ServedPlan {
-    /// The staging facts the plan carries: the entry's per-parameter
-    /// plans (none when no function of the name exists, an empty slice
-    /// for a zero-parameter entry) and the int and none member tags its
-    /// optional arm stages.
-    pub(crate) fn entry_facts(&self) -> (Option<&[EntryArg]>, Option<u8>, Option<u8>) {
-        match self {
-            ServedPlan::Raw => (None, None, None),
-            ServedPlan::Empty => (Some(&[][..]), None, None),
-            ServedPlan::Args { plans, int, none } => (Some(plans.as_slice()), *int, *none),
-        }
-    }
-}
-
-/// Which `--args` staging rule an entry can reproduce from the finished
-/// module alone — the hit path's correctness story.
-enum EntryStaging<'a> {
-    /// No function of the entry name.
-    Raw,
-    /// The entry function takes no parameter words.
-    NoParams,
-    /// The artifact's entry table records the entry's per-parameter
-    /// staging plan.
-    Args(&'a [EntryArg]),
-    /// A parameterized function with no recorded plan (a synthesized
-    /// member spelling, or an artifact whose writer recorded no entry
-    /// facts): its staging plan is a front-end fact this artifact does
-    /// not carry. These runs always compile in-process and never write an
-    /// artifact.
-    FrontEndOnly,
-}
-
-/// The entry's staging class, read off the module's own tables: the
-/// entry table first (a top-level lambda always lowers under its binding
-/// name, and the compile path records every one of them), then the
-/// function table's shape for the spellings the entry table cannot
-/// cover.
-fn entry_staging<'a>(module: &'a Module, entry: &str) -> EntryStaging<'a> {
-    if let Some(plans) = module.entry_args(entry) {
-        return EntryStaging::Args(plans);
-    }
-    match module.functions().iter().find(|f| f.name() == entry) {
-        None => EntryStaging::Raw,
-        Some(function) if function.layout().params().is_empty() => EntryStaging::NoParams,
-        Some(_) => EntryStaging::FrontEndOnly,
     }
 }
 

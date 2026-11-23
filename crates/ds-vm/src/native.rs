@@ -3607,6 +3607,12 @@ pub fn builtin_module() -> Vec<NativeFunction> {
 pub struct OutputSink {
     /// Where print/println write.
     target: SinkTarget,
+    /// Where eprint/eprintln write.
+    err_target: ErrTarget,
+    /// The process arguments the `args` op answers (the CLI process
+    /// surface): the host stages them, the VM never derives them — an
+    /// embedder's `args()` reads exactly what its host staged.
+    argv: Vec<String>,
     /// The connection table of the net natives.
     net: Connections,
     /// The file-handle table of the fsys natives (`crate::fsys`).
@@ -3624,6 +3630,16 @@ enum SinkTarget {
     Captured(Vec<u8>),
 }
 
+/// The stderr write target of an [`OutputSink`].
+#[derive(Debug, Default, PartialEq)]
+enum ErrTarget {
+    /// No capture requested yet; the process's stderr.
+    #[default]
+    Stderr,
+    /// The in-memory sink, switched with [`OutputSink::capture`].
+    Captured(Vec<u8>),
+}
+
 impl OutputSink {
     /// A fresh in-memory sink (tests and embedders construct the capture
     /// mode directly; the VM reaches it through [`crate::Vm::capture_output`]).
@@ -3631,15 +3647,18 @@ impl OutputSink {
     pub fn captured() -> Self {
         Self {
             target: SinkTarget::Captured(Vec::new()),
+            err_target: ErrTarget::Captured(Vec::new()),
+            argv: Vec::new(),
             net: Connections::default(),
             files: crate::fsys::Files::default(),
         }
     }
 
-    /// Switches the write target to a fresh in-memory buffer, keeping
+    /// Switches the write targets to fresh in-memory buffers, keeping
     /// every other field.
     pub(crate) fn capture(&mut self) {
         self.target = SinkTarget::Captured(Vec::new());
+        self.err_target = ErrTarget::Captured(Vec::new());
     }
 
     /// The bytes captured so far, empty in stdout mode.
@@ -3649,6 +3668,28 @@ impl OutputSink {
             SinkTarget::Captured(buf) => buf,
             SinkTarget::Stdout => &[],
         }
+    }
+
+    /// The stderr bytes captured so far, empty in stderr mode.
+    #[must_use]
+    pub fn captured_err_bytes(&self) -> &[u8] {
+        match &self.err_target {
+            ErrTarget::Captured(buf) => buf,
+            ErrTarget::Stderr => &[],
+        }
+    }
+
+    /// Stages the process arguments the `args` op answers — the host's
+    /// own wording of the run's command line (the CLI passes its
+    /// `--args` words verbatim).
+    pub fn set_argv(&mut self, argv: Vec<String>) {
+        self.argv = argv;
+    }
+
+    /// The staged process arguments.
+    #[must_use]
+    pub(crate) fn argv(&self) -> &[String] {
+        &self.argv
     }
 
     /// The connection table of the net natives.
@@ -3700,6 +3741,34 @@ impl OutputSink {
     pub fn write_line(&mut self, text: &str) -> Result<(), Trap> {
         self.write_str(text)?;
         self.write_str("\n")
+    }
+
+    /// Writes `text` to stderr with no newline — the eprint/eprintln
+    /// target, captured beside stdout in capture mode.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::OutputWrite`] when the underlying write fails.
+    pub fn write_err_str(&mut self, text: &str) -> Result<(), Trap> {
+        match &mut self.err_target {
+            ErrTarget::Stderr => std::io::stderr()
+                .write_all(text.as_bytes())
+                .map_err(|e| Trap::OutputWrite { kind: e.kind() }),
+            ErrTarget::Captured(buf) => {
+                buf.extend_from_slice(text.as_bytes());
+                Ok(())
+            },
+        }
+    }
+
+    /// Writes `text` to stderr followed by one newline.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::OutputWrite`] when the underlying write fails.
+    pub fn write_err_line(&mut self, text: &str) -> Result<(), Trap> {
+        self.write_err_str(text)?;
+        self.write_err_str("\n")
     }
 }
 
@@ -3767,6 +3836,62 @@ pub(crate) fn print_fn(
     let text = heaps.str_at(ref_arg(args, 0)?)?;
     out.write_str(text)?;
     Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// `eprintln`: the console face's stderr twin of [`println_fn`].
+pub(crate) fn eprintln_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let text = heaps.str_at(ref_arg(args, 0)?)?;
+    out.write_err_line(text)?;
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// `eprint`: the console face's stderr twin of [`print_fn`].
+pub(crate) fn eprint_fn(
+    heaps: &mut Heaps,
+    out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let text = heaps.str_at(ref_arg(args, 0)?)?;
+    out.write_err_str(text)?;
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+/// `read_line`: one line from the process's stdin, the checked ok/none
+/// span — end of input (or a stdin the process cannot read) answers the
+/// none member, never a trap. The line answer strips its trailing
+/// newline (and a CRLF pair's carriage return).
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn read_line_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    Ok(match read {
+        // zero bytes is end of input; a read failure folds into the
+        // same none member (the checked read's convention)
+        Ok(0) | Err(_) => NativeResult::Tag {
+            tag: PLATFORM_NONE,
+            payload: Value::I64(0),
+        },
+        Ok(_) => {
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            NativeResult::Tag {
+                tag: PLATFORM_IO_OK,
+                payload: heaps.new_str(line),
+            }
+        },
+    })
 }
 
 /// The bare trap primitive's body: the message rides the trap out to the

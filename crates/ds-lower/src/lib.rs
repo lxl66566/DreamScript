@@ -63,7 +63,7 @@ use std::{
 use ds_abi::{RcOp, Uop};
 use ds_check::{Analyzed, Condition, TraitId, render_type};
 use ds_diag::Span;
-use ds_mod::{Dep, EntryPlan, Hash128, Module, TargetClass};
+use ds_mod::{Dep, Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
 use func::{BodyId, EvidenceEnv, FnLower, Plan};
@@ -170,20 +170,6 @@ impl Lowered {
     #[must_use]
     pub fn tag(&self, name: &str) -> Option<u8> {
         self.tags.get(name).copied()
-    }
-
-    /// Records the run surface's entry staging facts into the module, so
-    /// the artifact carries what a warm run needs to stage arguments
-    /// without the front end: one row per top-level lambda (a candidate
-    /// entry name) with one plan per parameter. Lowering owns the tag
-    /// table (recorded at construction); the caller owns which names are
-    /// entries and how their parameters stage.
-    #[must_use]
-    pub fn with_entry_plans(mut self, entries: Vec<EntryPlan>) -> Self {
-        self.module = entries.into_iter().fold(self.module, |module, plan| {
-            module.with_entry(plan.name, plan.args)
-        });
-        self
     }
 
     /// Records the module's dependency list into the header (G3.5's link

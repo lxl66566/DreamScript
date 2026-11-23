@@ -98,11 +98,6 @@
 //!      3's addition), then per row:
 //!   uleb len + UTF-8   member atom's declared name
 //!   uleb               the module-wide tag id
-//! uleb  entry-table count (which top-level names are run entries and how
-//!      their parameters stage), then per entry:
-//!   uleb len + UTF-8   entry name
-//!   uleb               plan count, then one plan byte per parameter:
-//!                      Int=0, Float=1, Bool=2, OptionalInt=3, Foreign=4
 //! ```
 //!
 //! Read-side validation: every code word must decode at its pc — uops and
@@ -144,8 +139,7 @@ pub use hash::Hash128;
 pub use header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass};
 pub use mmap::{LoadError, MappedModule, read_mmap};
 pub use module::{
-    Constant, DebugSpan, EntryArg, EntryPlan, EvidenceChain, FuncRefKey, Function, FunctionError,
-    MemberTag, Module,
+    Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, FunctionError, MemberTag, Module,
 };
 pub use read::{ReadError, read, read_checked};
 pub use write::write;
@@ -162,6 +156,8 @@ pub const MAGIC: [u8; 4] = *b"\0DSM";
 /// dependency-position key (0 the enclosing module) addresses uop
 /// dependencies, a native-by-name key covers the native surfaces; the
 /// constants payload is locked and carries no payload version of its
-/// own, so any change visible in it bumps this version. Files of older
-/// versions are rejected.
-pub const FORMAT_VERSION: u8 = 4;
+/// own, so any change visible in it bumps this version. Version 5
+/// retires the entry staging table (the process surface's string argv
+/// superseded entry-parameter staging). Files of older versions are
+/// rejected.
+pub const FORMAT_VERSION: u8 = 5;

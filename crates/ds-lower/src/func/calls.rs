@@ -1005,6 +1005,9 @@ impl<'a> FnLower<'a, '_, '_> {
             if self.ambient_extern(def, AmbientExtern::Die) {
                 return self.die_call(&arg_exprs, ty, callee_span);
             }
+            if self.ambient_extern(def, AmbientExtern::Exit) {
+                return self.exit_call(&arg_exprs, ty, callee_span);
+            }
         }
         // a trait-method dispatch names its impl body directly: the call
         // stages and transfers like a local callee, with the solved

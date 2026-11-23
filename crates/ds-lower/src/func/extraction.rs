@@ -25,6 +25,11 @@ pub(super) enum AmbientExtern {
     /// extern). The declaration is the provider's own code; the
     /// primitive it routes to is the builtin core's `trap`.
     Die,
+    /// An `exit` spelling's declaration (the CLI process surface,
+    /// 2026-11-21): the same host-member shape as `Die` — the generic
+    /// one-parameter extern the host provision serves — routing to the
+    /// proc capability's deliberate-status seam.
+    Exit,
 }
 
 impl AmbientExtern {
@@ -34,6 +39,7 @@ impl AmbientExtern {
             Self::Str => "str",
             Self::Cancel => "cancel",
             Self::Die => "die",
+            Self::Exit => "exit",
         }
     }
 }
@@ -760,6 +766,41 @@ impl FnLower<'_, '_, '_> {
             ));
         }
         self.seam_call(native, &[(addr.slot, SlotType::Ref)], &[SlotType::I64])?;
+        self.temp_span(ty)
+    }
+
+    /// The `exit(code)` call (the CLI process surface's host member,
+    /// ruled 2026-11-21): the one i64 word stages to the proc
+    /// capability's exit op, the deliberate status riding the trap out
+    /// to the drive exactly like `die`'s message — the engine prints
+    /// nothing and decides no exit code, the host's policy applying
+    /// above it. The call never answers, so the call's own checked type
+    /// names a placeholder span no later instruction reads (the trap
+    /// fires first).
+    pub(super) fn exit_call(
+        &mut self,
+        args: &[&Expr],
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let native = crate::native::lookup("exit").ok_or_else(|| mismatch("the exit seam"))?;
+        let [code] = args else {
+            return Err(LowerError::unsupported(
+                span,
+                "an `exit` call",
+                "stage exactly the status; the spelling is `exit(code: int)`",
+            ));
+        };
+        let tp = self.value(code)?;
+        let addr = single(&self.word_addrs(&tp.place, tp.ty)?, code.span())?;
+        if addr.slot_ty != SlotType::I64 {
+            return Err(LowerError::unsupported(
+                code.span(),
+                "an `exit` status",
+                "the status must be the one int word the declaration names",
+            ));
+        }
+        self.seam_call(native, &[(addr.slot, SlotType::I64)], &[SlotType::I64])?;
         self.temp_span(ty)
     }
 

@@ -74,7 +74,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Check(args) => check::check(&args),
-        Command::Run(args) => run::run(&args).map(|()| ExitCode::SUCCESS),
+        Command::Run(args) => run::run(&args),
         Command::Build(args) => build::build(&args).map(|()| ExitCode::SUCCESS),
         Command::Save(args) => save::save(&args).map(|()| ExitCode::SUCCESS),
         Command::Info(args) => info::info(&args).map(|()| ExitCode::SUCCESS),

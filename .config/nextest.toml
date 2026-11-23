@@ -7,7 +7,7 @@
 # hang (a dead-waiting net or io probe), never a loaded run.
 
 [profile.default]
-slow-timeout = { timeout = "60s", terminate-after = 2 }
+slow-timeout = { period = "60s", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter       = "test(mutual_even_odd_at_ten_million_runs_at_constant_stack) or test(mutual_even_odd_across_two_modules_at_ten_million_runs_at_constant_stack) or test(dispatch_tails_slide_through_the_frame_reuse_transfer) or test(a_cross_module_tail_transfer_runs_a_ten_million_hop_loop_over_a_linked_package) or test(a_runaway_comptime_loop_answers_the_step_budget_at_the_run) or binary(fuzz_exec_gen)"

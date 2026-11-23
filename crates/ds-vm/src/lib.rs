@@ -128,6 +128,7 @@ mod net;
 pub mod nursery;
 pub mod object;
 pub mod platform;
+pub mod proc;
 pub mod program;
 pub mod repl;
 mod tls;

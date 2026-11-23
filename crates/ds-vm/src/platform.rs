@@ -36,7 +36,8 @@ use crate::{
 /// One world capability of a platform (H5's provides list).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capability {
-    /// The printing surface: `println`, `print`.
+    /// The printing surface: `println`, `print`, the stderr twins
+    /// `eprintln`/`eprint`, and the stdin read `read_line`.
     Console,
     /// The file surface: the readers, writers, and `fs_list`.
     Fsys,
@@ -48,6 +49,10 @@ pub enum Capability {
     /// selected or omitted per host — the `https_get` op and the
     /// https-routing `http_get` body.
     Tls,
+    /// The process surface (the CLI process surface, ruled 2026-11-21):
+    /// string argv, the environment read, process spawn, and the
+    /// `exit(code)` host member's seam.
+    Proc,
 }
 
 impl Capability {
@@ -60,6 +65,7 @@ impl Capability {
             Self::Net => "net",
             Self::Time => "time",
             Self::Tls => "tls",
+            Self::Proc => "proc",
         }
     }
 
@@ -73,6 +79,7 @@ impl Capability {
             "net" => Some(Self::Net),
             "time" => Some(Self::Time),
             "tls" => Some(Self::Tls),
+            "proc" => Some(Self::Proc),
             _ => None,
         }
     }
@@ -125,9 +132,23 @@ pub const OP_TIME: u32 = 15;
 /// ambient spelling declares it; the net face's `http_get` routes
 /// https URLs onto the tier).
 pub const OP_HTTPS_GET: u32 = 16;
+/// `read_line`: console (the stdin read, one line per call).
+pub const OP_READ_LINE: u32 = 17;
+/// `eprintln`: console (the stderr twin of `println`).
+pub const OP_EPRINTLN: u32 = 18;
+/// `eprint`: console (the stderr twin of `print`).
+pub const OP_EPRINT: u32 = 19;
+/// `args`: proc (the host-staged process arguments).
+pub const OP_ARGS: u32 = 20;
+/// `env`: proc (the environment-variable read).
+pub const OP_ENV: u32 = 21;
+/// `proc_run`: proc (spawn one child, answer its exit status).
+pub const OP_PROC_RUN: u32 = 22;
+/// `exit`: proc (the `exit(code)` host member's deliberate-status seam).
+pub const OP_EXIT: u32 = 23;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 17;
+pub const OP_COUNT: u32 = 24;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -162,6 +183,13 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "close_raw",   capability: Capability::Fsys,    params: &[SlotType::I64],        result_words: 1, func: crate::fsys::close_raw_fn },
     Op { name: "time",        capability: Capability::Time,    params: &[],                    result_words: 1, func: crate::native::time_fn },
     Op { name: "https_get",   capability: Capability::Tls,     params: &[SlotType::Ref],       result_words: 2, func: crate::tls::https_get_fn },
+    Op { name: "read_line",   capability: Capability::Console, params: &[],                    result_words: 2, func: crate::native::read_line_fn },
+    Op { name: "eprintln",    capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::eprintln_fn },
+    Op { name: "eprint",      capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::eprint_fn },
+    Op { name: "args",        capability: Capability::Proc,    params: &[],                    result_words: 1, func: crate::proc::args_fn },
+    Op { name: "env",         capability: Capability::Proc,    params: &[SlotType::Ref],        result_words: 2, func: crate::proc::env_fn },
+    Op { name: "proc_run",    capability: Capability::Proc,    params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::proc::proc_run_fn },
+    Op { name: "exit",        capability: Capability::Proc,    params: &[SlotType::I64],       result_words: 1, func: crate::proc::exit_fn },
 ];
 
 macro_rules! unserved {
@@ -193,6 +221,13 @@ unserved!(unserved_op_13 at 13);
 unserved!(unserved_op_14 at 14);
 unserved!(unserved_op_15 at 15);
 unserved!(unserved_op_16 at 16);
+unserved!(unserved_op_17 at 17);
+unserved!(unserved_op_18 at 18);
+unserved!(unserved_op_19 at 19);
+unserved!(unserved_op_20 at 20);
+unserved!(unserved_op_21 at 21);
+unserved!(unserved_op_22 at 22);
+unserved!(unserved_op_23 at 23);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -201,7 +236,8 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_4, unserved_op_5, unserved_op_6, unserved_op_7,
     unserved_op_8, unserved_op_9, unserved_op_10, unserved_op_11,
     unserved_op_12, unserved_op_13, unserved_op_14, unserved_op_15,
-    unserved_op_16,
+    unserved_op_16, unserved_op_17, unserved_op_18, unserved_op_19,
+    unserved_op_20, unserved_op_21, unserved_op_22, unserved_op_23,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -224,6 +260,7 @@ impl Platform {
             Capability::Net,
             Capability::Time,
             Capability::Tls,
+            Capability::Proc,
         ])
     }
 
@@ -338,7 +375,16 @@ mod tests {
         assert_eq!(OPS[OP_TIME as usize].capability, Capability::Time);
         assert_eq!(OPS[OP_HTTPS_GET as usize].name, "https_get");
         assert_eq!(OPS[OP_HTTPS_GET as usize].capability, Capability::Tls);
-        assert_eq!(OPS.len(), 17);
+        assert_eq!(OPS[OP_READ_LINE as usize].name, "read_line");
+        assert_eq!(OPS[OP_READ_LINE as usize].capability, Capability::Console);
+        assert_eq!(OPS[OP_EPRINTLN as usize].name, "eprintln");
+        assert_eq!(OPS[OP_EPRINT as usize].name, "eprint");
+        assert_eq!(OPS[OP_ARGS as usize].name, "args");
+        assert_eq!(OPS[OP_ARGS as usize].capability, Capability::Proc);
+        assert_eq!(OPS[OP_ENV as usize].name, "env");
+        assert_eq!(OPS[OP_PROC_RUN as usize].name, "proc_run");
+        assert_eq!(OPS[OP_EXIT as usize].name, "exit");
+        assert_eq!(OPS.len(), 24);
         for (index, op) in OPS.iter().enumerate() {
             let index = u32::try_from(index).expect("op index fits u32");
             assert_eq!(
@@ -363,6 +409,9 @@ mod tests {
         let console = Platform::new("test", &[Capability::Console]);
         assert!(console.serves(OP_PRINTLN));
         assert!(console.serves(OP_PRINT));
+        assert!(console.serves(OP_READ_LINE));
+        assert!(console.serves(OP_EPRINTLN));
+        assert!(console.serves(OP_EPRINT));
         for index in [
             OP_READ_FILE,
             OP_WRITE_FILE,
@@ -376,6 +425,9 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses fsys");
         }
         assert!(!console.serves(OP_TIME), "a console platform refuses time");
+        for index in [OP_ARGS, OP_ENV, OP_PROC_RUN, OP_EXIT] {
+            assert!(!console.serves(index), "a console platform refuses proc");
+        }
         for index in [
             OP_NET_CONNECT,
             OP_NET_SEND,
@@ -387,21 +439,24 @@ mod tests {
             assert!(!console.serves(index), "a console platform refuses net");
         }
         let table = platform_module(&console);
-        assert_eq!(table.len(), 17);
+        assert_eq!(table.len(), 24);
         assert_eq!(table[OP_PRINTLN as usize].name, "println");
         assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
     }
 
-    /// The embed platform serves the console face alone: print/println
-    /// answer and every world op beyond them stays a reserved trap at
-    /// its contract index — install-time validation is the refusal the
-    /// e2e pins.
+    /// The embed platform serves the console face alone: print/println,
+    /// their stderr twins, and the stdin read answer, and every world op
+    /// beyond them stays a reserved trap at its contract index —
+    /// install-time validation is the refusal the e2e pins.
     #[test]
     fn the_embed_platform_serves_the_console_face_alone() {
         let embed = Platform::embed();
         assert_eq!(embed.name(), EMBED_NAME);
         assert!(embed.serves(OP_PRINTLN), "embed serves println");
         assert!(embed.serves(OP_PRINT), "embed serves print");
+        assert!(embed.serves(OP_READ_LINE), "embed serves read_line");
+        assert!(embed.serves(OP_EPRINTLN), "embed serves eprintln");
+        assert!(embed.serves(OP_EPRINT), "embed serves eprint");
         for index in [
             OP_READ_FILE,
             OP_WRITE_FILE,
@@ -418,6 +473,10 @@ mod tests {
             OP_HTTP_GET,
             OP_TIME,
             OP_HTTPS_GET,
+            OP_ARGS,
+            OP_ENV,
+            OP_PROC_RUN,
+            OP_EXIT,
         ] {
             assert!(
                 !embed.serves(index),
@@ -500,6 +559,7 @@ mod tests {
             Capability::Net,
             Capability::Time,
             Capability::Tls,
+            Capability::Proc,
         ] {
             assert_eq!(Capability::from_name(cap.name()), Some(cap));
         }

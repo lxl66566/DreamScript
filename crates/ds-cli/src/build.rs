@@ -49,7 +49,6 @@ pub fn build(args: &BuildArgs) -> Result<()> {
             let prefix = crate::dsi_cache::PrefixCache::discover(true, args.no_ambient);
             source::compile(
                 &args.file,
-                "main",
                 args.no_ambient,
                 Some(&prefix),
                 source::BundleAfter::Keep,
@@ -81,7 +80,7 @@ fn build_root(
         &pins,
         script,
     );
-    package::compile_root(file, "main", graph, script, Some(&linked), None)
+    package::compile_root(file, graph, script, Some(&linked), None)
 }
 
 /// Debug-build check that the writer emitted bytes its own reader returns as

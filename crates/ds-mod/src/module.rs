@@ -129,52 +129,6 @@ pub struct EvidenceChain {
     pub next: Vec<u32>,
 }
 
-/// How one run-entry parameter stages when a host hands the module its
-/// command arguments: one of the scalar word kinds the run surface
-/// stages, the two-word `int | none` union span, or a shape command
-/// arguments cannot stage (the refusal travels as a fact, so warm runs
-/// refuse identically to cold ones).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum EntryArg {
-    /// One i64 parameter word.
-    Int,
-    /// One f64 parameter word.
-    Float,
-    /// One bool parameter word.
-    Bool,
-    /// The `int | none` union span: a present value stages the int
-    /// member tag plus its word, an absent value the none member tag
-    /// plus a zero word.
-    OptionalInt,
-    /// A parameter shape command arguments cannot stage; the run reports
-    /// it.
-    Foreign,
-}
-
-/// The wire tag of one entry staging fact: Int=0, Float=1, Bool=2,
-/// OptionalInt=3, Foreign=4.
-pub(crate) const fn entry_arg_tag(arg: EntryArg) -> u8 {
-    match arg {
-        EntryArg::Int => 0,
-        EntryArg::Float => 1,
-        EntryArg::Bool => 2,
-        EntryArg::OptionalInt => 3,
-        EntryArg::Foreign => 4,
-    }
-}
-
-/// Parses an entry staging fact's wire tag; `None` for unknown tags.
-pub(crate) const fn entry_arg_from_tag(tag: u8) -> Option<EntryArg> {
-    match tag {
-        0 => Some(EntryArg::Int),
-        1 => Some(EntryArg::Float),
-        2 => Some(EntryArg::Bool),
-        3 => Some(EntryArg::OptionalInt),
-        4 => Some(EntryArg::Foreign),
-        _ => None,
-    }
-}
-
 /// One row of the module's tag table: a declared union member atom's
 /// name and its module-wide tag id. The code words carry the ids (tag
 /// tests and staged member words); this table is the name side, so a
@@ -185,16 +139,6 @@ pub struct MemberTag {
     pub name: String,
     /// The module-wide tag id.
     pub id: u8,
-}
-
-/// One recorded entry of the module's entry table: a top-level source
-/// lambda's binding name plus how each of its parameters stages.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct EntryPlan {
-    /// The entry name.
-    pub name: String,
-    /// One staging fact per parameter, in parameter order.
-    pub args: Vec<EntryArg>,
 }
 
 /// A half-open byte-offset span `[start, end)` into the module source,
@@ -440,9 +384,6 @@ pub struct Module {
     pub(crate) chains: Vec<EvidenceChain>,
     /// The tag table (member atom name to tag id), in first-use order.
     pub(crate) tags: Vec<MemberTag>,
-    /// The recorded entry table: which top-level names are entries and
-    /// how each parameter stages.
-    pub(crate) entries: Vec<EntryPlan>,
     /// `None` means the module carries no debug-spans section.
     pub(crate) debug_spans: Option<Vec<DebugSpan>>,
 }
@@ -466,7 +407,6 @@ impl Module {
             functions: Vec::new(),
             chains: Vec::new(),
             tags: Vec::new(),
-            entries: Vec::new(),
             debug_spans: None,
         }
     }
@@ -637,32 +577,6 @@ impl Module {
         self.tags.push(MemberTag {
             name: name.into(),
             id,
-        });
-        self
-    }
-
-    /// The recorded entry table, in the writer's declaration order.
-    #[must_use]
-    pub fn entries(&self) -> &[EntryPlan] {
-        &self.entries
-    }
-
-    /// One entry's per-parameter staging plan, when the table records the
-    /// name.
-    #[must_use]
-    pub fn entry_args(&self, entry: &str) -> Option<&[EntryArg]> {
-        self.entries
-            .iter()
-            .find(|plan| plan.name == entry)
-            .map(|plan| plan.args.as_slice())
-    }
-
-    /// Appends one entry-table row; the caller keeps names unique.
-    #[must_use]
-    pub fn with_entry(mut self, name: impl Into<String>, args: Vec<EntryArg>) -> Self {
-        self.entries.push(EntryPlan {
-            name: name.into(),
-            args,
         });
         self
     }

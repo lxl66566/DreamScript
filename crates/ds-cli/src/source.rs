@@ -26,12 +26,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use ds_check::{Analyzed, DeclaredRows, Effect, EffectRow, Ty};
+use ds_check::{Analyzed, DeclaredRows, Effect, EffectRow};
 use ds_diag::{Diagnostic, ErrorCode, Files, render};
 use ds_dsi::ServedPrefix;
 use ds_lower::{ComptimeValues, LowerError, Lowered, lower_with_comptime, lower_with_served};
-use ds_mod::{EntryArg, EntryPlan, Hash128};
-use ds_parse::{ItemKind, Pattern, parse, parse_script};
+use ds_mod::Hash128;
+use ds_parse::{ItemKind, parse, parse_script};
 
 /// The reserved native module stems: a source file with either stem
 /// would shadow pool FuncRefs the lowered bodies emit (the VM's `builtin`
@@ -44,23 +44,25 @@ const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 /// The `$` stem keeps it outside every plausible user stem.
 pub(crate) const HOST_FILE: &str = "$host.ds";
 
-/// The host provision's text: the `die` spelling's declaration, the
-/// signature the old ambient extern carried, `pub` like every ambient
-/// face `[G4]` because the member's name is the host's surface to the
-/// entry files, not a private one. The lowerer's compiler-wired
-/// recognition routes the call to the builtin core's bare trap
-/// primitive; what the trap prints and which exit code follows is this
-/// host's own policy.
-pub(crate) const HOST_SOURCE: &str = "pub extern fn die[t](msg: string) -> t\n";
+/// The host provision's text: the `die` and `exit` spellings'
+/// declarations, `pub` like every ambient face `[G4]` because the
+/// member's names are the host's surface to the entry files, not a
+/// private one. `die` routes to the builtin core's bare trap primitive
+/// (the 2026-11-17 split); `exit` routes to the proc capability's
+/// deliberate-status seam (the CLI process surface, 2026-11-21) — what
+/// either prints and which exit code follows is this host's own policy.
+pub(crate) const HOST_SOURCE: &str =
+    "pub extern fn die[t](msg: string) -> t\npub extern fn exit[t](code: int) -> t\n";
 
 /// The entry session's declared rows: the ambient's table plus the die
-/// spelling's `trap` row — the host's own declaration, so the row rides
-/// with it (a declared row is a lower bound; trap alone never fences or
-/// refuses the pooled bodies).
+/// and exit spellings' `trap` rows — the host's own declarations, so
+/// the rows ride with them (a declared row is a lower bound; trap alone
+/// never fences or refuses the pooled bodies).
 static SESSION_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
     ds_stdlib::declared_rows()
         .clone()
         .with("die", EffectRow::of(Effect::Trap))
+        .with("exit", EffectRow::of(Effect::Trap))
 });
 
 /// The entry session's rows when the ambient serves: the host member's
@@ -343,17 +345,14 @@ pub(crate) fn rebase_span(
 }
 
 /// One compiled source: the lowered module plus what the run entry path
-/// needs — the module's name, the entry's staging plan, and the export
-/// surface a dependent's imports bind through (G4).
+/// needs — the module's name and the export surface a dependent's
+/// imports bind through (G4).
 pub struct CompiledSource {
     /// The lowered module, its name derived from the file's stem, with
-    /// the tag table and every candidate entry's staging plan recorded.
+    /// the tag table recorded.
     pub lowered: Lowered,
     /// The module name.
     pub name: String,
-    /// The entry's staging plan, when a lowerable function of the entry
-    /// name exists.
-    pub entry_args: Option<Vec<EntryArg>>,
     /// Every member file's exported top-level definitions (G4), in
     /// declaration order: the surface a dependent's import selections
     /// validate against, carrying the written signatures and effect rows
@@ -448,7 +447,6 @@ pub enum BundleAfter {
 /// (each named and located).
 pub fn compile(
     path: &Path,
-    entry: &str,
     no_ambient: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
     after: BundleAfter,
@@ -466,7 +464,6 @@ pub fn compile(
         &inputs,
         &[(inputs.display.clone(), source)],
         true,
-        entry,
         no_ambient,
         true,
         prefix_cache,
@@ -524,7 +521,6 @@ pub fn compile_linked(
     name: &str,
     members: &[(String, String)],
     identity: Hash128,
-    entry: &str,
     script: bool,
     main_required: bool,
     no_ambient: bool,
@@ -556,7 +552,6 @@ pub fn compile_linked(
         &inputs,
         members,
         script,
-        entry,
         no_ambient,
         true,
         prefix_cache,
@@ -574,7 +569,6 @@ fn compile_text(
     inputs: &Inputs<'_>,
     sources: &[(String, String)],
     script: bool,
-    entry: &str,
     no_ambient: bool,
     allow_serve: bool,
     prefix_cache: Option<&crate::dsi_cache::PrefixCache>,
@@ -863,16 +857,9 @@ fn compile_text(
         &comptime,
     )
     .map_err(|error| lower_error(&files, &error))?;
-    // every top-level lambda is a candidate `--entry` name, so the whole
-    // table rides the artifact and any of them serves a warm run; this
-    // run's entry takes its own slice. The dep list rides the header the
-    // same way: the artifact names the source's imports, so a load walk
-    // over it resolves its deps without re-deriving them from source.
-    let entries = entry_plans(asts, &analyzed);
-    let entry_args = entries
-        .iter()
-        .find(|plan| plan.name == entry)
-        .map(|plan| plan.args.clone());
+    // The dep list rides the header: the artifact names the source's
+    // imports, so a load walk over it resolves its deps without
+    // re-deriving them from source.
     let deps = dep_list(&asts[ambient_files..], imports.as_ref(), inputs.dep_content);
     // A clean, fully lowered compile persists its own prefix for the
     // next run of the same source; every failure inside is silent (the
@@ -914,9 +901,8 @@ fn compile_text(
         BundleAfter::Drop => {},
     }
     Ok(CompiledSource {
-        lowered: lowered.with_deps(deps).with_entry_plans(entries),
+        lowered: lowered.with_deps(deps),
         name,
-        entry_args,
         exports,
     })
 }
@@ -1055,103 +1041,6 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
     Ok(name)
 }
 
-/// Every top-level lambda binding's staging plan, in declaration order
-/// with the first occurrence per name (the entry lookup's first-match
-/// rule): each binding is a candidate `--entry` name, and the table
-/// rides the artifact so any of them serves a warm run.
-fn entry_plans<T>(asts: &[T], analyzed: &Analyzed) -> Vec<EntryPlan>
-where
-    T: std::borrow::Borrow<ds_parse::Ast>,
-{
-    let mut entries: Vec<EntryPlan> = Vec::new();
-    for ast in asts
-        .iter()
-        .map(std::borrow::Borrow::<ds_parse::Ast>::borrow)
-    {
-        for block in &ast.blocks {
-            for item in &block.items {
-                let ItemKind::Local(local) = &item.kind else {
-                    continue;
-                };
-                let Pattern::Binding { name, .. } = &local.pat else {
-                    continue;
-                };
-                let ds_parse::Expr::Lambda { params, .. } = &local.init else {
-                    continue;
-                };
-                if entries.iter().any(|plan| plan.name == name.name) {
-                    continue;
-                }
-                let Some(types) = params
-                    .iter()
-                    .map(|param| {
-                        analyzed
-                            .checked
-                            .binders
-                            .get(&param.name.span)
-                            .map(|fact| fact.ty)
-                    })
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    continue;
-                };
-                entries.push(EntryPlan {
-                    name: name.name.clone(),
-                    args: arg_plans(analyzed, &types),
-                });
-            }
-        }
-    }
-    entries
-}
-
-/// How one parameter stages, by its checked type's member names: the
-/// scalar atoms stage their word, `int | none` stages its two-word union
-/// span.
-fn arg_plans(analyzed: &Analyzed, params: &[Ty]) -> Vec<EntryArg> {
-    let universe = &analyzed.decls.universe;
-    params
-        .iter()
-        .map(|ty| {
-            let members = universe.members(*ty);
-            let mut names: Vec<&str> = members
-                .iter()
-                .filter_map(|atom| {
-                    universe
-                        .atom_decl(*atom)
-                        .ok()
-                        .map(|decl| decl.name.as_str())
-                })
-                .collect();
-            names.sort_unstable();
-            match names.as_slice() {
-                ["bool"] => EntryArg::Bool,
-                ["float"] => EntryArg::Float,
-                ["int"] => EntryArg::Int,
-                ["int", "none"] => EntryArg::OptionalInt,
-                _ => EntryArg::Foreign,
-            }
-        })
-        .collect()
-}
-
-/// The entry's staging plan for a host that compiles through its own
-/// query pass instead of this pipeline (the dev loop): the same
-/// per-parameter facts [`compile`] records, keyed by entry name.
-pub(crate) fn entry_staging_plan<T>(
-    asts: &[T],
-    analyzed: &Analyzed,
-    entry: &str,
-) -> Option<Vec<EntryArg>>
-where
-    T: std::borrow::Borrow<ds_parse::Ast>,
-{
-    entry_plans(asts, analyzed)
-        .into_iter()
-        .find(|plan| plan.name == entry)
-        .map(|plan| plan.args)
-}
-
 /// The module's dep list, recorded from the source's import declarations
 /// into the header's link table (G3.5): one entry per linked name in
 /// declaration order — the plain list the load walk consumes, so a built
@@ -1262,7 +1151,6 @@ mod tests {
     fn compile_script(
         inputs: &Inputs<'_>,
         source: &str,
-        entry: &str,
         no_ambient: bool,
         allow_serve: bool,
     ) -> anyhow::Result<CompiledSource> {
@@ -1270,7 +1158,6 @@ mod tests {
             inputs,
             &[(inputs.display.clone(), source.to_owned())],
             true,
-            entry,
             no_ambient,
             allow_serve,
             None,
@@ -1314,7 +1201,7 @@ mod tests {
     /// the std platform installed first, the run path's own order), and
     /// how many function records the served splice installed.
     fn compile_and_run(allow_serve: bool) -> (Vec<u8>, Vec<u8>, usize) {
-        let compiled = compile_script(&script_inputs("gate"), GATE, "main", false, allow_serve)
+        let compiled = compile_script(&script_inputs("gate"), GATE, false, allow_serve)
             .expect("the gate program compiles");
         let spliced = compiled.lowered.spliced();
         let bytes = ds_mod::write(compiled.lowered.module());
@@ -1360,7 +1247,7 @@ mod tests {
     #[test]
     fn the_serve_installs_the_artifacts_bodies() {
         let served = crate::ambient_dsmod::serve().expect("the artifact serves");
-        let compiled = compile_script(&script_inputs("gate"), GATE, "main", false, true)
+        let compiled = compile_script(&script_inputs("gate"), GATE, false, true)
             .expect("the gate program compiles");
         assert_eq!(
             compiled.lowered.spliced(),
@@ -1391,7 +1278,7 @@ mod tests {
             .expect("the artifact serves")
             .functions
             .len();
-        let compiled = compile_script(&script_inputs("trivial"), TRIVIAL, "main", false, true)
+        let compiled = compile_script(&script_inputs("trivial"), TRIVIAL, false, true)
             .expect("the trivial program compiles");
         assert_eq!(
             compiled.lowered.spliced(),
@@ -1527,8 +1414,7 @@ mod tests {
     #[test]
     fn a_built_module_s_recorded_dep_list_round_trips_the_walk() {
         const APP: &str = "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n7\n}\n";
-        let compiled =
-            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
+        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         let recorded = compiled.lowered.module().deps().to_vec();
         assert_eq!(
             recorded,
@@ -1572,8 +1458,7 @@ mod tests {
     #[test]
     fn a_stale_hash_in_the_recorded_list_refuses_as_today() {
         const APP: &str = "import @std/io\n\nfn main() -> int {\n7\n}\n";
-        let compiled =
-            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
+        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         let bytes = ds_mod::write(compiled.lowered.module());
         let built = ds_mod::read(&bytes).expect("the written module reads back");
         let mut vm = ds_vm::Vm::new(ds_vm::ModuleRegistry::new());
@@ -1598,8 +1483,7 @@ mod tests {
     #[test]
     fn a_self_named_recorded_entry_stays_local() {
         const APP: &str = "import app\n\nfn main() -> int {\n7\n}\n";
-        let compiled =
-            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
+        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
             name: "app".to_owned(),
             content_hash: ds_mod::Hash128::ZERO,
@@ -1624,8 +1508,7 @@ mod tests {
     fn an_unresolved_package_import_records_a_zero_link_the_walk_refuses() {
         const APP: &str =
             "import acme/pipeline/schema (row, parse_row)\n\nfn main() -> int {\n7\n}\n";
-        let compiled =
-            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
+        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [ds_mod::Dep {
             name: "acme/pipeline/schema".to_owned(),
             content_hash: ds_mod::Hash128::ZERO,
@@ -1654,7 +1537,6 @@ mod tests {
             "@app",
             &[("@app/main.ds".to_owned(), APP.to_owned())],
             ds_mod::Hash128::compute(APP.as_bytes()),
-            "main",
             false,
             true,
             false,
@@ -1685,8 +1567,7 @@ mod tests {
     fn aliased_and_conditional_imports_record_their_plain_linked_name() {
         const APP: &str = "import acme/pipeline/fs as pio\nimport acme/pipeline/io if os == \
                            \"windows\"\n\nfn main() -> int {\n7\n}\n";
-        let compiled =
-            compile_script(&script_inputs("app"), APP, "main", false, true).expect("compiles");
+        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [
             ds_mod::Dep {
                 name: "acme/pipeline/fs".to_owned(),

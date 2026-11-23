@@ -9,8 +9,8 @@ use crate::{
     hash::Hash128,
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
     module::{
-        Constant, DebugSpan, EntryPlan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
-        bound_ret_from_tag, entry_arg_from_tag, jump_target_of, slot_from_tag,
+        Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
+        bound_ret_from_tag, jump_target_of, slot_from_tag,
     },
     write::BLOCKS_PAYLOAD_VERSION,
 };
@@ -301,7 +301,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
     let (offset, len) = sections[SectionKind::Constants.index()].expect("checked above");
     let constants = parse_constants(bytes, offset, len, dep_count)?;
     let (offset, len) = sections[SectionKind::Blocks.index()].expect("checked above");
-    let (functions, chains, tags, entries) = parse_blocks(bytes, offset, len, dep_count)?;
+    let (functions, chains, tags) = parse_blocks(bytes, offset, len, dep_count)?;
     for kind in [SectionKind::TypeMetadata, SectionKind::EffectRows] {
         let (offset, len) = sections[kind.index()].expect("checked above");
         parse_placeholder(bytes, offset, len)?;
@@ -323,7 +323,6 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
         functions,
         chains,
         tags,
-        entries,
         debug_spans,
     })
 }
@@ -418,23 +417,16 @@ fn parse_constant(p: &mut Cursor<'_>, dep_count: usize) -> Result<Constant, Read
 }
 
 /// The parsed blocks payload's tables: the function records, the
-/// evidence chains, the tag table, and the entry staging table.
-type BlocksTables = (
-    Vec<Function>,
-    Vec<EvidenceChain>,
-    Vec<MemberTag>,
-    Vec<EntryPlan>,
-);
+/// evidence chains, and the tag table.
+type BlocksTables = (Vec<Function>, Vec<EvidenceChain>, Vec<MemberTag>);
 
-/// Parses the blocks payload, version 3 (BL-7): per-function records,
-/// then the module-level evidence-chain table, the tag table, and the
-/// entry staging table. Each body word is decoded once — every word must
-/// decode canonically at its pc, and every jump must land inside the
-/// function's own body — and the stored words are what the loader takes.
-/// Every chain's function index must address the function list and every
-/// tail index the chain table itself; the tag and entry tables must spell
-/// unique names (and unique tag ids). Whether an entry's plans agree with
-/// the named function's frame is a run-path concern, not a format one.
+/// Parses the blocks payload, version 4: per-function records, then the
+/// module-level evidence-chain table and the tag table. Each body word
+/// is decoded once — every word must decode canonically at its pc, and
+/// every jump must land inside the function's own body — and the stored
+/// words are what the loader takes. Every chain's function index must
+/// address the function list and every tail index the chain table
+/// itself; the tag table must spell unique names and unique tag ids.
 fn parse_blocks(
     bytes: &[u8],
     offset: usize,
@@ -553,26 +545,8 @@ fn parse_blocks(
         }
         tags.push(MemberTag { name, id });
     }
-    let entry_count = p.count()?;
-    let mut entries = Vec::with_capacity(p.capacity_for(entry_count, 2));
-    let mut entry_names = std::collections::HashSet::new();
-    for _ in 0..entry_count {
-        let name_at = p.abs();
-        let name = p.utf8()?.to_owned();
-        if !entry_names.insert(name.clone()) {
-            return Err(malformed(name_at, "duplicate entry-table name"));
-        }
-        let plan_count = p.count()?;
-        let mut args = Vec::with_capacity(p.capacity_for(plan_count, 1));
-        for _ in 0..plan_count {
-            let at = p.abs();
-            let arg = p.u8()?;
-            args.push(entry_arg_from_tag(arg).ok_or_else(|| malformed(at, "unknown entry plan"))?);
-        }
-        entries.push(EntryPlan { name, args });
-    }
     p.exhausted("trailing bytes in blocks section")?;
-    Ok((functions, chains, tags, entries))
+    Ok((functions, chains, tags))
 }
 
 /// Parses a versioned placeholder payload (type metadata, effect rows):
