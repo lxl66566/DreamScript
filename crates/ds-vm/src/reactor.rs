@@ -71,7 +71,11 @@ pub struct ReactorError(pub String);
 /// edge.
 pub trait Reactor {
     /// Watches `handle` for `dir` readiness, reporting under `token`.
-    /// A re-registration of the same handle replaces its interest.
+    /// One handle names one live interest: registering a handle an
+    /// existing interest already watches under another token refuses
+    /// (replacing the interest would strand the standing wait's
+    /// wake), while a registration under the same token re-aims the
+    /// existing interest (a direction change).
     fn register(
         &mut self,
         handle: IoHandle,
@@ -119,6 +123,14 @@ pub fn platform_default() -> Option<Box<dyn Reactor>> {
 #[derive(Debug)]
 pub struct Epoll {
     epfd: i32,
+    /// The token each watched handle's interest stands under: epoll
+    /// holds one row per fd, so a registration under another token
+    /// would silently replace the standing row and strand its wait's
+    /// wake — the map lets the register refuse that, the same token's
+    /// re-aim keeping its replace. A watched fd closed without a
+    /// deregister leaves its row stale, which the next registration's
+    /// successful ADD clears (the kernel's row died with the fd).
+    tokens: std::collections::HashMap<IoHandle, u64>,
 }
 
 #[cfg(target_os = "linux")]
@@ -203,7 +215,10 @@ impl Epoll {
                 std::io::Error::last_os_error()
             )));
         }
-        Ok(Self { epfd })
+        Ok(Self {
+            epfd,
+            tokens: std::collections::HashMap::new(),
+        })
     }
 
     /// The ctl helper over one interest change.
@@ -240,15 +255,24 @@ impl Reactor for Epoll {
             Direction::Read => epoll_imp::EPOLLIN,
             Direction::Write => epoll_imp::EPOLLOUT,
         };
-        // ADD over an existing interest answers EEXIST; a replacing
-        // registration (the scheduler re-arming one fd after a
-        // direction change) rides MOD, so try ADD then MOD
+        // a fresh fd ADDs its own row; a watched fd's ADD answers
+        // EEXIST, and the standing row's token decides: the same
+        // token re-aims (the re-arm's direction flip), another token
+        // refuses — replacing the row would strand the standing
+        // wait's wake
         if self
             .ctl(epoll_imp::EPOLL_CTL_ADD, handle, bits, token)
             .is_err()
         {
+            if self.tokens.get(&handle).is_some_and(|&live| live != token) {
+                return Err(ReactorError(format!(
+                    "handle {} is registered under another wait",
+                    handle.0
+                )));
+            }
             self.ctl(epoll_imp::EPOLL_CTL_MOD, handle, bits, token)?;
         }
+        self.tokens.insert(handle, token);
         Ok(())
     }
 
@@ -275,6 +299,7 @@ impl Reactor for Epoll {
                 return Err(ReactorError(format!("epoll_ctl: {err}")));
             }
         }
+        self.tokens.remove(&handle);
         Ok(())
     }
 
@@ -522,6 +547,83 @@ mod tests {
         assert_eq!(events.len(), 1, "the late write woke the wait");
         assert_eq!(events[0].token, 3);
         writer.join().expect("writer lands").flush().ok();
+    }
+
+    /// One handle names one live interest: a second token's
+    /// registration over a watched fd refuses loud — the silent
+    /// replacement would strand the first wait's wake (the parked
+    /// fiber waiting a connection that never wakes it) — while the
+    /// first token's own re-registration re-aims the row (the
+    /// direction flip the re-arm rides) and the standing wake survives
+    /// both.
+    #[test]
+    fn a_second_tokens_registration_refuses_over_a_watched_fd() {
+        let (dialer, acceptor) = pair();
+        acceptor.set_nonblocking(true).expect("nonblocking");
+        dialer.set_nonblocking(true).expect("nonblocking");
+        let mut reactor = Epoll::new().expect("epoll set");
+        reactor
+            .register(handle(&acceptor), Direction::Read, 7)
+            .expect("register");
+        // another token's interest on the same fd refuses, naming the
+        // standing row (never a silent replace)
+        let refused = reactor
+            .register(handle(&acceptor), Direction::Write, 8)
+            .expect_err("another token's registration refuses");
+        assert!(
+            refused.0.starts_with("handle ")
+                && refused.0.ends_with(" is registered under another wait"),
+            "the refusal names the steal: {}",
+            refused.0
+        );
+        // the same token re-aims its own row (the direction flip)
+        reactor
+            .register(handle(&acceptor), Direction::Write, 7)
+            .expect("the re-aim replaces its own interest");
+        // the standing wake survived: the re-aimed interest reports
+        // under the first token alone
+        let mut events = Vec::new();
+        reactor
+            .poll(Some(Duration::from_millis(50)), &mut events)
+            .expect("poll");
+        assert_eq!(events.len(), 1, "the re-aimed row reports: {events:?}");
+        assert_eq!(events[0].token, 7, "the standing token holds the fd");
+        assert!(events[0].write, "the re-aimed interest watches writes");
+        // the deregister drops the row, so a fresh token registers
+        reactor.deregister(handle(&acceptor)).expect("deregister");
+        reactor
+            .register(handle(&acceptor), Direction::Read, 9)
+            .expect("a fresh token registers over the dropped row");
+    }
+
+    /// A watched fd closed without a deregister leaves the token map
+    /// stale; the recycled fd number registers cleanly (the kernel's
+    /// row died with the fd, so the ADD succeeds) — a recycled number
+    /// never answers a false refusal.
+    #[test]
+    fn a_recycled_fd_number_registers_cleanly_past_the_stale_map_row() {
+        use std::os::fd::AsRawFd as _;
+        let (_dialer, acceptor) = pair();
+        let dead = handle(&acceptor);
+        let mut reactor = Epoll::new().expect("epoll set");
+        reactor
+            .register(dead, Direction::Read, 5)
+            .expect("register");
+        drop(acceptor);
+        // the freed number recycles to a fresh socket
+        let mut recycled = None;
+        for _ in 0..100 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+            if u64::try_from(listener.as_raw_fd()).is_ok_and(|fd| IoHandle(fd) == dead) {
+                recycled = Some(listener);
+                break;
+            }
+        }
+        assert!(recycled.is_some(), "the freed fd number recycles");
+        reactor
+            .register(dead, Direction::Read, 9)
+            .expect("the recycled number carries no standing interest");
+        drop(recycled);
     }
 
     /// The platform default exists on Linux (the tier-1 host) and is

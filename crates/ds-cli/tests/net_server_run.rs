@@ -157,6 +157,38 @@ fn an_unprovisioned_accept_tls_halts_on_the_net_error_line() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// The failed accept's printing halt: the raw close seam (the
+/// deinit's own idempotent twin) closes the bound listener before the
+/// accept reads it, so the accept answers the unknown-listener floor
+/// and the total spelling halts on the net error line exactly the
+/// failed bind's way — the 2026-11-24 ruling's pinned refusal (a
+/// non-halting accept stays the ownership round's optional-over-linear
+/// union seam, no accept-specific patch).
+#[test]
+fn a_failed_accept_halts_on_the_total_spellings_error_line() {
+    let dir = support::guarded_dir("ds-cli-net-accept-");
+    fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("accept.ds");
+    fs::write(
+        &file,
+        "fn main() -> int {\n  const l = net_listen(\"127.0.0.1\", 0)\n  \
+         net_listener_close(l.lid)\n  const c = accept(l)\n  0\n}\n",
+    )
+    .expect("source writes");
+    let out = ds().arg("run").arg(&file).output().expect("ds run spawns");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !out.status.success(),
+        "the failed accept never reads as clean success: status {:?}",
+        out.status.code()
+    );
+    assert!(
+        stdout.contains("net error: net_accept 0: unknown listener 0"),
+        "the total spelling's failure halts on the net error line: stdout {stdout:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_scheduled_run_parks_its_accept_and_serves_the_peer() {
     let dir = support::guarded_dir("ds-cli-net-server-");

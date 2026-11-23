@@ -11,6 +11,9 @@
 //! twin), the deadline bound on a listener no peer ever dials under
 //! the blocking twin (std's listener carries no OS accept timeout,
 //! so the poll draws the line the parked twin no longer does), the
+//! second parked accept over one listener answering the registration's
+//! refusal span (epoll's one row per fd: the cross-token interest
+//! refuses loud rather than stranding the first waiter's wake), the
 //! idempotent listener close with a later accept on the
 //! closed handle answering the unknown-listener floor, and the
 //! addr_in_use class of a bind against a port another socket holds.
@@ -293,6 +296,39 @@ fn bind_tag() -> FunctionDef {
     ])
 }
 
+/// `(host: string, port: int) -> word`: the bind's payload word alone
+/// (the listener's id on success, the failure message otherwise) — the
+/// host-side bind of the duplicate-interest fixture.
+fn bind_lid() -> FunctionDef {
+    def("bind_lid", &[Ref, I64, Raw, Raw], 2, 2, &[
+        Uop::Funcf { frame_slots: 4 },
+        Uop::Mov { dst: 2, src: 0 },
+        Uop::Mov { dst: 3, src: 1 },
+        Uop::Call {
+            callee: k(0),
+            nargs: 2,
+        },
+        Uop::Ret { src: 3 },
+    ])
+}
+
+/// `(lid: int) -> word`: the accept's payload word over a host-bound
+/// listener — the accepted connection's handle on success, the
+/// failure message otherwise.
+fn accept_lid() -> FunctionDef {
+    // args 2: the fallible accept's two-word tag+payload answer overlays
+    // the outgoing arg area, one word wider than the call's argument
+    def("accept_lid", &[I64, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 3 },
+        Uop::Mov { dst: 1, src: 0 },
+        Uop::Call {
+            callee: k(1),
+            nargs: 1,
+        },
+        Uop::Ret { src: 2 },
+    ])
+}
+
 fn server_registry() -> ModuleRegistry {
     registry(vec![serve(), accept_payload(), closed_accept(), bind_tag()])
 }
@@ -487,6 +523,86 @@ fn a_silent_listener_times_out_within_the_bound_under_the_blocking_twin() {
         elapsed < Duration::from_secs(5),
         "the interpreter cannot hang on a silent listener: {elapsed:?}"
     );
+}
+
+/// Two parked accepts over one listener: epoll holds one row per fd,
+/// so the second park's registration would silently replace the
+/// first's interest and strand its wake (the first fiber parking
+/// unbounded on a connection that never reaches it) — the
+/// registration refuses loud instead, the second accept answering
+/// its own refusal span while the first still takes the peer's
+/// connection. The parked twin is the reactor's own; a driver-less
+/// host keeps the blocking twins (whose serialized rounds share the
+/// fd with no interest row at all).
+#[test]
+fn a_second_parked_accept_over_one_listener_answers_the_refusal_span() {
+    if ds_vm::reactor::platform_default().is_none() {
+        return;
+    }
+    for _ in 0..8 {
+        let port = free_port();
+        let mut vm = scheduled_vm(vec![bind_lid(), accept_lid()]);
+        let host = string(&mut vm, "127.0.0.1");
+        let bound = vm
+            .run("server", "bind_lid", &[host, Value::I64(i64::from(port))])
+            .expect("the bind fixture runs");
+        let [Value::I64(lid)] = bound.as_slice() else {
+            continue; // the parallel suite stole the port: the bind refused
+        };
+        let lid = *lid;
+        let peer = thread::spawn(move || {
+            // both children park before the dial: the interest rows
+            // stand in spawn order
+            thread::sleep(Duration::from_millis(200));
+            for _ in 0..200 {
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        });
+        let nursery = vm.open_root_nursery();
+        vm.spawn_fiber_in(nursery, "server", "accept_lid", &[Value::I64(lid)])
+            .expect("the first acceptor spawns");
+        vm.spawn_fiber_in(nursery, "server", "accept_lid", &[Value::I64(lid)])
+            .expect("the second acceptor spawns");
+        let joined = vm.join_nursery(nursery).expect("the nursery joins");
+        match joined {
+            ds_vm::JoinOutcome::Joined(answers) => {
+                assert_eq!(answers.len(), 2, "both acceptors landed");
+                let mut conn = None;
+                let mut refusal = None;
+                for answer in &answers {
+                    match answer.as_slice() {
+                        [Value::I64(accepted)] => conn = Some(*accepted),
+                        [Value::Ref(word)] => {
+                            let id = *word;
+                            refusal = Some(
+                                vm.objects_of(id)
+                                    .str_at(id.id())
+                                    .expect("the refusal names a string")
+                                    .to_owned(),
+                            );
+                        },
+                        other => panic!("the acceptors answer their payloads: {other:?}"),
+                    }
+                }
+                assert!(conn.is_some(), "the first acceptor took the connection");
+                let refusal = refusal.expect("the second acceptor answers the refusal");
+                assert!(
+                    refusal.starts_with(&format!("net_accept {lid}: handle "))
+                        && refusal.ends_with(" is registered under another wait"),
+                    "the refusal names the standing interest: {refusal}"
+                );
+            },
+            other @ ds_vm::JoinOutcome::Failed(_) => {
+                panic!("the join failed: {other:?}")
+            },
+        }
+        peer.join().expect("the dialer lands");
+        return;
+    }
+    panic!("no free loopback port answered the bind");
 }
 
 /// The idempotent close: two closes never trap, and the accept on the

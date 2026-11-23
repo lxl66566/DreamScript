@@ -5619,6 +5619,12 @@ impl Vm {
                 )),
             };
             if let Err(err) = registered {
+                // the refusal span allocates in the parked fiber's own
+                // store: the context releases first, so the completion's
+                // swap lands the message where its Ref word names — an
+                // allocation over the live context rides the slot's
+                // stale stash instead (the pitfalls entry's own class)
+                self.host_release();
                 let result = self.wait_error_span(fiber, &wait, false, &err.0);
                 self.sched.waits.insert(token, WaitEntry {
                     fiber,
