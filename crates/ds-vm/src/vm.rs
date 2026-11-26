@@ -417,6 +417,15 @@ pub enum Trap {
     /// installed the interest owns the status it answers, per the die
     /// split.
     Shutdown,
+    /// A REPL entry met the root fiber in the wrong session state:
+    /// [`Vm::repl_start`](crate::repl::Vm::repl_start) needs an empty
+    /// root, `repl_resume` and `repl_drop_binding` a parked one. The
+    /// refusal is the state itself, never a callable, so the trap names
+    /// the entry the host chose.
+    ReplState {
+        /// The entry the session state refused.
+        entry: crate::repl::ReplEntry,
+    },
 }
 
 /// One entry of the call-info stack: the frame base plus the module

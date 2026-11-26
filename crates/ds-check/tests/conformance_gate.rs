@@ -360,6 +360,11 @@ const TEARDOWN_AMBIENT: &str = concat!(
     "pub extern fn cancel[t] (e: t) -> ()\n",
 );
 
+/// Ambient stdlib stubs for none_fields: the primitives alone (`none`
+/// is the predeclared unit atom, no ambient declaration needed); the
+/// file owns nothing.
+const NONE_FIELDS_AMBIENT: &str = "pub tag int\n";
+
 fn items_of(ast: &Ast) -> Vec<&Item> {
     ast.blocks.iter().flat_map(|b| b.items.iter()).collect()
 }
@@ -1238,6 +1243,38 @@ fn teardown_deinit_items_check_clean() {
         rejects.is_empty(),
         "the teardown deinit surface declares no reject item"
     );
+}
+
+/// none_fields.ds: the item 104 none-typed field honesty round — a
+/// field whose written type solves to the none atom alone refuses at
+/// its own span in every spelling (the eight DS2042 rejects, each
+/// exactly one diagnostic at its own item), a none-headed application
+/// hears the tag's own refusal (the DS2040 reject), and the two
+/// optional spellings agree at a field and at a case slot (the six
+/// typecheck items construct alike).
+#[test]
+fn none_fields_items_check_with_the_none_only_rejections() {
+    let rejects = gate("../../conformance/none_fields.ds", NONE_FIELDS_AMBIENT);
+    let ids: Vec<&str> = rejects.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "bare-cell",
+            "paren-cell",
+            "opt-cell",
+            "union-cell",
+            "alias-cell",
+            "payload-cell",
+            "case-cell",
+            "slot-cell",
+            "app-cell",
+        ],
+        "the reject class is the eight none-typed field spellings plus the none-headed application"
+    );
+    for (id, _what, diag) in &rejects {
+        let code = if id == "app-cell" { "DS2040" } else { "DS2042" };
+        assert_eq!(diag.code.as_str(), code, "`{id}` refuses at its own span");
+    }
 }
 
 /// The corpus header discipline over every conformance file, not only

@@ -228,6 +228,20 @@ fn answer_span(code: &[u32]) -> Option<AnswerSpan> {
     }
 }
 
+/// Which REPL entry the session state refused: each entry names the
+/// root-fiber state its protocol needs, and the refusal is that state
+/// itself, never a callable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplEntry {
+    /// [`Vm::repl_start`]: the root still holds a parked session (a live
+    /// session resumes instead).
+    Start,
+    /// [`Vm::repl_resume`]: no parked session stands to resume.
+    Resume,
+    /// [`Vm::repl_drop_binding`]: no parked session holds the binding.
+    DropBinding,
+}
+
 /// How one REPL drive ended: parked at the spliced call holding the
 /// submission's answer span, or the entry frame completed (a defensive
 /// outcome — the spliced body has no live exit path, so a completion
@@ -282,14 +296,14 @@ impl Vm {
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownCallee`] when the entry is absent or the root still
-    /// holds a parked frame; the execution traps otherwise.
+    /// [`Trap::ReplState`] when the root still holds a parked session (a
+    /// live session resumes instead); [`Trap::UnknownFunction`] when the
+    /// entry is absent; the execution traps otherwise.
     pub fn repl_start(&mut self, module: &str, func: &str) -> Result<ReplOutcome, Trap> {
         let (version, func_id) = self.resolve_repl_entry(module, func)?;
         if self.pool[FIBER_ROOT.index()].resumable() {
-            return Err(Trap::UnknownCallee {
-                module: "repl".into(),
-                func: 0,
+            return Err(Trap::ReplState {
+                entry: ReplEntry::Start,
             });
         }
         self.repl_pre = Some(ReplPre {
@@ -323,8 +337,10 @@ impl Vm {
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownCallee`] when the entry is absent or the root is
-    /// not parked; the execution traps otherwise (the caller rolls back).
+    /// [`Trap::ReplState`] when no parked session stands (the root is
+    /// empty; `repl_start` is that state's entry); [`Trap::UnknownFunction`]
+    /// when the entry is absent; the execution traps otherwise (the
+    /// caller rolls back).
     pub fn repl_resume(
         &mut self,
         module: &str,
@@ -334,9 +350,8 @@ impl Vm {
         let (version, func_id) = self.resolve_repl_entry(module, func)?;
         let root = &mut self.pool[FIBER_ROOT.index()];
         if !root.resumable() {
-            return Err(Trap::UnknownCallee {
-                module: "repl".into(),
-                func: 1,
+            return Err(Trap::ReplState {
+                entry: ReplEntry::Resume,
             });
         }
         // the pre-step state, read off the parked fiber before any move
@@ -485,8 +500,8 @@ impl Vm {
     ///
     /// # Errors
     ///
-    /// [`Trap::UnknownCallee`] when the entry is absent; a hook's own
-    /// trap otherwise.
+    /// [`Trap::ReplState`] when no parked session stands to hold the
+    /// binding; a hook's own trap otherwise.
     pub fn repl_drop_binding(
         &mut self,
         module: &str,
@@ -496,9 +511,8 @@ impl Vm {
         let (version, func_id) = self.resolve_repl_entry(module, func)?;
         let root = &mut self.pool[FIBER_ROOT.index()];
         if !root.resumable() {
-            return Err(Trap::UnknownCallee {
-                module: "repl".into(),
-                func: 2,
+            return Err(Trap::ReplState {
+                entry: ReplEntry::DropBinding,
             });
         }
         let extent = root.segment.len();

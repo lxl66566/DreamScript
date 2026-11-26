@@ -150,6 +150,11 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // spellings and the clean `@std` selection check clean (the G4
     // visibility round)
     assert_corpus_clean("visibility_surface.ds", 3);
+    // the nine errors are the file's own reject items (the eight
+    // none-typed field spellings and the none-headed application); the
+    // two optional spellings construct alike at a field and a case
+    // slot (the ds-check conformance gate pins the reject class)
+    assert_corpus_clean("none_fields.ds", 9);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a

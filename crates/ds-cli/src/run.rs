@@ -22,7 +22,7 @@ use ds_diag::{Files, human};
 use ds_mod::{Module, ReadError, read};
 use ds_vm::{
     ArenaMisuse, ArenaPackError, FIBER_ROOT, FramePc, LoadError as VmLoadError, ModuleBuildError,
-    ModuleRegistry, StagedSite, Trap, Value, Vm,
+    ModuleRegistry, ReplEntry, StagedSite, Trap, Value, Vm,
     native::{PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, is_io_class, is_net_class},
     platform::Platform,
 };
@@ -725,6 +725,13 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::UnknownCallee { module, func } => {
             format!("call into module `{module}` function index {func}, which is not installed")
         },
+        Trap::ReplState { entry } => match entry {
+            ReplEntry::Start => "a REPL session is already live: a parked session resumes, it \
+                                 never starts"
+                .to_owned(),
+            ReplEntry::Resume => "no live REPL session stands to resume".to_owned(),
+            ReplEntry::DropBinding => "no live REPL session holds the binding".to_owned(),
+        },
         Trap::UnservedWorldOp { op } => {
             format!("world op {op} is not served by the installed platform")
         },
@@ -838,5 +845,36 @@ fn describe_trap(trap: &Trap) -> String {
                                     deadline, and no live fiber answers — a channel every fiber \
                                     waits on is the honest deadlock)"
             .to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_vm::{ReplEntry, Trap};
+
+    use super::describe_trap;
+
+    /// The REPL session-state refusals render the state they name, never
+    /// an unknown-callee trap over a virtual module.
+    #[test]
+    fn repl_state_refusals_render_their_own_state() {
+        assert_eq!(
+            describe_trap(&Trap::ReplState {
+                entry: ReplEntry::Start
+            }),
+            "a REPL session is already live: a parked session resumes, it never starts"
+        );
+        assert_eq!(
+            describe_trap(&Trap::ReplState {
+                entry: ReplEntry::Resume
+            }),
+            "no live REPL session stands to resume"
+        );
+        assert_eq!(
+            describe_trap(&Trap::ReplState {
+                entry: ReplEntry::DropBinding
+            }),
+            "no live REPL session holds the binding"
+        );
     }
 }

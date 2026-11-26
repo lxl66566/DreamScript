@@ -4572,7 +4572,11 @@ fn impl_item(
     };
     // The target is a name use, so it mints its own span: two families
     // expanding one item each synthesize an impl, and the declaration's
-    // own name span cannot serve both targets' use records.
+    // own name span cannot serve both targets' use records. The applied
+    // arguments mint their own spans for the same reason — a generic
+    // declaration's written parameter span already carries the
+    // declaration's own use, so one shared span would key two impls'
+    // resolutions into one use record.
     let target_span = mint.span();
     let target = Type::Path {
         span: target_span,
@@ -4585,15 +4589,7 @@ fn impl_item(
         },
         args: generics
             .iter()
-            .map(|p| Type::Path {
-                span: p.span,
-                path: Path {
-                    span: p.span,
-                    segments: vec![p.name.clone()],
-                },
-                args: Vec::new(),
-                delim: Delim::Bracket,
-            })
+            .map(|p| name_type(mint, &p.name.name))
             .collect(),
         delim: Delim::Bracket,
     };

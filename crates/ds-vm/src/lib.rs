@@ -154,7 +154,7 @@ pub use native::{ControlNative, NativeFunction, NativeResult, OutputSink};
 pub use nursery::{ChildOutcome, JoinOutcome, NurseryId, NurseryState};
 pub use platform::{Capability, Platform};
 pub use program::{Const, ConstFuncRef, ConstKind, FunctionDef, assemble};
-pub use repl::{ReplOutcome, SpliceError, splice_park};
+pub use repl::{ReplEntry, ReplOutcome, SpliceError, splice_park};
 pub use value::{
     ARENA_CHUNK_LIMIT, ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word,
 };
