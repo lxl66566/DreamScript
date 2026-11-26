@@ -1320,8 +1320,11 @@ fn entry_sources(file: &Path, members: &[Member]) -> Vec<(String, String)> {
 
 /// The compile one `ds test` entry rides: the composed members (the
 /// package's own beside the test entry) through the same package
-/// compile a run takes — no script-mode caches, a test run is one-shot
-/// — and the same link validation.
+/// compile a run takes, and the same link validation. The caller
+/// serves and stores the compiled module around this call; the
+/// compile itself persists no prefix or dep `.dsi` tier, whose
+/// readers key the package shape a session-shaped test compile never
+/// serves.
 ///
 /// # Errors
 ///

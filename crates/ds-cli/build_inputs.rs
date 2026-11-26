@@ -1,8 +1,15 @@
-//! The build identity's input roots, shared between the build script
-//! and the watch test: one list drives both what the digest folds and
-//! what cargo watches, so the two sets can never drift apart.
+//! The build identity's input roots and fold, shared between the
+//! build script and the watch test: one list drives both what the
+//! digest folds and what cargo watches, and the test re-runs the same
+//! fold over the working tree, so the two sets can never drift apart
+//! and a build script the watches never rerun cannot keep a stale
+//! identity silently.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// The workspace crates whose code turns source text into module
 /// bytes, ds-vm deliberately absent (it executes the artifact but
@@ -126,4 +133,64 @@ pub fn relative(path: &Path, base: &Path) -> String {
         .collect();
     parts.extend(path.map(|part| part.as_os_str().to_string_lossy().into_owned()));
     if parts.is_empty() { ".".to_owned() } else { parts.join("/") }
+}
+
+/// The digest over every input root's bytes: one blake3 fold in root
+/// order, each file framed by its key's length and bytes, the domain
+/// tag first so the fold can never collide with a bare file digest.
+/// Returns the hex digest, or `None` when a Tree or File root is
+/// absent or unreadable — the packaged build, where the identity
+/// degrades to the version alone. A missing Required root panics: the
+/// identity must never go partial. The build script folds once and
+/// bakes the result into `DS_BUILD_ID`; the watch test re-runs the
+/// same fold over the working tree, so the baked value can only stay
+/// green while it matches what a fresh fold of the current tree
+/// produces — the comparison a clean checkout's byte gate reaches by
+/// rebuilding from scratch.
+pub fn fold_build_id(manifest_dir: &Path) -> Option<String> {
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for root in input_roots(manifest_dir) {
+        match root.kind {
+            RootKind::Tree => collect_tree(&root.path, &root.key, &mut files)?,
+            RootKind::File => {
+                files.insert(root.key, fs::read(&root.path).ok()?);
+            },
+            // the run path's own sources; a missing one is a broken
+            // package build, and the identity must never be partial
+            RootKind::Required => {
+                let key = root.key;
+                let bytes =
+                    fs::read(&root.path).unwrap_or_else(|error| panic!("reading {key}: {error}"));
+                files.insert(key, bytes);
+            },
+        }
+    }
+    files.remove(GENERATED_ARTIFACT);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ds-build-id-v1");
+    for (path, bytes) in &files {
+        hasher.update(&(path.len() as u64).to_le_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    Some(hasher.finalize().to_string())
+}
+
+/// Collects every file under `dir` into `files` keyed by
+/// `prefix`-plus-relative path; `None` when the tree is absent or
+/// unreadable (the packaged-build case).
+fn collect_tree(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Vec<u8>>) -> Option<()> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            collect_tree(&path, &format!("{prefix}/{name}"), files)?;
+        } else {
+            files.insert(format!("{prefix}/{name}"), fs::read(&path).ok()?);
+        }
+    }
+    Some(())
 }

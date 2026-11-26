@@ -37,6 +37,34 @@ fn every_input_is_watched_where_it_folds() {
     }
 }
 
+/// The fresh-fold gate: the baked `DS_BUILD_ID` must equal a fold run
+/// over the working tree's current bytes, independently of the build
+/// script's cached output. The drift gates stamp their fresh
+/// generation with the same baked digest, so without this pin a build
+/// script the watches never rerun (a watch spelling gone stale, an
+/// mtime cargo's change detection cannot see, an input class added
+/// without its watch) lets the drift gate and a stale-sealed artifact
+/// agree — the seal only refusing in a checkout that rebuilds the
+/// script from scratch. Byte-based, so mtime games cannot hide it.
+#[test]
+fn the_baked_identity_matches_a_fresh_fold_of_the_tree() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let baked = env!("DS_BUILD_ID");
+    match build_inputs::fold_build_id(manifest) {
+        Some(fresh) => assert_eq!(
+            baked, fresh,
+            "the baked build identity predates the working tree; rerun the build script (touch \
+             build.rs) and reseat the ambient dsmod when the seal's header moved",
+        ),
+        // a fold that cannot complete bakes the empty identity, so the
+        // packaged build answers green with both sides degraded
+        None => assert_eq!(
+            baked, "",
+            "the fold cannot complete while the baked identity is set"
+        ),
+    }
+}
+
 /// The spelling scheme itself: siblings and the lock escape the
 /// package root through `..`, the run path stays inside it, and no
 /// spelling carries a backslash (cargo takes forward slashes on every
@@ -109,5 +137,18 @@ fn watch_spellings_and_keys_stay_pinned() {
             .iter()
             .all(|root| root.key != build_inputs::GENERATED_ARTIFACT),
         "the generated artifact never becomes its own identity root"
+    );
+    // the spelling derivation itself: a common prefix is skipped, the
+    // climb out spells `..`, and forward slashes hold on every platform
+    assert_eq!(
+        build_inputs::relative(&manifest.join("src").join("main.rs"), manifest),
+        "src/main.rs"
+    );
+    assert_eq!(
+        build_inputs::relative(
+            &manifest.parent().unwrap().join("ds-check").join("src"),
+            manifest
+        ),
+        "../ds-check/src"
     );
 }

@@ -107,30 +107,33 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     resolve_and_run(&mut prepared, &args.entry, &signals)
 }
 
-/// The `ds test` re-entry's drive: one compiled test script — the
-/// package's members composed beside it — installs through the same
-/// deps-first walk as a package run, no script-mode caches (a test run
-/// is one-shot), then the run tail as ever: empty argv, the platform
-/// reactor, the shutdown door, the `main` entry.
+/// The `ds test` re-entry's drive: one test module — the package's
+/// members composed beside the test file, served from the script cache
+/// or freshly compiled — installs through the same deps-first walk
+/// as a package run over the caller's cache handle (the walk's
+/// dep-member artifacts serve warm and store what compiles), then the
+/// run tail as ever: empty argv, the platform reactor, the shutdown
+/// door, the `main` entry.
 ///
 /// # Errors
 ///
 /// Every refusal the install walk and the drive report.
 pub(crate) fn run_test_entry(
-    compiled: source::CompiledSource,
+    module: Module,
     graph: &package::Graph,
+    cache: &RunCache,
 ) -> Result<ExitCode> {
     let signals = ShutdownWatch::install()?;
-    let name = compiled.name.clone();
-    let functions = compiled.lowered.functions().to_vec();
-    let cache = RunCache::discover(false, false);
-    let vm = install_package_root(
-        compiled.lowered.into_module(),
-        graph,
-        &cache,
-        &name,
-        functions.len(),
-    )?;
+    let name = module.name().to_owned();
+    let functions: Vec<String> = module
+        .functions()
+        .iter()
+        .map(|function| function.name().to_owned())
+        .collect();
+    // the walk persists no dep `.dsi`: the test fold keys over the
+    // session shape, so the prefix tier's readers (whose probes fold
+    // the package shape) would never serve those files
+    let vm = install_package_root(module, graph, cache, None, &name, functions.len())?;
     let mut prepared = PreparedRun {
         vm,
         name,
@@ -294,6 +297,7 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
         compiled.lowered.into_module(),
         graph,
         &cache,
+        Some(&cache),
         &name,
         functions.len(),
     )?;
@@ -310,11 +314,15 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
 /// their dependent, each recorded link validated against the identity
 /// it pins. The walk's dep demands consult the dep-member cache first,
 /// so a warm run installs the linked members' own artifacts without
-/// compiling them.
+/// compiling them; `dep_dsi` is the checked-prefix tier a cold dep
+/// compile persists beside its dsmod (`Some` from the run paths, whose
+/// probes fold the same shape; `None` from a caller whose fold keys no
+/// prefix reader would serve).
 fn install_package_root(
     module: Module,
     graph: &package::Graph,
     cache: &RunCache,
+    dep_dsi: Option<&RunCache>,
     name: &str,
     function_count: usize,
 ) -> Result<Vm> {
@@ -334,7 +342,7 @@ fn install_package_root(
         if let Some(served) = cache.lookup_dep(dep, linked) {
             return Some(served);
         }
-        match graph.serve(dep, Some(cache)) {
+        match graph.serve(dep, dep_dsi) {
             Ok(Some(served)) => {
                 cache.store_dep(dep, linked, &served);
                 Some(served)
@@ -390,7 +398,7 @@ fn run_cached_package(
         .iter()
         .map(|function| function.name().to_owned())
         .collect();
-    let vm = install_package_root(module, graph, cache, &name, functions.len())?;
+    let vm = install_package_root(module, graph, cache, Some(cache), &name, functions.len())?;
     Ok(PreparedRun {
         vm,
         name,

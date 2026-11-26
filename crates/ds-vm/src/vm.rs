@@ -679,6 +679,30 @@ struct CallSite {
 /// CALL-site cache slot count (direct-mapped, one uop per slot).
 const CALL_CACHE_SLOTS: usize = 512;
 
+/// One word-keyed inline-cache slot: the resolution of a callable word
+/// (the CALLS arm and the hosted-call seam) as of `stamp`. The key is
+/// the whole input triple the full resolution takes — the scalar
+/// FuncRef or closure header's bits, the caller's owner row, and the
+/// staged argument count — so a hit answers exactly what the full path
+/// answers, the arity check included (`nargs` rides the key). The stamp
+/// is the registry generation the resolution ran against, so any
+/// install invalidates every entry at once; a miss falls back to the
+/// full lookup, so dispatch correctness never depends on the cache.
+/// Traps are never cached: every failure comes from the full path.
+#[derive(Clone, Debug)]
+struct WordCallee {
+    funcref: FuncRef,
+    owner: Option<VersionIdx>,
+    nargs: u8,
+    stamp: u64,
+    version: VersionIdx,
+    func: u32,
+}
+
+/// Word-keyed cache slot count (direct-mapped; the monomorphic call
+/// sites the bank serves touch a handful of distinct keys per run).
+const WORD_CACHE_SLOTS: usize = 64;
+
 /// A KSTR intern-row key: the pool's address (stable for its version's
 /// lifetime) and the loading fiber — each heap interns its own copy of a
 /// constant, so a cached id is only ever served against the fiber whose
@@ -1331,11 +1355,12 @@ impl StackState<'_> {
             if owner_name.is_some_and(|own| registry.module_name(funcref.module()) == Some(own)) {
                 registry.resolve_indexed_in(owner.expect("checked above"), funcref.func())
             } else {
-                let name = registry
-                    .module_name(funcref.module())
-                    .ok_or(Trap::UnknownModule {
-                        module: funcref.module(),
-                    })?;
+                let name =
+                    registry
+                        .module_name(funcref.module())
+                        .ok_or_else(|| Trap::UnknownModule {
+                            module: funcref.module(),
+                        })?;
                 registry.resolve_indexed(name, funcref.func())
             };
         let (version, func_id) = target.ok_or_else(|| Trap::UnknownCallee {
@@ -2229,7 +2254,7 @@ fn int_div(x: i64, y: i64) -> Result<i64, Trap> {
     if y == 0 {
         return Err(Trap::DivideByZero);
     }
-    x.checked_div(y).ok_or(Trap::IntegerOverflow)
+    x.checked_div(y).ok_or_else(|| Trap::IntegerOverflow)
 }
 
 /// MODI64 [B7]: same trap split as [`int_div`].
@@ -2237,7 +2262,7 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     if y == 0 {
         return Err(Trap::DivideByZero);
     }
-    x.checked_rem(y).ok_or(Trap::IntegerOverflow)
+    x.checked_rem(y).ok_or_else(|| Trap::IntegerOverflow)
 }
 
 /// SHLI64/SHRI64/BITAND/BITXOR/BITORI64 [B7]: the shift amounts trap
@@ -2390,7 +2415,7 @@ fn stage_closure<'s>(
     } else {
         pool.get_mut(word.fiber().index())
             .map(|fiber| &mut fiber.objects)
-            .ok_or(Trap::UnknownObject { obj: word.id() })?
+            .ok_or_else(|| Trap::UnknownObject { obj: word.id() })?
     };
     let (header, block) = store.closure_at(word.id())?;
     Ok((header, staging.stage(block)))
@@ -2928,6 +2953,12 @@ pub struct Vm {
     /// also sweeps the bank against so swapped-out versions' handles do
     /// not linger until eviction.
     call_cache: Vec<Option<CallSite>>,
+    /// The word-keyed inline-cache bank (the CALLS arm and the hosted-call
+    /// seam): one [`WordCallee`] per slot, keyed by the callable word's
+    /// bits, the owner row, and the argument count, validated against the
+    /// registry generation. Fibers share the bank safely — the key names
+    /// the callee alone, never per-fiber stack state.
+    word_cache: Vec<Option<WordCallee>>,
     /// The KSTR pool-const intern cache: per-(pool, fiber) object-id
     /// rows, keyed by the pool's address (stable for its version's
     /// lifetime) and the loading fiber. No claim is held — a hit
@@ -3132,6 +3163,7 @@ impl Vm {
             trap_pc: None,
             claims: vec![ClaimTable::default()],
             call_cache: vec![None; CALL_CACHE_SLOTS],
+            word_cache: vec![None; WORD_CACHE_SLOTS],
             kstr_cache: KstrRows::default(),
             hook_dirs: HookDirIndex::default(),
             hook_dirs_stamp: u64::MAX,
@@ -7736,6 +7768,49 @@ impl Vm {
     /// frame may sit deep in the dying chain, not at its innermost entry),
     /// every other caller resolving staged values through the current
     /// slot.
+    /// Resolves a callable word for the CALLS arm and the hosted-call
+    /// seam through the word-keyed inline cache: a hit whose key matches
+    /// the (FuncRef, owner, nargs) triple and whose stamp matches the
+    /// registry generation answers the row and index the full path
+    /// resolved, otherwise the full [`StackState::resolve_func_word`]
+    /// runs and its answer fills the slot. The arity rode the key, so a
+    /// hit skips the full path's arity compare; traps are never cached,
+    /// so every refusal keeps the full path's shape.
+    fn resolve_word(
+        registry: &ModuleRegistry,
+        word_cache: &mut [Option<WordCallee>],
+        funcref: FuncRef,
+        owner: Option<VersionIdx>,
+        nargs: u8,
+    ) -> Result<(VersionIdx, u32), Trap> {
+        let stamp = registry.generation();
+        let mut hasher = WordKeyHasher::default();
+        hasher.mix(u64::from(funcref.module()));
+        hasher.mix(u64::from(funcref.func()));
+        hasher.mix(u64::from(nargs));
+        hasher.mix(owner.map_or(0, |row| u64::from(row.0) + 1));
+        let at = hasher.finish() as usize & (WORD_CACHE_SLOTS - 1);
+        if let Some(entry) = word_cache[at].as_ref() {
+            if entry.funcref == funcref
+                && entry.owner == owner
+                && entry.nargs == nargs
+                && entry.stamp == stamp
+            {
+                return Ok((entry.version, entry.func));
+            }
+        }
+        let resolved = StackState::resolve_func_word(registry, funcref, owner, nargs)?;
+        word_cache[at] = Some(WordCallee {
+            funcref,
+            owner,
+            nargs,
+            stamp,
+            version: resolved.0,
+            func: resolved.1,
+        });
+        Ok(resolved)
+    }
+
     pub(crate) fn call_hosted_in(
         &mut self,
         callee: Value,
@@ -7764,7 +7839,7 @@ impl Vm {
             },
         };
         let (version, func_id) =
-            StackState::resolve_func_word(&self.registry, funcref, owner, nargs)?;
+            Self::resolve_word(&self.registry, &mut self.word_cache, funcref, owner, nargs)?;
         let target = &self.registry.pinned(version).functions()[func_id as usize];
         let frame_size = target.layout.frame_size() as usize;
         let base = self.stack.len();
@@ -9132,9 +9207,9 @@ impl Vm {
                                     .map_err(|e| (e, at))?,
                             );
                             let result = match op {
-                                OP_ADD_I64 => x.checked_add(y).ok_or(Trap::IntegerOverflow),
-                                OP_SUB_I64 => x.checked_sub(y).ok_or(Trap::IntegerOverflow),
-                                OP_MUL_I64 => x.checked_mul(y).ok_or(Trap::IntegerOverflow),
+                                OP_ADD_I64 => x.checked_add(y).ok_or_else(|| Trap::IntegerOverflow),
+                                OP_SUB_I64 => x.checked_sub(y).ok_or_else(|| Trap::IntegerOverflow),
+                                OP_MUL_I64 => x.checked_mul(y).ok_or_else(|| Trap::IntegerOverflow),
                                 // the fourth fused arith, MODI64: the same
                                 // zero-divide / overflow split as DIVI64,
                                 // spelled inline so `int_mod` keeps its one
@@ -9145,7 +9220,7 @@ impl Vm {
                                     if y == 0 {
                                         Err(Trap::DivideByZero)
                                     } else {
-                                        x.checked_rem(y).ok_or(Trap::IntegerOverflow)
+                                        x.checked_rem(y).ok_or_else(|| Trap::IntegerOverflow)
                                     }
                                 },
                             }
@@ -10612,9 +10687,14 @@ impl Vm {
                                 ))
                             },
                         };
-                        let (version, func_id) =
-                            StackState::resolve_func_word(&self.registry, funcref, None, nargs)
-                                .map_err(|e| (e, pc))?;
+                        let (version, func_id) = Self::resolve_word(
+                            &self.registry,
+                            &mut self.word_cache,
+                            funcref,
+                            None,
+                            nargs,
+                        )
+                        .map_err(|e| (e, pc))?;
                         let target = &self.registry.pinned(version).functions()[func_id as usize];
                         // a closure's capture block lands in the callee's frame
                         // starting at the first local slot (after the params),
