@@ -83,7 +83,13 @@ impl FnLower<'_, '_, '_> {
                         // the element reads back through the checked read
                         // and the walk continues over the read copy; the
                         // store-back rides below
-                        let elem = self.stage_index_read(*native, &place, &probe, *elem)?;
+                        let elem = self.stage_index_read(
+                            *native,
+                            &place,
+                            &probe,
+                            *elem,
+                            "an assignment place",
+                        )?;
                         let step = PendingStore {
                             native: *native,
                             recv: place,
@@ -286,6 +292,43 @@ impl FnLower<'_, '_, '_> {
         })
     }
 
+    /// One value-position subscript read: the checker routed the
+    /// receiver over the ambient collections with the assignment place's
+    /// own resolution, so the read stages the generic `get` native's
+    /// CALLG over the receiver and probe words and answers the ok
+    /// payload's whole span. The miss arm carries the assignment path's
+    /// semantics at the read: a list's out-of-range index traps, a
+    /// map's absent key halts through the bare trap primitive — the
+    /// checked `get` members alone keep the `t | none` spelling. An
+    /// anonymous receiver's or probe's count dies after the read, once
+    /// per evaluation; a named binding keeps its own death.
+    pub(super) fn index_read_value(
+        &mut self,
+        recv: &Expr,
+        probe: &Expr,
+        elem: Ty,
+    ) -> Result<TypedPlace, LowerError> {
+        let recv_tp = self.value(recv)?;
+        let probe_tp = self.value(probe)?;
+        let native = match self.shapes.builtin_instance(recv_tp.ty) {
+            Some(BuiltinInstance::List) => StoreIndex::List,
+            Some(BuiltinInstance::Map) => StoreIndex::Map,
+            _ => {
+                return Err(LowerError::unsupported(
+                    recv.span(),
+                    "a subscript read receiver",
+                    "the read's collection has no instance row the lowerer covers",
+                ));
+            },
+        };
+        let recv_addr = single(&self.word_addrs(&recv_tp.place, recv_tp.ty)?, no_span())?;
+        let probe_addr = single(&self.word_addrs(&probe_tp.place, probe_tp.ty)?, no_span())?;
+        let temp = self.stage_index_read(native, &recv_tp, &probe_tp, elem, "a subscript read")?;
+        self.rc
+            .drop_unnamed(&mut self.code, &[recv_addr.slot, probe_addr.slot]);
+        Ok(temp)
+    }
+
     /// One checked element read (the nesting's front half): the generic
     /// `get` native's CALLG over the receiver and probe words, the ok
     /// payload's words copied into a fresh element temp under their own
@@ -298,6 +341,7 @@ impl FnLower<'_, '_, '_> {
         place: &TypedPlace,
         probe: &TypedPlace,
         elem: Ty,
+        place_kind: &str,
     ) -> Result<TypedPlace, LowerError> {
         let (get, instance) = match native {
             StoreIndex::List => (
@@ -367,7 +411,7 @@ impl FnLower<'_, '_, '_> {
         // the miss arm halts inside its own call, so nothing it owns
         // flows past the fork
         let fork = self.rc.save();
-        self.place_miss(native, place, probe, &temp, &elem_words)?;
+        self.place_miss(native, place, probe, &temp, &elem_words, place_kind)?;
         self.rc.restore(fork);
         self.bind_label(ok);
         // the payload words move into the element temp, each `Ref` word
@@ -386,12 +430,13 @@ impl FnLower<'_, '_, '_> {
         Ok(temp)
     }
 
-    /// The miss arm of a checked place read: the place must resolve or
-    /// halt. A list's own store refuses the out-of-range probe — the
-    /// element temp first takes kind-true dead words so the staging stays
-    /// well-typed — answering the plain store's own trap; a map's store
-    /// would insert instead, so an absent key halts through the bare trap
-    /// primitive.
+    /// The miss arm of a checked collection read: the place must resolve
+    /// or stop. A list's own store refuses the out-of-range probe — the
+    /// element temp first takes kind-true dead words so the staging
+    /// stays well-typed — answering the store's own trap; a map's store
+    /// would insert instead, so an absent key halts through the bare
+    /// trap primitive. `place_kind` names the miss in the halt line (an
+    /// assignment place, a subscript read).
     fn place_miss(
         &mut self,
         native: StoreIndex,
@@ -399,6 +444,7 @@ impl FnLower<'_, '_, '_> {
         probe: &TypedPlace,
         temp: &TypedPlace,
         elem_words: &[SlotType],
+        place_kind: &str,
     ) -> Result<(), LowerError> {
         match native {
             StoreIndex::List => {
@@ -411,10 +457,10 @@ impl FnLower<'_, '_, '_> {
             StoreIndex::Map => {
                 let trap =
                     crate::native::lookup("trap").ok_or_else(|| mismatch("the trap primitive"))?;
-                let k = self.pool_str(
-                    "the map holds no value under the key; an assignment place must resolve, it \
-                     carries no miss answer",
-                );
+                let k = self.pool_str(&format!(
+                    "the map holds no value under the key; {place_kind} must resolve, it carries \
+                     no miss answer"
+                ));
                 let msg = self.temp_word(SlotType::Ref)?;
                 self.kstr(msg, k);
                 self.seam_call(trap, &[(msg, SlotType::Ref)], &[SlotType::I64])

@@ -892,8 +892,8 @@ fn describe_trap(trap: &Trap) -> String {
              must live on the map's own heap for any content probe to find it"
         ),
         Trap::ListIndex { obj, index, len } => format!(
-            "list object {obj} holds {len} elements; index {index} names none — a store or \
-             removal must resolve its place, it carries no miss answer"
+            "list object {obj} holds {len} elements; index {index} names none — a subscript read, \
+             store, or removal must resolve its place, it carries no miss answer"
         ),
         Trap::ArenaExhausted { field } => match field {
             ArenaPackError::Length => {

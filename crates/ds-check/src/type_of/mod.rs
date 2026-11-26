@@ -1978,7 +1978,7 @@ impl Bodies<'_> {
             Expr::Call { .. } => self.call(e),
             Expr::Field { recv, name, .. } => self.field_access(recv, name),
             Expr::FieldKey { span, recv, name } => self.keyed_field_access(*span, recv, name),
-            Expr::Index { span, recv, .. } => {
+            Expr::Index { span, recv, index } => {
                 if let Some(head) = single_path_ident(recv)
                     && self.package.lookup_type(&head.name).is_some()
                 {
@@ -2000,17 +2000,7 @@ impl Bodies<'_> {
                         poisoned: false,
                     };
                 }
-                self.error(
-                    ErrorCode::InferenceFailed,
-                    "index typing arrives with the stdlib collection types [F5, M3]".to_owned(),
-                    *span,
-                    "index",
-                );
-                Val {
-                    ty: self.empty(),
-                    diverges: false,
-                    poisoned: false,
-                }
+                self.index_read(*span, recv, index)
             },
             Expr::MapApply { span, .. } => {
                 self.error(
@@ -7173,6 +7163,67 @@ impl Bodies<'_> {
             );
         }
         None
+    }
+
+    /// A value-position subscript read: the receiver must name one
+    /// ambient collection, and the read carries the assignment place's
+    /// resolution semantics — the probe checks against the collection's
+    /// own parameter type (the list's `int` index, the map's key) and
+    /// the answer is the element value itself, so an out-of-range list
+    /// index traps and an absent map key halts at the read while the
+    /// `get` members keep the checked `t | none` spelling.
+    fn index_read(&mut self, span: Span, recv: &Expr, index: &Expr) -> Val {
+        let recv_val = self.expr(recv, None);
+        let members = self.decls.universe.members(recv_val.ty).to_vec();
+        let single = members.first().filter(|_| members.len() == 1).copied();
+        let route = single.and_then(|single| {
+            let AtomKind::Apply(ctor, args) = &self.decls.universe.atom_decl(single).ok()?.kind
+            else {
+                return None;
+            };
+            let def = self.decls.defs_of_atoms.get(ctor).copied()?;
+            if Some(def) == self.package.lookup_type("list") {
+                return Some((*args.first()?, None));
+            }
+            if Some(def) == self.package.lookup_type("map") {
+                return Some((*args.get(1)?, args.first().copied()));
+            }
+            None
+        });
+        let Some((elem, key)) = route else {
+            // A poisoned receiver already reported; the collection-shape
+            // complaint on top of it would be a cascade.
+            if !recv_val.poisoned {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "a subscript read rides the ambient collections; `{}` is not one",
+                        self.decls.universe.render(recv_val.ty)
+                    ),
+                    span,
+                    "not a collection",
+                );
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: recv_val.poisoned,
+            };
+        };
+        // The list's probe is the ambient `int`; the map's is its key.
+        let probe_ty = match key {
+            None => self.named_atom_ty(span, "int", "the list's index"),
+            Some(key) => Some(key),
+        };
+        let probe_val = self.expr(index, probe_ty);
+        if let Some(probe_ty) = probe_ty {
+            self.expect_contains(probe_val, probe_ty, index.span(), "subscript probe");
+        }
+        Val {
+            ty: elem,
+            diverges: false,
+            poisoned: false,
+        }
     }
 
     /// One index step's collection and element type: the receiver must

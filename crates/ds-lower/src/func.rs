@@ -4983,8 +4983,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => {
                 return Err(LowerError::unsupported(
                     span,
-                    "a destructuring for pattern",
-                    "only plain name and wildcard patterns lower this round",
+                    "a destructuring range pattern",
+                    "an int step binds as a plain name or `_`; there is nothing to destructure",
                 ))
             },
         }
@@ -5151,6 +5151,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.rc_bind(*bind_span, &elem_place, element)?;
                 self.scope_insert(&name.name, *bind_span);
             },
+            Pattern::Tuple { pats, .. } => {
+                // the destructuring elements bind at their addresses in
+                // the fetched element's span, borrowed the const
+                // convention — the binding sites' own machinery
+                self.bind_tuple_pattern(
+                    pats.as_slice(),
+                    &TypedPlace {
+                        place: elem_place.clone(),
+                        ty: element,
+                    },
+                    false,
+                )?;
+            },
             Pattern::Wildcard(_) => {
                 let words = self.tracked_words(&elem_place, element)?;
                 self.rc.discard(&mut self.code, &words);
@@ -5159,7 +5172,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 return Err(LowerError::unsupported(
                     span,
                     "a destructuring for pattern",
-                    "only plain name and wildcard patterns lower this round",
+                    "plain names, tuple patterns, and `_` lower this round",
                 ))
             },
         }
@@ -5450,88 +5463,96 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// re-spans them at the expression whose lowering hit them.
     fn value_node(&mut self, e: &Expr) -> Result<TypedPlace, LowerError> {
         let val = self.val(e.span())?;
-        let place = match e {
-            Expr::Literal { lit, .. } => self.literal(lit, e.span())?,
-            Expr::Str { parts, .. } => self.string_expr(parts)?,
-            Expr::RawStr { text, .. } => {
-                let dst = self.temp_word(SlotType::Ref)?;
-                let kidx = self.pool_str(text);
-                self.kstr(dst, kidx);
-                Place {
-                    base: dst,
-                    shape: PlaceShape::Word(SlotType::Ref),
-                }
-            },
-            Expr::List { .. } => self.list_literal(e, val.ty)?,
-            Expr::Path { path, .. } => self.path_value(path, e.span(), val.ty)?,
-            Expr::Paren { inner, .. } => return self.value(inner),
-            Expr::Block(block) => return self.block_value(block),
-            Expr::If { .. } => self.if_value(e, val.ty)?,
-            Expr::Match { .. } => self.match_value(e, val.ty)?,
-            Expr::Struct { .. } => self.struct_literal(e, val.ty)?,
-            Expr::Call { .. } => self.call_value(e, val.ty)?,
-            Expr::Field { .. } | Expr::FieldKey { .. } => self.field_access(e, val.ty)?,
-            Expr::Try { .. } => self.try_value(e, val.ty)?,
-            Expr::Unary { op, expr, span } => self.unary(*op, expr, *span, val.ty)?,
-            Expr::Binary { .. } => self.binary_value(e, val.ty)?,
-            Expr::Is { expr, ty, span } => self.is_value(expr, ty, *span)?,
-            Expr::Assign { .. } => self.assign_value(e)?,
-            Expr::While { .. } => self.while_value(e)?,
-            Expr::Return { .. } => return self.return_value(e),
-            Expr::For { comptime: true, .. } => self.for_comptime_value(e)?,
-            Expr::For { .. } => self.for_value(e)?,
-            Expr::Break(span) => self.break_value(*span)?,
-            Expr::Continue(span) => self.continue_value(*span)?,
-            // a conversion placeholder never reaches lowering through the
-            // pipeline (a tree holding one never leaves `parse`); refuse
-            // rather than emit code for a rejected shape
-            Expr::Invalid(span) => {
-                return Err(LowerError::unsupported(
-                    *span,
-                    "an expression",
-                    "it was rejected at conversion",
-                ))
-            },
-            Expr::Nursery { .. } => self.nursery_value(e)?,
-            Expr::Spawn { .. } => self.spawn_value(e)?,
-            Expr::Defer { .. } => {
-                return Err(LowerError::unsupported(
-                    e.span(),
-                    "a control statement",
-                    "defer statements have no lowering yet",
-                ))
-            },
-            Expr::Lambda { .. } => self.lambda_value(e)?,
-            Expr::Tuple { items, span, .. } => {
-                if items.is_empty() {
-                    self.unit_value(*span)?.place
-                } else {
-                    self.tuple_literal(items, val.ty, *span)?
-                }
-            },
-            Expr::MapApply { .. } => {
-                return Err(LowerError::unsupported(
-                    e.span(),
-                    "a map type application",
-                    "the application `map[k, v]` constructs only in call position — `map[k, v]()`",
-                ))
-            },
-            Expr::FnType { .. } => {
-                return Err(LowerError::unsupported(
-                    e.span(),
-                    "a fn type in value position",
-                    "a fn type is a type spelling for the constructor brackets — `list[fn(int) -> \
-                     int]()`",
-                ))
-            },
-            Expr::Index { .. } | Expr::Range { .. } => {
-                return Err(LowerError::unsupported(
-                    e.span(),
-                    "an index or range expression",
-                    "indexing and ranges arrive with the collection surface",
-                ))
-            },
-        };
+        let place =
+            match e {
+                Expr::Literal { lit, .. } => self.literal(lit, e.span())?,
+                Expr::Str { parts, .. } => self.string_expr(parts)?,
+                Expr::RawStr { text, .. } => {
+                    let dst = self.temp_word(SlotType::Ref)?;
+                    let kidx = self.pool_str(text);
+                    self.kstr(dst, kidx);
+                    Place {
+                        base: dst,
+                        shape: PlaceShape::Word(SlotType::Ref),
+                    }
+                },
+                Expr::List { .. } => self.list_literal(e, val.ty)?,
+                Expr::Path { path, .. } => self.path_value(path, e.span(), val.ty)?,
+                Expr::Paren { inner, .. } => return self.value(inner),
+                Expr::Block(block) => return self.block_value(block),
+                Expr::If { .. } => self.if_value(e, val.ty)?,
+                Expr::Match { .. } => self.match_value(e, val.ty)?,
+                Expr::Struct { .. } => self.struct_literal(e, val.ty)?,
+                Expr::Call { .. } => self.call_value(e, val.ty)?,
+                Expr::Field { .. } | Expr::FieldKey { .. } => self.field_access(e, val.ty)?,
+                Expr::Try { .. } => self.try_value(e, val.ty)?,
+                Expr::Unary { op, expr, span } => self.unary(*op, expr, *span, val.ty)?,
+                Expr::Binary { .. } => self.binary_value(e, val.ty)?,
+                Expr::Is { expr, ty, span } => self.is_value(expr, ty, *span)?,
+                Expr::Assign { .. } => self.assign_value(e)?,
+                Expr::While { .. } => self.while_value(e)?,
+                Expr::Return { .. } => return self.return_value(e),
+                Expr::For { comptime: true, .. } => self.for_comptime_value(e)?,
+                Expr::For { .. } => self.for_value(e)?,
+                Expr::Break(span) => self.break_value(*span)?,
+                Expr::Continue(span) => self.continue_value(*span)?,
+                // a conversion placeholder never reaches lowering through the
+                // pipeline (a tree holding one never leaves `parse`); refuse
+                // rather than emit code for a rejected shape
+                Expr::Invalid(span) => {
+                    return Err(LowerError::unsupported(
+                        *span,
+                        "an expression",
+                        "it was rejected at conversion",
+                    ))
+                },
+                Expr::Nursery { .. } => self.nursery_value(e)?,
+                Expr::Spawn { .. } => self.spawn_value(e)?,
+                Expr::Defer { .. } => {
+                    return Err(LowerError::unsupported(
+                        e.span(),
+                        "a control statement",
+                        "defer statements have no lowering yet",
+                    ))
+                },
+                Expr::Lambda { .. } => self.lambda_value(e)?,
+                Expr::Tuple { items, span, .. } => {
+                    if items.is_empty() {
+                        self.unit_value(*span)?.place
+                    } else {
+                        self.tuple_literal(items, val.ty, *span)?
+                    }
+                },
+                Expr::MapApply { .. } => {
+                    return Err(LowerError::unsupported(
+                        e.span(),
+                        "a map type application",
+                        "the application `map[k, v]` constructs only in call position — `map[k, \
+                         v]()`",
+                    ))
+                },
+                Expr::FnType { .. } => {
+                    return Err(LowerError::unsupported(
+                        e.span(),
+                        "a fn type in value position",
+                        "a fn type is a type spelling for the constructor brackets — \
+                         `list[fn(int) -> int]()`",
+                    ))
+                },
+                Expr::Index { recv, index, .. } => {
+                    self.index_read_value(recv, index, val.ty)?.place
+                },
+                Expr::Range { .. } => {
+                    return Err(
+                        LowerError::unsupported(
+                            e.span(),
+                            "a range expression",
+                            "a range lowers in the `for` loop's own staging; no range value \
+                             exists in                      the record",
+                        ),
+                    )
+                },
+            };
         Ok(TypedPlace { place, ty: val.ty })
     }
 
