@@ -270,6 +270,12 @@ pub enum TypeFact {
 pub struct TraitFact {
     /// The trait's member rows, in declaration order.
     pub members: Vec<TraitMemberFact>,
+    /// The declaration carries the `#[sealed]` origin attribute: the
+    /// trait admits only its declaring package's own impls, so a
+    /// consuming compile refuses its own impls over the trait and the
+    /// install admits linked rows from the trait's own link position
+    /// alone.
+    pub sealed: bool,
 }
 
 /// One member row of a linked trait.
@@ -292,7 +298,7 @@ pub struct TraitMemberFact {
 
 impl PartialEq for TraitFact {
     fn eq(&self, other: &Self) -> bool {
-        self.members == other.members
+        self.members == other.members && self.sealed == other.sealed
     }
 }
 
@@ -464,7 +470,8 @@ impl TypeFact {
         // The trait items keyed by their def: a trait's fact reads the
         // declaration itself (its written member rows), which no decls
         // table carries whole.
-        let mut traits: FxHashMap<crate::DefId, &ds_parse::TraitDecl> = FxHashMap::default();
+        let mut traits: FxHashMap<crate::DefId, (&ds_parse::TraitDecl, bool)> =
+            FxHashMap::default();
         for ast in analyzed.asts.iter().skip(ambient_files) {
             for block in &ast.blocks {
                 for item in &block.items {
@@ -474,7 +481,8 @@ impl TypeFact {
                     if let Some(def) = package.lookup_type(&t.name.name)
                         && package.def(def).span == t.name.span
                     {
-                        traits.insert(def, t);
+                        let sealed = item.attrs.iter().any(|a| a.name.name == "sealed");
+                        traits.insert(def, (t, sealed));
                     }
                 }
             }
@@ -533,7 +541,7 @@ impl TypeFact {
         decls: &crate::Decls,
         deinit: &std::collections::HashSet<u32>,
         eligible: &FxHashSet<crate::DefId>,
-        trait_decl: Option<&ds_parse::TraitDecl>,
+        trait_decl: Option<(&ds_parse::TraitDecl, bool)>,
         carried: &FxHashMap<String, u32>,
         def: crate::DefId,
     ) -> Option<Self> {
@@ -557,7 +565,10 @@ impl TypeFact {
                 Self::alias_fact(package, decls, eligible, package.def(def).span.file, def)
             },
             crate::DefKind::Tag => Self::tag_fact(decls, def),
-            crate::DefKind::Trait => Self::trait_fact(trait_decl?, carried),
+            crate::DefKind::Trait => {
+                let (decl, sealed) = trait_decl?;
+                Self::trait_fact(decl, carried, sealed)
+            },
             _ => None,
         }
     }
@@ -570,7 +581,11 @@ impl TypeFact {
     /// carried table names exactly the bodies that plan and stage no
     /// runtime evidence, so a body the walk refused keeps its member's
     /// row bodiless and the consumer's impls must spell it.
-    fn trait_fact(t: &ds_parse::TraitDecl, carried: &FxHashMap<String, u32>) -> Option<Self> {
+    fn trait_fact(
+        t: &ds_parse::TraitDecl,
+        carried: &FxHashMap<String, u32>,
+        sealed: bool,
+    ) -> Option<Self> {
         if !t.generics.is_empty() || !t.supers.is_empty() {
             return None;
         }
@@ -595,7 +610,7 @@ impl TypeFact {
                 default_func,
             });
         }
-        Some(Self::Trait(TraitFact { members }))
+        Some(Self::Trait(TraitFact { members, sealed }))
     }
 
     /// The fact one declared struct carries, when its whole shape

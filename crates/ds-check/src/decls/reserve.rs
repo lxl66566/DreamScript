@@ -283,6 +283,14 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
         ItemKind::Trait(t) => {
             if let Ok(id) = decls.universe.declare_trait(&t.name.name) {
                 decls.traits.insert(def, id);
+                // The origin attribute records beside the trait id: the
+                // seal's span is the declaring name occurrence, the
+                // label the impl refusals name. The record reads the
+                // item's own text, so a served def carries it the same
+                // way a fresh one does.
+                if item.attrs.iter().any(|a| a.name.name == "sealed") {
+                    decls.sealed_traits.insert(def, t.name.span);
+                }
                 if !is_served(decls, def) {
                     let mut names = Vec::new();
                     for member in &t.members {

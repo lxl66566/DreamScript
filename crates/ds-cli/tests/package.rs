@@ -5656,3 +5656,225 @@ fn a_runtime_resolved_impl_shadows_with_a_warning() {
     );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
+
+// ---- the `#[sealed]` origin attribute ----
+
+/// The sealed fixture's trait and type: the trait carries the origin
+/// attribute, the origin package declares its own impl beside it, and
+/// every face impls over the same head.
+fn sealed_base_member() -> String {
+    format!(
+        "{}{}\n{}",
+        "#[sealed]\npub trait greet {\n  fn greet(self) -> string\n}\n\n",
+        "pub struct cell {\n  n: int\n}\n",
+        "impl greet for cell {\n  fn greet(self) -> string {\n    \"base ${{self.n}}\"\n  }\n}\n"
+    )
+}
+
+/// The positive face: the origin's own impl over its sealed trait is
+/// legal beside the declaration, and the origin's row crosses the link,
+/// so the consumer's dispatch answers the origin's body.
+#[test]
+fn an_origin_impl_over_its_own_sealed_trait_serves_the_link() {
+    let work = temp_dir("sealed-origin");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    write_layer_pkg(&work, "@base", &[], &sealed_base_member());
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@base"]), &[(
+        "app.ds",
+        concat!(
+            "import @base (cell, greet)\n",
+            "import @std/io (println)\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 3 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        ok,
+        "the sealed trait's origin compile stands (stderr: {err})"
+    );
+    assert_eq!(
+        out, "base 3\n0\n",
+        "the origin's impl crosses and serves the consumer's dispatch"
+    );
+    assert!(
+        !err.contains("DS2055"),
+        "no seal refusal fires inside the origin (stderr: {err})"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The negative face over the link: the root consumer's own impl of the
+/// dependency's sealed trait refuses at the root's own compile, though
+/// the link layering would hand the root's impls the top layer — the
+/// seal is stronger than the layering. The refusal names the trait and
+/// the seal.
+#[test]
+fn a_consumer_impl_over_a_linked_sealed_trait_refuses() {
+    let work = temp_dir("sealed-consumer");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    write_layer_pkg(&work, "@base", &[], &sealed_base_member());
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@base"]), &[(
+        "app.ds",
+        concat!(
+            "import @base (cell, greet)\n",
+            "import @std/io (println)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"root ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 3 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        !ok,
+        "the root consumer's impl of a linked sealed trait refuses (stderr: {err})"
+    );
+    assert!(
+        err.contains("DS2055"),
+        "the refusal is the seal's own code: {err}"
+    );
+    assert!(
+        err.contains("impl `greet` refuses"),
+        "the refusal names the trait: {err}"
+    );
+    assert!(
+        err.contains("declared sealed here"),
+        "the refusal labels the seal: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The third-party face: an extending package's impl over the origin's
+/// sealed trait refuses in the extending package's own compile, so no
+/// row ever reaches a consumer's install.
+#[test]
+fn a_third_party_impl_over_a_sealed_trait_refuses_at_its_own_compile() {
+    let work = temp_dir("sealed-third-party");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    write_layer_pkg(&work, "@base", &[], &sealed_base_member());
+    write_layer_pkg(
+        &work,
+        "@ext",
+        &["@base"],
+        concat!(
+            "pub import @base (cell, greet)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"ext ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@base", "@ext"]), &[(
+        "app.ds",
+        concat!(
+            "import @base (cell, greet)\n",
+            "import @ext\n",
+            "import @std/io (println)\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 3 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        !ok,
+        "the third party's compile refuses its own impl (stderr: {err})"
+    );
+    assert!(
+        err.contains("DS2055"),
+        "the refusal is the seal's own code: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The same-checkout face: a local trait carrying the seal and an impl
+/// in another file of the same package refuse — the seal's origin is
+/// the declaring file, so only impls beside the declaration are
+/// admitted.
+#[test]
+fn a_foreign_file_impl_over_a_local_sealed_trait_refuses() {
+    let work = temp_dir("sealed-local");
+    let root = work.join("root");
+    let manifest = "name = \"app\"\nversion = \"0.1.0\"\n".to_owned();
+    write_pkg(&root, &manifest, &[
+        (
+            "defs.ds",
+            concat!(
+                "#[sealed]\n",
+                "pub trait greet {\n",
+                "  fn greet(self) -> string\n",
+                "}\n",
+                "\n",
+                "pub struct cell {\n",
+                "  n: int\n",
+                "}\n",
+            ),
+        ),
+        (
+            "impls.ds",
+            concat!(
+                "impl greet for cell {\n",
+                "  fn greet(self) -> string {\n",
+                "    \"local ${self.n}\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        ),
+        (
+            "app.ds",
+            concat!(
+                "import @std/io (println)\n",
+                "\n",
+                "fn main() -> () {\n",
+                "  println(cell { n: 3 }.greet())\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        !ok,
+        "the foreign-file impl over a local sealed trait refuses (stderr: {err})"
+    );
+    assert!(
+        err.contains("DS2055"),
+        "the refusal is the seal's own code: {err}"
+    );
+    assert!(
+        err.contains("another file of the same package"),
+        "the refusal names the same-package file seam: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}

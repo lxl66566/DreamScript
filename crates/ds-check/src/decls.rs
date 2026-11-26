@@ -357,6 +357,15 @@ pub struct Decls {
     /// through it, and an instantiation derives the substituted
     /// application's entry from its source's.
     pub apply_structs: std::collections::HashMap<TypeId, std::rc::Rc<[SolvedField]>>,
+    /// The `#[sealed]` traits, keyed by the trait def with the sealed
+    /// name occurrence's span: the origin attribute whose seal admits
+    /// only the trait's own declaring file's impls. A local trait
+    /// records at its declaration; a linked trait records from its
+    /// crossed fact, the span rebased into this compile's file space.
+    /// The impl seams read it: a local impl whose file differs from
+    /// the declaration's refuses, and a linked impl row declares only
+    /// from the trait's own link position.
+    pub sealed_traits: IdTable<DefId, Span>,
 }
 
 impl Decls {
@@ -622,6 +631,10 @@ where
         let Some(&trait_id) = decls.traits.get(&trait_def) else {
             continue;
         };
+        if let Some(diag) = sealed_row_refusal(package, &decls, trait_def, fact) {
+            diags.push(diag);
+            continue;
+        }
         let Some((head, _)) = foreign_field_type(
             &mut MintCtx {
                 package,
@@ -696,9 +709,9 @@ where
                 LinkOutcome::Loses(impl_side_spell(rival.pkg.as_deref()))
             }
         } else if fact_layer == ImplLayer::ThirdParty {
-            LinkOutcome::Refuses(sides.iter().cloned().collect())
+            LinkOutcome::Refuses(sides.clone())
         } else {
-            LinkOutcome::Wins(sides.iter().cloned().collect())
+            LinkOutcome::Wins(sides.clone())
         };
         match outcome {
             LinkOutcome::Declare => {

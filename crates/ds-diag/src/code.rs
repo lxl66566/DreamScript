@@ -237,6 +237,8 @@ error_codes! {
     NeverTypedPosition => "DS2053", Type,
     /// A fn declaration's return type names a type variable no parameter mentions; the variable never solves from a call's arguments, and a diverging declaration answers `never`.
     UnconstrainedReturnVariable => "DS2054", Type,
+    /// An impl of a trait carrying the `#[sealed]` origin attribute, from outside the trait's declaring file: the seal admits only the origin's own impls, so a third-party package's impl (a linked trait's consumers included, the root package's own over a dep's sealed trait) and a foreign-file impl of the same package both refuse. The message names the trait and the seal.
+    SealedImplRefused => "DS2055", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -390,6 +392,7 @@ mod tests {
             ("LinkShadowedInherentMember", "DS2052", ErrorClass::Type),
             ("NeverTypedPosition", "DS2053", ErrorClass::Type),
             ("UnconstrainedReturnVariable", "DS2054", ErrorClass::Type),
+            ("SealedImplRefused", "DS2055", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

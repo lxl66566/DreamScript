@@ -101,6 +101,20 @@ pub(super) fn declare_instance(
         None => return,
     };
 
+    // The origin attribute's seal: a `#[sealed]` trait admits only its
+    // declaring file's own impls. A linked trait's declaring file
+    // belongs to the producer's compile and never matches a consumer
+    // file, so every local impl of a linked sealed trait refuses here;
+    // the producer's own impls ride its own compile and cross as its
+    // own link rows.
+    if let Some(seal) = decls.sealed_traits.get(&owner).copied()
+        && (package.foreign().get(&owner).is_some()
+            || package.def(owner).span.file != item.span.file)
+    {
+        diags.push(sealed_impl_diag(package, trait_only, owner, seal));
+        return;
+    }
+
     let mut vars = FxHashMap::default();
     for param in &imp.generics {
         // A bare `$name` would collide with every other impl naming its
@@ -224,6 +238,33 @@ pub(super) fn instance_diag(
         )
         .with_primary(item.span, "rejected impl"),
     }
+}
+
+/// The sealed-trait refusal at the local declaration door: the
+/// trait's `#[sealed]` origin attribute admits only the declaring
+/// file's own impls. A linked trait's declaring file sits in the
+/// producer's compile, so every impl this compile declares is a third
+/// party's; a local trait's foreign-file impl stays outside the
+/// declaration's own file. The message names the trait and the seal.
+pub(super) fn sealed_impl_diag(
+    package: &Package,
+    trait_name: &Ident,
+    owner: DefId,
+    seal: Span,
+) -> Diagnostic {
+    let reason = if package.foreign().get(&owner).is_some() {
+        "the trait is sealed, so only its declaring package's own impls are admitted; this compile \
+         links the trait from its origin"
+    } else {
+        "the trait is sealed, so its impls live beside the declaration; this impl sits in another \
+         file of the same package"
+    };
+    Diagnostic::error(
+        ErrorCode::SealedImplRefused,
+        format!("impl `{}` refuses: {reason}", trait_name.name),
+    )
+    .with_primary(trait_name.span, "impl of a sealed trait")
+    .with_secondary(seal, "declared sealed here")
 }
 
 /// The registered method id of one trait member.

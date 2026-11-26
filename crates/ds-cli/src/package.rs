@@ -1237,7 +1237,10 @@ impl Graph {
                             })
                             .collect();
                         std::sync::Arc::new(ds_check::TypeFact::Trait(
-                            ds_check::import::TraitFact { members },
+                            ds_check::import::TraitFact {
+                                members,
+                                sealed: trait_fact.sealed,
+                            },
                         ))
                     },
                     _ => std::sync::Arc::clone(fact),

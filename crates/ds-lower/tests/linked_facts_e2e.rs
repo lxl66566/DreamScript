@@ -512,6 +512,7 @@ fn build_trait_vm() -> (Vm, Lowered) {
                 "sizing",
                 ds_check::TypeFact::Trait(ds_check::import::TraitFact {
                     members: vec![member],
+                    sealed: false,
                 }),
             ),
         ],
@@ -741,6 +742,7 @@ fn build_default_vm() -> (Vm, Lowered) {
             "answering",
             ds_check::TypeFact::Trait(ds_check::import::TraitFact {
                 members: vec![member],
+                sealed: false,
             }),
         )],
     };
@@ -1032,6 +1034,7 @@ fn build_union_vm() -> (Vm, Lowered) {
                             param("xs", Some(list_int())),
                         ]),
                     ],
+                    sealed: false,
                 }),
             ),
         ],
@@ -1260,6 +1263,7 @@ fn build_union_default_vm() -> (Vm, Lowered) {
             "wording",
             ds_check::TypeFact::Trait(ds_check::import::TraitFact {
                 members: vec![member],
+                sealed: false,
             }),
         )],
     };

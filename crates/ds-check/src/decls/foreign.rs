@@ -48,7 +48,7 @@ pub(super) fn install_foreign_type(
             install_foreign_tag(def, name, span, decls);
         },
         crate::import::TypeFact::Trait(fact) => {
-            install_foreign_trait(ctx, def, name, link, fact, decls);
+            install_foreign_trait(ctx, def, name, span, link, fact, decls);
         },
     }
 }
@@ -65,6 +65,7 @@ pub(super) fn install_foreign_trait(
     ctx: &mut MintCtx,
     def: DefId,
     name: &str,
+    span: Span,
     link: u32,
     fact: &crate::import::TraitFact,
     decls: &mut Decls,
@@ -77,6 +78,12 @@ pub(super) fn install_foreign_trait(
     };
     decls.traits.insert(def, trait_id);
     decls.foreign_type_names.insert(name.to_owned(), def);
+    // The origin attribute crosses beside the member rows: the seal's
+    // span is the trait name's occurrence rebased into this compile's
+    // file space, the label the impl refusals name.
+    if fact.sealed {
+        decls.sealed_traits.insert(def, span);
+    }
     for member in &fact.members {
         if let Some(method) = member_id(ctx.package, def, &member.name) {
             decls.members.insert(method, member.sig.clone());
@@ -258,6 +265,44 @@ pub(super) fn origin_positions_of(
         }
     }
     positions
+}
+
+/// Whether a linked impl row over a sealed trait refuses at the
+/// install: the row declares only from the trait's own link position —
+/// the declaring package's own impls — so a row from any other package
+/// refuses; the producer's compile already refuses its own third-party
+/// impls at the local declaration door, and this check keeps such a
+/// row out of this compile's tables too.
+pub(super) fn sealed_row_refusal(
+    package: &Package,
+    decls: &Decls,
+    trait_def: DefId,
+    fact: &crate::import::ImplFact,
+) -> Option<Diagnostic> {
+    let seal = decls.sealed_traits.get(&trait_def).copied()?;
+    if package.foreign().get(&trait_def).map(|entry| entry.link) == Some(fact.link) {
+        return None;
+    }
+    Some(sealed_link_impl_diag(fact, seal))
+}
+
+/// The sealed-trait refusal at the linked install: a row over a sealed
+/// trait declares only from the trait's own link position — the
+/// declaring package's own impls — so a row from any other package
+/// refuses naming the trait, the seal, and the row's own package.
+pub(super) fn sealed_link_impl_diag(fact: &crate::import::ImplFact, seal: Span) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::SealedImplRefused,
+        format!(
+            "{}'s impl of `{}` for `{}` refuses: the trait is sealed, so only the declaring \
+             package's own impls cross the link, and this row declares from another package",
+            fact.pkg,
+            fact.trait_name,
+            crate::import::render_word(&fact.head),
+        ),
+    )
+    .with_primary(fact.span, "the refused impl row")
+    .with_secondary(seal, "declared sealed here")
 }
 
 /// The linked mint's resolution context: the consuming package's link
