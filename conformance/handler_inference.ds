@@ -1,0 +1,54 @@
+// source: todo item 141, the B2 inference round (ruled 2026-11-25)
+// purpose: the .err/.ok handler parameters take the derived handled members as their expected type — a handler using the parameter at the handled type checks un-annotated, a bare case label resolves inside the handler body against the narrowed parameter, the identity .ok handler checks clean over the whole operand, and the disjoint empty refusal class is retired
+// items:
+// announce: stage: run
+// via-param: stage: run
+// label-body: stage: run
+// ok-identity: stage: run
+// chain: stage: run
+// missed: stage: run
+// hit: stage: run
+// main: stage: run
+
+fn announce(e: io_err) -> string { "io failed" }
+
+// The handled member threads into the parameter: `e` lands at io_err and
+// the announce use checks without the annotation.
+fn via_param() -> string {
+  read_file("handler_inference_absent/probe.txt").err((e) => announce(e))
+}
+
+// A bare case label inside the handler body resolves against the
+// narrowed parameter's own union.
+fn label_body() -> int {
+  parse_int("4x").err((e) => { match e { parse_err => -1 } })
+}
+
+// The identity .ok handler covers nothing: it checks clean and the
+// operand stays whole for the .err behind it.
+fn ok_identity() -> string {
+  read_file("handler_inference_absent/probe.txt").ok((x) => x).err((_) => "fallback")
+}
+
+// The same chain over the parse receiver.
+fn chain() -> int {
+  parse_int("42").ok((x) => x).err((_) => -1)
+}
+
+// The checked get receiver, miss and hit sides.
+fn missed() -> string {
+  ["ada", "bob"].get(7).ok((x) => x).err((_) => "absent")
+}
+
+fn hit() -> string {
+  ["ada", "bob"].get(0).ok((x) => x).err((_) => "absent")
+}
+
+fn main() -> () {
+  println(via_param())
+  println(str(label_body()))
+  println(str(chain()))
+  println(ok_identity())
+  println(missed())
+  println(hit())
+}

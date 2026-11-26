@@ -300,6 +300,23 @@ fn the_fallible_io_spellings_answer_the_io_err_union() {
     );
 }
 
+/// The B2 inference round over the difference-typed handlers: a handler
+/// using its parameter at the handled type checks un-annotated (`e`
+/// lands at io_err), a bare case label resolves inside the handler body
+/// against the narrowed parameter, and the identity `.ok` handler
+/// checks clean over the whole operand for the `.err` behind it — the
+/// disjoint empty refusal class is retired.
+#[test]
+fn handler_parameters_take_the_handled_members() {
+    // via_param answers on the io_err side (the absent path), label_body
+    // on the parse_err side, and the identity chain keeps the operand
+    // whole so the .err handler fires: fallback, -1, and the miss side
+    run_golden(
+        "handler_inference.ds",
+        "io failed\n-1\n42\nfallback\nabsent\nada\n0\n",
+    );
+}
+
 /// The package-fixture gate beside the file gate: one directory per
 /// fixture below conformance/packages/ — the consumer package root
 /// `app/` (its `ds.pkg` manifest, the `main.ds` entry carrying the

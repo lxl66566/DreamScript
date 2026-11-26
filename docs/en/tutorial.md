@@ -206,7 +206,7 @@ if written is io_err { eprintln("app.cfg stayed unwritten") }
 
 Every path-face spelling answers the union: `read_file(path)` `string | io_err`, `write_file(path, text)` `() | io_err`, `fs_list(dir)` `list[string] | io_err`, and `file_size(path)` `int | io_err`; the path round beside them — `mkdir(path)` one directory a single level deep with `already_exists` the branchable outcome, `remove(path)` one entry whatever it is (a directory only once empty, the non-empty directory answering the `io_other` floor), and `fs_size(path)` the entry's byte count — answers the same union, so library packages reach every one of them. A failed leg is a class tag: `?`, `.err`/`.ok`, `is`, and `match` extract it and nothing halts. The handle constructors stay total (`open_file` here, `net_connect` and `proc_spawn` below): their failure prints the error line and ends the run.
 
-`.err(h)` and `.ok(h)` are set-difference-typed handlers: the result type is the incoming union minus what the handler covers.
+`.err(h)` and `.ok(h)` are set-difference-typed handlers: the result type is the incoming union minus what the handler covers. An un-annotated handler parameter takes the handled members' type, so a handler that uses its parameter at the handled type needs no annotation and an identity handler may drop it.
 
 ```ts
 const cfg = load_config("app.cfg").err((e) => config { host: "localhost", port: none, retries: 3 })
@@ -220,6 +220,8 @@ println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).err((e)
 ```
 
 The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `panic(msg)`, an ambient declaration over the builtin trap primitive that every source sharing @std reaches, library packages included — the @std assert family composes over it (`assert(cond, msg)` the bool gate; the equality pair spells one concrete member per scalar width, `assert_eq_int`/`assert_eq_float`/`assert_eq_string`/`assert_eq_bool`, a generic `assert_eq[t]` refusing because the equality compare and the message rendering answer no runtime kind for a type variable), while `die(msg)` stays a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail abort against an annotated return refuses. The process face rides the `proc` capability of `platform "std"`: `args()` answers the process arguments `ds run --args` stages, `env(name)` reads one variable into the checked none member, `read_line()` answers stdin's next line, `eprint`/`eprintln` write stderr, `proc_run(cmd, args)` answers a spawned child's exit status, and piped `proc_spawn(cmd, args)` answers the linear `proc_handle` — `write` feeds the child's stdin, `read_out`/`read_err` take the captured output and diagnostics (the empty string a pipe's orderly end), `close_in` is the idempotent end-of-input while the handle stays live, `wait` answers the exit status idempotently, `try_wait` the non-blocking `int | none` poll, and the closing deinit kills and reaps a still-running child. `exit(code)` ends the process with a deliberate status through the proc capability's own op row, so a host refusing the capability refuses the spelling at install; the installing CLI owns what the code means: 0 clean, 1 trapped; a negative code traps — the run answers 1 with the standard trap note, a deliberate failure never reading as clean success — and a code above 255 wraps to its low byte, POSIX process semantics. Never-returning calls like `exit` and `die` carry a generic answer (`fn exit[t](code: int) -> t`), and the checker has no never-returns marker, so the call cannot sit in a block's tail against an annotated return or a script's folded main — the tail's answer must still unify; spell the call mid-block with any trailing statement after it, which both script mode and a written `fn main` take.
+
+The library-boundary idiom: a package exports one alias as its whole error surface (`pub type http_err = timed_out | refused | net_other` over ordinary declared class tags), and callers write their own wider unions around it — `?`'s checked containment absorbs the alias's growth, so the library adding a member never edits its callers, and an exhaustive `match` over the alias is the only caller surface a new member breaks (the same blast radius an enum variant carries anywhere).
 
 ## Linearity
 
@@ -254,7 +256,7 @@ var club = list[user]()
 club.push(user { name: "ada", age: 45 })                       // the whole span lands in place
 club.push(user { name: "bob", age: 15 })
 const cell = club.get(0)                                      // user | none, the checked read
-const who = cell.ok((u: user) => u.name).err((_: none) => "?")  // fields project out
+const who = cell.ok((u: user) => u.name).err((_) => "?")  // fields project out
 const grown = cons(user { name: "eve", age: 30 }, tail(club))   // cons and tail move whole spans
 const roster = collect(grown)                                   // the whole-list copy
 for u in roster { println("user ${u.name}") }

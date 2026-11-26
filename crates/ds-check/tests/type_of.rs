@@ -649,6 +649,35 @@ fn err_handler_is_difference_typed() {
 }
 
 #[test]
+fn handler_parameters_take_the_handled_members() {
+    // An identity handler covers nothing: no disjoint refusal fires, the
+    // first walk stands, and the operand stays whole [B2, E4].
+    clean(concat!(
+        "extern fn load () -> config | io_err\n",
+        "const cfg = load().ok((x) => x)\n",
+    ));
+    // The handled members are the parameter's expected type: `e` lands
+    // at io_err and the use at the handled type checks [B2, E4].
+    clean(concat!(
+        "extern fn load () -> config | io_err\n",
+        "extern fn announce (e: io_err) -> config\n",
+        "const cfg = load().err((e) => announce(e))\n",
+    ));
+    // A forward-declared binding's error, first used inside a handler
+    // body the re-walk would re-type, reports exactly once: a walk that
+    // reported from outside the body keeps the first walk whole.
+    let diags = check(concat!(
+        "extern fn load () -> config | io_err\n",
+        "extern fn announce (e: io_err) -> config\n",
+        "const cfg = load().err((e) => late_value)\n",
+        "const late_value = announce(1)\n",
+    ));
+    assert_eq!(diags, ["DS2001 `argument` has type `int`, not contained \
+                        in `io_err` [B2]"
+        .to_owned()]);
+}
+
+#[test]
 fn numeric_table_int_float_split() {
     clean("fn f(a: int, b: int) -> int { a +% b }\n");
     clean("fn f(a: float, b: float) -> float { a + b }\n");

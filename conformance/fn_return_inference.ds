@@ -1,0 +1,71 @@
+// source: todo item 141, the B2 inference round (ruled 2026-11-25)
+// purpose: a fn-typed parameter's return type unifies against the written signature by first-order pattern match for a lambda literal or a named fn argument — the body infers its own answer and the written return binds its variables — while a variable no argument fixes names DS2002, a shape mismatch is the containment refusal, and a generic fn value passed bare keeps its own-variable refusal; the retired disjoint empty refusal pins the un-annotated retry spelling as a typecheck fact (the lowering hazard stays the queued todo item's)
+// items:
+// lambda: stage: typecheck
+// block-lambda: stage: typecheck
+// explode: stage: typecheck
+// named: stage: typecheck
+// tuple-ret: stage: typecheck
+// outer: stage: typecheck
+// retry: stage: typecheck
+// dup: stage: typecheck
+// pair-up: stage: typecheck
+// shape-lambda: stage: reject the lambda answering a tuple where the written return nests the variable in a list application fails the first-order match and gives the containment refusal (DS2001)
+// shape-named: stage: reject the identical shape through a named fn gives the same containment refusal (DS2001)
+// bare-generic: stage: reject the generic named fn passed bare carries its own unsolved variable into the containment refusal (DS2001)
+// unbound-t: stage: reject a variable only the fn-typed parameter mentions names the inference failure (DS2002)
+// union-ret: stage: reject a fn(t) -> r | none parameter whose lambda answers none leaves r unsolved (DS2002)
+
+// The lambda literal's body infers its own answer: the written `list[r]`
+// binds r from `list[string]`.
+const lambda = flat_map(["a", "b"], (w) => [w])
+
+// The block-bodied spelling answers the same.
+const block_lambda = flat_map(["a"], (w) => {
+  const parts = [w]
+  parts
+})
+
+// A named monomorphic fn argument solves through the same match.
+fn explode(w: string) -> list[string] { [w] }
+
+const named = flat_map(["a"], explode)
+
+// A tuple return binds its variable in place.
+const tuple_ret = pick([1], (w) => (str(w), w))
+
+// Inside an enclosing generic the lambda answers the scope's own
+// variable, a runtime-evidenced fact, never an inference hole.
+fn outer[u](xs: list[u]) -> list[u] {
+  flat_map(xs, (w) => [w])
+}
+
+// The retired disjoint empty refusal: the un-annotated retry whose
+// answer re-adds the handled member checks clean (lowering derives the
+// handled set from the result's difference, so the handler never fires
+// — the queued todo item owns the fix).
+fn retry() -> string | io_err {
+  read_file("absent-a").err((e) => read_file("absent-b"))
+}
+
+// A generic named fn checks as a value on its own.
+fn dup[t](v: t) -> list[t] { [v] }
+
+// The answer is a tuple, the written return a list application: the
+// first-order match fails on shape.
+fn pair_up(w: string) -> (int, int) { (1, 2) }
+
+const shape_lambda = flat_map(["a"], (w) => ((1, 2)))
+
+const shape_named = flat_map(["a"], pair_up)
+
+// The generic named fn passed bare carries its minted variable into
+// the containment refusal.
+const bare_generic = flat_map(["a"], dup)
+
+// Only the fn-typed parameter mentions `t`, so the call's answer binds
+// `r` alone.
+const unbound_t = app((n) => ["a"])
+
+// `none` is contained in `r | none`, so the match leaves r unsolved.
+const union_ret = opt_head(["a"], (w) => none)

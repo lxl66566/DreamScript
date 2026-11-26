@@ -36,7 +36,8 @@
 //! the wanted members (the right operand's type for a plain tail, the
 //! return union for `or return`); `.err(h)`/`.ok(h)` are difference-typed:
 //! the handled set is the handler parameter when annotated, otherwise
-//! everything but what the handler's own result keeps.
+//! everything but what the handler's own result keeps — and that set is
+//! the handler parameter's expected type.
 //!
 //! # Out of scope here
 //!
@@ -46,7 +47,7 @@
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
-use ds_diag::{Diagnostic, ErrorCode, Files, Span};
+use ds_diag::{Diagnostic, ErrorCode, Files, LabelStyle, Span};
 use ds_parse::{
     Ast, BinaryOp, BlockExpr, Delim, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal,
     LocalDecl, MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam,
@@ -4165,13 +4166,25 @@ impl Bodies<'_> {
             }
         }
         // Pass two: lambda arguments check against the fn-typed parameter,
-        // and their result type binds the parameter's return variables.
+        // and their result type binds the parameter's return variables. A
+        // written return still carrying an unsolved variable is the
+        // instantiation's inference hole (B2): the lambda takes no return
+        // expectation, its body infers its own answer, and the written
+        // return unifies against that answer by first-order pattern match
+        // — an application strips to its arguments and a variable binds
+        // directly. General unification stays out: a variable the match
+        // cannot reach binds nothing, and the settled check below names
+        // the variable no argument fixed. A routed lambda waits for every
+        // argument's binding turn before it is judged.
+        let mut routed: Vec<(&Type, &Type, Val, Span)> = Vec::new();
         for (slot, param) in slots.iter().zip(sig.params.iter()) {
-            let Some(Type::Fn {
-                params: fn_params,
-                ret: fn_ret,
-                ..
-            }) = &param.ty
+            let Some(
+                param_ty @ Type::Fn {
+                    params: fn_params,
+                    ret: fn_ret,
+                    ..
+                },
+            ) = &param.ty
             else {
                 continue;
             };
@@ -4188,10 +4201,16 @@ impl Bodies<'_> {
                     None => self.fresh_var(&p.name.name),
                 });
             }
-            let expected_ret = fn_ret
-                .as_ref()
+            let written_ret = fn_ret.as_ref();
+            let mut expected_ret = written_ret
                 .and_then(|r| self.solve_with(r, &subst, &sig.generics))
                 .unwrap_or_else(|| self.empty());
+            let inferred_ret = self.has_hole(expected_ret);
+            if inferred_ret {
+                // A bare variable marks the return as the hole the body
+                // solves, never an expectation its answer must meet.
+                expected_ret = self.fresh_var("ret");
+            }
             let params_boxed: Box<[Ty]> = param_tys.into();
             let expected_ty = self
                 .decls
@@ -4211,6 +4230,21 @@ impl Bodies<'_> {
                 let result = self.decompose_fn(val.ty).map_or(val.ty, |(_, ret)| ret);
                 self.match_param(fn_ret, result, &sig.generics, &mut subst);
             }
+            if let (true, Some(fn_ret)) = (inferred_ret, written_ret) {
+                routed.push((param_ty, fn_ret, val, arg.span()));
+            }
+        }
+        let mut unsolved = false;
+        for (param_ty, written_ret, val, arg_span) in routed {
+            unsolved |= self.settle_routed_return(
+                param_ty,
+                written_ret,
+                val,
+                arg_span,
+                &sig.generics,
+                &subst,
+                span,
+            );
         }
         let ret = match sig.ret.as_ref() {
             Some(ret_ty) => self
@@ -4229,6 +4263,11 @@ impl Bodies<'_> {
                 break;
             };
             solved.push(*ty);
+        }
+        // A routed lambda that fixed nothing leaves holes in the
+        // substitution: no record and no bound proof answers for it.
+        if unsolved {
+            solved.clear();
         }
         // A solved instantiation answers for its declared bounds [B6]:
         // every bound must hold for the solved type, through the
@@ -4286,7 +4325,100 @@ impl Bodies<'_> {
         Val {
             ty: ret,
             diverges: false,
-            poisoned: false,
+            poisoned: unsolved,
+        }
+    }
+
+    /// One lambda argument that took no return expectation, judged once
+    /// every argument had its binding turn: the written return unified
+    /// against the lambda's answer by first-order pattern match, and the
+    /// solved parameter type is the contract (B2). A concrete answer under
+    /// a written return still holding an unsolved variable is the match
+    /// failing on shape; otherwise a variable the parameter mentions that
+    /// stayed unsolved names what no argument fixed. Answers whether this
+    /// reported, so the call's result carries the poison and no
+    /// instantiation records.
+    fn settle_routed_return(
+        &mut self,
+        param: &Type,
+        fn_ret: &Type,
+        val: Val,
+        arg_span: Span,
+        generics: &[GenericParam],
+        subst: &FxHashMap<String, Ty>,
+        span: Span,
+    ) -> bool {
+        if val.diverges || val.poisoned {
+            return false;
+        }
+        let solved_ret = self.solve_with(fn_ret, subst, generics);
+        let answer = self.decompose_fn(val.ty).map(|(_, ret)| ret);
+        if let (Some(solved_ret), Some(answer)) = (solved_ret, answer)
+            && self.has_hole(solved_ret)
+            && !self.has_hole(answer)
+            && !self.decls.universe.contains(solved_ret, answer)
+        {
+            let expected = self.solve_with(param, subst, generics);
+            if let Some(expected) = expected
+                && !self.decls.universe.is_empty(expected)
+                && !self.expect_param_contains(val, param, expected, arg_span)
+            {
+                return true;
+            }
+        }
+        let unbound: Vec<&str> = generics
+            .iter()
+            .filter(|generic| {
+                type_mentions(param, &generic.name)
+                    && subst.get(&generic.name).is_none_or(|ty| self.has_hole(*ty))
+            })
+            .map(|generic| generic.name.as_str())
+            .collect();
+        if !unbound.is_empty() {
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!(
+                    "cannot infer `{}` from this call's arguments [B2]",
+                    unbound.join("`, `")
+                ),
+                span,
+                "unbound type variable",
+            );
+            return true;
+        }
+        // Every variable the parameter mentions solved: the solved
+        // parameter is the contract, exactly as for any other argument.
+        self.solve_with(param, subst, generics)
+            .is_some_and(|expected| !self.expect_param_contains(val, param, expected, arg_span))
+    }
+
+    /// Whether a solved type still carries an inference hole: a minted
+    /// variable no enclosing generic binds (an enclosing body's own type
+    /// variables are runtime-evidenced facts, never holes).
+    fn has_hole(&self, ty: Ty) -> bool {
+        self.decls
+            .universe
+            .members(ty)
+            .iter()
+            .any(|atom| self.atom_has_hole(*atom))
+    }
+
+    fn atom_has_hole(&self, atom: TypeId) -> bool {
+        match self.decls.universe.atom_decl(atom) {
+            Ok(decl) if decl.name.starts_with('$') => !self.type_vars.iter().any(|scope| {
+                scope
+                    .values()
+                    .any(|ty| self.decls.universe.members(*ty) == [atom])
+            }),
+            Ok(decl) => match &decl.kind {
+                AtomKind::Apply(_, args) => args.iter().any(|arg| self.has_hole(*arg)),
+                AtomKind::Tuple(elements) => elements.iter().any(|elem| self.atom_has_hole(*elem)),
+                AtomKind::FnSig(params, ret) => {
+                    params.iter().any(|param| self.has_hole(*param)) || self.has_hole(*ret)
+                },
+                _ => false,
+            },
+            Err(_) => false,
         }
     }
 
@@ -5556,7 +5688,8 @@ impl Bodies<'_> {
 
     /// `.err(h)`/`.ok(h)`: difference-typed handlers (E4). The handled set
     /// is the handler's annotated parameter, or — unannotated — everything
-    /// except what the handler's own result keeps of the operand.
+    /// except what the handler's own result keeps of the operand; that set
+    /// is the parameter's expected type.
     fn err_ok(&mut self, recv: &Expr, name: &str, args: &[ds_parse::CallArg], span: Span) -> Val {
         let recv_val = self.expr(recv, None);
         let total = recv_val.ty;
@@ -5597,25 +5730,41 @@ impl Bodies<'_> {
             .first()
             .and_then(|p| p.ty.as_ref())
             .and_then(|t| self.solve_here(t));
-        let saved = self.snapshot();
-        let param_ty = annotated.unwrap_or(total);
-        if let Some(first) = handler_params.first() {
-            self.bind_local(first.name.span, Binding {
-                ty: param_ty,
-                mutable: false,
-            });
-        }
-        let body_val = self.expr(body, None);
-        let body_ty = body_val.ty;
-        self.restore(saved);
+        let diags_mark = self.diags.len();
+        let value_pos = self.value_pos;
+        let mut body_val = self.handler_body(handler_params, body, annotated.unwrap_or(total));
         let handled_set = if let Some(written) = annotated {
             written
         } else {
-            let kept = self.decls.universe.inter(total, body_ty);
-            self.decls.universe.diff(total, kept)
+            let kept = self.decls.universe.inter(total, body_val.ty);
+            let handled = self.decls.universe.diff(total, kept);
+            // The handled members thread back as the parameter's expected
+            // type: a handler covering a proper part of the operand checks
+            // again with its parameter at that set, so a use of the
+            // parameter at the handled type stands. The first walk's
+            // diagnostics all sit inside the body it typed and the second
+            // walk's replace them; one reported from elsewhere (a lazily
+            // typed top-level binding's initializer) keeps the first walk.
+            let remainder = self.decls.universe.diff(total, handled);
+            if !self.decls.universe.is_empty(handled)
+                && !self.decls.universe.is_empty(remainder)
+                && self.diags[diags_mark..]
+                    .iter()
+                    .all(|diag| reported_in(diag, body.span()))
+            {
+                self.diags.truncate(diags_mark);
+                self.value_pos = value_pos;
+                body_val = self.handler_body(handler_params, body, handled);
+            }
+            handled
         };
+        let body_ty = body_val.ty;
+        // An annotated handler disjoint from the operand refuses; an
+        // unannotated one whose result keeps every member covers nothing
+        // and leaves the operand whole.
         let overlap = self.decls.universe.inter(total, handled_set);
-        if self.decls.universe.is_empty(overlap)
+        if annotated.is_some()
+            && self.decls.universe.is_empty(overlap)
             && !self.decls.universe.is_empty(total)
             && !recv_val.poisoned
         {
@@ -5669,6 +5818,23 @@ impl Bodies<'_> {
             diverges: false,
             poisoned: false,
         }
+    }
+
+    /// One handler lambda's body under its parameter's type: the first
+    /// parameter binds immutably at `param_ty`, the body carries no
+    /// expectation (its own answer is the result's own member), and the
+    /// walk leaves no binding behind.
+    fn handler_body(&mut self, params: &[Param], body: &Expr, param_ty: Ty) -> Val {
+        let saved = self.snapshot();
+        if let Some(first) = params.first() {
+            self.bind_local(first.name.span, Binding {
+                ty: param_ty,
+                mutable: false,
+            });
+        }
+        let val = self.expr(body, None);
+        self.restore(saved);
+        val
     }
 
     /// The family member a call addresses, when the callee's shape could
@@ -8536,6 +8702,49 @@ fn peel_paren(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren { inner, .. } => peel_paren(inner),
         other => other,
+    }
+}
+
+/// Whether a diagnostic's primary label sits inside `range`: a walk that
+/// typed exactly those sources owns the diagnostic, so a re-walk replaces
+/// it; anything else (a lazily typed binding's initializer reached from
+/// inside) reports from elsewhere and stays.
+fn reported_in(diag: &Diagnostic, range: Span) -> bool {
+    diag.labels
+        .iter()
+        .find(|label| label.style == LabelStyle::Primary)
+        .is_some_and(|label| {
+            label.span.file == range.file
+                && label.span.start >= range.start
+                && label.span.end <= range.end
+        })
+}
+
+/// Whether a written type names `name` anywhere a path segment sits.
+fn type_mentions(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Path { path, args, .. } => {
+            path.segments.iter().any(|segment| segment.name == name)
+                || args.iter().any(|arg| type_mentions(arg, name))
+        },
+        Type::Optional { inner, .. } | Type::Negation { inner, .. } | Type::Paren { inner, .. } => {
+            type_mentions(inner, name)
+        },
+        Type::Union { left, right, .. }
+        | Type::Intersect { left, right, .. }
+        | Type::Difference { left, right, .. } => {
+            type_mentions(left, name) || type_mentions(right, name)
+        },
+        Type::Tuple { items, .. } => items.iter().any(|item| type_mentions(item, name)),
+        Type::Fn { params, ret, .. } => {
+            params.iter().any(|param| match &param.ty {
+                // A bare fn-type parameter (`fn(t) -> r`) is the
+                // in-scope variable its name spells.
+                None => param.name.name == name,
+                Some(ty) => type_mentions(ty, name),
+            }) || ret.as_ref().is_some_and(|r| type_mentions(r, name))
+        },
+        _ => false,
     }
 }
 

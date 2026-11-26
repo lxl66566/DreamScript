@@ -365,6 +365,24 @@ const TEARDOWN_AMBIENT: &str = concat!(
 /// file owns nothing.
 const NONE_FIELDS_AMBIENT: &str = "pub tag int\n";
 
+/// Ambient stdlib stubs for fn_return_inference: the generic externs
+/// whose fn-typed parameters nest the callee's variables in their
+/// written returns (the first-order match's test surface), `str` for
+/// the tuple answer, and the io pair the retry handler reads; the file
+/// owns nothing.
+const FN_RETURN_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag io_err\n",
+    "pub struct list[t]\n",
+    "pub extern fn str[t] (v: t) -> string\n",
+    "pub extern fn flat_map[t, r] (xs: list[t], f: fn(t) -> list[r]) -> list[r]\n",
+    "pub extern fn pick[t, r] (xs: list[t], f: fn(t) -> (r, int)) -> (r, int)\n",
+    "pub extern fn app[t, r] (f: fn(t) -> r) -> (t, r)\n",
+    "pub extern fn opt_head[t, r] (xs: list[t], f: fn(t) -> r | none) -> list[r]\n",
+    "pub extern fn read_file (path: string) -> string | io_err\n",
+);
+
 fn items_of(ast: &Ast) -> Vec<&Item> {
     ast.blocks.iter().flat_map(|b| b.items.iter()).collect()
 }
@@ -1286,6 +1304,65 @@ fn none_fields_items_check_with_the_none_only_rejections() {
         let code = if id == "app-cell" { "DS2040" } else { "DS2042" };
         assert_eq!(diag.code.as_str(), code, "`{id}` refuses at its own span");
     }
+}
+
+/// fn_return_inference.ds: the B2 first-order return unification — a
+/// lambda literal or named fn argument's inferred answer binds the
+/// written return's variables (the typecheck items, the un-annotated
+/// retry spelling among them), and the rejects pin the refusals: the
+/// identical shape mismatch through a lambda and a named fn, the
+/// generic fn value passed bare keeping its own-variable containment
+/// refusal, and the two inference failures naming the variable no
+/// argument fixed.
+#[test]
+fn fn_return_inference_first_order_matches_and_refuses() {
+    let rejects = gate(
+        "../../conformance/fn_return_inference.ds",
+        FN_RETURN_AMBIENT,
+    );
+    let ids: Vec<&str> = rejects.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "shape-lambda",
+            "shape-named",
+            "bare-generic",
+            "unbound-t",
+            "union-ret"
+        ],
+        "the reject class is the two shape mismatches, the own-variable
+         refusal, and the two inference failures"
+    );
+    let by_id = |id: &str| {
+        rejects
+            .iter()
+            .find(|(rid, ..)| rid == id)
+            .map_or_else(|| panic!("`{id}` rejects"), |(_, _, diag)| diag)
+    };
+    assert_eq!(
+        by_id("shape-lambda").message,
+        by_id("shape-named").message,
+        "the lambda and the named fn give the identical DS2001 line"
+    );
+    for id in ["shape-lambda", "shape-named", "bare-generic"] {
+        assert_eq!(
+            by_id(id).code.as_str(),
+            "DS2001",
+            "`{id}` is the containment refusal"
+        );
+    }
+    assert!(
+        by_id("bare-generic").message.contains("$t#"),
+        "the bare generic names its own minted variable"
+    );
+    assert_eq!(
+        by_id("unbound-t").message,
+        "cannot infer `t` from this call's arguments [B2]"
+    );
+    assert_eq!(
+        by_id("union-ret").message,
+        "cannot infer `r` from this call's arguments [B2]"
+    );
 }
 
 /// Ambient stdlib stubs for tag_resolution: the failure taxonomy both
