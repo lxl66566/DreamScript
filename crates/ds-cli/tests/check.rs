@@ -155,6 +155,12 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // two optional spellings construct alike at a field and a case
     // slot (the ds-check conformance gate pins the reject class)
     assert_corpus_clean("none_fields.ds", 9);
+    // the one error is the file's own reject item (the compound operator
+    // over a place chain keeping the plain-binding place); the field
+    // paths, subscript stores, and nestings check clean over the ambient
+    // members (the assignment-sugar round pins the runs in the ds-lower
+    // place_assign suite)
+    assert_corpus_clean("place_stores.ds", 1);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a

@@ -17,25 +17,98 @@ struct map[k, v]
 extern fn println (s: string) -> ()
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn list_remove[t] (xs: mut list[t], i: int) -> ()
+extern fn list_insert[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn list_clear[t] (xs: mut list[t]) -> ()
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn map_remove[k, v] (m: mut map[k, v], key: k) -> ()
+extern fn map_contains[k, v] (m: map[k, v], key: k) -> bool
+extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 extern fn len[t] (xs: t) -> int
 
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
+  fn set (mut self, i: int, x: t) -> list[t]
   fn push (mut self, x: t) -> list[t]
+  fn insert (mut self, i: int, x: t) -> list[t]
+  fn remove (mut self, i: int) -> list[t]
+  fn clear (mut self) -> list[t]
   fn concat (self, other: list[t]) -> list[t]
 }
 
 impl[k, v] map[k, v] {
   fn get (self, key: k) -> v | none
   fn set (mut self, key: k, value: v) -> map[k, v]
+  fn remove (mut self, key: k) -> map[k, v]
+  fn contains (self, key: k) -> bool
+  fn entries (self) -> list[(k, v)]
 }
 
 fn grown() -> list[int] {
   var xs = [1, 2]
   xs.push(3)
+}
+
+// the mutation and membership members over the same windows: the
+// indexed replacement, the splice, the removal, the emptying, the
+// map's removal and membership reads, and the entry-order pair list
+// (a missing key's removal a no-op, the pair tuples read one word per
+// positional member)
+fn members_round() -> bool {
+  var xs = [1, 2, 3]
+  xs.set(1, 20)
+  xs.insert(0, 9)
+  xs.remove(3)
+  const a = xs.get(0).ok((x: int) => x).err((_: none) => -1)
+  const b = xs.get(1).ok((x: int) => x).err((_: none) => -1)
+  const c = xs.get(2).ok((x: int) => x).err((_: none) => -1)
+  var ys = [1]
+  ys.clear()
+  ys.push(7)
+  const fresh = ys.get(0).ok((x: int) => x).err((_: none) => -1)
+  var m = map[string, int]()
+  m.set("one", 1)
+  m.set("two", 2)
+  m.remove("one")
+  m.remove("nope")
+  const kept = m.contains("two")
+  const gone = m.contains("one")
+  var total = 0
+  for e in m.entries() {
+    const (k, v) = e
+    total = total + v
+  }
+  const rows = m.len()
+  a == 9 && b == 1 && c == 20 && len(xs) == 3 && fresh == 7 &&
+    len(ys) == 1 && kept && !gone && total == 2 && rows == 1
+}
+
+// the same members over reference-carrying elements: the replaced
+// and removed words release their counts, the inserted and stored
+// words acquire theirs, and the entry list's edge counts keep the map
+// rows alive for the loop's own reads — the frame draining to zero at
+// its end
+fn members_ref_round() -> bool {
+  var xs = ["a", "b", "c"]
+  const hold = "b"
+  xs.set(0, "z")
+  xs.insert(1, "q")
+  xs.remove(2)
+  var m = map[string, string]()
+  m.set("one", "un")
+  m.set("two", "deux")
+  m.remove("one")
+  var joined = ""
+  for e in m.entries() {
+    const (k, v) = e
+    joined += k
+    joined += v
+  }
+  const read = xs.get(0).ok((s: string) => s).err((_: none) => "?")
+  read == "z" && joined == "twodeux" && hold == "b" && len(xs) == 3
 }
 
 fn main() -> bool {

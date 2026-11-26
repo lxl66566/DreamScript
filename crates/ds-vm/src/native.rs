@@ -121,6 +121,13 @@
 //! | 84    | `contains (haystack, needle: string) -> bool` |
 //! | 85    | `index_of (haystack, needle: string) -> int \| none` (the checked search, char-indexed) |
 //! | 86    | `replace (haystack, needle, with: string) -> string` |
+//! | 91    | `list_set (xs: list, i: int, x: element words, variadic) -> unit` — the in-place element replacement, out-of-range trapping (the member tier's `set`) |
+//! | 92    | `list_remove (xs: list, i: int) -> unit` — the in-place element removal, the removed words releasing their counts (the member tier's `remove`) |
+//! | 93    | `list_insert (xs: list, i: int, x: element words, variadic) -> unit` — the in-place splice before `i`, `i == len` appending (the member tier's `insert`) |
+//! | 94    | `list_clear (xs: list) -> unit` — the in-place emptying (the member tier's `clear`) |
+//! | 95    | `map_remove (m: map, key: value) -> unit` — the in-place row removal, a missing key a no-op (the member tier's `remove`) |
+//! | 96    | `map_contains (m: map, key: value) -> bool` — the membership read (the member tier's `contains`) |
+//! | 97    | `map_entries (m: map) -> list` — the entry-order pair list, one key word then the value span per row (the member tier's `entries`) |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -774,6 +781,41 @@ pub const BUILTIN_CHAN_RECV: u32 = 89;
 /// in [`GENERIC_FUNCTIONS`], CALLG-addressed; the native slot stays a
 /// reserved trap.
 pub const BUILTIN_SORT: u32 = 90;
+/// `list_set (xs: list, i: int, x: element words) -> unit` — the
+/// in-place element replacement at the index, variadic at the element
+/// span (`list_push`'s staging shape), the store acquiring one count per
+/// incoming `Ref` word and the replaced span releasing its own. The
+/// member tier's `list[t].set` mut-window member routes here; an
+/// out-of-range index traps (the store carries no miss answer).
+pub const BUILTIN_LIST_SET: u32 = 91;
+/// `list_remove (xs: list, i: int) -> unit` — the in-place element
+/// removal, the removed span releasing one count per `Ref` word. The
+/// member tier's `list[t].remove` mut-window member routes here; an
+/// out-of-range index traps.
+pub const BUILTIN_LIST_REMOVE: u32 = 92;
+/// `list_insert (xs: list, i: int, x: element words) -> unit` — the
+/// in-place splice before the index (`index == len` appends), variadic
+/// at the element span. The member tier's `list[t].insert` mut-window
+/// member routes here; an index outside `0..=len` traps.
+pub const BUILTIN_LIST_INSERT: u32 = 93;
+/// `list_clear (xs: list) -> unit` — the in-place emptying, every
+/// element word releasing its count. The member tier's `list[t].clear`
+/// mut-window member routes here.
+pub const BUILTIN_LIST_CLEAR: u32 = 94;
+/// `map_remove (m: map, key: value) -> unit` — the in-place row removal,
+/// the removed key and value span releasing their counts. The member
+/// tier's `map[k, v].remove` mut-window member routes here; a missing
+/// key is a no-op.
+pub const BUILTIN_MAP_REMOVE: u32 = 95;
+/// `map_contains (m: map, key: value) -> bool` — the membership read,
+/// no value handed out. The member tier's `map[k, v].contains` routes
+/// here.
+pub const BUILTIN_MAP_CONTAINS: u32 = 96;
+/// `map_entries (m: map) -> list` — the entry-order pair list: one key
+/// word then its value span per row, one count per `Ref` word acquired
+/// for the fresh list's edge (the map keeps its own, C4). The member
+/// tier's `map[k, v].entries` routes here.
+pub const BUILTIN_MAP_ENTRIES: u32 = 97;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -2163,6 +2205,99 @@ fn map_set_fn(
     heaps.set_map(ref_arg(args, 0)?, args[1], &args[2..])?;
     // the inert unit word: no caller reads the overlay result
     Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn list_set_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the staged span is the list word, the index word, then the
+    // element's whole inline word span (`list_push`'s variadic shape at
+    // the element position)
+    if args.len() < 3 {
+        return Err(Trap::ArityMismatch {
+            expected: 3,
+            given: args.len(),
+        });
+    }
+    heaps.set_list(ref_arg(args, 0)?, i64_arg(args, 1)?, &args[2..])?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn list_remove_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    heaps.remove_list(ref_arg(args, 0)?, i64_arg(args, 1)?)?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn list_insert_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // `list_set`'s staging shape: the list word, the index word, then
+    // the element's whole inline word span
+    if args.len() < 3 {
+        return Err(Trap::ArityMismatch {
+            expected: 3,
+            given: args.len(),
+        });
+    }
+    heaps.insert_list(ref_arg(args, 0)?, i64_arg(args, 1)?, &args[2..])?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn list_clear_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    heaps.clear_list(ref_arg(args, 0)?)?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn map_remove_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    heaps.remove_map(ref_arg(args, 0)?, args[1])?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn map_contains_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let hit = heaps.contains_map(ref_arg(args, 0)?, args[1])?;
+    Ok(NativeResult::Word(Value::Bool(hit)))
+}
+
+fn map_entries_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    // the entry-order pair list: the fresh list's edge owns one count
+    // per `Ref` word of key and value alike (the map keeps its own, C4),
+    // the `map_keys` adoption discipline over the value words too
+    let (words, stride) = heaps.map_entries(ref_arg(args, 0)?)?;
+    for word in &words {
+        if let Value::Ref(word) = *word {
+            heaps.inc_edge(word)?;
+        }
+    }
+    Ok(NativeResult::Word(heaps.new_list_strided(words, stride)))
 }
 
 /// The copy natives' shared finisher: the fresh list's edge owns one
@@ -3975,10 +4110,77 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             func: chan_refuse_fn,
         },
         reserved_entry(builtin_reserved_90),
+        NativeFunction {
+            name: "list_set",
+            // the staged tail is the list word, the index word, then the
+            // element's whole inline word span (`list_push`'s variadic
+            // shape at the element position)
+            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
+            variadic: true,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: list_set_fn,
+        },
+        NativeFunction {
+            name: "list_remove",
+            params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: list_remove_fn,
+        },
+        NativeFunction {
+            name: "list_insert",
+            // `list_set`'s staging shape
+            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
+            variadic: true,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: list_insert_fn,
+        },
+        NativeFunction {
+            name: "list_clear",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: list_clear_fn,
+        },
+        NativeFunction {
+            name: "map_remove",
+            params: &[SlotType::Ref, SlotType::Raw],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: map_remove_fn,
+        },
+        NativeFunction {
+            name: "map_contains",
+            params: &[SlotType::Ref, SlotType::Raw],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: map_contains_fn,
+        },
+        NativeFunction {
+            name: "map_entries",
+            params: &[SlotType::Ref],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: map_entries_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_SORT, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_SORT as usize + 1);
+    // BUILTIN_MAP_ENTRIES, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_MAP_ENTRIES as usize + 1);
     fns
 }
 
@@ -4792,7 +4994,14 @@ mod tests {
         assert_eq!(fns[BUILTIN_CHAN_NEW as usize].name, "chan_new");
         assert_eq!(fns[BUILTIN_CHAN_SEND as usize].name, "chan_send");
         assert_eq!(fns[BUILTIN_CHAN_RECV as usize].name, "chan_recv");
-        assert_eq!(fns.len(), BUILTIN_SORT as usize + 1);
+        assert_eq!(fns[BUILTIN_LIST_SET as usize].name, "list_set");
+        assert_eq!(fns[BUILTIN_LIST_REMOVE as usize].name, "list_remove");
+        assert_eq!(fns[BUILTIN_LIST_INSERT as usize].name, "list_insert");
+        assert_eq!(fns[BUILTIN_LIST_CLEAR as usize].name, "list_clear");
+        assert_eq!(fns[BUILTIN_MAP_REMOVE as usize].name, "map_remove");
+        assert_eq!(fns[BUILTIN_MAP_CONTAINS as usize].name, "map_contains");
+        assert_eq!(fns[BUILTIN_MAP_ENTRIES as usize].name, "map_entries");
+        assert_eq!(fns.len(), BUILTIN_MAP_ENTRIES as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [

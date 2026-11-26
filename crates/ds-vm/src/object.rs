@@ -393,6 +393,17 @@ impl MapData {
         }
         self.slots[at] = row;
     }
+
+    /// Re-places every row after a removal shifted the row numbers: the
+    /// index is positional, so the cleared rebuild is the removal's own
+    /// bookkeeping. The capacity rule stays satisfied (rows only
+    /// shrank), so the capacity is kept as is.
+    fn index_rebuild(&mut self) {
+        self.slots.fill(ROW_NONE);
+        for row in 0..self.keys.len() {
+            self.place(row, self.hashes[row]);
+        }
+    }
 }
 
 /// FNV-1a over `bytes`, continuing `state` (one round per byte).
@@ -1163,6 +1174,208 @@ impl Objects {
         Ok(())
     }
 
+    /// Replaces the element span at `index` with `words`, in place: the
+    /// store acquires one count per incoming `Ref` word before the write
+    /// (a bogus element reference leaves the list untouched), then the
+    /// replaced span releases one count per `Ref` word. An out-of-range
+    /// index has no extractable miss channel (the checked read answers
+    /// `t | none` because the caller can extract; a store must resolve
+    /// its place or halt), so it traps.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no list or the
+    /// staged span is empty; [`Trap::ElementStride`] when the staged
+    /// width disagrees with the list's stride; [`Trap::ListIndex`] when
+    /// `index` names no live element.
+    pub fn set_list(&mut self, obj: u32, index: i64, words: &[Value]) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) || words.is_empty() {
+            return Err(Trap::UnknownObject { obj });
+        }
+        let (stride, len, at) = match self.payload_of(obj) {
+            Some(Object::List(data)) if !data.elems.is_empty() => {
+                let len = data.elems.len() / data.stride;
+                (
+                    data.stride,
+                    len,
+                    usize::try_from(index).ok().filter(|&at| at < len),
+                )
+            },
+            _ => return Err(Trap::ListIndex { obj, index, len: 0 }),
+        };
+        let Some(at) = at else {
+            return Err(Trap::ListIndex { obj, index, len });
+        };
+        if stride != words.len() {
+            return Err(Trap::ElementStride {
+                obj,
+                stride,
+                given: words.len(),
+            });
+        }
+        for value in words {
+            if let Value::Ref(word) = value {
+                if word.fiber() == self.owner {
+                    self.inc(word.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Inc(*word));
+                }
+            }
+        }
+        let old = match self.heap.payload_mut::<Object>(header) {
+            Object::List(data) => {
+                let at = at * stride;
+                let old = data.elems[at..at + stride].to_vec();
+                data.elems[at..at + stride].copy_from_slice(words);
+                old
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        for value in old {
+            if let Value::Ref(word) = value {
+                self.release_stored(word);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes the element span at `index`, in place: the removed span
+    /// releases one count per `Ref` word, and a list emptied by removals
+    /// returns to the stride-0 polymorphism an empty list carries (the
+    /// stride 0 iff empty invariant). An out-of-range index traps like
+    /// [`Objects::set_list`]'s — the removal's miss has no extractable
+    /// answer either.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no list;
+    /// [`Trap::ListIndex`] when `index` names no live element.
+    pub fn remove_list(&mut self, obj: u32, index: i64) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        let (stride, len, at) = match self.payload_of(obj) {
+            Some(Object::List(data)) if !data.elems.is_empty() => {
+                let len = data.elems.len() / data.stride;
+                (
+                    data.stride,
+                    len,
+                    usize::try_from(index).ok().filter(|&at| at < len),
+                )
+            },
+            _ => return Err(Trap::ListIndex { obj, index, len: 0 }),
+        };
+        let Some(at) = at else {
+            return Err(Trap::ListIndex { obj, index, len });
+        };
+        let removed = match self.heap.payload_mut::<Object>(header) {
+            Object::List(data) => {
+                let start = at * stride;
+                let removed = data.elems.drain(start..start + stride).collect::<Vec<_>>();
+                if data.elems.is_empty() {
+                    data.stride = 0;
+                }
+                removed
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        for value in removed {
+            if let Value::Ref(word) = value {
+                self.release_stored(word);
+            }
+        }
+        Ok(())
+    }
+
+    /// Inserts `words` as one fresh element span before `index`, in
+    /// place: `index == len` appends (the `push` shape), an empty list
+    /// adopts the staged width as its stride, and any other index in
+    /// `0..=len` splices. The acquire happens before the store, exactly
+    /// like [`Objects::push_list`]. An out-of-range index traps like
+    /// [`Objects::set_list`]'s.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no list or the
+    /// staged span is empty; [`Trap::ElementStride`] when the staged
+    /// width disagrees with a non-empty list's stride;
+    /// [`Trap::ListIndex`] when `index` sits outside `0..=len`.
+    pub fn insert_list(&mut self, obj: u32, index: i64, words: &[Value]) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::List(_)) || words.is_empty() {
+            return Err(Trap::UnknownObject { obj });
+        }
+        let (stride, len, at) = match self.payload_of(obj) {
+            Some(Object::List(data)) if data.elems.is_empty() => (0usize, 0usize, Some(0)),
+            Some(Object::List(data)) => {
+                let len = data.elems.len() / data.stride;
+                (
+                    data.stride,
+                    len,
+                    usize::try_from(index).ok().filter(|&at| at <= len),
+                )
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        let Some(at) = at else {
+            return Err(Trap::ListIndex { obj, index, len });
+        };
+        if stride != 0 && stride != words.len() {
+            return Err(Trap::ElementStride {
+                obj,
+                stride,
+                given: words.len(),
+            });
+        }
+        for value in words {
+            if let Value::Ref(word) = value {
+                if word.fiber() == self.owner {
+                    self.inc(word.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Inc(*word));
+                }
+            }
+        }
+        match self.heap.payload_mut::<Object>(header) {
+            Object::List(data) => {
+                if data.elems.is_empty() {
+                    data.stride = words.len();
+                }
+                let start = at * data.stride;
+                data.elems.splice(start..start, words.iter().copied());
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        }
+        Ok(())
+    }
+
+    /// Empties the list, in place: every element word releases one
+    /// count per `Ref` word and the list returns to the stride-0
+    /// polymorphism an empty list carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no list.
+    pub fn clear_list(&mut self, obj: u32) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        let removed = match self.heap.payload_mut::<Object>(header) {
+            Object::List(data) => {
+                let elems = std::mem::take(&mut data.elems);
+                data.stride = 0;
+                elems
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        for value in removed {
+            if let Value::Ref(word) = value {
+                self.release_stored(word);
+            }
+        }
+        Ok(())
+    }
+
     /// Concatenates two lists into a fresh object: `lhs`'s elements then
     /// `rhs`'s, the joined length reserved up front (growth is amortized
     /// doubling; a join never re-grows mid-copy). The two strides must
@@ -1714,6 +1927,98 @@ impl Objects {
             Some(Object::Map(data)) => Ok(&data.keys),
             _ => Err(Trap::UnknownObject { obj }),
         }
+    }
+
+    /// Removes the row stored under `key`, when present: the removed
+    /// key and value span release one count per `Ref` word (the map's
+    /// rows own their counts, the `set` store's contract), and the row
+    /// index rebuilds over the shifted row numbers. A missing key is a
+    /// no-op — the removal has nothing to release, and the caller that
+    /// needs to know composes `contains`/`get` first.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn remove_map(&mut self, obj: u32, key: Value, res: &ResolvedKey<'_>) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::Map(_)) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        let at = match self.payload_of(obj) {
+            Some(Object::Map(data)) if !data.slots.is_empty() => {
+                let probe = self.resolve_probe(key, res);
+                self.map_row_at(data, &probe)
+            },
+            _ => None,
+        };
+        let Some(at) = at else {
+            return Ok(());
+        };
+        let (key, value) = match self.heap.payload_mut::<Object>(header) {
+            Object::Map(data) => {
+                let key = data.keys.remove(at);
+                data.hashes.remove(at);
+                let start = at * data.vstride;
+                let value = data
+                    .values
+                    .drain(start..start + data.vstride)
+                    .collect::<Vec<_>>();
+                data.index_rebuild();
+                (key, value)
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        if let Value::Ref(word) = key {
+            self.release_stored(word);
+        }
+        for value in value {
+            if let Value::Ref(word) = value {
+                self.release_stored(word);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a row is stored under `key` — the membership read, no
+    /// value handed out.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn contains_map(&self, obj: u32, key: Value, res: &ResolvedKey<'_>) -> Result<bool, Trap> {
+        let Some(Object::Map(data)) = self.payload_of(obj) else {
+            return Err(Trap::UnknownObject { obj });
+        };
+        if data.slots.is_empty() {
+            return Ok(false);
+        }
+        let probe = self.resolve_probe(key, res);
+        Ok(self.map_row_at(data, &probe).is_some())
+    }
+
+    /// The entry words of map object `obj`, in entry order — one key
+    /// word then its value span per row, flattened — plus the per-entry
+    /// stride (one word wider than the value stride; 0 for a rowless
+    /// map, keeping the empty list's stride-0 invariant). The read is a
+    /// copy, not a hand-out: the map keeps every count, the caller that
+    /// adopts the words acquires its own.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no map object.
+    pub fn map_entries(&self, obj: u32) -> Result<(Vec<Value>, usize), Trap> {
+        let Some(Object::Map(data)) = self.payload_of(obj) else {
+            return Err(Trap::UnknownObject { obj });
+        };
+        if data.keys.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let mut words = Vec::with_capacity(data.keys.len() * (1 + data.vstride));
+        for (row, key) in data.keys.iter().enumerate() {
+            words.push(*key);
+            words.extend_from_slice(&data.values[row * data.vstride..(row + 1) * data.vstride]);
+        }
+        Ok((words, 1 + data.vstride))
     }
 }
 
@@ -2369,6 +2674,69 @@ impl<'a> Heaps<'a> {
     /// them.
     pub(crate) fn map_keys(&mut self, map: RefId) -> Result<Vec<Value>, Trap> {
         Ok(self.store(map)?.map_keys(map.id())?.to_vec())
+    }
+
+    /// Removes the row stored under `key` in map object `map`, routed,
+    /// with the queues drained: the removed key and value span release
+    /// their counts on the words' own heaps, a missing key a no-op.
+    pub(crate) fn remove_map(&mut self, map: RefId, key: Value) -> Result<(), Trap> {
+        let mut probe_text = String::new();
+        let res = self.resolve_key_staged(map.fiber(), key, &mut probe_text)?;
+        self.store(map)?.remove_map(map.id(), key, &res)?;
+        self.settle(map.fiber())
+    }
+
+    /// Whether a row is stored under `key` in map object `map`, routed
+    /// as a shared read.
+    pub(crate) fn contains_map(&mut self, map: RefId, key: Value) -> Result<bool, Trap> {
+        let res = self.resolve_key_shared(map.fiber(), key)?;
+        self.store_shared(map)?.contains_map(map.id(), key, &res)
+    }
+
+    /// The entry words of map object `map`, in entry order, routed and
+    /// copied out: the map keeps every count it owns, so the caller that
+    /// adopts the words acquires its own.
+    pub(crate) fn map_entries(&mut self, map: RefId) -> Result<(Vec<Value>, usize), Trap> {
+        self.store_shared(map)?.map_entries(map.id())
+    }
+
+    /// Replaces the element span at `index` in list object `list`,
+    /// routed: the store mutation lands on the list's store and each
+    /// incoming `Ref` word's acquired count on the element's own heap.
+    pub(crate) fn set_list(
+        &mut self,
+        list: RefId,
+        index: i64,
+        words: &[Value],
+    ) -> Result<(), Trap> {
+        self.store(list)?.set_list(list.id(), index, words)?;
+        self.settle(list.fiber())
+    }
+
+    /// Removes the element span at `index` in list object `list`,
+    /// routed: the removed words' counts release on their own heaps.
+    pub(crate) fn remove_list(&mut self, list: RefId, index: i64) -> Result<(), Trap> {
+        self.store(list)?.remove_list(list.id(), index)?;
+        self.settle(list.fiber())
+    }
+
+    /// Inserts one element span before `index` in list object `list`,
+    /// routed.
+    pub(crate) fn insert_list(
+        &mut self,
+        list: RefId,
+        index: i64,
+        words: &[Value],
+    ) -> Result<(), Trap> {
+        self.store(list)?.insert_list(list.id(), index, words)?;
+        self.settle(list.fiber())
+    }
+
+    /// Empties list object `list`, routed: every element word's count
+    /// releases on its own heap.
+    pub(crate) fn clear_list(&mut self, list: RefId) -> Result<(), Trap> {
+        self.store(list)?.clear_list(list.id())?;
+        self.settle(list.fiber())
     }
 
     /// The content-compare face the object behind `word` presents, routed:

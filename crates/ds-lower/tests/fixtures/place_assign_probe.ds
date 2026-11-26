@@ -1,0 +1,109 @@
+// Probe: the assignment sugar's place chains — the field store over a
+// var-bound struct (plain and nested), the subscript store desugaring to
+// the `set` member's own staging, the nesting of both (an element read
+// back, its sub-span mutated, the element stored back), and the
+// reference-carrying element counts — with the out-of-range store kept
+// to the trap test (the place must resolve, no miss answer exists).
+
+tag int
+tag string
+tag bool
+
+struct list[t]
+struct map[k, v]
+
+struct point { x: int, y: int }
+struct outer { p: point, n: int, xs: list[int] }
+
+extern fn println (s: string) -> ()
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
+extern fn len[t] (xs: t) -> int
+extern fn unwrap_or[t] (x: t?, y: t) -> t
+
+impl[t] list[t] {
+  fn get (self, i: int) -> t | none
+  fn push (mut self, x: t) -> list[t]
+  fn set (mut self, i: int, x: t) -> list[t]
+}
+
+impl[k, v] map[k, v] {
+  fn get (self, key: k) -> v | none
+  fn set (mut self, key: k, value: v) -> map[k, v]
+}
+
+// the plain field store and the nested field path
+fn field_paths() -> bool {
+  var p = point { x: 1, y: 2 }
+  p.x = 10
+  p.y = p.x + 5
+  var o = outer { p: point { x: 1, y: 2 }, n: 3, xs: [9] }
+  o.p.y = 7
+  o.n = 9
+  o.xs[0] = 5
+  p.x == 10 && p.y == 15 && o.p.x == 1 && o.p.y == 7 && o.n == 9 && o.xs.get(0).unwrap_or(-1) == 5
+}
+
+// the subscript store desugars to the set member's own call
+fn subscripts() -> bool {
+  var xs = [1, 2, 3]
+  xs[1] = 20
+  const spelled = xs.set(2, 30)
+  const middle = xs.get(1).unwrap_or(-1)
+  const tail = xs.get(2).unwrap_or(-1)
+  xs.get(0).unwrap_or(-1) == 1 && middle == 20 && tail == 30 && len(spelled) == 3
+}
+
+// the nesting: the element reads back, its sub-span mutates, the element
+// stores back through the same set
+fn nested_subscript() -> bool {
+  var xs = [point { x: 1, y: 2 }, point { x: 3, y: 4 }]
+  xs[1].y = 40
+  const first = xs.get(0).unwrap_or(point { x: 0, y: 0 })
+  const second = xs.get(1).unwrap_or(point { x: 0, y: 0 })
+  first.y == 2 && second.y == 40 && second.x == 3
+}
+
+// the map's subscript store stages the key word and the value span
+fn map_subscript() -> bool {
+  var m = map[string, int]()
+  m["one"] = 1
+  m["two"] = 2
+  const one = m.get("one").unwrap_or(-1)
+  const two = m.get("two").unwrap_or(-1)
+  one == 1 && two == 2 && m.len() == 2
+}
+
+// a list of lists: the inner store mutates the inner list, the outer
+// store writes the same element word back (an identity the counts keep)
+fn nested_lists() -> bool {
+  var rows = [[1, 2], [3, 4]]
+  rows[1][0] = 30
+  const inner = rows.get(1).unwrap_or([0])
+  inner.get(0).unwrap_or(-1) == 30
+}
+
+// reference-carrying elements: the replaced word releases its count, the
+// stored word acquires its own, and the frame drains
+fn ref_elements() -> bool {
+  var ss = ["a", "b", "c"]
+  ss[0] = "z"
+  const hold = "b"
+  ss.get(2).unwrap_or("?").len() == 1 && ss.get(0).unwrap_or("?") == "z" && hold == "b"
+}
+
+fn main() -> bool {
+  field_paths() && subscripts() && nested_subscript() && map_subscript() && nested_lists() &&
+    ref_elements()
+}
+
+// the out-of-range store: the place must resolve or halt (the trap test's
+// own leg, never run by main)
+fn trap_out_of_range() -> int {
+  var xs = [1, 2]
+  xs[3] = 9
+  0
+}

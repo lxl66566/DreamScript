@@ -1,0 +1,8 @@
+error[DS3006]: `p` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]
+ --> tests/fixtures/negative/ds3006_place_store_const_receiver.ds:9:3
+  |
+8 |   const p = point { x: 1 }
+  |         - bound here
+  |
+9 |   p.x = 2
+  |   ^ const receiver

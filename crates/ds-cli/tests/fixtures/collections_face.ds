@@ -19,4 +19,22 @@ fn main() -> () {
   println("empty ${list[int]().len()} ${map[string, int]().len()}")
   println("concat ${list[int]().concat([5, 6]).len()}")
   println("get ${xs.get(1).unwrap_or(0)} ${m.get("two").unwrap_or(0)}")
+  var ys = [1, 2, 3]
+  ys.set(1, 20)
+  ys.insert(0, 9)
+  ys.remove(3)
+  println("set ${ys.get(0).unwrap_or(-1)} ${ys.get(1).unwrap_or(-1)} ${ys.get(2).unwrap_or(-1)}")
+  var zs = [4, 5]
+  zs.clear()
+  zs.push(7)
+  println("clear ${zs.len()} ${zs.get(0).unwrap_or(-1)}")
+  m.remove("one")
+  m.remove("nope")
+  println("map ${m.len()} ${m.contains("two")} ${m.contains("one")}")
+  var total = 0
+  for e in m.entries() {
+    const (k, v) = e
+    total += v
+  }
+  println("entries ${total}")
 }

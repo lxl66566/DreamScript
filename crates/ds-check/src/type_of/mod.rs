@@ -173,6 +173,55 @@ pub type HoleShowDispatches = FxHashMap<Span, MethodId>;
 /// form's receiver fact).
 pub type GenericCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>, Ty)>;
 
+/// One step of a place-store chain (the assignment sugar, ruled
+/// 2026-11-25): a field projection or an index over the ambient
+/// collections. The step carries its solved type so the lowering walks
+/// the chain without re-deriving sub-place types no span records.
+#[derive(Clone, Debug)]
+pub enum PlaceStep {
+    /// A field of the receiver struct, by its declared name; `ty` the
+    /// field's solved type at this position of the chain.
+    Field {
+        /// The field's declared name.
+        name: String,
+        /// The field's solved type.
+        ty: Ty,
+    },
+    /// An index over a list or map: the subscript assignment lowers to
+    /// the collection's `set` member, and a nested chain reads the
+    /// element back through the checked read first. `elem` is the
+    /// element (a list's) or value (a map's) type.
+    Index {
+        /// The collection the receiver names.
+        native: StoreIndex,
+        /// The element (a list's) or value (a map's) type.
+        elem: Ty,
+    },
+}
+
+/// The collection a subscript store addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreIndex {
+    /// A list receiver: `list_set`, the probe an int index.
+    List,
+    /// A map receiver: `map_set`, the probe a key word.
+    Map,
+}
+
+/// One checked assignment place chain (the assignment sugar): the root
+/// binder plus its projection steps, recorded at the assignment's own
+/// span for the lowering to synthesize the store.
+#[derive(Clone, Debug)]
+pub struct PlaceStore {
+    /// The root's introducing binder span.
+    pub binder: Span,
+    /// The root's solved type at the assignment (the flow-refined type,
+    /// a narrowing's narrowed member included).
+    pub root_ty: Ty,
+    /// The projection steps, outermost first.
+    pub steps: Vec<PlaceStep>,
+}
+
 /// The result of one package check: diagnostics in walk order plus the
 /// memoized type of every top-level binding (G3).
 #[derive(Clone, Default)]
@@ -256,6 +305,11 @@ pub struct Checked {
     /// re-span, the width guard) reads this record where a dispatch
     /// reaches a body no planned def names.
     pub member_call_params: FxHashMap<Span, Vec<Ty>>,
+    /// Every checked assignment place chain (the assignment sugar),
+    /// keyed by the assignment's own span: the root binder plus its
+    /// field/index steps, the lowering synthesizing the mut-window
+    /// field store or the `set` member call from it.
+    pub place_stores: FxHashMap<Span, PlaceStore>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -397,6 +451,7 @@ pub fn analyze_resolved(
         is_tests: checked.is_tests,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        place_stores: checked.place_stores,
     };
     Analyzed {
         asts,
@@ -561,6 +616,7 @@ fn analyze_served_over(
         is_tests: checked.is_tests,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        place_stores: checked.place_stores,
     };
     Analyzed {
         asts: asts.into(),
@@ -607,6 +663,7 @@ where
     let mut inherent_calls = FxHashMap::default();
     let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut member_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
+    let mut place_stores: FxHashMap<Span, PlaceStore> = FxHashMap::default();
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
@@ -631,6 +688,7 @@ where
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            place_stores: &mut place_stores,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -685,6 +743,7 @@ where
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            place_stores: &mut place_stores,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -735,6 +794,7 @@ where
         is_tests,
         method_selections,
         member_call_params,
+        place_stores,
     }))
 }
 
@@ -852,6 +912,7 @@ struct Bodies<'a> {
     inherent_calls: &'a mut FxHashMap<Span, MethodId>,
     method_selections: &'a mut FxHashMap<Span, MethodId>,
     member_call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
+    place_stores: &'a mut FxHashMap<Span, PlaceStore>,
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
@@ -5794,6 +5855,219 @@ impl Bodies<'_> {
 
     fn assign(&mut self, op: ds_parse::AssignOp, left: &Expr, right: &Expr, span: Span) -> Val {
         let unit = self.unit();
+        let chain = place_chain(left);
+        if op != ds_parse::AssignOp::Plain
+            && let PlaceShape::Chain(chain) = &chain
+        {
+            // A compound store reads the current value, so a place chain
+            // would need a read synthesized beside the store; the
+            // plain-binding place keeps the compound forms alone this
+            // round.
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!(
+                    "compound assignment keeps the plain-binding place; the chain rooted at `{}` \
+                     needs a read-then-store the place paths lower this round",
+                    chain.root.name
+                ),
+                left.span(),
+                "compound place",
+            );
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        match chain {
+            // The whole-binding place.
+            PlaceShape::Binding => self.assign_binding(op, left, right, span),
+            PlaceShape::Chain(chain) => self.assign_place(&chain, right, span),
+            PlaceShape::Unsupported => {
+                self.error(
+                    ErrorCode::InferenceFailed,
+                    "assignment places are bindings or field/subscript paths rooted at a `var` \
+                     binding [D2]"
+                        .to_owned(),
+                    left.span(),
+                    "unsupported place",
+                );
+                self.expr(right, None);
+                Val {
+                    ty: unit,
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
+        }
+    }
+
+    /// One assignment whose place is a field/subscript chain (the
+    /// assignment sugar, ruled 2026-11-25): the root binding must be an
+    /// owned `var` — a const receiver refuses as the mut-window
+    /// spelling DS3006, the same gate a `mut` member call's receiver
+    /// passes — every field step descends one single-member struct, and
+    /// every index step resolves the ambient collection's element type
+    /// while checking the probe expression against its parameter type.
+    /// The value checks against the leaf type, and the walked chain
+    /// records at the assignment's own span for the lowering to
+    /// synthesize the store — exclusivity rides the existing affine
+    /// gates, no new mutation channel.
+    fn assign_place(&mut self, chain: &PlaceChain<'_>, right: &Expr, span: Span) -> Val {
+        let unit = self.unit();
+        let root = chain.root;
+        let Some(res) = self.res.get(root.span).cloned() else {
+            self.error(
+                ErrorCode::UnresolvedName,
+                format!("the name `{}` does not resolve", root.name),
+                root.span,
+                "unresolved place root",
+            );
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        };
+        // The root is a local binding alone: a place chain rooted at a
+        // top-level binding keeps the plain assignment's own lowering
+        // door (module-level storage waits on cross-module state).
+        let Res::Local { bind } = res else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "a place path's root stays a local binding; module-level storage arrives with \
+                 cross-module state [G4, M7]"
+                    .to_owned(),
+                root.span,
+                "module-level root",
+            );
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        };
+        if self.gate_mut_window_root(root, &res) {
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        let Some(binding) = self.locals.get(bind) else {
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        };
+        let root_ty = self.refined.get(bind).copied().unwrap_or(binding.ty);
+        if !crate::linearity::ty_copyable(self.decls, root_ty, &self.linear_vars) {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "a place path needs a copyable root; a `~Copyable` value's field mutation \
+                 composes with its deinit claim's own seam [C5]"
+                    .to_owned(),
+                root.span,
+                "linear root",
+            );
+            self.expr(right, None);
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        // Walk the steps: every field descends one struct member, every
+        // index resolves the collection's element type and checks the
+        // probe expression against it.
+        let mut ty = root_ty;
+        let mut steps: Vec<PlaceStep> = Vec::with_capacity(chain.steps.len());
+        for step in &chain.steps {
+            match step {
+                ChainStep::Field { name } => {
+                    let Some(step_ty) = self.field_step_ty(ty, name) else {
+                        self.expr(right, None);
+                        return Val {
+                            ty: unit,
+                            diverges: false,
+                            poisoned: false,
+                        };
+                    };
+                    steps.push(PlaceStep::Field {
+                        name: name.name.clone(),
+                        ty: step_ty,
+                    });
+                    ty = step_ty;
+                },
+                ChainStep::Index { index } => {
+                    let Some((native, elem)) = self.index_step_ty(ty) else {
+                        self.error(
+                            ErrorCode::TypeMismatch,
+                            format!(
+                                "subscript assignment rides the ambient collections' `set` \
+                                 member; `{}` is not one",
+                                self.decls.universe.render(ty)
+                            ),
+                            index.span(),
+                            "not a collection",
+                        );
+                        self.expr(right, None);
+                        return Val {
+                            ty: unit,
+                            diverges: false,
+                            poisoned: false,
+                        };
+                    };
+                    // The probe expression checks against the collection's
+                    // own parameter type: the list's int index, the map's
+                    // key.
+                    let probe_ty = match native {
+                        StoreIndex::List => {
+                            self.named_atom_ty(index.span(), "int", "the list's index type")
+                        },
+                        StoreIndex::Map => self.index_key_ty(ty),
+                    };
+                    let probe_val = self.expr(index, probe_ty);
+                    if let Some(probe_ty) = probe_ty {
+                        self.expect_contains(probe_val, probe_ty, index.span(), "subscript probe");
+                    }
+                    steps.push(PlaceStep::Index { native, elem });
+                    ty = elem;
+                },
+            }
+        }
+        let leaf = ty;
+        let val = self.expr(right, Some(leaf));
+        self.expect_contains(val, leaf, right.span(), "assignment");
+        self.place_stores.insert(span, PlaceStore {
+            binder: bind,
+            root_ty,
+            steps,
+        });
+        Val {
+            ty: unit,
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
+    /// The whole-binding assignment, the pre-sugar surface: the place
+    /// is a single-segment path to a binding, the compound forms read
+    /// the current value, and a plain store resets the refinement.
+    fn assign_binding(
+        &mut self,
+        op: ds_parse::AssignOp,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+    ) -> Val {
+        let unit = self.unit();
         let place = match peel_paren(left) {
             Expr::Path { path, .. } if path.segments.len() == 1 => {
                 self.res.get(path.segments[0].span).cloned()
@@ -5803,7 +6077,8 @@ impl Bodies<'_> {
         let Some(res) = place else {
             self.error(
                 ErrorCode::InferenceFailed,
-                "assignment places are bindings; field assignment is undecided surface [D2]"
+                "assignment places are bindings or field/subscript paths rooted at a `var` \
+                 binding [D2]"
                     .to_owned(),
                 left.span(),
                 "unsupported place",
@@ -5863,6 +6138,208 @@ impl Bodies<'_> {
             diverges: false,
             poisoned: false,
         }
+    }
+
+    /// One field step's solved type: the receiver must be one
+    /// single-member struct and the field must exist, its declared type
+    /// solved under the application's substitution.
+    fn field_step_ty(&mut self, recv_ty: Ty, name: &Ident) -> Option<Ty> {
+        let members = self.decls.universe.members(recv_ty);
+        let single = members.first().filter(|_| members.len() == 1).copied();
+        let Some(single) = single else {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "field access needs one struct, `{}` given; narrow with `is` first [B2]",
+                    self.decls.universe.render(recv_ty)
+                ),
+                name.span,
+                "not a single struct",
+            );
+            return None;
+        };
+        let kind = self.decls.universe.atom_decl(single).ok().map(|d| &d.kind);
+        let (def, subst): (DefId, FxHashMap<String, Ty>) = match kind {
+            Some(AtomKind::Apply(ctor, args)) => {
+                if let Some(def) = self.decls.defs_of_atoms.get(ctor).copied() {
+                    let mut subst = FxHashMap::default();
+                    if let Some(shape) = self.decls.structs.get(&def) {
+                        for (param, arg) in shape.params.iter().zip(args.iter()) {
+                            subst.insert(param.name.clone(), *arg);
+                        }
+                    }
+                    (def, subst)
+                } else {
+                    self.no_field(recv_ty, name);
+                    return None;
+                }
+            },
+            _ => match self.decls.defs_of_atoms.get(&single).copied() {
+                Some(def) if self.decls.structs.contains_key(&def) => (def, FxHashMap::default()),
+                _ => {
+                    self.no_field(recv_ty, name);
+                    return None;
+                },
+            },
+        };
+        let field_ty = self
+            .decls
+            .structs
+            .get(&def)
+            .and_then(|shape| {
+                shape
+                    .fields
+                    .iter()
+                    .find(|field| field.name.name == name.name)
+            })
+            .map(|field| field.ty.clone());
+        let Some(field_ty) = field_ty else {
+            self.no_field(recv_ty, name);
+            return None;
+        };
+        self.type_vars.push(subst);
+        let field_ty = self.solve_here(&field_ty);
+        self.type_vars.pop();
+        if let Some(ty) = field_ty {
+            return Some(ty);
+        }
+        if !self.take_solve_reported() {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!("field `{}` does not solve", name.name),
+                name.span,
+                "unsolvable field type",
+            );
+        }
+        None
+    }
+
+    /// One index step's collection and element type: the receiver must
+    /// name the ambient `list[t]` (element `t`) or `map[k, v]` (value
+    /// `v`) — the subscript store desugars to their `set` members, and a
+    /// user member's own desugar waits on its seam.
+    fn index_step_ty(&mut self, recv_ty: Ty) -> Option<(StoreIndex, Ty)> {
+        let members = self.decls.universe.members(recv_ty);
+        let single = members.first().filter(|_| members.len() == 1).copied();
+        let single = single?;
+        let AtomKind::Apply(ctor, args) = &self.decls.universe.atom_decl(single).ok()?.kind else {
+            return None;
+        };
+        let def = self.decls.defs_of_atoms.get(ctor).copied()?;
+        if Some(def) == self.package.lookup_type("list") {
+            return Some((StoreIndex::List, *args.first()?));
+        }
+        if Some(def) == self.package.lookup_type("map") {
+            return Some((StoreIndex::Map, *args.get(1)?));
+        }
+        None
+    }
+
+    /// The map receiver's key type, the probe expression's expected type.
+    fn index_key_ty(&mut self, recv_ty: Ty) -> Option<Ty> {
+        let members = self.decls.universe.members(recv_ty);
+        let single = members.first().filter(|_| members.len() == 1).copied()?;
+        let AtomKind::Apply(ctor, args) = &self.decls.universe.atom_decl(single).ok()?.kind else {
+            return None;
+        };
+        let def = self.decls.defs_of_atoms.get(ctor).copied()?;
+        (Some(def) == self.package.lookup_type("map"))
+            .then(|| args.first().copied())
+            .flatten()
+    }
+
+    /// The mut-window receiver gates a place chain's root shares with a
+    /// `mut` member call's receiver: the for-in iterated binding (its
+    /// element count froze at loop entry, DS3007), the nursery-outlived
+    /// binding inside a spawned body (E2), then the const-binding
+    /// refusal itself (DS3006) — the place store is a `mut` window
+    /// spelled as an assignment. Returns whether the site refused.
+    fn gate_mut_window_root(&mut self, root: &Ident, res: &Res) -> bool {
+        let bind = match res {
+            Res::Local { bind } => Some(IterBind::Local(*bind)),
+            Res::Def(def) => Some(IterBind::Def(*def)),
+            _ => None,
+        };
+        if let Some(bind) = bind
+            && let Some(iter_at) = self.iterated_at(bind)
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::ForIterMutWindow,
+                    format!(
+                        "`{}` is this loop's iterated binding; its element count froze at loop \
+                         entry, so a `mut` window over it inside the body never joins this loop's \
+                         walk [D3]",
+                        root.name
+                    ),
+                )
+                .with_primary(root.span, "mut window over the iterated binding")
+                .with_secondary(iter_at, "iterated here"),
+            );
+            return true;
+        }
+        if self.spawn_depth > 0
+            && let Some((outlives, nursery_at)) = self.nursery_scopes.last().map(|scope| {
+                let outlives = match res {
+                    Res::Local { bind } => scope.outlived.contains(bind),
+                    Res::Def(def) => self.package.def(*def).kind == DefKind::Var,
+                    _ => false,
+                };
+                (outlives, scope.at)
+            })
+            && outlives
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    ErrorCode::SpawnOutlivedMutWindow,
+                    format!(
+                        "`{}` outlives this nursery block; a spawned body may never hold a `mut` \
+                         window over it [E2]",
+                        root.name
+                    ),
+                )
+                .with_primary(root.span, "mut window over an outlived binding")
+                .with_secondary(nursery_at, "the nursery block joins here"),
+            );
+            return true;
+        }
+        let (binder, mutable, ty) = match res {
+            Res::Local { bind } => {
+                let Some(binding) = self.locals.get(*bind) else {
+                    return false;
+                };
+                (*bind, binding.mutable, binding.ty)
+            },
+            Res::Def(def) => {
+                let def_info = self.package.def(*def);
+                if def_info.kind != DefKind::Const {
+                    return false;
+                }
+                let Some(ty) = self.def_types.get(def).copied() else {
+                    return false;
+                };
+                (def_info.span, false, ty)
+            },
+            _ => return false,
+        };
+        if mutable
+            || self.decls.universe.is_empty(ty)
+            || !crate::linearity::ty_copyable(self.decls, ty, &self.linear_vars)
+        {
+            return false;
+        }
+        self.diags.push(
+            Diagnostic::error(
+                ErrorCode::MutWindowConstReceiver,
+                format!(
+                    "`{}` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]",
+                    root.name
+                ),
+            )
+            .with_secondary(binder, "bound here")
+            .with_primary(root.span, "const receiver"),
+        );
+        true
     }
 
     /// `?` in a branch-final position splits against the expected type
@@ -7355,6 +7832,71 @@ fn single_path_ident(expr: &Expr) -> Option<&Ident> {
     match expr {
         Expr::Path { path, .. } if path.segments.len() == 1 => path.segments.first(),
         _ => None,
+    }
+}
+
+/// One projection step of an assignment place chain (the assignment
+/// sugar): a field of the receiver or an index over it.
+#[derive(Clone, Copy)]
+enum ChainStep<'a> {
+    /// A field projection.
+    Field {
+        /// The field's name occurrence.
+        name: &'a Ident,
+    },
+    /// A subscript projection.
+    Index {
+        /// The probe expression (a list's index, a map's key).
+        index: &'a Expr,
+    },
+}
+
+/// One assignment place chain: the root path segment plus its
+/// projection steps in source order.
+struct PlaceChain<'a> {
+    root: &'a Ident,
+    steps: Vec<ChainStep<'a>>,
+}
+
+/// The place shape of an assignment's left side (the assignment sugar):
+/// the shape names no place at all (the caller's unsupported-place
+/// refusal), a plain binding path, or a projection chain over a
+/// single-segment root.
+enum PlaceShape<'a> {
+    Unsupported,
+    Binding,
+    Chain(PlaceChain<'a>),
+}
+
+fn place_chain(left: &Expr) -> PlaceShape<'_> {
+    let mut steps: Vec<ChainStep<'_>> = Vec::new();
+    let mut recv = peel_paren(left);
+    loop {
+        match recv {
+            Expr::Field {
+                recv: inner, name, ..
+            } => {
+                steps.push(ChainStep::Field { name });
+                recv = peel_paren(inner);
+            },
+            Expr::Index {
+                recv: inner, index, ..
+            } => {
+                steps.push(ChainStep::Index { index });
+                recv = peel_paren(inner);
+            },
+            Expr::Path { path, .. } if path.segments.len() == 1 => {
+                if steps.is_empty() {
+                    return PlaceShape::Binding;
+                }
+                steps.reverse();
+                return PlaceShape::Chain(PlaceChain {
+                    root: &path.segments[0],
+                    steps,
+                });
+            },
+            _ => return PlaceShape::Unsupported,
+        }
     }
 }
 

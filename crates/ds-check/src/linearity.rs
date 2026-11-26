@@ -1299,9 +1299,33 @@ impl<'a> Lin<'a> {
             return false;
         };
         let Some(place) = self.place_of(left) else {
-            // Field assignment is undecided surface [D2]; the type walk
-            // already reports it.
-            self.expr(left, false);
+            // A field/subscript place chain (the assignment sugar): the
+            // root binding reads borrowed (a copyable root — the type
+            // walk refuses the linear ones — so no move, no drop), each
+            // index probe moves into the synthesized `set` call, and the
+            // value moves into the store.
+            if let Some(root) = place_root(left) {
+                let place = self
+                    .res
+                    .and_then(|res| res.get(root.span))
+                    .and_then(|res| match res {
+                        Res::Local { bind } => Some(Place::Local(*bind)),
+                        Res::Def(def) if self.is_data_def(*def) => Some(Place::Def(*def)),
+                        _ => None,
+                    });
+                if let Some(place) = place {
+                    self.read(place, root.span, false);
+                } else {
+                    self.expr(left, false);
+                }
+                for step in place_steps(left) {
+                    if let PlaceStep::Index { index } = step {
+                        self.expr(index, true);
+                    }
+                }
+            } else {
+                self.expr(left, false);
+            }
             self.expr(right, true);
             return false;
         };
@@ -1791,6 +1815,57 @@ fn peel(expr: &Expr) -> &Expr {
     match expr {
         Expr::Paren { inner, .. } => peel(inner),
         _ => expr,
+    }
+}
+
+/// One projection step of an assignment place chain (the assignment
+/// sugar), for the affine walk's uses.
+enum PlaceStep<'a> {
+    /// A field projection (no binding use of its own).
+    Field,
+    /// A subscript projection: the probe expression moves into the
+    /// synthesized `set` call.
+    Index {
+        /// The probe expression.
+        index: &'a Expr,
+    },
+}
+
+/// The root path segment of an assignment place chain, when the left
+/// side is one: the binding the chain's mut window opens over.
+fn place_root(left: &Expr) -> Option<&Ident> {
+    let mut recv = peel(left);
+    loop {
+        match recv {
+            Expr::Field { recv: inner, .. } | Expr::Index { recv: inner, .. } => {
+                recv = peel(inner);
+            },
+            Expr::Path { path, .. } if path.segments.len() == 1 => {
+                return path.segments.first();
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// An assignment place chain's projection steps, outermost first.
+fn place_steps(left: &Expr) -> Vec<PlaceStep<'_>> {
+    let mut steps = Vec::new();
+    let mut recv = peel(left);
+    loop {
+        match recv {
+            Expr::Field { recv: inner, .. } => {
+                steps.push(PlaceStep::Field);
+                recv = peel(inner);
+            },
+            Expr::Index {
+                recv: inner, index, ..
+            } => {
+                steps.push(PlaceStep::Index { index });
+                recv = peel(inner);
+            },
+            _ => return steps,
+        }
     }
 }
 

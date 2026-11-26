@@ -1,0 +1,71 @@
+// source: todo item 117, the assignment-sugar round (ruled 2026-11-25)
+// purpose: the place chains lower over the one mutation mechanism the surface already had — the field path's in-place frame sub-span store over the var-bound root, the subscript's identical staging to the `set` member call, and the nesting of both reading the element back and storing it through the same window — with the compound operator over a place chain the refusal (it keeps the plain-binding place this round)
+// items:
+// point: stage: typecheck
+// outer: stage: typecheck
+// field-store: stage: run
+// field-path: stage: run
+// subscript-store: stage: run
+// subscript-nesting: stage: run
+// nested-subscripts: stage: run
+// map-subscript: stage: run
+// compound-place: stage: reject the compound operator over a place chain keeps the plain-binding place; the chain needs a read-then-store the place paths lower this round (DS2002)
+// main: stage: run
+
+struct point { x: int, y: int }
+
+struct outer { p: point, n: int }
+
+fn field_store() -> int {
+  var p = point { x: 1, y: 2 }
+  p.x = 10
+  p.y = 20
+  p.x + p.y
+}
+
+fn field_path() -> int {
+  var o = outer { p: point { x: 1, y: 2 }, n: 3 }
+  o.p.x = 30
+  o.p.y = o.p.x + 5
+  o.n = 9
+  o.p.y * 10 + o.n
+}
+
+fn subscript_store() -> int {
+  var xs = [1, 2, 3]
+  xs[1] = 20
+  const spelled = xs.set(2, 30)
+  xs.get(0).unwrap_or(-1) + xs.get(1).unwrap_or(-1) * 10 + spelled.get(2).unwrap_or(-1) * 100
+}
+
+fn subscript_nesting() -> int {
+  var xs = [point { x: 1, y: 2 }, point { x: 3, y: 4 }]
+  xs[1].y = 40
+  xs[0].x = 11
+  xs.get(0).unwrap_or(point { x: 0, y: 0 }).x * 10 + xs.get(1).unwrap_or(point { x: 0, y: 0 }).y
+}
+
+fn nested_subscripts() -> int {
+  var rows = [[1, 2], [3, 4]]
+  rows[1][0] = 30
+  const inner = rows.get(1).unwrap_or([0])
+  inner.get(0).unwrap_or(-1) * 10 + inner.get(1).unwrap_or(-1)
+}
+
+fn map_subscript() -> int {
+  var m = map[string, int]()
+  m["one"] = 1
+  m["two"] = 2
+  m.get("one").unwrap_or(-1) + m.get("two").unwrap_or(-1) * 10 + m.len() * 100
+}
+
+fn compound_place() -> int {
+  var xs = [1, 2, 3]
+  xs[1] += 5
+  xs.get(1).unwrap_or(-1)
+}
+
+fn main() -> () {
+  println("fields ${field_store()} ${field_path()}")
+  println("subscripts ${subscript_store()} ${subscript_nesting()} ${nested_subscripts()} ${map_subscript()}")
+}

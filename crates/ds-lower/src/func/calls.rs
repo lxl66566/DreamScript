@@ -44,13 +44,15 @@ impl<'a> FnLower<'a, '_, '_> {
         let ty = receiver?;
         match target {
             Callee::Builtin(native) if native.name == "list_push" => self.shapes.list_element(ty),
+            Callee::Builtin(native) if native.name == "list_set" => self.shapes.list_element(ty),
+            Callee::Builtin(native) if native.name == "list_insert" => self.shapes.list_element(ty),
             Callee::Builtin(native) if native.name == "map_set" => self.shapes.map_value(ty),
             Callee::Builtin(native) if native.name == "chan_send" => self.shapes.chan_payload(ty),
             _ => None,
         }
     }
 
-    fn guard_list_element(
+    pub(super) fn guard_list_element(
         &mut self,
         val: &TypedPlace,
         span: Span,
@@ -154,6 +156,17 @@ impl<'a> FnLower<'a, '_, '_> {
                 "a map_set argument",
                 "map_set stages the map, one key word, then the value's whole word span; a \
                  narrower staging mis-names the value channel",
+            ));
+        }
+        if let Callee::Builtin(native) = target
+            && (native.name == "list_set" || native.name == "list_insert")
+            && staged.len() < 3
+        {
+            return Err(LowerError::unsupported(
+                span,
+                "a list element store argument",
+                "the store stages the list, one index word, then the element's whole word span; a \
+                 narrower staging mis-names the element channel",
             ));
         }
         if let Callee::Local(index) = target
@@ -1227,6 +1240,12 @@ impl<'a> FnLower<'a, '_, '_> {
         let element_slot = match target {
             Callee::Builtin(native) if native.name == "list_push" => {
                 Some((1usize, "a list_push element"))
+            },
+            Callee::Builtin(native) if native.name == "list_set" => {
+                Some((2usize, "a list_set element"))
+            },
+            Callee::Builtin(native) if native.name == "list_insert" => {
+                Some((2usize, "a list_insert element"))
             },
             Callee::Builtin(native) if native.name == "map_set" => {
                 Some((2usize, "a map_set value"))
@@ -2826,10 +2845,17 @@ impl<'a> FnLower<'a, '_, '_> {
         let member = self.analyzed.package.method(method).name.as_str();
         let (native, window) = match (target.as_str(), member) {
             ("list", "get") => ("list_get", false),
+            ("list", "set") => ("list_set", true),
             ("list", "push") => ("list_push", true),
+            ("list", "insert") => ("list_insert", true),
+            ("list", "remove") => ("list_remove", true),
+            ("list", "clear") => ("list_clear", true),
             ("list", "concat") => ("list_concat", false),
             ("map", "get") => ("map_get", false),
             ("map", "set") => ("map_set", true),
+            ("map", "remove") => ("map_remove", true),
+            ("map", "contains") => ("map_contains", false),
+            ("map", "entries") => ("map_entries", false),
             ("chan", "send") => ("chan_send", false),
             ("chan", "recv") => ("chan_recv", false),
             _ => return None,

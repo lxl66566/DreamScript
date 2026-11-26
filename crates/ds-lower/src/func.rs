@@ -19,8 +19,8 @@ use ds_abi::{
 };
 use ds_check::{
     Analyzed, AtomKind, BinderFact, ConstFact, DefId, DotRes, Extraction, GenericCallBounds,
-    InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
-    Ty, TypeExpr, TypeId, Val,
+    InherentCallBounds, InstanceId, MethodId, MethodOwner, PlaceStep, PlaceStore, Res, Resolutions,
+    StoreIndex, TraitCall, TraitId, Ty, TypeExpr, TypeId, Val,
 };
 use ds_diag::{FileId, Span};
 use ds_mod::{Constant, FuncRefKey};
@@ -45,6 +45,7 @@ mod calls;
 mod extraction;
 mod pattern;
 mod sort;
+mod store;
 mod tail;
 
 use extraction::AmbientExtern;
@@ -3835,6 +3836,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// reassignment kills the old value: the replacement drop threads right
     /// here, before the store Movs overwrite the old reference.
     fn assign_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
+        // A checked place chain (the assignment sugar) synthesizes its
+        // store from the walk the checker recorded.
+        if let Some(store) = self.analyzed.checked.place_stores.get(&e.span()).cloned() {
+            return self.assign_place_store(e, &store);
+        }
         let Expr::Assign {
             op, left, right, ..
         } = e

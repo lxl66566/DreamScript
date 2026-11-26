@@ -225,11 +225,29 @@ impl[k, v] map[k, v] {
   fn keys (self) -> list[k] { map_keys(self) }
   fn get (self, key: k) -> v | none
   fn set (mut self, key: k, value: v) -> map[k, v]
+  // The removal's miss answer: a missing key is a no-op — the row that
+  // is not there has nothing to release, and the caller that needs to
+  // know composes `contains`/`get` first. The mutation members answer
+  // the receiver (the mut-window member shape), so no miss channel
+  // exists to extract.
+  fn remove (mut self, key: k) -> map[k, v]
+  fn contains (self, key: k) -> bool
+  // The entry-order pair face: one `(key, value)` tuple per row, the
+  // iteration seam `keys` composes with the value spans in one pass.
+  fn entries (self) -> list[(k, v)]
 }
 
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
+  fn set (mut self, i: int, x: t) -> list[t]
   fn push (mut self, x: t) -> list[t]
+  // The indexed splice and removal: `insert` before `i` appends at
+  // `i == len`, `remove` drops the element's words with their counts,
+  // and both trap out of range (a store or removal must resolve its
+  // place — the checked read keeps the extractable `t | none` miss).
+  fn insert (mut self, i: int, x: t) -> list[t]
+  fn remove (mut self, i: int) -> list[t]
+  fn clear (mut self) -> list[t]
   fn concat (self, other: list[t]) -> list[t]
 }
 
@@ -379,6 +397,10 @@ extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
+extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn list_remove[t] (xs: mut list[t], i: int) -> ()
+extern fn list_insert[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn list_clear[t] (xs: mut list[t]) -> ()
 extern fn map_new[k, v] () -> map[k, v]
 extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
@@ -387,6 +409,13 @@ extern fn map_len[k, v] (m: map[k, v]) -> int
 // iteration seam the checked reads and the inherent `keys` member
 // compose over (the value spans read back through the member route).
 extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
+// The mutation and membership seams behind the member spellings above:
+// the removal's missing key a no-op, the membership read answering the
+// bit, and the entry-order pair list one key word then the value span
+// per row (the fresh list's edge owning one count per reference word).
+extern fn map_remove[k, v] (m: mut map[k, v], key: k) -> ()
+extern fn map_contains[k, v] (m: map[k, v], key: k) -> bool
+extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 // The bounded channel's native face: the construction is the type
 // application `chan[t](cap)` (the bound the one value argument the
 // collection construction form carries — the payload type never reaches

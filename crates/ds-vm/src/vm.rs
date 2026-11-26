@@ -297,6 +297,20 @@ pub enum Trap {
         /// The refused key word.
         key: RefId,
     },
+    /// An indexed mutation (an element store, a removal, an insertion)
+    /// named an index outside the list's live element range: the
+    /// checked reads answer the `none` member because the caller can
+    /// extract a miss, but a mutating member and an assignment place
+    /// keep no extractable miss channel — the place must resolve or
+    /// halt, so the out-of-range index traps loud naming it.
+    ListIndex {
+        /// The list object's table id.
+        obj: u32,
+        /// The rejected index.
+        index: i64,
+        /// The list's live element count.
+        len: usize,
+    },
     /// An arena concatenation or its packed handle hit a field limit: a
     /// slice at or past the 24-bit length field, an offset at it, or a
     /// chunk index at the 16-bit field. Lowered code traps at the

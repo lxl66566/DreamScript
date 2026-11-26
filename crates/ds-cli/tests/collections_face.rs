@@ -59,6 +59,32 @@ fn the_member_spellings_run_over_the_ambient() {
             "empty 0 0\n",
             "concat 2\n",
             "get 2 2\n",
+            "set 9 1 20\n",
+            "clear 1 7\n",
+            "map 1 true false\n",
+            "entries 2\n",
+            "0\n",
+        )
+    );
+}
+
+/// The mutation and membership members answer through the ambient in
+/// source mode: the indexed replacement, splice, and removal over the
+/// same mut windows, the stride-resetting emptying, the map's row
+/// removal (a missing key a no-op), the membership read, and the
+/// entry-order pair list — with the trap an out-of-range indexed store
+/// answers carrying its own report line.
+#[test]
+fn the_mutation_and_membership_members_run_over_the_ambient() {
+    let out = run(ds().arg("run").arg(fixture("collections_members.ds")));
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        concat!(
+            "spliced 9 1 20\n",
+            "cleared 7\n",
+            "removed true false 1\n",
+            "pairs two=2\n",
             "0\n",
         )
     );
@@ -89,6 +115,10 @@ fn built_module_reproduces_the_source_run() {
             "empty 0 0\n",
             "concat 2\n",
             "get 2 2\n",
+            "set 9 1 20\n",
+            "clear 1 7\n",
+            "map 1 true false\n",
+            "entries 2\n",
             "0\n",
         )
     );

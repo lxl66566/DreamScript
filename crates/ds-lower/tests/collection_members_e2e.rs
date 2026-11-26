@@ -68,3 +68,31 @@ fn the_member_spellings_route_to_the_native_seams() {
         "every member leg matched"
     );
 }
+
+#[test]
+fn the_mutation_and_membership_members_run_over_the_windows() {
+    // `members_round` legs: the indexed replacement and splice, the
+    // removal and the stride-resetting clear (a cleared list adopting a
+    // later element again), the map's removal (the missing key a
+    // no-op), the membership reads, and the entry-order pair list
+    // iterated as one tuple per row. `members_ref_round` runs the same
+    // members over reference-carrying elements and the frame drains to
+    // zero — the replaced and removed words released, the stored and
+    // entry words balanced
+    let (mut vm, _) = build_vm();
+    assert_eq!(
+        vm.run("collection_members_probe", "members_round", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true))),
+        "every mutation and membership leg matched"
+    );
+    assert_eq!(
+        vm.run("collection_members_probe", "members_ref_round", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true))),
+        "every reference-carrying leg matched"
+    );
+    assert_eq!(
+        vm.objects().len(),
+        0,
+        "the reference-carrying members round drains the heap"
+    );
+}

@@ -1,0 +1,10 @@
+// One const-root rejection [D2, C3]: the assignment sugar's place store
+// rides a `mut` window's exclusivity, so a place chain rooted at a
+// `const` binding rejects by its spelling.
+
+tag int
+struct point { x: int }
+fn store() -> () {
+  const p = point { x: 1 }
+  p.x = 2
+}

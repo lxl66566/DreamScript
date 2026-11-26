@@ -31,6 +31,9 @@
 //! bounds only a later impl intersects, reported by the closure pass
 //! over the closed instance set. The loop-exit round adds DS2002's lambda-frame route: a break
 //! lexically inside a lambda within a loop reports the crossed frame boundary at check time.
+//! The assignment-sugar round adds DS3006's place-store route: a place
+//! chain rooted at a `const` binding rejects by the mut window's own
+//! spelling gate.
 
 use std::{
     env, fs,
@@ -160,6 +163,11 @@ const CASES: &[Case] = &[
         stem: "ds3006_member_call_const_receiver",
         human: include_str!("goldens/ds3006_member_call_const_receiver.human"),
         json: include_str!("goldens/ds3006_member_call_const_receiver.json"),
+    },
+    Case {
+        stem: "ds3006_place_store_const_receiver",
+        human: include_str!("goldens/ds3006_place_store_const_receiver.human"),
+        json: include_str!("goldens/ds3006_place_store_const_receiver.json"),
     },
     Case {
         stem: "ds3005_borrow_escapes",

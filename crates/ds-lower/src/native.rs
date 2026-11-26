@@ -335,6 +335,61 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::I64), // the unit word
     },
     Native {
+        // the in-place element replacement at the index: the element's
+        // whole word span stages variadic (`list_push`'s shape), an
+        // out-of-range index trapping — the checked read keeps the
+        // `t | none` miss answer because the caller can extract it
+        name: "list_set",
+        module: NativeModule::Builtin,
+        index: 91,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the in-place element removal, the removed words releasing
+        // their counts; an out-of-range index traps like `list_set`'s
+        name: "list_remove",
+        module: NativeModule::Builtin,
+        index: 92,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the in-place splice before the index, `index == len`
+        // appending; the element stages variadic like `list_set`'s
+        name: "list_insert",
+        module: NativeModule::Builtin,
+        index: 93,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the in-place emptying, every element word releasing its count
+        name: "list_clear",
+        module: NativeModule::Builtin,
+        index: 94,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the in-place row removal, a missing key a no-op
+        name: "map_remove",
+        module: NativeModule::Builtin,
+        index: 95,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        // the membership read, no value handed out
+        name: "map_contains",
+        module: NativeModule::Builtin,
+        index: 96,
+        shape: NativeShape::Total(SlotType::Bool),
+    },
+    Native {
+        // the entry-order pair list: one key word then the value span
+        // per row, the fresh list's edge owning one count per `Ref` word
+        name: "map_entries",
+        module: NativeModule::Builtin,
+        index: 97,
+        shape: NativeShape::Total(SlotType::Ref), // the list object
+    },
+    Native {
         // B8's checked char read: the ok/none span re-spans into the
         // call's own `char | none` union (char rides the Ref, the hit
         // payload the one-scalar word `char_of` mints); an out-of-range

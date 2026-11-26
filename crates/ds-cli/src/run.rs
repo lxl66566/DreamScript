@@ -789,6 +789,10 @@ fn describe_trap(trap: &Trap) -> String {
             "map object {obj} refuses a fresh row keyed by foreign reference {key:?}: the key \
              must live on the map's own heap for any content probe to find it"
         ),
+        Trap::ListIndex { obj, index, len } => format!(
+            "list object {obj} holds {len} elements; index {index} names none — a store or \
+             removal must resolve its place, it carries no miss answer"
+        ),
         Trap::ArenaExhausted { field } => match field {
             ArenaPackError::Length => {
                 "a string concatenation or arena slice hit the 16 MiB length field limit".to_owned()
