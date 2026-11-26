@@ -51,6 +51,20 @@ thread_local! {
 thread_local! {
     /// Counts spawns per caller thread, which pins the reuse contract.
     static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Refuses every spawn on this caller thread, pinning the degrade a
+    /// host that cannot start threads answers.
+    static REFUSE_SPAWNS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What handing one job to this thread's worker did.
+enum Handoff {
+    Sent,
+    /// The cached worker died between jobs: the job rides back and the slot
+    /// is emptied, so the caller's retry spawns a fresh thread.
+    Dead(Job),
+    /// The host cannot start the worker thread, so the job never left and
+    /// the caller answers the internal error instead of retrying.
+    Refused,
 }
 
 /// Runs the grammar and the conversion for one source on this caller thread's
@@ -64,14 +78,17 @@ pub(super) fn run(file: FileId, src: &str, script: bool) -> Result<Ast, Vec<Diag
         reply,
     };
     loop {
-        let sent = WORKER.with_borrow_mut(|slot| slot.get_or_insert_with(spawn).jobs.send(job));
-        match sent {
-            Ok(()) => break,
-            // A worker that died outside a job's guard is replaced; the next
-            // job goes to a fresh thread.
-            Err(mpsc::SendError(returned)) => {
-                job = returned;
-                WORKER.with_borrow_mut(|slot| *slot = Some(spawn()));
+        match hand_off(job) {
+            Handoff::Sent => break,
+            Handoff::Dead(returned) => job = returned,
+            // The host cannot start the worker thread: the same internal
+            // answer every other worker failure gives, never a panic on the
+            // caller's stack.
+            Handoff::Refused => {
+                return Err(vec![Diagnostic::error(
+                    ErrorCode::UnexpectedToken,
+                    "internal parser error: the parse worker could not start",
+                )]);
             },
         }
     }
@@ -80,6 +97,27 @@ pub(super) fn run(file: FileId, src: &str, script: bool) -> Result<Ast, Vec<Diag
             ErrorCode::UnexpectedToken,
             "internal parser error: the parse worker stopped",
         )])
+    })
+}
+
+/// Hands one job to this thread's worker, spawning a worker when the slot is
+/// empty; a dead worker hands the job back for the caller's retry, and a
+/// refused spawn answers `Refused`.
+fn hand_off(job: Job) -> Handoff {
+    WORKER.with_borrow_mut(|slot| {
+        if slot.is_none() {
+            *slot = spawn();
+        }
+        let Some(worker) = slot.as_mut() else {
+            return Handoff::Refused;
+        };
+        match worker.jobs.send(job) {
+            Ok(()) => Handoff::Sent,
+            Err(mpsc::SendError(returned)) => {
+                *slot = None;
+                Handoff::Dead(returned)
+            },
+        }
     })
 }
 
@@ -101,18 +139,24 @@ fn serve(jobs: mpsc::Receiver<Job>) {
     }
 }
 
-fn spawn() -> Worker {
+/// `None` when the host cannot start the thread: the caller answers the
+/// internal-error diagnostic instead of panicking on its own stack.
+fn spawn() -> Option<Worker> {
+    #[cfg(test)]
+    if REFUSE_SPAWNS.with(std::cell::Cell::get) {
+        return None;
+    }
     let (jobs, queue) = mpsc::channel();
+    // The handle is dropped: the worker waits for jobs only, and the sender
+    // drop is what ends it.
     thread::Builder::new()
         .name("ds-parse".to_owned())
         .stack_size(PARSE_STACK)
         .spawn(move || serve(queue))
-        .expect("spawning the parse worker cannot fail");
-    // The handle is dropped: the worker waits for jobs only, and the sender
-    // drop is what ends it.
+        .ok()?;
     #[cfg(test)]
     SPAWNS.with(|spawns| spawns.set(spawns.get() + 1));
-    Worker { jobs }
+    Some(Worker { jobs })
 }
 
 #[cfg(test)]
@@ -134,6 +178,22 @@ mod tests {
             SPAWNS.with(std::cell::Cell::get),
             spawned,
             "the caller thread keeps its worker"
+        );
+    }
+
+    /// A host that cannot start the worker thread answers the internal
+    /// error diagnostic — the same degrade a dead worker's caller gets —
+    /// instead of panicking on the caller's stack.
+    #[test]
+    fn a_refused_spawn_answers_the_internal_error() {
+        REFUSE_SPAWNS.with(|refuse| refuse.set(true));
+        let mut files = Files::new();
+        let f = files.add_source("t.ds", "fn f() -> () {}\n");
+        let out = run(f, files.source(f), false);
+        assert!(
+            matches!(&out, Err(diags)
+                if diags.len() == 1 && diags[0].message.contains("could not start")),
+            "a refused spawn answers the internal error diagnostic: {out:?}"
         );
     }
 }

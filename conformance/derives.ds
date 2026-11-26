@@ -1,4 +1,4 @@
-// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15, the part-less shapes 2026-11-15, the from_json family 2026-11-18, the to_json family 2026-11-18, the json width fields 2026-11-19
+// source: G1 the derive engine's rounds: the show and ord families 2026-11-13, the hash family 2026-11-14, the clone family 2026-11-15, the part-less shapes 2026-11-15, the from_json family 2026-11-18, the to_json family 2026-11-18, the json width fields 2026-11-19, the generic admissions and the empty-enum hosting 2026-11-24
 // purpose: `#[derive(show)]`, `#[derive(ord)]`, `#[derive(hash)]`, `#[derive(clone)]`, `#[derive(from_json)]`, and `#[derive(to_json)]` on structs, enums, and tags (the json families: structs and enums alone) expand into the ordinary impl items after parse (parts derive structurally: fields, every payload shape, the part-less struct included over its one reserved unit word), every call spelling reaches the one body, and each ruled refusal names its class
 // items:
 // point: stage: run
@@ -19,6 +19,8 @@
 // holder: stage: reject a ~Copyable-headed part refuses structural derivation, naming the part [G1, B9]
 // not-data: stage: reject a derive applies only to a struct, enum, or tag declaration [G1]
 // gen-cell: stage: typecheck
+// never: stage: typecheck a zero-case enum hosts the trait families' derives over its name-solved empty head, a vacuous instance disjoint from every head (the item 98 hosting round), staged typecheck with its check and lowering doors pinned in the ds-lower derive_refusal suite
+// flip: stage: typecheck a unit-only generic enum derives through its unit cases resolving over the applied head (the item 6 gate narrowing), staged typecheck with its lowering-door refusal pinned in the ds-lower derive_refusal suite
 // named-cell: stage: run
 // fj-cell: stage: run
 // fj-inner: stage: run
@@ -148,6 +150,12 @@ fn not_data(v: int) -> int { v }
 
 #[derive(show)]
 struct gen_cell[t] { v: t }
+
+#[derive(show, ord, hash, clone)]
+enum never {}
+
+#[derive(show)]
+enum flip[t] { heads, tails }
 
 #[derive(ord)]
 struct named_cell { s: string, c: char, b: byte }

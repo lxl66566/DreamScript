@@ -7,6 +7,9 @@
 // one_word: stage: run
 // unit_word: stage: run
 // list_bearing: stage: run
+// unit_box: stage: typecheck
+// unit_word: stage: typecheck
+// unit_alias: stage: typecheck
 // reject-union-destructure: stage: reject a destructuring declaration over a union binds unproven members (DS2001) [B3, F4]
 
 fn pair_of(host: string, port: int) -> (string, int) {
@@ -43,6 +46,18 @@ fn list_bearing() -> int {
   const n = xs.len()
   n
 }
+
+// the ()-typed field checks clean at the declaration while the empty
+// tuple stays outside the inline-span vocabulary: the bare () is the
+// frame's one canonical unit word, so a field over it would span zero
+// words — the written tuple and the aliased tuple atom alike refuse at
+// the lowering door (the 2026-11-24 empty-tuple field round; the
+// refusal is pinned in the ds-lower tuples_e2e suite)
+struct unit_box { u: () }
+
+type unit_word = ()
+
+struct unit_alias { u: unit_word }
 
 fn reject_union_destructure(u: (int, int) | none) -> int {
   const (a, b) = u

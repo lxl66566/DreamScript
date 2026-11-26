@@ -506,7 +506,7 @@ impl Vm {
         let module_id = self
             .registry
             .module_id(self.registry.pinned(version).name())
-            .unwrap_or(0);
+            .expect("the entry resolved through a registered module name");
         let sites = self.hook_sites_for(version, func_id, module_id);
         let site = sites
             .iter()

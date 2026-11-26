@@ -159,12 +159,20 @@ impl Symbol {
     /// [`MarshalError::Kind`] when an argument's shape disagrees with
     /// its parameter's encoding.
     pub fn call(&self, sig: &Sig, args: &[Arg<'_>]) -> Result<Answer, MarshalError> {
+        // The width refusal reads the signature alone, before staging:
+        // the FP-placement mask is one u8 bit per staged word, so a wider
+        // signature would overflow the mask's shift ahead of any refusal
+        // a post-staging count could raise.
+        let width: usize = sig.params.iter().map(|param| param.words()).sum();
+        if width > MAX_PARAMS {
+            return Err(MarshalError::Width { words: width });
+        }
         if args.len() != sig.params.len() {
             return Err(MarshalError::Kind {
                 index: args.len().min(sig.params.len()),
             });
         }
-        let mut words = Vec::with_capacity(args.len());
+        let mut words = Vec::with_capacity(width);
         // the placement mask: bit i set when word i rides the FP
         // register — the first word at the low bit, the transmute
         // arms' own order
@@ -196,9 +204,11 @@ impl Symbol {
                 _ => return Err(MarshalError::Kind { index }),
             }
         }
-        if words.len() > MAX_PARAMS {
-            return Err(MarshalError::Width { words: words.len() });
-        }
+        debug_assert_eq!(
+            words.len(),
+            width,
+            "every encoding stages its own word count"
+        );
         Ok(match sig.ret {
             Ret::Unit => {
                 dispatch!(self, &words, mask, ());
@@ -229,6 +239,23 @@ mod tests {
             .call(&sig, &args)
             .expect_err("the staged words refuse");
         assert_eq!(error, MarshalError::Width { words: 5 });
+    }
+
+    /// A signature whose staged words overflow the FP-placement mask's
+    /// u8 width refuses from the signature alone, before any staging:
+    /// the mask shift would otherwise panic in debug (and corrupt the
+    /// mask in release) ahead of the width refusal.
+    #[test]
+    fn a_wide_signature_refuses_before_staging() {
+        let sig = Sig {
+            params: vec![Param::Float; 9],
+            ret: Ret::Float,
+        };
+        let args = [Arg::Float(1.0); 9];
+        let error = crate::test_symbol(0)
+            .call(&sig, &args)
+            .expect_err("the staged words refuse");
+        assert_eq!(error, MarshalError::Width { words: 9 });
     }
 
     /// The encodings own word arithmetic: a scalar parameter stages one

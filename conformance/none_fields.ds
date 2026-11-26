@@ -1,0 +1,51 @@
+// source: todo item 104, the none-typed field honesty round 2026-11-24, over B4's two optional spellings
+// purpose: a field or payload whose written type solves to the none atom alone refuses at its own span in every spelling — none is the optional's absent member, a member of `t?` and `t | none` spellings, never a standalone field type — while the two optional spellings at a field and at a case slot construct alike, and a none-headed application hears the tag's own refusal
+// items:
+// bare-cell: stage: reject the bare none field names the field and the ruling (DS2042)
+// paren-cell: stage: reject the paren-spelled none field folds to the none-only set (DS2042)
+// opt-cell: stage: reject the optional of none folds to the none-only set (DS2042)
+// union-cell: stage: reject the union of none with itself folds to the none-only set (DS2042)
+// none-alias: stage: typecheck
+// alias-cell: stage: reject a field typed an alias of none solves through to the none-only set (DS2042)
+// payload-cell: stage: reject a tag's payload field refuses the none-only set (DS2042)
+// case-cell: stage: reject a case's payload field refuses the none-only set (DS2042)
+// slot-cell: stage: reject a case's positional slot refuses the none-only set, naming the case (DS2042)
+// app-cell: stage: reject a none-headed application hears the tag's own refusal (DS2040)
+// both: stage: typecheck
+// filled: stage: typecheck
+// absent: stage: typecheck
+// wav: stage: typecheck
+// quiet-blip: stage: typecheck
+
+struct bare_cell { x: none }
+
+struct paren_cell { x: (none) }
+
+struct opt_cell { x: none? }
+
+struct union_cell { x: none | none }
+
+type none_alias = none
+
+struct alias_cell { x: none_alias }
+
+tag payload_cell { x: none }
+
+enum case_cell { bad { x: none } }
+
+enum slot_cell { boxed(none) }
+
+struct app_cell { x: none[int] }
+
+// B4's two spellings agree at a field: the union spelling enters the
+// universe atom exactly like the sugar
+struct both { a: int?, b: int | none }
+
+const filled = both { a: 7, b: 3 }
+
+const absent = both { a: none, b: none }
+
+// the same agreement at a case slot
+enum wav { quiet, blip { times: int | none } }
+
+const quiet_blip = blip(times: none)
