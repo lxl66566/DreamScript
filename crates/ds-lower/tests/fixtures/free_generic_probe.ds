@@ -1,15 +1,18 @@
-// purpose: the free-generic-fn call surface — a free generic fn lowers
-// its ONE body once, and its call sites stage the runtime-evidence
-// words the body's bound demands read, in the outgoing-argument area
-// after the true arguments. Shapes: a bounded fn over int and string
-// instantiations (the evidence word answering a concrete impl body),
-// the runtime form (a free generic fn called from inside another free
-// generic body, its demand riding the calling frame's own staged
-// slot), a boundless fn (no evidence, the plain call), a two-level
-// serving chain (the instantiated type answered by a generic impl,
-// its follow words sliding one level per nested dispatch), and a
-// tail-position call (the CALLT transfer with the evidence words
-// staged after the exit claims).
+// purpose: the free-generic-fn call surface — a free generic fn holds
+// no table entry of its own: every call site entering it plans the body
+// it needs, an instance over the types the checker solved for the
+// site's generic arguments (equal shapes shared), and the sites stage
+// the runtime-evidence words the body's bound demands read, in the
+// outgoing-argument area after the true arguments. Shapes: a bounded
+// fn over int and string instantiations (the evidence word answering a
+// concrete impl body), the runtime form (a free generic fn called from
+// inside a body that lowers over its variables' Raw words, its demand
+// riding the calling frame's own staged slot), a boundless fn (no
+// evidence, the plain call), a two-level serving chain (the
+// instantiated type answered by a generic impl, its follow words
+// sliding one level per nested dispatch), and a tail-position call
+// (the CALLT transfer with the evidence words staged after the exit
+// claims).
 // items:
 // int: stage: run
 // string: stage: run

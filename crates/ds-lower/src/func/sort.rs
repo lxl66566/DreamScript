@@ -47,7 +47,7 @@ impl FnLower<'_, '_, '_> {
         let &[(_, bound, served, _)] = record.as_slice() else {
             return Err(mismatch("a sort call's bound record"));
         };
-        let Some(ord) = self.analyzed.decls.universe.trait_by_name("ord") else {
+        let Some(ord) = self.universe().trait_by_name("ord") else {
             return Err(mismatch("the ord trait's declaration"));
         };
         if bound != ord {

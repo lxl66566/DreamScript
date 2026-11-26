@@ -8,6 +8,17 @@ use super::*;
 /// A bodiless ambient collection member's native routing: the extern
 /// def the call lowers through, and whether the member re-answers the
 /// receiver after the native's in-place mutation (`push`/`set`).
+/// One call site's evidence-staging descriptors: the entered
+/// instance, the inherent impl's site, the lensed receiver the chain
+/// start substitutes, and the written receiver the slot path keys by.
+#[derive(Clone, Copy)]
+struct EvidenceSite {
+    entered: Option<InstanceId>,
+    inherent_site: Option<Span>,
+    recv: Option<Ty>,
+    written_recv: Option<Ty>,
+}
+
 #[derive(Clone, Copy)]
 struct NativeMember {
     def: DefId,
@@ -759,7 +770,7 @@ impl<'a> FnLower<'a, '_, '_> {
             .members(ty)
             .first()
             .and_then(|&atom| {
-                let decl = self.analyzed.decls.universe.atom_decl(atom).ok()?;
+                let decl = self.universe().atom_decl(atom).ok()?;
                 match &decl.kind {
                     AtomKind::Apply(_, args) => args.first().copied(),
                     _ => None,
@@ -1260,9 +1271,11 @@ impl<'a> FnLower<'a, '_, '_> {
                 func: *func,
             },
             Some(TraitDispatch::Runtime { slot, .. }) => Callee::Evidence(*slot),
-            None => {
-                self.resolve_callee(def.expect("a named callee resolves to a def"), callee_span)?
-            },
+            None => self.resolve_callee(
+                def.expect("a named callee resolves to a def"),
+                callee_span,
+                call_span,
+            )?,
         };
         // a member call stages its omitted literal defaults at the call
         // site like the free-fn spelling [F7]: a trait dispatch stages
@@ -1369,15 +1382,11 @@ impl<'a> FnLower<'a, '_, '_> {
         // rides the decls table keyed by its method id, never a def
         // whose fn type the free-fn seam reads, so the staging below
         // reads the call's own solved record instead
-        let member_params: Option<&[Ty]> = match target {
-            Callee::Foreign { def: None, .. } => self
-                .analyzed
-                .checked
-                .member_call_params
-                .get(&call_span)
-                .map(Vec::as_slice),
+        let member_params: Option<Vec<Ty>> = match target {
+            Callee::Foreign { def: None, .. } => self.member_call_params(call_span)?,
             _ => None,
         };
+        let member_params = member_params.as_deref();
         // a local callee's per-parameter checked types, when its
         // signature is static: a union-typed parameter re-spans a bare
         // member or a strict sub-union argument into its whole region
@@ -1385,12 +1394,8 @@ impl<'a> FnLower<'a, '_, '_> {
         let param_types = match target {
             Callee::Local(index) => self.callee_param_types(index),
             Callee::Foreign { def: Some(def), .. } => self
-                .analyzed
-                .checked
-                .def_types
-                .get(&def)
-                .copied()
-                .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                .def_type(def)?
+                .and_then(|fn_ty| fn_sig_of(self.universe(), fn_ty))
                 .map(|(params, _)| params.to_vec()),
             Callee::Foreign { def: None, .. } => member_params.map(<[Ty]>::to_vec),
             _ => None,
@@ -1403,6 +1408,10 @@ impl<'a> FnLower<'a, '_, '_> {
         // the receiver's checked type mints a generic call's evidence
         // words (the builtin instance it addresses) [H3]
         let mut receiver_ty: Option<Ty> = None;
+        // the receiver's written type — the runtime-evidence slot path's
+        // key, which peels the entering frame's own variable however the
+        // lens substituted the value's type
+        let mut written_receiver_ty: Option<Ty> = None;
         // a `push`/`set` member call's receiver place: the native window
         // mutates it in place, and the member re-answers a duplicate of
         // its word after the call
@@ -1442,6 +1451,7 @@ impl<'a> FnLower<'a, '_, '_> {
             {
                 if index == 0 {
                     receiver_ty = Some(self.val(arg.span())?.ty);
+                    written_receiver_ty = Some(self.written_val(arg.span())?.ty);
                 }
                 let expected_raw = expected_words
                     .as_deref()
@@ -1473,6 +1483,7 @@ impl<'a> FnLower<'a, '_, '_> {
             let direct = offered && self.scalar_dst.take().is_none();
             if index == 0 {
                 receiver_ty = Some(arg_val.ty);
+                written_receiver_ty = Some(self.written_val(arg.span())?.ty);
                 if window_answer {
                     window_receiver = Some(arg_val.clone());
                 }
@@ -1934,9 +1945,12 @@ impl<'a> FnLower<'a, '_, '_> {
                     self.evidence_words(
                         pair,
                         &call.bounds,
-                        Some(call.instance),
-                        None,
-                        Some(call.recv),
+                        EvidenceSite {
+                            entered: Some(call.instance),
+                            inherent_site: None,
+                            recv: Some(call.recv),
+                            written_recv: self.written_trait_call(call_span).map(|tc| tc.recv),
+                        },
                         "a trait-method call into a generic impl body",
                         callee_span,
                     )?
@@ -1982,9 +1996,12 @@ impl<'a> FnLower<'a, '_, '_> {
                     let words = self.evidence_words(
                         pair,
                         bounds,
-                        None,
-                        inherent_site,
-                        receiver_ty,
+                        EvidenceSite {
+                            entered: None,
+                            inherent_site,
+                            recv: receiver_ty,
+                            written_recv: written_receiver_ty,
+                        },
                         "an inherent method call into a generic impl body",
                         callee_span,
                     )?;
@@ -2014,19 +2031,15 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Callee::Local(index) = target {
             let pairs = self.plan.functions()[index as usize].evidence.clone();
             // a dispatch target (a trait's declared default body) stages
-            // its evidence words through the dispatch branch above; this
-            // free-fn staging serves named callees alone
+            // its evidence words through the dispatch branch above; a
+            // generic body — the ONE Raw-word body or an instance alike
+            // — serves the free-fn staging here, its entering site the
+            // one that carries the checker's bound answers
             if trait_dispatch.is_none()
-                && self.plan.functions()[index as usize].free_generic
+                && self.plan.functions()[index as usize].is_generic_body()
                 && !pairs.is_empty()
             {
-                let Some(record) = self
-                    .analyzed
-                    .checked
-                    .generic_call_bounds
-                    .get(&call_span)
-                    .cloned()
-                else {
+                let Some(record) = self.written_generic_call_bounds(call_span) else {
                     return Err(LowerError::unsupported(
                         callee_span,
                         "a call into a free generic fn's body",
@@ -2329,7 +2342,7 @@ impl<'a> FnLower<'a, '_, '_> {
         tail: bool,
     ) -> Result<Place, LowerError> {
         let callee_ty = self.val(callee_span)?.ty;
-        let Some((params, ret)) = fn_sig_of(&self.analyzed.decls.universe, callee_ty) else {
+        let Some((params, ret)) = fn_sig_of(self.universe(), callee_ty) else {
             return Err(LowerError::unsupported(
                 callee_span,
                 "a callable callee",
@@ -2736,18 +2749,13 @@ impl<'a> FnLower<'a, '_, '_> {
                 ));
             }
         } else {
-            let instantiations =
-                self.analyzed
-                    .checked
-                    .generic_calls
-                    .get(&call)
-                    .ok_or_else(|| {
-                        LowerError::unsupported(
-                            span,
-                            "a generic call",
-                            "the checker recorded no full instantiation for it",
-                        )
-                    })?;
+            let instantiations = self.generic_call(call)?.ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    "a generic call",
+                    "the checker recorded no full instantiation for it",
+                )
+            })?;
             if instantiations.len() != sig.generics.len()
                 || instantiations.len() != usize::from(generic.evidence)
             {
@@ -2810,18 +2818,21 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) {
             return self.resolve_inherent_method(method, call, what);
         }
-        let Some(tc) = self.analyzed.checked.trait_calls.get(&call).cloned() else {
-            // A bound-variable receiver inside a generic impl body: the
-            // checker satisfied the call through the impl's own bound
+        let Some(tc) = self.trait_call(call)? else {
+            // A bound-variable receiver inside a generic body: the
+            // checker satisfied the call through the body's own bound
             // (an in-scope assumption), so no instance records here —
             // dispatch resolves at runtime through the evidence slot the
-            // call site entering this body staged.
+            // call site entering this body staged. The decision reads the
+            // body's written type, not the lensed one: an instance serves
+            // the same runtime evidence word whatever the site solved,
+            // and a statically-resolved dispatch would need an instance
+            // record the body's own checking never minted.
             if let Some(recv) = recv
-                && let Ok(val) = self.val(recv.span())
+                && let Ok(val) = self.written_val(recv.span())
                 && let [var] = self.members(val.ty)
                 && self.shapes.is_var_atom(*var)
-                && let Some(param) =
-                    crate::shape::var_param_name(&self.analyzed.decls.universe, *var)
+                && let Some(param) = crate::shape::var_param_name(self.universe(), *var)
             {
                 let matching: Vec<(MethodId, u8)> = self
                     .evidence
@@ -3069,7 +3080,7 @@ impl<'a> FnLower<'a, '_, '_> {
         what: &'static str,
         span: Span,
     ) -> Result<Vec<EvidenceSrc>, LowerError> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         let [only] = universe.members(recv) else {
             return Err(LowerError::unsupported(
                 span,
@@ -3122,7 +3133,7 @@ impl<'a> FnLower<'a, '_, '_> {
         what: &'static str,
         span: Span,
     ) -> Result<u32, LowerError> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         let env = &self.analyzed.decls.instances;
         // the one-word instantiation boundary: this level's serving body
         // is entered by a nested dispatch that stages the bound
@@ -3250,7 +3261,7 @@ impl<'a> FnLower<'a, '_, '_> {
         if pair.var == "Self" {
             return self.chain_for(pair.method, instance, start, what, span);
         }
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         let env = &self.analyzed.decls.instances;
         let trait_id = self.pair_trait_id(pair, what, span)?;
         // the default body's trait, and the argument its impl substitutes
@@ -3376,7 +3387,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let Ok(head) = self.analyzed.decls.instances.head(instance) else {
             return true;
         };
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         universe
             .members(head)
             .iter()
@@ -3386,21 +3397,29 @@ impl<'a> FnLower<'a, '_, '_> {
     /// The staged evidence words a call site entering a generic impl body
     /// stages for one of the body's demands: the checker-recorded bounds
     /// of this call site's solved dispatch answer the pair's bound — a
-    /// concrete answer walks the serving chain, a `None` answer (the
-    /// site sits inside a generic body whose substitution is that
-    /// frame's own) reads the frame's evidence slots.
+    /// concrete answer walks the serving chain (the chain start
+    /// substituting the entered instance's variable with the receiver
+    /// this site hands the body, read through the lens), and a `None`
+    /// answer (the site sits inside a generic body whose substitution is
+    /// that frame's own) reads the frame's evidence slots, keyed by the
+    /// written receiver the record names — the slot the entering site
+    /// staged into this frame, the same word under an instantiation.
     fn evidence_words(
         &mut self,
         pair: &RuntimePair,
         bounds: &InherentCallBounds,
-        entered: Option<InstanceId>,
-        inherent_site: Option<Span>,
-        recv: Option<Ty>,
+        site: EvidenceSite,
         what: &'static str,
         span: Span,
     ) -> Result<Vec<EvidenceSrc>, LowerError> {
+        let EvidenceSite {
+            entered,
+            inherent_site,
+            recv,
+            written_recv,
+        } = site;
         let trait_id = self.pair_trait_id(pair, what, span)?;
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         let env = &self.analyzed.decls.instances;
         // the recorded bounds key by the declaration's own minted variable;
         // the written parameter name bridges the two mintings
@@ -3434,7 +3453,7 @@ impl<'a> FnLower<'a, '_, '_> {
         };
         let Some(instance) = served else {
             // the runtime form: this site's substitution is its own frame's
-            let Some(recv) = recv else {
+            let Some(recv) = written_recv else {
                 return Err(LowerError::unsupported(
                     span,
                     what,
@@ -3487,7 +3506,10 @@ impl<'a> FnLower<'a, '_, '_> {
     /// substitution — a concrete answer stages the serving chain
     /// object, and a `None` answer (the substitution is the calling
     /// frame's own variable) reads the frame's evidence area for the
-    /// pair.
+    /// pair, keyed by the written variable the record names (an
+    /// instantiation stages the same slot the entering site staged into
+    /// the frame's trailing evidence parameters, so the written form —
+    /// never the lensed one — keys it).
     fn free_evidence_words(
         &mut self,
         pair: &RuntimePair,
@@ -3496,7 +3518,7 @@ impl<'a> FnLower<'a, '_, '_> {
         span: Span,
     ) -> Result<Vec<EvidenceSrc>, LowerError> {
         let trait_id = self.pair_trait_id(pair, what, span)?;
-        let universe = &self.analyzed.decls.universe;
+        let universe = self.universe();
         let Some((_, _, served, solved)) = record.iter().find(|(var, bound, ..)| {
             crate::shape::var_param_name(universe, *var).as_deref() == Some(pair.var.as_str())
                 && *bound == trait_id
@@ -3511,11 +3533,16 @@ impl<'a> FnLower<'a, '_, '_> {
             return self.slot_evidence(*solved, pair, what, span);
         };
         let instance = *instance;
-        // the chain start is the solved type itself: the demand's
-        // variable takes it at this site, and the first tail chain
-        // serves the body the serving instance's own head re-substitutes
-        // it into
-        let start = Some(Cow::Borrowed(universe.members(*solved)));
+        // the chain start is the solved type itself under this frame's
+        // substitution (a concrete site's solved type names nothing to
+        // substitute): the demand's variable takes it at this site, and
+        // the first tail chain serves the body the serving instance's
+        // own head re-substitutes it into
+        let solved = self
+            .shapes
+            .subst(*solved)
+            .map_err(|err| err.respanned(span))?;
+        let start = Some(Cow::Borrowed(self.members(solved)));
         Ok(vec![EvidenceSrc::Const(self.chain_for(
             pair.method,
             instance,
@@ -3627,7 +3654,40 @@ impl<'a> FnLower<'a, '_, '_> {
         }
     }
 
-    fn resolve_callee(&self, def: DefId, span: Span) -> Result<Callee, LowerError> {
+    fn resolve_callee(
+        &self,
+        def: DefId,
+        span: Span,
+        call_span: Span,
+    ) -> Result<Callee, LowerError> {
+        // A declared free generic fn answers its entering site first: an
+        // instance over the site's solved argument types (the same key
+        // the plan's discovery planned by), the ONE Raw-word body where
+        // the site's vector still names a variable (a call from inside a
+        // body that itself lowers over its variables). Neither found is
+        // the walk and the discovery disagreeing on the site — refused
+        // here, because a walk-time plan would break the served splice.
+        if self.plan.generic_fn(def).is_some() {
+            let solved = self.generic_call(call_span)?.unwrap_or_default();
+            let concrete = !solved.is_empty()
+                && solved
+                    .iter()
+                    .all(|ty| !crate::types::has_variables(self.universe(), *ty));
+            let target = if concrete {
+                self.plan.instance_target(def, &solved)
+            } else {
+                self.plan.index_of(def)
+            };
+            return match target {
+                Some(index) => Ok(Callee::Local(index)),
+                None => Err(LowerError::unsupported(
+                    span,
+                    "a call into a free generic fn",
+                    "the plan's discovery planned no body for this site; the walk and the \
+                     discovery disagree — report the construct",
+                )),
+            };
+        }
         if let Some(index) = self.plan.index_of(def) {
             return Ok(Callee::Local(index));
         }
@@ -3924,15 +3984,24 @@ impl<'a> FnLower<'a, '_, '_> {
     /// the body's own binding reads, so call sites and body agree.
     pub(super) fn decl_param_words(&mut self, index: u32) -> Option<Vec<SlotType>> {
         let planned = self.plan.functions().get(index as usize)?;
+        // An instance's parameter words are its solved types' spans —
+        // the shapes the entering site stages against, never the body's
+        // variable-keyed binder facts.
+        if let Some(instance) = &planned.instance {
+            let mut words = Vec::with_capacity(instance.params.len());
+            for ty in instance.params.iter() {
+                words.extend_from_slice(&self.shapes.words(*ty).ok()?);
+            }
+            return Some(words);
+        }
         let decl = planned.decl.clone()?;
         let mut words = Vec::with_capacity(decl.params.len());
         for param in decl.params.iter() {
-            let fact = self
-                .analyzed
-                .checked
-                .binders
-                .get(&param.name.span)
-                .copied()?;
+            // the belt cannot fire on this path — a declared body other
+            // than an instance lowers over no substitution — so the
+            // lens failure folds into the `None` this reader's callers
+            // already treat as "no static words"
+            let fact = self.binder_fact(param.name.span).ok()??;
             words.extend_from_slice(&self.shapes.words(fact.ty).ok()?);
         }
         Some(words)
@@ -3944,22 +4013,26 @@ impl<'a> FnLower<'a, '_, '_> {
     /// its recorded signature. `None` keeps the runtime arity check.
     fn callee_param_types(&mut self, index: u32) -> Option<Vec<Ty>> {
         let planned = self.plan.functions().get(index as usize)?;
+        // An instance's parameter types are its solved ones — concrete
+        // handles the call site re-spans its arguments against.
+        if let Some(instance) = &planned.instance {
+            return Some(instance.params.to_vec());
+        }
         if let Some(decl) = &planned.decl {
             return decl
                 .params
                 .iter()
                 .map(|param| {
-                    self.analyzed
-                        .checked
-                        .binders
-                        .get(&param.name.span)
+                    self.binder_fact(param.name.span)
+                        .ok()
+                        .flatten()
                         .map(|fact| fact.ty)
                 })
                 .collect();
         }
         let def = planned.def?;
-        let fn_ty = self.analyzed.checked.def_types.get(&def).copied()?;
-        let (params, _) = fn_sig_of(&self.analyzed.decls.universe, fn_ty)?;
+        let fn_ty = self.def_type(def).ok()??;
+        let (params, _) = fn_sig_of(self.universe(), fn_ty)?;
         Some(params.to_vec())
     }
 
@@ -4035,8 +4108,8 @@ impl<'a> FnLower<'a, '_, '_> {
             return self.decl_param_words(index).map(|words| words.len());
         }
         let def = planned.def?;
-        let fn_ty = self.analyzed.checked.def_types.get(&def).copied()?;
-        let (params, _) = fn_sig_of(&self.analyzed.decls.universe, fn_ty)?;
+        let fn_ty = self.def_type(def).ok()??;
+        let (params, _) = fn_sig_of(self.universe(), fn_ty)?;
         let mut total = 0;
         for ty in params {
             total += self.shapes.words(*ty).ok()?.len();
@@ -4138,12 +4211,14 @@ impl<'a> FnLower<'a, '_, '_> {
                     // (a trait's declared default body carries its solved
                     // return on the plan entry; no def signature names it)
                     let words = self.shapes.words(ty)?;
-                    let declared = planned
-                        .def
-                        .and_then(|def| self.analyzed.checked.def_types.get(&def).copied())
-                        .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
-                        .map(|(_, ret)| ret)
-                        .or(planned.ret);
+                    let declared = match planned.def {
+                        Some(def) => self
+                            .def_type(def)?
+                            .and_then(|fn_ty| fn_sig_of(self.universe(), fn_ty))
+                            .map(|(_, ret)| ret),
+                        None => None,
+                    }
+                    .or(planned.ret);
                     if declared.is_some_and(|ret| self.is_var_ty(ret)) {
                         self.guard_one_word_instantiation(
                             self.members(ty),
@@ -4161,16 +4236,11 @@ impl<'a> FnLower<'a, '_, '_> {
                     return Ok(words);
                 }
                 let fn_ty = match planned.def {
-                    Some(def) => self.analyzed.checked.def_types.get(&def).copied(),
-                    None => self
-                        .analyzed
-                        .checked
-                        .expr_types
-                        .get(&planned.lambda.span())
-                        .map(|val| val.ty),
+                    Some(def) => self.def_type(def)?,
+                    None => self.val(planned.lambda.span()).ok().map(|val| val.ty),
                 }
                 .ok_or_else(|| mismatch("a callee signature"))?;
-                let Some((_, ret)) = fn_sig_of(&self.analyzed.decls.universe, fn_ty) else {
+                let Some((_, ret)) = fn_sig_of(self.universe(), fn_ty) else {
                     return Err(mismatch("a callee signature"));
                 };
                 let words = self.shapes.words(ret)?;
@@ -4402,7 +4472,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// from the payload-less class members (the unit tags).
     fn is_unit_member(&self, atom: TypeId) -> bool {
         matches!(
-            self.analyzed.decls.universe.atom_decl(atom),
+            self.universe().atom_decl(atom),
             Ok(decl) if matches!(&decl.kind, AtomKind::Tuple(elements) if elements.is_empty())
         )
     }
@@ -4620,7 +4690,7 @@ impl<'a> FnLower<'a, '_, '_> {
     ) -> Result<Vec<(u8, MemberShape)>, LowerError> {
         let mut class_members: Vec<(u8, MemberShape)> = Vec::new();
         for (tag, name) in classes {
-            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
+            let Some(atom) = self.universe().atom_by_name(name) else {
                 let _ = name;
                 return Err(LowerError::unsupported(
                     no_span(),
@@ -5040,12 +5110,10 @@ impl<'a> FnLower<'a, '_, '_> {
                 base: src.place.base,
                 shape: src.place.shape.clone(),
             });
-            let param_ty = self
-                .analyzed
-                .checked
-                .binders
-                .get(&param.name.span)
-                .map_or(src_ty, |f| f.ty);
+            let param_ty = match self.binder_fact(param.name.span)? {
+                Some(fact) => fact.ty,
+                None => src_ty,
+            };
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
@@ -5199,12 +5267,10 @@ impl<'a> FnLower<'a, '_, '_> {
                 base: src.place.base,
                 shape: src.place.shape.clone(),
             });
-            let param_ty = self
-                .analyzed
-                .checked
-                .binders
-                .get(&param.name.span)
-                .map_or(src_ty, |f| f.ty);
+            let param_ty = match self.binder_fact(param.name.span)? {
+                Some(fact) => fact.ty,
+                None => src_ty,
+            };
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
@@ -5251,11 +5317,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let src_members = self.members(src_ty);
         if param.ty.is_some() {
             let fact = self
-                .analyzed
-                .checked
-                .binders
-                .get(&param.name.span)
-                .copied()
+                .binder_fact(param.name.span)?
                 .ok_or_else(|| mismatch("a handler parameter"))?;
             let annotated = self.members(fact.ty);
             return Ok(src_members

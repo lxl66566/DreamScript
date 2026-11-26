@@ -44,12 +44,12 @@
 //! word. `none` is the universe's predeclared unit atom and needs no
 //! declaration.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, fmt::Write as _, rc::Rc};
 
 use ds_abi::{BuiltinInstance, SlotType};
-use ds_check::{Analyzed, Ty, TypeExpr, TypeId};
+use ds_check::{Analyzed, Ty, TypeExpr, TypeId, Universe};
 
-use crate::error::LowerError;
+use crate::{error::LowerError, types::Subst};
 
 /// Span placeholder for shape-level errors: shapes are built from types,
 /// not nodes, so no source span sits behind them.
@@ -210,6 +210,53 @@ impl Shape {
     }
 }
 
+/// The key one word of a value span takes in an instance key: a
+/// scalar word keys by its slot, a heap-reference word by the builtin
+/// instance behind it (`==`, `len`, and the other collection natives
+/// dispatch on the instance, so `string` and `bytes` never share), and
+/// a Tag word — or a Ref word no instance covers, such as `char` — by
+/// its atom, since tag dispatch and the uncovered words key on the
+/// member's identity.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum WordKey {
+    /// A scalar or callable word: the slot alone (`int` and `byte` share
+    /// one integer word; two fn types share one Fn word).
+    Slot(SlotType),
+    /// A heap-reference word: the builtin instance behind it.
+    Heap(BuiltinInstance),
+    /// A word keyed by its atom: a union member's Tag word and any word
+    /// no builtin instance covers.
+    Atom(TypeId),
+}
+
+/// The key one recorded type takes under one instantiation: the shape
+/// with the field names dropped, so two argument types that lower the
+/// same code share one body. A bare struct keys by its fields' word
+/// spans; a struct declaring a `deinit` keys by its own atom and shares
+/// with nothing (its binding sites claim its own hook); a tuple keys by
+/// its elements; a union by its members, each member by atom with its
+/// payload fields' (offset, span) pairs — tag dispatch and payload
+/// placement key on those. A type still naming a type variable refuses:
+/// the substitution resolved every recorded type of the body.
+/// One union member's key entry: the member's atom with its payload
+/// fields' (word offset, span) pairs, in claim order.
+pub(crate) type UnionMemberKey = (TypeId, Vec<(u8, Vec<SlotType>)>);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ShapeKey {
+    /// One word.
+    Word(WordKey),
+    /// A bare struct: one entry per field, the field's word span.
+    Struct(Vec<Vec<SlotType>>),
+    /// A struct declaring a `deinit`: its own atom, unshared.
+    DeinitStruct(TypeId),
+    /// A tuple: one entry per element.
+    Tuple(Vec<WordKey>),
+    /// A union: one entry per member — the member's atom and its payload
+    /// fields' (word offset, span) pairs, in claim order.
+    Union(Vec<UnionMemberKey>),
+}
+
 /// The claim-band tags of the teardown establishment marker (see the
 /// placement pass): a deinit claim's dedicated band word holds SET while
 /// the claim lives and CLEAR once any death path or consuming move spent
@@ -232,8 +279,23 @@ pub(crate) const CLAIM_BAND_CLEAR: u8 = u8::MAX - 9;
 pub(crate) const FIRST_RESERVED_TAG: u8 = crate::native::UTF8_ERR;
 
 /// Shapes of the types of one package, plus the module-wide tag ids.
+///
+/// The types are read through the lens: the registry is the one the
+/// plan's discovery left (its own copy once a substitution minted a type),
+/// and while a body lowers under an instantiation every type it reads is
+/// substituted first. A variable atom reaching the shape layer under an
+/// active instantiation is therefore a type that skipped the lens, and it
+/// refuses — the one Raw word is the generic body's own shape, never an
+/// instance's.
 pub(crate) struct Shapes<'a> {
     analyzed: &'a Analyzed,
+    /// The registry as this lowering reads it.
+    universe: &'a Universe,
+    /// The substituted types the discovery minted, keyed by (substitution,
+    /// source type).
+    minted: &'a HashMap<(u32, Ty), Ty>,
+    /// The instantiation the body being lowered was planned under.
+    active: Option<Rc<Subst>>,
     /// Every struct whose declaration carries a `deinit` member: the
     /// positions a deinit value cannot inhabit (a union payload)
     /// refuse against it.
@@ -263,10 +325,14 @@ pub(crate) struct Shapes<'a> {
 impl<'a> Shapes<'a> {
     pub(crate) fn new(
         analyzed: &'a Analyzed,
+        types: &'a crate::types::Types<'_>,
         declared_deinits: std::collections::HashSet<ds_check::DefId>,
     ) -> Self {
         Self {
             analyzed,
+            universe: types.universe(),
+            minted: types.minted(),
+            active: None,
             declared_deinits,
             cache: HashMap::new(),
             word_cache: HashMap::new(),
@@ -332,7 +398,7 @@ impl<'a> Shapes<'a> {
             if row.id >= FIRST_RESERVED_TAG {
                 return Err(drift("the id reaches the platform's reserved range"));
             }
-            if let Some(atom) = self.analyzed.decls.universe.atom_by_name(&row.name) {
+            if let Some(atom) = self.universe.atom_by_name(&row.name) {
                 if self.tags.contains_key(&atom) {
                     return Err(drift("the row names an atom twice"));
                 }
@@ -418,7 +484,7 @@ impl<'a> Shapes<'a> {
                 .decls
                 .foreign_type(name)
                 .and_then(|def| self.analyzed.decls.atoms.get(&def).copied())
-                .filter(|&atom| self.analyzed.decls.universe.atom_by_name(name) == Some(atom))
+                .filter(|&atom| self.universe.atom_by_name(name) == Some(atom))
             else {
                 continue;
             };
@@ -450,7 +516,7 @@ impl<'a> Shapes<'a> {
     fn id_owner(&self, id: u8) -> Option<String> {
         for (&atom, &held) in &self.tags {
             if held == id
-                && let Ok(decl) = self.analyzed.decls.universe.atom_decl(atom)
+                && let Ok(decl) = self.universe.atom_decl(atom)
             {
                 return Some(decl.name.clone());
             }
@@ -484,15 +550,224 @@ impl<'a> Shapes<'a> {
 
     /// Whether an atom is one of the checker's minted type variables: a
     /// generic parameter of an impl, function, or alias, named `$...`
-    /// (`$` sits outside the identifier charset). Its values ride one
-    /// Raw word — the runtime kind is the caller's fact, checked by the
-    /// VM at every hand-off, never a static one.
+    /// (`$` sits outside the identifier charset). Outside an
+    /// instantiation its values ride one Raw word — the runtime kind is
+    /// the caller's fact, checked by the VM at every hand-off, never a
+    /// static one; under one, the lens substituted it away.
     pub(crate) fn is_var_atom(&self, atom: TypeId) -> bool {
-        self.analyzed
-            .decls
+        is_var_atom(self.universe, atom)
+    }
+
+    /// The registry as this lowering reads it.
+    pub(crate) fn universe(&self) -> &'a Universe {
+        self.universe
+    }
+
+    /// Lowers the bodies to come under one instantiation's substitution
+    /// (`None` returns to the generic view).
+    pub(crate) fn enter(&mut self, subst: Option<Rc<Subst>>) {
+        self.active = subst;
+    }
+
+    /// The type one recorded type reads as under the active instantiation:
+    /// itself outside one; under one, the type the discovery substituted
+    /// it to. A type naming a substituted variable that the discovery
+    /// never resolved refuses here — the walk lowers no variable's word
+    /// for an instance.
+    pub(crate) fn subst(&self, ty: Ty) -> Result<Ty, LowerError> {
+        let Some(active) = &self.active else {
+            return Ok(ty);
+        };
+        if let Some(substituted) = self.minted.get(&(active.id, ty)) {
+            return Ok(*substituted);
+        }
+        if active.mentions(self.universe, ty) {
+            return Err(unsupported(
+                "an instantiated body's type",
+                "it still names a type variable the plan's discovery never substituted; report \
+                 the site",
+            ));
+        }
+        Ok(ty)
+    }
+
+    /// The key one recorded type takes under the active instantiation —
+    /// the instance table's sharing key, computed on a throwaway probe so
+    /// the union members mint no tag ids into any live lowering. A type
+    /// still naming a type variable refuses: the discovery substituted
+    /// every recorded type of the body, so one reaching here skipped the
+    /// substitution.
+    pub(crate) fn type_key(&mut self, ty: Ty) -> Result<ShapeKey, LowerError> {
+        if crate::types::has_variables(self.universe, ty) {
+            return Err(unsupported(
+                "an instance key",
+                "the type still names a type variable the instantiation does not substitute; \
+                 report the construct",
+            ));
+        }
+        match self.universe.members(ty) {
+            // the empty type never flows; it keys as its one inert word
+            [] => return Ok(ShapeKey::Word(WordKey::Slot(SlotType::I64))),
+            [only] => {
+                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(only)
+                    && self.declared_deinits.contains(def)
+                {
+                    return Ok(ShapeKey::DeinitStruct(*only));
+                }
+                match &*self.shape(ty)? {
+                    Shape::Word(slot) => {
+                        return self.word_key(*only, *slot).map(ShapeKey::Word);
+                    },
+                    Shape::Struct(s) => {
+                        return Ok(ShapeKey::Struct(
+                            s.fields.iter().map(|field| field.slots.clone()).collect(),
+                        ));
+                    },
+                    Shape::Tuple(s) => {
+                        let Ok(ds_check::AtomKind::Tuple(elements)) =
+                            self.universe.atom_decl(*only).map(|decl| decl.kind.clone())
+                        else {
+                            return Err(unsupported("an instance key", "a tuple type's atom"));
+                        };
+                        let mut keys = Vec::with_capacity(elements.len());
+                        for (element, field) in elements.iter().zip(s.fields.iter()) {
+                            keys.push(self.word_key(*element, field.slot())?);
+                        }
+                        return Ok(ShapeKey::Tuple(keys));
+                    },
+                    Shape::Union(_) => {
+                        return Err(unsupported(
+                            "an instance key",
+                            "a single-atom type whose atom is a union; report the construct",
+                        ));
+                    },
+                }
+            },
+            _ => {},
+        }
+        let Shape::Union(union) = &*self.shape(ty)? else {
+            return Err(unsupported(
+                "an instance key",
+                "a multi-member type the shape layer did not lay out as a union",
+            ));
+        };
+        Ok(ShapeKey::Union(
+            union
+                .members
+                .iter()
+                .map(|member| {
+                    (
+                        member.atom,
+                        member
+                            .fields
+                            .iter()
+                            .map(|field| (field.word, field.slots.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    /// The key one word takes: the erasures the instance table keys by.
+    fn word_key(&self, atom: TypeId, slot: SlotType) -> Result<WordKey, LowerError> {
+        if self.is_var_atom(atom) {
+            return Err(unsupported(
+                "an instance key",
+                "the word's type still names a type variable the instantiation does not \
+                 substitute; report the construct",
+            ));
+        }
+        if slot == SlotType::Tag {
+            return Ok(WordKey::Atom(atom));
+        }
+        if slot == SlotType::Ref {
+            return Ok(match self.atom_builtin_instance(atom) {
+                Some(instance) => WordKey::Heap(instance),
+                None => WordKey::Atom(atom),
+            });
+        }
+        Ok(WordKey::Slot(slot))
+    }
+
+    /// The shape every type of one generic body lowers under — the
+    /// sequence of [`ShapeKey`] entries in the body's fixed type order,
+    /// rendered as one deterministic string so an instance's table name
+    /// (its digest) holds across compiles while the shape holds. Atoms
+    /// render by declared name: two atoms sharing a name share a digest,
+    /// and the collision takes an ordinal.
+    pub(crate) fn render_key(&self, key: &[ShapeKey]) -> String {
+        let mut out = String::from("shape-key:");
+        for ty in key {
+            out.push('|');
+            self.render_ty(ty, &mut out);
+        }
+        out
+    }
+
+    fn render_ty(&self, key: &ShapeKey, out: &mut String) {
+        match key {
+            ShapeKey::Word(word) => match word {
+                WordKey::Slot(slot) => write!(out, "w:{slot:?}").expect("a String write"),
+                WordKey::Heap(instance) => write!(out, "h:{instance:?}").expect("a String write"),
+                WordKey::Atom(atom) => self.render_atom(*atom, out),
+            },
+            ShapeKey::Struct(fields) => {
+                out.push_str("struct(");
+                for (at, field) in fields.iter().enumerate() {
+                    if at > 0 {
+                        out.push(',');
+                    }
+                    out.push('[');
+                    for slot in field {
+                        write!(out, "{slot:?};").expect("a String write");
+                    }
+                    out.push(']');
+                }
+                out.push(')');
+            },
+            ShapeKey::DeinitStruct(atom) => {
+                out.push_str("deinit(");
+                self.render_atom(*atom, out);
+                out.push(')');
+            },
+            ShapeKey::Tuple(elements) => {
+                out.push_str("tuple(");
+                for (at, word) in elements.iter().enumerate() {
+                    if at > 0 {
+                        out.push(',');
+                    }
+                    self.render_ty(&ShapeKey::Word(word.clone()), out);
+                }
+                out.push(')');
+            },
+            ShapeKey::Union(members) => {
+                out.push_str("union(");
+                for (at, (atom, fields)) in members.iter().enumerate() {
+                    if at > 0 {
+                        out.push(',');
+                    }
+                    self.render_atom(*atom, out);
+                    out.push('{');
+                    for (word, span) in fields {
+                        write!(out, "{word}:").expect("a String write");
+                        for slot in span {
+                            write!(out, "{slot:?};").expect("a String write");
+                        }
+                    }
+                    out.push('}');
+                }
+                out.push(')');
+            },
+        }
+    }
+
+    fn render_atom(&self, atom: TypeId, out: &mut String) {
+        let name = self
             .universe
             .atom_decl(atom)
-            .is_ok_and(|decl| decl.name.starts_with('$'))
+            .map_or_else(|_| "?".to_owned(), |decl| decl.name.clone());
+        write!(out, "a:{name}").expect("a String write");
     }
 
     /// The shape of one solved type, memoized.
@@ -502,7 +777,7 @@ impl<'a> Shapes<'a> {
         }
         // The member set is the analysis's own: reading it through the
         // analyzed reference keeps it borrowed across the shape walk below.
-        let members = self.analyzed.decls.universe.members(ty);
+        let members = self.universe.members(ty);
         let shape = self.members_shape(members, 0)?;
         let shape = Rc::new(shape);
         self.cache.insert(ty, shape.clone());
@@ -603,14 +878,25 @@ impl<'a> Shapes<'a> {
     }
 
     fn atom_shape_uncached(&mut self, atom: TypeId) -> Result<Shape, LowerError> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let Ok(decl) = universe.atom_decl(atom) else {
             return Err(unsupported("a value", "its atom has no declaration"));
         };
         match &decl.kind {
             // a type variable's value is one Raw word: the runtime kind
-            // is the caller's fact (the VM checks it at every hand-off)
-            ds_check::AtomKind::Unit if self.is_var_atom(atom) => Ok(Shape::Word(SlotType::Raw)),
+            // is the caller's fact (the VM checks it at every hand-off).
+            // Under an instantiation the lens substituted every variable
+            // away, so one reaching here skipped it.
+            ds_check::AtomKind::Unit if self.is_var_atom(atom) => {
+                if self.active.is_some() {
+                    return Err(unsupported(
+                        "an instantiated body's value",
+                        "its type still names a type variable the instantiation does not \
+                         substitute",
+                    ));
+                }
+                Ok(Shape::Word(SlotType::Raw))
+            },
             ds_check::AtomKind::Unit => Ok(Shape::Word(
                 primitive_slot(&decl.name).unwrap_or(SlotType::Tag),
             )),
@@ -686,7 +972,7 @@ impl<'a> Shapes<'a> {
         atom: TypeId,
         depth: usize,
     ) -> Result<Vec<PayloadField>, LowerError> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let Ok(decl) = universe.atom_decl(atom) else {
             return Err(unsupported("a value", "its atom has no declaration"));
         };
@@ -694,6 +980,8 @@ impl<'a> Shapes<'a> {
             // a union member over a type variable has no static payload
             // shape: the member's runtime word kind is the caller's fact,
             // and a checked read would need runtime reflection to re-span
+            // (under an instantiation the lens replaced the member, so
+            // this is a generic body's own union)
             ds_check::AtomKind::Unit if self.is_var_atom(atom) => Err(unsupported(
                 "a union member over a type variable",
                 "the variable's runtime word kind is a runtime fact; a runtime reflection table \
@@ -828,7 +1116,7 @@ impl<'a> Shapes<'a> {
         id: TypeId,
         depth: usize,
     ) -> Result<Option<Vec<SlotType>>, LowerError> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let Ok(decl) = universe.atom_decl(id) else {
             return Ok(None);
         };
@@ -926,7 +1214,7 @@ impl<'a> Shapes<'a> {
     /// type — a union of containers, a container of the wrong name, a
     /// non-container application, a non-application.
     fn heap_arg(&self, ty: Ty, name: &str, position: usize) -> Option<Ty> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let [only] = universe.members(ty) else {
             return None
         };
@@ -953,7 +1241,7 @@ impl<'a> Shapes<'a> {
     /// single-atom type check, so unions and unresolved variables
     /// answer None and the call site reports the uncovered receiver.
     pub(crate) fn builtin_instance(&self, ty: Ty) -> Option<BuiltinInstance> {
-        let [only] = self.analyzed.decls.universe.members(ty) else {
+        let [only] = self.universe.members(ty) else {
             return None
         };
         self.atom_builtin_instance(*only)
@@ -979,7 +1267,7 @@ impl<'a> Shapes<'a> {
     /// and the widths ride plain scalar words, no collection content
     /// compare behind them).
     pub(crate) fn atom_builtin_instance(&self, atom: TypeId) -> Option<BuiltinInstance> {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let decl = universe.atom_decl(atom).ok()?;
         match &decl.kind {
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
@@ -1010,7 +1298,7 @@ impl<'a> Shapes<'a> {
     /// The argument types of one atom's generic application, if it is
     /// one: the list's element type, the map's key and value types.
     pub(crate) fn apply_args(&self, atom: TypeId) -> Option<&[Ty]> {
-        match &self.analyzed.decls.universe.atom_decl(atom).ok()?.kind {
+        match &self.universe.atom_decl(atom).ok()?.kind {
             ds_check::AtomKind::Apply(_, args) => Some(args),
             _ => None,
         }
@@ -1069,7 +1357,7 @@ impl<'a> Shapes<'a> {
         if pattern == value {
             return true;
         }
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let (Ok(pdecl), Ok(vdecl)) = (universe.atom_decl(pattern), universe.atom_decl(value))
         else {
             return false;
@@ -1112,7 +1400,7 @@ impl<'a> Shapes<'a> {
     /// matches by member-list identity — a compound pattern over a
     /// union argument never guesses a decomposition.
     fn ty_under(&self, pattern: Ty, value: Ty, bindings: &mut Vec<(TypeId, Vec<TypeId>)>) -> bool {
-        let universe = &self.analyzed.decls.universe;
+        let universe = &self.universe;
         let pmembers = universe.members(pattern);
         let vmembers = universe.members(value);
         match (pmembers, vmembers) {
@@ -1135,13 +1423,22 @@ fn bind(var: TypeId, bound: Vec<TypeId>, bindings: &mut Vec<(TypeId, Vec<TypeId>
     }
 }
 
+/// Whether an atom is one of the checker's minted type variables: a
+/// generic parameter of an impl, function, or alias, named `$...` (`$`
+/// sits outside the identifier charset).
+pub(crate) fn is_var_atom(universe: &Universe, atom: TypeId) -> bool {
+    universe
+        .atom_decl(atom)
+        .is_ok_and(|decl| decl.name.starts_with('$'))
+}
+
 /// The generic parameter name behind one minted type variable: the
 /// shared counter mints `${name}#N` (both `#` and `$` sit outside the
 /// identifier charset, so the split is unambiguous). Two minting sites
 /// exist — instance declaration and body checking — and their atoms
 /// differ, so consumers bridging the two (the runtime-evidence seam) key
 /// by this name.
-pub(crate) fn var_param_name(universe: &ds_check::Universe, atom: TypeId) -> Option<String> {
+pub(crate) fn var_param_name(universe: &Universe, atom: TypeId) -> Option<String> {
     let decl = universe
         .atom_decl(atom)
         .ok()
@@ -1357,7 +1654,8 @@ mod tests {
             .map(|val| val.ty)
             .find(|ty| analyzed.decls.universe.render(*ty) == rendered)
             .unwrap_or_else(|| panic!("no expression of {rendered}"));
-        let mut shapes = Shapes::new(&analyzed, std::collections::HashSet::new());
+        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes.shape(ty).expect("the shape lowers")
     }
 
@@ -1742,7 +2040,8 @@ mod tests {
 
         // the keyed seed: quiet at 5, loud at 6, an exact repeat skipped,
         // the local atom's row dropped, a name resolving to nothing dropped
-        let mut shapes = Shapes::new(&analyzed, std::collections::HashSet::new());
+        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes
             .seed_linked(&[
                 row("quiet", 5),
@@ -1760,7 +2059,8 @@ mod tests {
 
         // a second linked name claiming a keyed id refuses, naming the
         // row and the holder
-        let mut crossed = Shapes::new(&analyzed, std::collections::HashSet::new());
+        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let mut crossed = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         crossed
             .seed_linked(&[row("quiet", 5)])
             .expect("the first row seeds");
@@ -1773,7 +2073,8 @@ mod tests {
         );
 
         // a row reaching the reserved range refuses
-        let mut reserved = Shapes::new(&analyzed, std::collections::HashSet::new());
+        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let mut reserved = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         let err = reserved
             .seed_linked(&[row("quiet", FIRST_RESERVED_TAG)])
             .expect_err("the reserved range is closed");

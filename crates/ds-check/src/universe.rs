@@ -50,6 +50,12 @@ pub(crate) const MAX_TUPLE_COMBINATIONS: usize = 4096;
 /// Nominal atoms come from declarations; anonymous tuple atoms are minted
 /// structurally on demand ([`Universe::solve`] on [`TypeExpr::Tuple`]) and
 /// hash-consed on their element-atom lists (B3).
+///
+/// The registry is clonable: a consumer that must mint types the checked
+/// package never solved (a lowering substituting a generic body's
+/// variables) takes its own copy, where every analyzed handle keeps its
+/// set and the new types append after them.
+#[derive(Clone)]
 pub struct Universe {
     atoms: Vec<AtomDecl>,
     traits: Vec<TraitDecl>,

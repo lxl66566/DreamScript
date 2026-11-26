@@ -54,6 +54,7 @@ mod func;
 mod native;
 mod place;
 mod shape;
+mod types;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -66,7 +67,7 @@ use ds_diag::Span;
 use ds_mod::{Dep, Hash128, Module, TargetClass};
 use ds_parse::{Ast, Expr, Ident, ImplDecl, Item, ItemKind, Param, Pattern, StructMember};
 pub use error::LowerError;
-use func::{BodyId, EvidenceEnv, FnLower, Plan};
+use func::{BodyId, EvidenceEnv, FnLower, GenericFn, Plan};
 use shape::Shapes;
 
 /// One op of a function body: a runnable micro-operation or a placed
@@ -342,6 +343,21 @@ where
     }
     let mut plan = Plan::new();
     plan.set_demands(collect_demands(asts, analyzed));
+    // the type lens: the plan's discovery substitutes the recorded
+    // types of every instantiated body under it, and the lowering reads
+    // the results through the shape layer — one registry, the
+    // analyzed package's own until a substitution mints a type
+    let mut types = types::Types::new(&analyzed.decls.universe);
+    // every struct declaring a `deinit`: the instance keys read the set
+    // before the plan's own deinit table completes (it fills in only
+    // after all items plan), and a deinit-carrying struct keys an
+    // instance by its own atom, unshared
+    let deinits = deinit_structs(asts, analyzed);
+    let mut found = func::Discovery {
+        analyzed,
+        types: &mut types,
+        deinits: &deinits,
+    };
     for tree in asts {
         let ast = tree.borrow();
         for block in &ast.blocks {
@@ -362,12 +378,15 @@ where
                     plan_deinits(item, &mut plan, analyzed);
                 }
                 // the item's lambda-value and spawn sites mint their
-                // records here, before any body lowers: the records sit
-                // inside the item's contiguous block, and the walk that
-                // reaches a site reads the plan's answer instead of
-                // minting — the discipline the served splice's
+                // records, and its calls entering a free generic fn plan
+                // the body they enter — an instance over the solved shape,
+                // the ONE body where the site still names a variable —
+                // before any body lowers: every record and instance
+                // lands inside the item's contiguous block, and the walk
+                // that reaches a site reads the plan's answer instead of
+                // planning — the discipline the served splice's
                 // plan-time prefix needs over lowering-time records
-                func::discover_item_mints(&mut plan, analyzed, first);
+                func::discover_item(&mut plan, &mut found, first)?;
             }
         }
     }
@@ -428,6 +447,7 @@ where
     let (functions, placed, facts, shapes, spliced) = lower_all(
         &mut plan,
         analyzed,
+        &types,
         lin,
         &platform_name(asts),
         served,
@@ -730,6 +750,39 @@ where
     )
 }
 
+/// The deinit structs the plan's instance keys read: every struct whose
+/// declaration carries a `deinit` member. The plan's own deinit table
+/// completes only after all items plan, and the discovery keys
+/// instances between an item's planning and the plan's completion, so
+/// the keys read this pre-pass set — the same defs the plan's own
+/// planning collects, taken from the trees directly.
+fn deinit_structs<T>(asts: &[T], analyzed: &Analyzed) -> HashSet<ds_check::DefId>
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut out = HashSet::new();
+    for ast in asts.iter().map(std::borrow::Borrow::<Ast>::borrow) {
+        for block in &ast.blocks {
+            for item in &block.items {
+                let ItemKind::Struct(s) = &item.kind else {
+                    continue;
+                };
+                if !s
+                    .members
+                    .iter()
+                    .any(|member| matches!(member, StructMember::Deinit { .. }))
+                {
+                    continue;
+                }
+                if let Some(def) = analyzed.package.lookup_type(&s.name.name) {
+                    out.insert(def);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Plans one struct item's declared `deinit` member as a synthesized
 /// module function before any body lowers (C5): binding a value of a
 /// deinit-carrying struct claims the hook by naming this plan's function,
@@ -874,14 +927,23 @@ fn plan_item(
         // callee the evaluator's admission pass named for this slice
     }
     if !generics.is_empty() {
-        // The ONE generic body [H3]: a free generic fn lowers once,
-        // never per instantiation; its declared bounds collect the
-        // runtime-evidence demands its body's nested bound calls read,
-        // and the entering call sites stage the words. A bare `[t]`
-        // parameter bounds nothing, so its bodies demand nothing.
+        // A free generic fn registers without a table entry: a body that
+        // lowers once per shape an entering site solves (the discovery
+        // planning each instance), the shape a site still naming a
+        // variable enters being the ONE Raw-word body. Its declared
+        // bounds collect the runtime-evidence demands its body's nested
+        // bound calls read, and the entering call sites stage the words.
+        // A bare `[t]` parameter bounds nothing, so its bodies demand
+        // nothing.
         let bounds = Rc::new(fn_bounds(def, analyzed));
         let pairs = plan.demand(&BodyId::Free(def));
-        plan.push_free_generic(name.name.clone(), def, local, EvidenceEnv { pairs, bounds });
+        plan.register_generic(GenericFn {
+            name: name.name.clone(),
+            def,
+            lambda: local.init.clone(),
+            pairs,
+            bounds,
+        });
         return;
     }
     plan.push(name.name.clone(), def, local);
@@ -1320,13 +1382,14 @@ where
 fn lower_all<'b>(
     plan: &mut Plan,
     analyzed: &'b Analyzed,
+    types: &'b types::Types<'b>,
     lin: &ds_check::Linearity,
     platform: &str,
     served: Option<Served>,
     comptime: func::ComptimeRun<'b>,
     mode: LowerMode,
 ) -> Result<LowerAll<'b>, LowerError> {
-    let mut shapes = Shapes::new(analyzed, plan.declared_deinits());
+    let mut shapes = Shapes::new(analyzed, types, plan.declared_deinits());
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
     let mut facts = Vec::with_capacity(plan.functions().len());
@@ -1358,6 +1421,11 @@ fn lower_all<'b>(
     let mut index = functions.len();
     while let Some(planned) = plan.function(index).cloned() {
         let res = &analyzed.resolutions[planned.lambda.span().file.as_u32() as usize];
+        // this entry lowers under its own instantiation's substitution
+        // (a free generic fn's instance, or the enclosing instance a
+        // lambda or spawned child was minted inside); every other
+        // entry lowers over the analyzed registry as read
+        shapes.enter(planned.subst.clone());
         // Any sentinel-spanned refusal that reached here without a
         // node-observing re-point lands on the function being lowered:
         // the sentinel renders against the first file's first line,

@@ -126,21 +126,20 @@ fn the_generic_equality_spelling_refuses_at_the_abort_shape() {
 }
 
 /// The generic equality compare underneath: the checker admits `==`
-/// over a type variable and the lowering refuses it — no uop covers a
-/// variable's runtime word kind — so no spelling of a generic equality
-/// member dodges the concrete per-width landing.
+/// over a type variable and the per-shape instantiation lowers it —
+/// the site's solved one-word shape plans an instance whose compare
+/// dispatches through the builtin instance the call stages, so the
+/// concrete per-width landing answers through its own body. The abort
+/// arm keeps item 139's shape.
 #[test]
-fn the_generic_equality_compare_refuses_at_lowering() {
-    let out = run(&["run", &fixture("assert_generic_equality_refusal.ds")]);
+fn the_generic_equality_compare_runs_through_its_instance() {
+    let out = run(&["run", &fixture("assert_generic_equality.ds")]);
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "the generic compare refuses: {}",
+        Some(0),
+        "the generic compare lowers through its instance: {}",
         text(&out.stderr)
     );
     let err = text(&out.stderr);
-    assert!(
-        err.contains("outside the M3 runtime contract"),
-        "the refusal names the lowering contract: {err}"
-    );
+    assert!(err.is_empty(), "the instance compare traps nothing: {err}");
 }

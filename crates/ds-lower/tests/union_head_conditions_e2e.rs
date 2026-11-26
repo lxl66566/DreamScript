@@ -626,10 +626,12 @@ fn a_multiword_element_substitution_refuses_at_the_sources_shape() {
 }
 
 /// A substituted value wider than one word entering a free generic fn
-/// keeps the one-word instantiation boundary: the generic body lowers
-/// its variable's value to a single Raw word, so the tuple never
-/// reaches the head's member write — per-instantiation frames are the
-/// JIT specialization tier's.
+/// whose bound demand dispatches into a generic impl member keeps the
+/// one-word instantiation boundary: the instance's own parameters carry
+/// the argument's whole span, but the body's runtime-evidence dispatch
+/// stages the receiver into the serving member's Raw-word body — a
+/// shape the impl-member instantiation round owns (the generic impl
+/// members still ride one Raw body this round).
 #[test]
 fn a_free_generic_call_keeps_its_one_word_instantiation_boundary() {
     let source = format!(
@@ -648,7 +650,7 @@ fn a_free_generic_call_keeps_its_one_word_instantiation_boundary() {
     refuse_lowering(
         "free_generic_tuple_argument.ds",
         &source,
-        "a generic call's argument is outside the M3 runtime contract",
+        "the substituted type spans more than one word",
     );
 }
 

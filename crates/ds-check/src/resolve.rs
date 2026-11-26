@@ -1285,7 +1285,7 @@ impl Package {
             let bindable = match entry.kind {
                 ForeignKind::Fn if entry.generic || entry.defaulted => {
                     let what = if entry.generic {
-                        "a generic function: its one body is a per-instantiation fact the linked \
+                        "a generic function: its bodies are per-instantiation facts the linked \
                          module serves"
                     } else {
                         "a function with a defaulted parameter: the default stages at the linked \

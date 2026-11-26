@@ -1,0 +1,14 @@
+// The generic equality spelling, isolated from the abort shape: the
+// checker admits a structural `==` over a type variable (set algebra
+// over the variable's own member) and the per-shape instantiation
+// lowers it — the site's solved one-word shape plans an instance whose
+// compare dispatches through the builtin instance the call stages.
+// The abort arm keeps item 139's shape.
+
+fn eq_any[t] (a: t, b: t) -> bool {
+  a == b
+}
+
+fn main() -> int {
+  if eq_any(1, 1) { 1 } else { 0 }
+}

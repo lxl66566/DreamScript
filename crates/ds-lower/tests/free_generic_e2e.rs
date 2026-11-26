@@ -15,7 +15,7 @@
 use ds_abi::Uop;
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, Lowered, PlacedOp, lower};
+use ds_lower::{Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
@@ -61,40 +61,6 @@ fn run_lowered(lowered: &Lowered) -> Vm {
     vm
 }
 
-/// Checks one inline source clean and asserts the lowering refuses with
-/// the expected seam named.
-fn refuses_with(source: &str, expected: &str) {
-    let mut files = Files::new();
-    let id = files.add_source("probe.ds", source);
-    let asts = [parse(&files, id).expect("the probe parses")];
-    let analyzed = analyze(&files, &asts);
-    assert!(
-        analyzed.checked.diags.is_empty(),
-        "the surface checks clean: {}",
-        analyzed
-            .checked
-            .diags
-            .iter()
-            .map(|diag| human(diag, &files))
-            .collect::<String>()
-    );
-    let err = lower(
-        "probe",
-        Hash128::compute(source.as_bytes()),
-        &asts,
-        &analyzed,
-    )
-    .err()
-    .expect("the shape must refuse at lowering");
-    let LowerError::Unsupported { what, reason, .. } = err else {
-        panic!("the refusal is an unsupported shape");
-    };
-    assert!(
-        reason.contains(expected),
-        "the refusal names {expected:?}: {what} {reason}"
-    );
-}
-
 /// One function's placed ops by table name.
 fn ops_of<'l>(lowered: &'l Lowered, name: &str) -> &'l [PlacedOp] {
     lowered
@@ -102,16 +68,16 @@ fn ops_of<'l>(lowered: &'l Lowered, name: &str) -> &'l [PlacedOp] {
         .unwrap_or_else(|| panic!("the function table holds {name:?}"))
 }
 
-/// The one acceptance: a free generic call runs end to end — the ONE
-/// body entered through the ordinary CALL naming the whole staged
-/// count (two argument words plus the pair's three evidence words), a
-/// concrete instantiation answered by a concrete impl body, the runtime
-/// form (a free generic fn called from inside another free generic
-/// body, its demand riding the calling frame's own staged slot), the
-/// boundless spelling staging no evidence at all, a two-level serving
-/// chain whose follow words slide one level per nested dispatch, and
-/// the tail-position transfer carrying its evidence words after the
-/// exit claims.
+/// The one acceptance: a free generic call runs end to end — the
+/// site's planned instance entered through the ordinary CALL naming
+/// the whole staged count (two argument words plus the pair's three
+/// evidence words), a concrete instantiation answered by a concrete
+/// impl body, the runtime form (a free generic fn called from inside
+/// another free generic body, its demand riding the calling frame's own
+/// staged slot), the boundless spelling staging no evidence at all, a
+/// two-level serving chain whose follow words slide one level per
+/// nested dispatch, and the tail-position transfer carrying its
+/// evidence words after the exit claims.
 #[test]
 fn free_generic_calls_run_evidence_staged_and_answered() {
     let lowered = lower_probe();
@@ -141,7 +107,7 @@ fn free_generic_calls_run_evidence_staged_and_answered() {
     );
 }
 
-/// The emission pin: a call into a free generic fn's ONE body stages
+/// The emission pin: a call into a free generic fn's instance stages
 /// the pair's evidence words after the true arguments and lowers the
 /// ordinary CALL naming the whole staged count — and a tail site the
 /// CALLT transfer, the evidence stores staged after the exit claims.
@@ -238,6 +204,17 @@ fn a_lone_callee_demand_collects_into_the_calling_frame() {
         &analyzed,
     )
     .expect("the lone callee demand collects into the calling frame");
+    // main's direct call plans name_it's own instance over int; the
+    // generic impl member's body — lowering over its variables' Raw
+    // words — enters ride's ONE body, the runtime form this round
+    assert!(
+        lowered
+            .functions()
+            .iter()
+            .any(|name| name.starts_with("name_it@")),
+        "the entering site plans its own instance: {:?}",
+        lowered.functions()
+    );
     assert!(
         lowered.functions().contains(&"ride".to_owned()),
         "the nested caller's ONE body emits with its collected slot"
@@ -318,37 +295,80 @@ fn callee_demands_propagate_through_mutually_recursive_callers() {
     );
 }
 
-/// The one-word instantiation boundary at the free-generic parameter: a
-/// parameter over the fn's own type variable claims the argument as the
-/// variable's single Raw word, so a multi-word argument refuses at the
-/// entering site, where the type is concrete.
+/// A multi-word argument through a free generic fn runs end to end: the
+/// entering site plans the instance over the two-word struct's shape,
+/// the body lowers its parameter and return as the substituted span,
+/// and the heap drains when the run ends — the retired one-word
+/// instantiation boundary's positive.
 #[test]
-fn a_multi_word_argument_into_a_variable_parameter_refuses() {
-    refuses_with(
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct point { x: int, y: int }\n",
-            "extern fn println (s: string) -> ()\n",
-            "extern fn str_int (x: int) -> string\n",
-            "fn echo[t] (x: t) -> t { x }\n",
-            "fn main() -> int {\n",
-            "  const p = point { x: 1, y: 2 }\n",
-            "  println(str_int(echo(p).x))\n",
-            "  0\n",
-            "}\n",
-        ),
-        "the substituted type spans more than one word",
+fn a_two_word_argument_through_a_generic_fn_lowers_and_drains() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct point { x: int, y: int }\n",
+        "extern fn println (s: string) -> ()\n",
+        "extern fn str_int (x: int) -> string\n",
+        "fn echo[t] (x: t) -> t { x }\n",
+        "fn main() -> int {\n",
+        "  const p = point { x: 1, y: 2 }\n",
+        "  println(str_int(echo(p).x))\n",
+        "  println(str_int(echo(p).y))\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("probe.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the surface checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "probe",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the two-word argument lowers through its instance");
+    // one instance answers both entering sites over the same shape
+    let instances = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.starts_with("echo@"))
+        .count();
+    assert_eq!(instances, 1, "both sites share the one instance");
+    let mut vm = run_lowered(&lowered);
+    assert_eq!(
+        vm.run("probe", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"1\n2\n" as &[u8],
+        "the struct crosses the body whole, both fields answering"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
     );
 }
 
 /// A tuple built inside a free generic fn over its own variable registers
 /// the element word's ownership at the construction and the tail return
-/// alike: the element's declared word is the variable's Raw classification
-/// under a counted instantiation (a string), so the count moves into the
-/// returned span instead of dying with the still-owned parameter — the
-/// caller reads the value it passed while a later binding reuses no freed
-/// id under the tuple's word.
+/// alike: the element's word is the substituted classification — a
+/// counted string instantiation — so the count moves into the returned
+/// span instead of dying with the still-owned parameter — the caller
+/// reads the value it passed while a later binding reuses no freed id
+/// under the tuple's word.
 #[test]
 fn a_generic_tuple_hands_the_element_count_to_the_returned_span() {
     let source = concat!(
@@ -403,15 +423,13 @@ fn a_generic_tuple_hands_the_element_count_to_the_returned_span() {
     );
 }
 
-/// A multi-word parameter over the fn's own variables (a tuple formal)
-/// declares Raw words on the callee side while the call site's argument
-/// words carry their concrete kinds: the staging records the callee's
-/// Raw at those overlay indices (the slide's one-way exemption), so the
-/// call enters the ONE body — previously the site staged the argument's
-/// own Ref/I64 against the Raw formals and the VM rejected the layout
-/// at runtime with no diagnostic from check or lowering.
+/// A tuple formal instantiates over its solved elements: the entering
+/// site plans the instance whose parameters carry the argument's own
+/// word kinds (a Ref and an I64 here), and the body destructures and
+/// answers the first element — the staging and the instance's parameter
+/// spans agree, so no Raw exemption rides the slide.
 #[test]
-fn a_multi_word_variable_parameter_stages_the_callees_raw_words() {
+fn a_tuple_formal_instantiates_and_answers_its_first_element() {
     let source = concat!(
         "tag int\n",
         "tag string\n",

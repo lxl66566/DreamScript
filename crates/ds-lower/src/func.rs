@@ -37,19 +37,23 @@ use crate::{
     },
     place::{AffineFacts, Hook, Owned, Placement, State},
     shape::{
-        MemberField, MemberShape, Shape, Shapes, SpanWords, StructShape, UnionShape, expr_members,
-        shape_words,
+        MemberField, MemberShape, Shape, ShapeKey, Shapes, SpanWords, StructShape, UnionShape,
+        expr_members, shape_words,
     },
+    types::Subst,
 };
 
 mod calls;
 mod extraction;
+mod instance;
 mod pattern;
 mod sort;
 mod store;
 mod tail;
 
 use extraction::AmbientExtern;
+pub(crate) use instance::GenericFn;
+use instance::{Instance, InstanceKey};
 
 /// One symbolic frame slot: a body word, or an outgoing-overlay word that
 /// resolves against the frame tail at finalization.
@@ -461,6 +465,23 @@ pub(crate) struct PlannedFn {
     /// demands as trailing words after the true arguments. False for
     /// impl-member declared bodies, whose parameters stay concrete.
     pub(crate) free_generic: bool,
+    /// The instantiation this entry is: one body of a free generic fn,
+    /// lowered over the shape an entering site solved. `None` for every
+    /// other entry.
+    pub(crate) instance: Option<Rc<Instance>>,
+    /// The substitution this entry lowers under: its own instantiation's
+    /// when it is an instance, the enclosing instance's for a lambda or a
+    /// spawned child minted inside one, `None` everywhere else.
+    pub(crate) subst: Option<Rc<Subst>>,
+}
+
+impl PlannedFn {
+    /// Whether call sites entering this body stage its runtime-evidence
+    /// demands as trailing words: a free generic fn's body, the ONE form
+    /// or an instance alike.
+    pub(crate) fn is_generic_body(&self) -> bool {
+        self.free_generic || self.instance.is_some()
+    }
 }
 
 /// One declared body's lowering shape (an impl member's or a free
@@ -645,16 +666,31 @@ pub(crate) struct Plan {
     /// table the dispatches walk lazily, one hop per call.
     chain_memo: HashMap<(MethodId, InstanceId, Option<Vec<TypeId>>), u32>,
     /// Every minted record's site answer, keyed by the lambda's or
-    /// spawn's own span: the table index, the capture list, and the
-    /// evidence pairs the record's body stages — the facts the minting
-    /// site's walk reads instead of minting, so the walk and the plan
-    /// hold one mint truth.
-    mints: HashMap<Span, Minted>,
+    /// spawn's own span inside its enclosing entry: the table index, the
+    /// capture list, and the evidence pairs the record's body stages —
+    /// the facts the minting site's walk reads instead of minting, so the
+    /// walk and the plan hold one mint truth. The enclosing entry keys
+    /// too: one lambda site mints one record per instantiation of the
+    /// body holding it.
+    mints: HashMap<(Span, u32), Minted>,
     /// The defs whose initializers planned as the evaluation slice's
     /// zero-parameter bodies: a value use of one keeps the top-level
     /// refusal (the planned entry answers the fenced run, it is not a
     /// callable the runtime half mints a word for).
     const_defs: HashSet<DefId>,
+    /// Every declared free generic fn, keyed by its definition: a body
+    /// that holds no table entry of its own and lowers once per shape
+    /// its entering sites solve (the discovery plans the instances).
+    generics: HashMap<DefId, Rc<GenericFn>>,
+    /// The instance of each generic fn at one shape key: the function
+    /// table's index of the body lowered over that shape.
+    instances: HashMap<(DefId, Rc<InstanceKey>), u32>,
+    /// The same instances by their solved argument types: what an
+    /// entering site looks its target up by.
+    instance_args: HashMap<(DefId, Vec<Ty>), u32>,
+    /// Every generic fn's recorded types, in a fixed order: the signature
+    /// and every type the checker recorded inside the body's span.
+    body_types: HashMap<DefId, Rc<[Ty]>>,
 }
 
 /// One minted record's plan row: the facts keyed by the site's span.
@@ -694,6 +730,10 @@ impl Plan {
             chain_memo: HashMap::new(),
             mints: HashMap::new(),
             const_defs: HashSet::new(),
+            generics: HashMap::new(),
+            instances: HashMap::new(),
+            instance_args: HashMap::new(),
+            body_types: HashMap::new(),
         }
     }
 
@@ -746,6 +786,8 @@ impl Plan {
             bounds: Rc::new(HashMap::new()),
             spawn_child: false,
             free_generic: false,
+            instance: None,
+            subst: None,
         });
     }
 
@@ -766,69 +808,31 @@ impl Plan {
             bounds: Rc::new(HashMap::new()),
             spawn_child: false,
             free_generic: false,
+            instance: None,
+            subst: None,
         });
     }
 
-    /// Registers one free generic fn's ONE body [H3]: the fn lowers
-    /// once, never per instantiation, under its own name (a package def
-    /// is unique, and the impl members' `#` mangles sit outside the
-    /// identifier charset). `local.init` is the fn's lambda shape; its
-    /// parameters and block become the declared body the walk lowers
-    /// like an impl member's, and the entering call sites stage the
-    /// evidence words its runtime pairs demand after the true
-    /// arguments. `None` return: the checker's def type carries the
-    /// fn's signature over its minted variables.
-    pub(crate) fn push_free_generic(
-        &mut self,
-        name: String,
-        def: DefId,
-        local: &LocalDecl,
-        evidence: EvidenceEnv,
-    ) {
-        let Expr::Lambda { params, body, .. } = &local.init else {
-            unreachable!("push_free_generic receives a lambda-armed local");
-        };
-        self.index.insert(
-            def,
-            u32::try_from(self.functions.len()).expect("function index fits u32"),
-        );
-        self.functions.push(PlannedFn {
-            name,
-            lambda: local.init.clone(),
-            def: Some(def),
-            deinit: None,
-            captures: Rc::new(Vec::new()),
-            decl: Some(Rc::new(DeclFn {
-                params: Rc::new(params.clone()),
-                body: Rc::new((**body).clone()),
-            })),
-            ret: None,
-            evidence: evidence.pairs,
-            bounds: evidence.bounds,
-            spawn_child: false,
-            free_generic: true,
-        });
-    }
-
-    /// Registers one value-position lambda as a synthesized function and
-    /// returns its table index plus the captures its body will bind (the
-    /// construction and the body share the one list, so the staged block
-    /// and the frame layout cannot drift). The minted name keys off the
-    /// enclosing function and the table index — `$` is outside the
-    /// identifier charset, so the name never shadows a user-declared one.
+    /// Registers one value-position lambda as a synthesized function
+    /// inside the enclosing entry and returns its table index. The
+    /// captures list was collected by the caller: the discovery and the
+    /// body share the one list, so the staged block and the frame layout
+    /// cannot drift. The minted name keys off the enclosing function's
+    /// name and the table index — `$` is outside the identifier charset,
+    /// so the name never shadows a user-declared one.
     pub(crate) fn push_lambda(
         &mut self,
-        enclosing: &str,
+        enclosing: u32,
         lambda: &Expr,
-        res: &Resolutions,
-        binders: &HashMap<Span, BinderFact>,
+        captures: Rc<Vec<(Span, Ty)>>,
         evidence: Rc<Vec<RuntimePair>>,
         bounds: Rc<HashMap<String, HashSet<TraitId>>>,
-    ) -> (u32, Rc<Vec<(Span, Ty)>>) {
+        subst: Option<Rc<Subst>>,
+    ) -> u32 {
         let index = u32::try_from(self.functions.len()).expect("function index fits u32");
-        let captures = Rc::new(collect_captures(lambda, res, binders));
+        let name = format!("{}${index}", self.functions[enclosing as usize].name);
         self.functions.push(PlannedFn {
-            name: format!("{enclosing}${index}"),
+            name,
             lambda: lambda.clone(),
             def: None,
             deinit: None,
@@ -839,39 +843,40 @@ impl Plan {
             bounds,
             spawn_child: false,
             free_generic: false,
+            instance: None,
+            subst,
         });
         let Expr::Lambda { span, .. } = lambda else {
             unreachable!("push_lambda receives a lambda");
         };
-        self.mints.insert(*span, Minted {
+        self.mints.insert((*span, enclosing), Minted {
             index,
-            captures: captures.clone(),
+            captures,
             evidence,
         });
-        (index, captures)
+        index
     }
 
     /// Registers one `spawn` expression's block as a synthesized child
-    /// function [E2] and returns its table index plus the captures its
-    /// body will bind: the block becomes a zero-parameter lambda over the
-    /// same capture list the lambda construction uses. The plan entry's
-    /// return is the body's answer type — the value the frame's exit
-    /// carries out for the join to collect in spawn order. A child
-    /// lexically inside a
-    /// generic impl body carries its own runtime-evidence pairs (staged
-    /// from the spawning frame's slots into the entry argument area) and
-    /// inherits the impl's bounds so its nested lambdas and spawns
-    /// collect their demands the same way.
+    /// function inside the enclosing entry and returns its table index:
+    /// the block becomes a zero-parameter lambda over the capture list
+    /// the caller collected. The plan entry's return is the body's answer
+    /// type — the value the frame's exit carries out for the join to
+    /// collect in spawn order. A child lexically inside a generic body
+    /// carries its own runtime-evidence pairs (staged from the spawning
+    /// frame's slots into the entry argument area) and inherits the
+    /// body's bounds so its nested lambdas and spawns collect their
+    /// demands the same way.
     pub(crate) fn push_spawn(
         &mut self,
-        enclosing: &str,
+        enclosing: u32,
         spawn: &Expr,
-        res: &Resolutions,
-        binders: &HashMap<Span, BinderFact>,
+        captures: Rc<Vec<(Span, Ty)>>,
         ret: Ty,
         evidence: Rc<Vec<RuntimePair>>,
         bounds: Rc<HashMap<String, HashSet<TraitId>>>,
-    ) -> (u32, Rc<Vec<(Span, Ty)>>) {
+        subst: Option<Rc<Subst>>,
+    ) -> u32 {
         let Expr::Spawn { span, body, .. } = spawn else {
             unreachable!("push_spawn receives a spawn expression");
         };
@@ -884,9 +889,9 @@ impl Plan {
             arrow: false,
             body: Box::new(Expr::Block(body.clone())),
         };
-        let captures = Rc::new(collect_captures(&lambda, res, binders));
+        let name = format!("{}${index}", self.functions[enclosing as usize].name);
         self.functions.push(PlannedFn {
-            name: format!("{enclosing}${index}"),
+            name,
             lambda,
             def: None,
             deinit: None,
@@ -897,25 +902,74 @@ impl Plan {
             bounds,
             spawn_child: true,
             free_generic: false,
+            instance: None,
+            subst,
         });
-        self.mints.insert(*span, Minted {
+        self.mints.insert((*span, enclosing), Minted {
             index,
-            captures: captures.clone(),
+            captures,
             evidence,
         });
-        (index, captures)
+        index
     }
 
-    /// One mint site's plan answer: the record the discovery pass
-    /// pushed for this lambda's or spawn's own span, for the walk that
-    /// reaches the site to stage instead of minting.
-    pub(crate) fn minted(&self, span: Span) -> Option<MintSite> {
-        let minted = self.mints.get(&span)?;
+    /// One mint site's plan answer: the record the discovery pushed for
+    /// this lambda's or spawn's own span inside the entry `enclosing`,
+    /// for the walk that reaches the site to stage instead of minting.
+    pub(crate) fn minted(&self, enclosing: u32, span: Span) -> Option<MintSite> {
+        let minted = self.mints.get(&(span, enclosing))?;
         Some(MintSite {
             index: minted.index,
             captures: minted.captures.clone(),
             evidence: minted.evidence.clone(),
         })
+    }
+
+    /// Records one declared free generic fn: its body holds no table
+    /// entry until a call site enters it, the discovery planning the
+    /// instance (or the ONE body) each site needs.
+    pub(crate) fn register_generic(&mut self, generic: GenericFn) {
+        self.generics.insert(generic.def, Rc::new(generic));
+    }
+
+    /// The declared free generic fn one definition names.
+    pub(crate) fn generic_fn(&self, def: DefId) -> Option<Rc<GenericFn>> {
+        self.generics.get(&def).cloned()
+    }
+
+    /// Registers one free generic fn's ONE body [H3] under its own name
+    /// (a package def is unique, and the impl members' `#` mangles sit
+    /// outside the identifier charset) and returns its table index: the
+    /// fn lowers once over its variables' single Raw words, the form a
+    /// call site still naming a variable enters. Its parameters and block
+    /// become the declared body the walk lowers like an impl member's.
+    /// `None` return: the checker's def type carries the fn's signature
+    /// over its minted variables.
+    pub(crate) fn push_free_generic(&mut self, generic: &GenericFn) -> u32 {
+        let index = u32::try_from(self.functions.len()).expect("function index fits u32");
+        self.index.insert(generic.def, index);
+        let Expr::Lambda { params, body, .. } = &generic.lambda else {
+            unreachable!("a free generic fn plans a lambda-armed local");
+        };
+        self.functions.push(PlannedFn {
+            name: generic.name.clone(),
+            lambda: generic.lambda.clone(),
+            def: Some(generic.def),
+            deinit: None,
+            captures: Rc::new(Vec::new()),
+            decl: Some(Rc::new(DeclFn {
+                params: Rc::new(params.clone()),
+                body: Rc::new((**body).clone()),
+            })),
+            ret: None,
+            evidence: generic.pairs.clone(),
+            bounds: generic.bounds.clone(),
+            spawn_child: false,
+            free_generic: true,
+            instance: None,
+            subst: None,
+        });
+        index
     }
 
     /// Registers one impl-member function under its mangled table name
@@ -948,6 +1002,8 @@ impl Plan {
             bounds: evidence.bounds,
             spawn_child: false,
             free_generic: false,
+            instance: None,
+            subst: None,
         });
         index
     }
@@ -992,6 +1048,8 @@ impl Plan {
             bounds: evidence.bounds,
             spawn_child: false,
             free_generic: true,
+            instance: None,
+            subst: None,
         });
         index
     }
@@ -1045,6 +1103,8 @@ impl Plan {
             bounds: Rc::new(HashMap::new()),
             spawn_child: false,
             free_generic: false,
+            instance: None,
+            subst: None,
         });
     }
 
@@ -1078,6 +1138,13 @@ impl Plan {
     /// The function-table index of a planned DefId.
     pub(crate) fn index_of(&self, def: DefId) -> Option<u32> {
         self.index.get(&def).copied()
+    }
+
+    /// The instance one generic fn's concrete argument types entered, when
+    /// the plan's discovery planned one: the call-site walk's target,
+    /// shared with every other site solving the same shape.
+    pub(crate) fn instance_target(&self, def: DefId, args: &[Ty]) -> Option<u32> {
+        self.instance_args.get(&(def, args.to_vec())).copied()
     }
 
     pub(crate) fn functions(&self) -> &[PlannedFn] {
@@ -1522,37 +1589,43 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
 /// in — their demands ride the child's own entry words (a lambda's
 /// capture block, a spawned child's entry argument area), staged from
 /// this frame's evidence slots at the construction or spawn site.
-/// The plan-time mint discovery: one item's just-planned entries walked
-/// in order, every lambda-value and spawn site minting its record into
-/// the table before any body lowers. The records land after their
-/// enclosing item's entries, so one file's block stays contiguous and
-/// append-stable — and the ambient's prefix (items, deinits, and their
-/// records alike) is a pure function of the ambient's own trees, the
-/// property the served splice pins its bytes against. The walk that
-/// reaches a mint site reads [`Plan::minted`] instead of minting, so
-/// discovery and lowering hold one mint truth; a site the walk reaches
-/// with no plan answer is the drift the discovery predicate and the
-/// walk's routing disagree on, refused loud at the site.
-pub(crate) fn discover_item_mints(plan: &mut Plan, analyzed: &Analyzed, first: usize) {
+/// The plan-time discovery: one item's just-planned entries walked in
+/// order before any body lowers. Every lambda-value and spawn site mints
+/// its record into the table, and every call entering a free generic fn
+/// plans the body it enters — an instance over the site's solved shape,
+/// or the ONE body where the site still names a variable. Each record
+/// lands after the entry holding its site, so one item's block stays
+/// contiguous and append-stable — and the ambient's prefix (items,
+/// deinits, their records, and instances alike) is a pure function of the
+/// ambient's own trees, the property the served splice pins its bytes
+/// against. The walk that reaches a site reads the plan's answer instead
+/// of planning, so discovery and lowering hold one truth; a site the walk
+/// reaches with no plan answer is the drift the discovery and the walk's
+/// routing disagree on, refused loud at the site.
+pub(crate) fn discover_item(
+    plan: &mut Plan,
+    found: &mut Discovery<'_, '_>,
+    first: usize,
+) -> Result<(), LowerError> {
     let last = plan.functions.len();
     for at in first..last {
-        let (name, bounds, file) = {
-            let entry = &plan.functions[at];
-            (
-                entry.name.clone(),
-                entry.bounds.clone(),
-                entry.lambda.span().file,
-            )
-        };
-        let res = &analyzed.resolutions[file.as_u32() as usize];
-        let body = entry_body(&plan.functions[at]).clone();
-        let ctx = MintCtx {
-            enclosing: name,
-            bounds,
-            res,
-        };
-        discover_expr(plan, analyzed, &ctx, &body);
+        instance::walk_entry(
+            plan,
+            found,
+            u32::try_from(at).expect("function index fits u32"),
+        )?;
     }
+    Ok(())
+}
+
+/// The discovery's shared inputs beyond the plan: the analyzed package,
+/// the type lens the entering sites substitute under, and the structs
+/// whose declaration carries a deinit (a deinit-carrying substitution
+/// keys an instance by the struct itself).
+pub(crate) struct Discovery<'a, 't> {
+    pub(crate) analyzed: &'a Analyzed,
+    pub(crate) types: &'t mut crate::types::Types<'a>,
+    pub(crate) deinits: &'a HashSet<DefId>,
 }
 
 /// One planned entry's body expression: a declared body lowers its
@@ -1569,17 +1642,20 @@ fn entry_body(entry: &PlannedFn) -> &Expr {
 }
 
 /// The discovery walk's threaded context: the enclosing entry's table
-/// name and declared bounds — the facts a nested record's own sites
-/// inherit, exactly as the walking frame's state once fed the mint.
+/// index and name, its declared bounds, and the instantiation it lowers
+/// under — the facts a nested record's own sites inherit, exactly as the
+/// walking frame's state once fed the mint.
 struct MintCtx<'a> {
-    enclosing: String,
+    enclosing: u32,
+    enclosing_name: String,
     bounds: Rc<HashMap<String, HashSet<TraitId>>>,
+    subst: Option<Rc<Subst>>,
     res: &'a Resolutions,
 }
 
 /// The runtime-evidence demands one minted record's body stages: empty
-/// outside a bounds-carrying body, the propagated pairs inside one —
-/// the same rule the minting walk applied at the site.
+/// outside a bounds-carrying body, the propagated pairs inside one — the
+/// same rule the minting walk applied at the site.
 fn mint_evidence(
     plan: &Plan,
     analyzed: &Analyzed,
@@ -1609,6 +1685,25 @@ fn spawn_return(analyzed: &Analyzed, span: Span, body: &BlockExpr) -> Option<Ty>
         return answer.map(|val| val.ty);
     }
     analyzed.checked.expr_types.get(&span).map(|val| val.ty)
+}
+
+/// The enclosing bindings one lambda or spawned block captures, as the
+/// body lowering them reads the types: under an instantiation each
+/// capture's type is the substituted one.
+fn captures_under(
+    found: &mut Discovery<'_, '_>,
+    subst: Option<&Rc<Subst>>,
+    lambda: &Expr,
+    res: &Resolutions,
+) -> Result<Vec<(Span, Ty)>, LowerError> {
+    let captures = collect_captures(lambda, res, &found.analyzed.checked.binders);
+    let Some(subst) = subst else {
+        return Ok(captures);
+    };
+    captures
+        .into_iter()
+        .map(|(span, ty)| Ok((span, found.types.substitute(subst, ty)?)))
+        .collect()
 }
 
 /// Whether this call site inlines its last lambda argument instead of
@@ -1675,49 +1770,69 @@ fn extraction_lambda_taker(analyzed: &Analyzed, plan: &Plan, def: Option<DefId>)
     )
 }
 
-/// The pre-order mint walk itself.
-fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) {
+/// The pre-order discovery walk itself.
+fn discover_expr(
+    plan: &mut Plan,
+    found: &mut Discovery<'_, '_>,
+    ctx: &MintCtx,
+    e: &Expr,
+) -> Result<(), LowerError> {
     match e {
         Expr::Lambda { generics, body, .. } => {
             if !generics.is_empty() {
-                return; // the walk refuses a generic lambda value; nothing inside it lowers
+                return Ok(()); // the walk refuses a generic lambda value; nothing inside it lowers
             }
-            let evidence = mint_evidence(plan, analyzed, ctx, body);
-            let (index, _) = plan.push_lambda(
-                &ctx.enclosing,
+            let evidence = mint_evidence(plan, found.analyzed, ctx, body);
+            let captures = captures_under(found, ctx.subst.as_ref(), e, ctx.res)?;
+            let index = plan.push_lambda(
+                ctx.enclosing,
                 e,
-                ctx.res,
-                &analyzed.checked.binders,
+                Rc::new(captures),
                 evidence,
                 ctx.bounds.clone(),
+                ctx.subst.clone(),
             );
             let nested = MintCtx {
-                enclosing: format!("{}${}", ctx.enclosing, index),
+                enclosing: index,
+                enclosing_name: format!("{}${index}", ctx.enclosing_name),
                 bounds: ctx.bounds.clone(),
+                subst: ctx.subst.clone(),
                 res: ctx.res,
             };
-            discover_expr(plan, analyzed, &nested, body);
+            discover_expr(plan, found, &nested, body)?;
         },
         Expr::Spawn { span, body } => {
-            let Some(ret) = spawn_return(analyzed, *span, body) else {
-                return; // no checked answer: the walk's own refusal owns the site
+            let Some(ret) = spawn_return(found.analyzed, *span, body) else {
+                return Ok(()); // no checked answer: the walk's own refusal owns the site
             };
-            let evidence = mint_evidence(plan, analyzed, ctx, &Expr::Block(body.clone()));
-            let (index, _) = plan.push_spawn(
-                &ctx.enclosing,
-                e,
+            let ret = match &ctx.subst {
+                Some(subst) => found.types.substitute(subst, ret)?,
+                None => ret,
+            };
+            let evidence = mint_evidence(plan, found.analyzed, ctx, &Expr::Block(body.clone()));
+            let captures = captures_under(
+                found,
+                ctx.subst.as_ref(),
+                &Expr::Block(body.clone()),
                 ctx.res,
-                &analyzed.checked.binders,
+            )?;
+            let index = plan.push_spawn(
+                ctx.enclosing,
+                e,
+                Rc::new(captures),
                 ret,
                 evidence,
                 ctx.bounds.clone(),
+                ctx.subst.clone(),
             );
             let nested = MintCtx {
-                enclosing: format!("{}${}", ctx.enclosing, index),
+                enclosing: index,
+                enclosing_name: format!("{}${index}", ctx.enclosing_name),
                 bounds: ctx.bounds.clone(),
+                subst: ctx.subst.clone(),
                 res: ctx.res,
             };
-            discover_block(plan, analyzed, &nested, body);
+            discover_block(plan, found, &nested, body)?;
         },
         Expr::Call {
             span,
@@ -1726,7 +1841,11 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
             trailing,
             ..
         } => {
-            let inlines = inlines_lambda_arg(analyzed, plan, ctx.res, callee, *span);
+            let inlines = inlines_lambda_arg(found.analyzed, plan, ctx.res, callee, *span);
+            // A call entering a free generic fn plans the body it enters
+            // before anything lowers: the instance over the site's solved
+            // shape, or the ONE body of a site still naming a variable.
+            instance::enter_site(plan, found, ctx, callee, *span)?;
             // The callee first, in the receiver-first order the walk
             // stages its arguments: a dot-call's receiver holds whole
             // call shapes (the fluent spelling `xs.map(f).len()`), and
@@ -1734,7 +1853,7 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
             // where the walk lowers them — callee shapes the walk
             // refuses (a computed callee) lower no module, so their
             // records never reach a table.
-            discover_expr(plan, analyzed, ctx, callee);
+            discover_expr(plan, found, ctx, callee)?;
             let mut effective: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
             if let Some(block) = trailing {
                 effective.push(block);
@@ -1746,17 +1865,17 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
             for (at, arg) in effective.iter().enumerate() {
                 if last_inlined && at + 1 == effective.len() {
                     if let Expr::Lambda { body, .. } = arg {
-                        discover_expr(plan, analyzed, ctx, body);
+                        discover_expr(plan, found, ctx, body)?;
                     }
                 } else {
-                    discover_expr(plan, analyzed, ctx, arg);
+                    discover_expr(plan, found, ctx, arg)?;
                 }
             }
         },
         Expr::Paren { inner, .. }
         | Expr::Unary { expr: inner, .. }
         | Expr::Is { expr: inner, .. }
-        | Expr::Try { expr: inner, .. } => discover_expr(plan, analyzed, ctx, inner),
+        | Expr::Try { expr: inner, .. } => discover_expr(plan, found, ctx, inner)?,
         Expr::Binary { left, right, .. }
         | Expr::Range {
             start: left,
@@ -1764,74 +1883,74 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
             ..
         }
         | Expr::Assign { left, right, .. } => {
-            discover_expr(plan, analyzed, ctx, left);
-            discover_expr(plan, analyzed, ctx, right);
+            discover_expr(plan, found, ctx, left)?;
+            discover_expr(plan, found, ctx, right)?;
         },
         Expr::Str { parts, .. } => {
             for part in parts {
                 if let StrPart::Expr { expr, .. } = part {
-                    discover_expr(plan, analyzed, ctx, expr);
+                    discover_expr(plan, found, ctx, expr)?;
                 }
             }
         },
         Expr::Struct { fields, .. } => {
             for (_, value) in fields {
                 if let Some(value) = value {
-                    discover_expr(plan, analyzed, ctx, value);
+                    discover_expr(plan, found, ctx, value)?;
                 }
             }
         },
         Expr::Tuple { items, .. } | Expr::List { items, .. } => {
             for item in items {
-                discover_expr(plan, analyzed, ctx, item);
+                discover_expr(plan, found, ctx, item)?;
             }
         },
-        Expr::Field { recv, .. } => discover_expr(plan, analyzed, ctx, recv),
+        Expr::Field { recv, .. } => discover_expr(plan, found, ctx, recv)?,
         Expr::Index { recv, index, .. } => {
-            discover_expr(plan, analyzed, ctx, recv);
-            discover_expr(plan, analyzed, ctx, index);
+            discover_expr(plan, found, ctx, recv)?;
+            discover_expr(plan, found, ctx, index)?;
         },
         Expr::MapApply { key, value, .. } => {
-            discover_expr(plan, analyzed, ctx, key);
-            discover_expr(plan, analyzed, ctx, value);
+            discover_expr(plan, found, ctx, key)?;
+            discover_expr(plan, found, ctx, value)?;
         },
         Expr::If {
             cond, then, else_, ..
         } => {
-            discover_expr(plan, analyzed, ctx, cond);
-            discover_block(plan, analyzed, ctx, then);
+            discover_expr(plan, found, ctx, cond)?;
+            discover_block(plan, found, ctx, then)?;
             if let Some(else_) = else_ {
-                discover_expr(plan, analyzed, ctx, else_);
+                discover_expr(plan, found, ctx, else_)?;
             }
         },
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            discover_expr(plan, analyzed, ctx, scrutinee);
+            discover_expr(plan, found, ctx, scrutinee)?;
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    discover_expr(plan, analyzed, ctx, guard);
+                    discover_expr(plan, found, ctx, guard)?;
                 }
-                discover_expr(plan, analyzed, ctx, &arm.body);
+                discover_expr(plan, found, ctx, &arm.body)?;
             }
         },
         Expr::While { cond, body, .. } => {
-            discover_expr(plan, analyzed, ctx, cond);
-            discover_block(plan, analyzed, ctx, body);
+            discover_expr(plan, found, ctx, cond)?;
+            discover_block(plan, found, ctx, body)?;
         },
         Expr::For { iter, body, .. } => {
-            discover_expr(plan, analyzed, ctx, iter);
-            discover_expr(plan, analyzed, ctx, body);
+            discover_expr(plan, found, ctx, iter)?;
+            discover_expr(plan, found, ctx, body)?;
         },
         Expr::Return { expr, .. } => {
             if let Some(expr) = expr {
-                discover_expr(plan, analyzed, ctx, expr);
+                discover_expr(plan, found, ctx, expr)?;
             }
         },
         Expr::Nursery { body, .. } | Expr::Defer { body, .. } => {
-            discover_block(plan, analyzed, ctx, body);
+            discover_block(plan, found, ctx, body)?;
         },
-        Expr::Block(block) => discover_block(plan, analyzed, ctx, block),
+        Expr::Block(block) => discover_block(plan, found, ctx, block)?,
         Expr::Literal { .. }
         | Expr::RawStr { .. }
         | Expr::Path { .. }
@@ -1841,20 +1960,32 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
         // a conversion placeholder mints nothing
         | Expr::Invalid(_) => {},
     }
+    Ok(())
 }
 
 /// One block's statements, in source order.
-fn discover_block(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, block: &BlockExpr) {
+fn discover_block(
+    plan: &mut Plan,
+    found: &mut Discovery<'_, '_>,
+    ctx: &MintCtx,
+    block: &BlockExpr,
+) -> Result<(), LowerError> {
     for stmt in &block.stmts {
-        discover_stmt(plan, analyzed, ctx, stmt);
+        discover_stmt(plan, found, ctx, stmt)?;
     }
+    Ok(())
 }
 
 /// One statement: a binding's initializer or an expression.
-fn discover_stmt(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, stmt: &Stmt) {
+fn discover_stmt(
+    plan: &mut Plan,
+    found: &mut Discovery<'_, '_>,
+    ctx: &MintCtx,
+    stmt: &Stmt,
+) -> Result<(), LowerError> {
     match &stmt.kind {
-        StmtKind::Local(local) => discover_expr(plan, analyzed, ctx, &local.init),
-        StmtKind::Expr(expr) => discover_expr(plan, analyzed, ctx, expr),
+        StmtKind::Local(local) => discover_expr(plan, found, ctx, &local.init),
+        StmtKind::Expr(expr) => discover_expr(plan, found, ctx, expr),
     }
 }
 
@@ -2529,18 +2660,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // and the pool-call slide checks words against the callee's
         // typed parameters — so those members refuse here, honestly,
         // until the representation ruling that names their word shape.
-        // A free generic fn's body is the exception: its parameters and
-        // returns over the fn's own type variables are the Raw-word
+        // A generic body is the exception — the ONE body of a free
+        // generic fn or any of its instances: the ONE body's parameters
+        // and returns over the fn's own type variables are the Raw-word
         // shape the entering call sites guard at their one-word
-        // instantiation boundary.
+        // instantiation boundary, and an instance reads its types
+        // substituted through the lens, so its guard cannot fire.
         if let Some(decl) = &planned.decl
-            && !planned.free_generic
+            && !planned.is_generic_body()
         {
             for param in decl.params.iter() {
                 let Some(fact) = analyzed.checked.binders.get(&param.name.span) else {
                     continue;
                 };
-                if let [only] = analyzed.decls.universe.members(fact.ty)
+                if let [only] = shapes.universe().members(fact.ty)
                     && shapes.is_var_atom(*only)
                 {
                     return Err(LowerError::unsupported(
@@ -2589,7 +2722,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     "only monomorphic checked functions lower this round",
                 )
             })?;
-            let Some((_, ret)) = fn_sig_of(&analyzed.decls.universe, fn_ty) else {
+            // a lambda minted inside an instance lowers under the
+            // instance's substitution, so its own checked type reads
+            // through the lens here
+            let fn_ty = shapes
+                .subst(fn_ty)
+                .map_err(|err| err.respanned(planned.lambda.span()))?;
+            let Some((_, ret)) = fn_sig_of(shapes.universe(), fn_ty) else {
                 return Err(LowerError::unsupported(
                     planned.lambda.span(),
                     "a non-function binding",
@@ -2599,8 +2738,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             ret
         };
         if planned.decl.is_some()
-            && !planned.free_generic
-            && let [only] = analyzed.decls.universe.members(ret)
+            && !planned.is_generic_body()
+            && let [only] = shapes.universe().members(ret)
             && shapes.is_var_atom(*only)
         {
             return Err(LowerError::unsupported(
@@ -2695,8 +2834,45 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     // ---- frame and buffer --------------------------------------------------
 
-    /// The checked `Val` recorded at one span.
+    // ---- the type lens -------------------------------------------------------
+
+    /// The registry as this lowering reads it: the analyzed package's
+    /// own outside every instantiation, the discovery's copy while one
+    /// lowered (the substituted types minted there).
+    fn universe(&self) -> &'a ds_check::Universe {
+        self.shapes.universe()
+    }
+
+    /// The checked `Val` recorded at one span, read through the lens:
+    /// under an instantiation every type the checker recorded for the
+    /// body is the one the plan's discovery substituted it to, so the
+    /// walk lowers an instance exactly like a monomorphic body. A type
+    /// naming a variable the discovery never resolved refuses here,
+    /// re-spanned at the node, instead of lowering a variable's word.
     fn val(&self, span: Span) -> Result<Val, LowerError> {
+        let val = self
+            .analyzed
+            .checked
+            .expr_types
+            .get(&span)
+            .copied()
+            .ok_or_else(|| {
+                LowerError::unsupported(span, "an expression", "it has no checked type")
+            })?;
+        let ty = self
+            .shapes
+            .subst(val.ty)
+            .map_err(|err| err.respanned(span))?;
+        Ok(Val { ty, ..val })
+    }
+
+    /// The checked `Val` the body's own checking recorded, un-substituted:
+    /// the runtime-evidence dispatch's decision read. A generic body is
+    /// written over its variables, and its nested bound calls dispatch
+    /// through the frame's evidence slots whatever the instantiation
+    /// solved, so the decision reads the written type and the lens
+    /// stays out of it.
+    fn written_val(&self, span: Span) -> Result<Val, LowerError> {
         self.analyzed
             .checked
             .expr_types
@@ -2705,8 +2881,138 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .ok_or_else(|| LowerError::unsupported(span, "an expression", "it has no checked type"))
     }
 
+    /// The checked binder fact at one span, its type read through the
+    /// lens. `Ok(None)` keeps the site's own no-record handling; a belt
+    /// refusal (`Err`) re-spans at the binder and never lowers a
+    /// variable's word for an instance.
+    fn binder_fact(&self, span: Span) -> Result<Option<BinderFact>, LowerError> {
+        let Some(fact) = self.analyzed.checked.binders.get(&span).copied() else {
+            return Ok(None);
+        };
+        let ty = self
+            .shapes
+            .subst(fact.ty)
+            .map_err(|err| err.respanned(span))?;
+        Ok(Some(BinderFact { ty, ..fact }))
+    }
+
+    /// A def's checked type, read through the lens: a monomorphic
+    /// callee's signature names no variable of the body being lowered,
+    /// so the lens is an identity there and a belt refusal names a
+    /// construct to report — re-spanned by the call site's own error
+    /// mapping.
+    fn def_type(&self, def: DefId) -> Result<Option<Ty>, LowerError> {
+        let Some(ty) = self.analyzed.checked.def_types.get(&def).copied() else {
+            return Ok(None);
+        };
+        Ok(Some(self.shapes.subst(ty)?))
+    }
+
+    /// The checked trait-call record at one span, its receiver type read
+    /// through the lens.
+    fn trait_call(&self, span: Span) -> Result<Option<TraitCall>, LowerError> {
+        let Some(call) = self.analyzed.checked.trait_calls.get(&span).cloned() else {
+            return Ok(None);
+        };
+        let recv = self
+            .shapes
+            .subst(call.recv)
+            .map_err(|err| err.respanned(span))?;
+        Ok(Some(TraitCall { recv, ..call }))
+    }
+
+    /// The checked trait-call record at one span, un-substituted: the
+    /// runtime-evidence slot path's read, which peels the entering
+    /// frame's own written variable.
+    fn written_trait_call(&self, span: Span) -> Option<TraitCall> {
+        self.analyzed.checked.trait_calls.get(&span).cloned()
+    }
+
+    /// The checked `is`-test type at one span, read through the lens.
+    fn is_test(&self, span: Span) -> Result<Option<Ty>, LowerError> {
+        let Some(ty) = self.analyzed.checked.is_tests.get(&span).copied() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.shapes.subst(ty).map_err(|err| err.respanned(span))?,
+        ))
+    }
+
+    /// The solved generic-argument types one call site's checker record
+    /// carries, read through the lens: under an instantiation the
+    /// record names this body's variables, and the substitution is what
+    /// the plan's discovery keyed the instance by.
+    fn generic_call(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
+        let Some(solved) = self.analyzed.checked.generic_calls.get(&span).cloned() else {
+            return Ok(None);
+        };
+        let solved = solved
+            .iter()
+            .map(|ty| self.shapes.subst(*ty).map_err(|err| err.respanned(span)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(solved))
+    }
+
+    /// The checked bound answers one call entering a generic body
+    /// carries, un-substituted: the runtime-evidence staging's read. A
+    /// `None` serving answer names the entering body's own written
+    /// variable — the frame's evidence slot the entering site staged —
+    /// while a solved answer's type reaches the chain start through the
+    /// lens at the staging itself.
+    fn written_generic_call_bounds(&self, span: Span) -> Option<GenericCallBounds> {
+        self.analyzed
+            .checked
+            .generic_call_bounds
+            .get(&span)
+            .cloned()
+    }
+
+    /// The member call's solved parameter types, read through the lens.
+    fn member_call_params(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
+        let Some(params) = self.analyzed.checked.member_call_params.get(&span).cloned() else {
+            return Ok(None);
+        };
+        let params = params
+            .iter()
+            .map(|ty| self.shapes.subst(*ty).map_err(|err| err.respanned(span)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(params))
+    }
+
+    /// The checked assignment place chain, read through the lens.
+    fn place_store(&self, span: Span) -> Result<Option<PlaceStore>, LowerError> {
+        let Some(store) = self.analyzed.checked.place_stores.get(&span).cloned() else {
+            return Ok(None);
+        };
+        let root_ty = self
+            .shapes
+            .subst(store.root_ty)
+            .map_err(|err| err.respanned(span))?;
+        let steps = store
+            .steps
+            .into_iter()
+            .map(|step| {
+                Ok(match step {
+                    PlaceStep::Field { name, ty } => PlaceStep::Field {
+                        name,
+                        ty: self.shapes.subst(ty).map_err(|err| err.respanned(span))?,
+                    },
+                    PlaceStep::Index { native, elem } => PlaceStep::Index {
+                        native,
+                        elem: self.shapes.subst(elem).map_err(|err| err.respanned(span))?,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, LowerError>>()?;
+        Ok(Some(PlaceStore {
+            binder: store.binder,
+            root_ty,
+            steps,
+        }))
+    }
+
     fn members(&self, ty: Ty) -> &'a [TypeId] {
-        self.analyzed.decls.universe.members(ty)
+        self.universe().members(ty)
     }
 
     /// Allocates body slots, returning the base.
@@ -3073,7 +3379,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // (store_over decs the incoming count the caller handed),
                 // so the only seam is the var-typed word whose count the
                 // overwrite contract cannot see yet
-                ParamMode::Mut(_) if self.param_is_var_ty(param) => {
+                ParamMode::Mut(_) if self.param_is_var_ty(param)? => {
                     return Err(LowerError::unsupported(
                         param.span,
                         "a mut parameter over a type variable",
@@ -3083,7 +3389,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 },
                 _ => {},
             }
-            let Some(fact) = self.analyzed.checked.binders.get(&param.name.span).copied() else {
+            let Some(fact) = self.binder_fact(param.name.span)? else {
                 return Err(LowerError::unsupported(
                     param.name.span,
                     "a parameter",
@@ -3127,14 +3433,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Whether one parameter's checked type is a generic impl's type
-    /// variable (the mut-window seam the var-binding refusal mirrors).
-    fn param_is_var_ty(&self, param: &Param) -> bool {
-        self.analyzed
-            .checked
-            .binders
-            .get(&param.name.span)
-            .copied()
-            .is_some_and(|fact| self.is_var_ty(fact.ty))
+    /// variable (the mut-window seam the var-binding refusal mirrors),
+    /// read through the lens: an instance's mut parameter over the
+    /// body's variable reads its substituted concrete type.
+    fn param_is_var_ty(&self, param: &Param) -> Result<bool, LowerError> {
+        Ok(self
+            .binder_fact(param.name.span)?
+            .is_some_and(|fact| self.is_var_ty(fact.ty)))
     }
 
     /// Binds one generic impl member body's runtime-evidence slots: one
@@ -3174,7 +3479,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let [param] = params else {
             return Err(mismatch("a deinit's parameter"));
         };
-        let Some(fact) = self.analyzed.checked.binders.get(&param.name.span).copied() else {
+        let Some(fact) = self.binder_fact(param.name.span)? else {
             return Err(LowerError::unsupported(
                 param.name.span,
                 "a deinit's `self`",
@@ -3565,7 +3870,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return false;
         };
         matches!(
-            self.analyzed.decls.universe.atom_decl(*atom),
+            self.universe().atom_decl(*atom),
             Ok(decl)
                 if matches!(&decl.kind, AtomKind::Tuple(elements) if elements.is_empty())
         )
@@ -3663,12 +3968,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let init = self.value(&local.init)?;
         let declared = match pat {
-            Pattern::Binding { span, .. } => self
-                .analyzed
-                .checked
-                .binders
-                .get(span)
-                .map_or(init.ty, |f| f.ty),
+            Pattern::Binding { span, .. } => self.binder_fact(*span)?.map_or(init.ty, |f| f.ty),
             _ => init.ty,
         };
         let place = if local.mutable {
@@ -3771,7 +4071,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let Expr::Literal { lit, .. } = peel_parens(&local.init) else {
             return Ok(None);
         };
-        let Some(fact) = self.analyzed.checked.binders.get(span).copied() else {
+        let Some(fact) = self.binder_fact(*span)? else {
             return Ok(None);
         };
         if self.is_var_ty(fact.ty) {
@@ -3845,7 +4145,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     },
                 }
             };
-            let Some(fact) = self.analyzed.checked.binders.get(span).copied() else {
+            let Some(fact) = self.binder_fact(*span)? else {
                 return Err(mismatch("a var destructuring binder"));
             };
             if self.is_var_ty(fact.ty) {
@@ -3894,7 +4194,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn assign_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
         // A checked place chain (the assignment sugar) synthesizes its
         // store from the walk the checker recorded.
-        if let Some(store) = self.analyzed.checked.place_stores.get(&e.span()).cloned() {
+        if let Some(store) = self.place_store(e.span())? {
             return self.assign_place_store(e, &store);
         }
         let Expr::Assign {
@@ -3940,11 +4240,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .cloned()
             .ok_or_else(|| self.missing_binder(only.span))?;
         let declared = self
-            .analyzed
-            .checked
-            .binders
-            .get(&binder)
-            .copied()
+            .binder_fact(binder)?
             .ok_or_else(|| mismatch("an assignment place"))?
             .ty;
         let assigned = match op {
@@ -5076,7 +5372,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // minted it for this span, so the site stages the plan's answer
         // (index, captures, evidence) instead of minting mid-walk — one
         // mint truth between discovery and the walk.
-        let Some(mint) = self.plan.minted(*span) else {
+        let Some(mint) = self.plan.minted(self.index, *span) else {
             return Err(LowerError::unsupported(
                 *span,
                 "a lambda value",
@@ -5628,7 +5924,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // site's own checks above read, so the site stages the plan's
         // answer instead of minting mid-walk — one mint truth between
         // discovery and the walk.
-        let Some(mint) = self.plan.minted(*span) else {
+        let Some(mint) = self.plan.minted(self.index, *span) else {
             return Err(LowerError::unsupported(
                 *span,
                 "a spawned child",
@@ -5686,12 +5982,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // (H5): the scalar slice validated at resolution, the same
             // derivation the linked arm takes
             Callee::Bound { def, .. } | Callee::Foreign { def: Some(def), .. } => self
-                .analyzed
-                .checked
-                .def_types
-                .get(&def)
-                .copied()
-                .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                .def_type(def)
+                .ok()
+                .flatten()
+                .and_then(|fn_ty| fn_sig_of(self.universe(), fn_ty))
                 .and_then(|(params, _)| {
                     let mut words = Vec::with_capacity(params.len());
                     for ty in params {
@@ -5706,8 +6000,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 planned
                     .def
-                    .and_then(|def| self.analyzed.checked.def_types.get(&def).copied())
-                    .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
+                    .and_then(|def| self.def_type(def).ok().flatten())
+                    .and_then(|fn_ty| fn_sig_of(self.universe(), fn_ty))
                     .and_then(|(params, _)| {
                         let mut words = Vec::with_capacity(params.len());
                         for ty in params {
@@ -6234,6 +6528,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         if let Some(fact) = self.analyzed.decls.foreign_consts.get(def).cloned() {
                             return self.embed_const_fact(fact, ty, span);
                         }
+                        // A free generic fn holds no callable word: a call
+                        // through it has no site to stage the body's
+                        // evidence words, and the per-shape bodies answer
+                        // only direct calls, so the value use refuses ahead
+                        // of the table lookup — whether the plan holds a
+                        // ONE body for it or not.
+                        if self.plan.generic_fn(*def).is_some() {
+                            return Err(LowerError::unsupported(
+                                span,
+                                "a generic function value",
+                                "the word carries no instantiation, and a call through it has no \
+                                 site to stage the body's evidence words; generic calls name \
+                                 their callee directly",
+                            ));
+                        }
                         // A named fn used as a value (F2, functions are
                         // values): the same pool FuncRef const channel a
                         // non-capturing lambda mints — one copyable scalar
@@ -6283,14 +6592,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                             })
                         } else if kind == ds_check::DefKind::Fn
                             || self
-                                .analyzed
-                                .checked
-                                .def_types
-                                .get(def)
-                                .copied()
-                                .is_some_and(|ty| {
-                                    fn_sig_of(&self.analyzed.decls.universe, ty).is_some()
-                                })
+                                .def_type(*def)?
+                                .is_some_and(|ty| fn_sig_of(self.universe(), ty).is_some())
                         {
                             // a bodied fn that did not plan (a `var`-bound
                             // generic fn) still carries a checked fn type,
@@ -6350,7 +6653,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // atom); the nominal path spelling covers only the shapes the
         // checker recorded no solve for.
         let nominal;
-        let tested: &[TypeId] = if let Some(members) = self.solved_is_members(span) {
+        let tested: &[TypeId] = if let Some(members) = self.solved_is_members(span)? {
             members
         } else {
             let atom = self.type_atom(ty)?;
@@ -6442,13 +6745,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The tested members of one `is` test, from the checker's solved
-    /// record keyed by the expression's span: the solution's members
-    /// are what the TAG_TESTs discriminate by, the authority the nominal
-    /// path spelling only backs up (a written type the checker recorded
-    /// no solve for).
-    fn solved_is_members(&self, span: Span) -> Option<&'a [TypeId]> {
-        let &solved = self.analyzed.checked.is_tests.get(&span)?;
-        Some(self.members(solved))
+    /// record keyed by the expression's span, read through the lens: the
+    /// solution's members are what the TAG_TESTs discriminate by, the
+    /// authority the nominal path spelling only backs up (a written type
+    /// the checker recorded no solve for).
+    fn solved_is_members(&self, span: Span) -> Result<Option<&'a [TypeId]>, LowerError> {
+        let Some(solved) = self.is_test(span)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.members(solved)))
     }
 
     /// The atom a written type names; nominal single-segment paths only.
@@ -6604,12 +6909,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .get(&bind)
                     .cloned()
                     .ok_or_else(|| mismatch("a punned field's binding"))?;
-                let ty = self
-                    .analyzed
-                    .checked
-                    .binders
-                    .get(&bind)
-                    .map_or(static_ty, |f| f.ty);
+                let ty = self.binder_fact(bind)?.map_or(static_ty, |f| f.ty);
                 (TypedPlace { place, ty }, name.span)
             };
             let addrs = self
@@ -6654,7 +6954,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// union store reads the field's own union sides.
     fn field_decl_expr(&self, ty: Ty, index: usize) -> Option<&'a TypeExpr> {
         let atom = self.only_atom(ty, no_span()).ok()?;
-        let decl = self.analyzed.decls.universe.atom_decl(atom).ok()?;
+        let decl = self.universe().atom_decl(atom).ok()?;
         match &decl.kind {
             AtomKind::Struct(fields) => fields.get(index).map(|f| &f.ty),
             _ => None,

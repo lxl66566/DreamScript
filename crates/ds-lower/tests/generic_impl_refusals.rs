@@ -542,13 +542,18 @@ fn a_mut_parameter_over_the_impl_head_application_lands() {
     );
 }
 
-/// A mut parameter over a type variable inside a free generic function
-/// fires the overwrite contract's guard the moment the body plans: a
+/// A mut parameter over a type variable inside a free generic fn fires
+/// the overwrite contract's guard where the ONE body still lowers: a
 /// reassignment would drop the previous word's count by runtime kind,
-/// and no placement contract for a type-variable's word exists yet.
-/// The guard's predicate is any type variable, not an impl's own.
+/// and no placement contract for a type-variable's word exists yet. A
+/// site entering from inside a generic body that lowers over its
+/// variables' Raw words (a generic impl member's body) targets that
+/// ONE body, so the guard fires at the instance-body-free route; a
+/// concrete entering site plans an instance whose mut parameter reads
+/// the substituted concrete words, and the uncalled declaration plans
+/// nothing at all.
 #[test]
-fn a_mut_parameter_over_a_variable_in_a_generic_free_fn_refuses_at_planning() {
+fn a_mut_parameter_over_a_variable_in_the_one_body_refuses_at_lowering() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -560,14 +565,16 @@ fn a_mut_parameter_over_a_variable_in_a_generic_free_fn_refuses_at_planning() {
         "impl shows for int {\n",
         "  fn show(self) -> string { \"n\" }\n",
         "}\n",
+        "fn keep[t: shows] (mut x: t) -> t { x }\n",
         "impl [t: shows] shows for list[t] {\n",
-        "  fn show(self) -> string { \"l\" }\n",
-        "}\n",
-        "fn take[t: shows] (mut x: t, y: t) -> () {\n",
-        "  x = y\n",
+        "  fn show(self) -> string {\n",
+        "    var v = self\n",
+        "    keep(v)\n",
+        "    \"l\"\n",
+        "  }\n",
         "}\n",
         "fn main() -> int {\n",
-        "  println([1].show())\n",
+        "  println(\"m\")\n",
         "  0\n",
         "}\n",
     );
@@ -592,7 +599,7 @@ fn a_mut_parameter_over_a_variable_in_a_generic_free_fn_refuses_at_planning() {
         &analyzed,
     )
     .err()
-    .expect("the body's own planning fires the overwrite guard");
+    .expect("the ONE body's own lowering fires the overwrite guard");
     let LowerError::Unsupported { what, reason, .. } = err else {
         panic!("the refusal is an unsupported shape");
     };
@@ -603,11 +610,12 @@ fn a_mut_parameter_over_a_variable_in_a_generic_free_fn_refuses_at_planning() {
     );
 }
 
-/// The uncalled declaration stays inert the honest way: the body lowers
-/// exactly once (the record's ONE body), installs beside `main`, and
-/// the run never enters it.
+/// The uncalled declaration stays inert the honest way: no site entered
+/// it, so the plan holds neither an instance nor a ONE body, and the
+/// module's table carries nothing for the fn — the run never reaches
+/// it.
 #[test]
-fn an_uncalled_free_generic_fn_lowers_once_and_never_runs() {
+fn an_uncalled_free_generic_fn_lowers_nothing() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -644,10 +652,14 @@ fn an_uncalled_free_generic_fn_lowers_once_and_never_runs() {
         &asts,
         &analyzed,
     )
-    .expect("the uncalled body lowers");
+    .expect("the uncalled declaration plans nothing");
     assert!(
-        lowered.functions().contains(&"show_it".to_owned()),
-        "the ONE body emits exactly once"
+        lowered
+            .functions()
+            .iter()
+            .all(|name| name != "show_it" && !name.starts_with("show_it@")),
+        "neither a ONE body nor an instance emits: {:?}",
+        lowered.functions()
     );
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the writer's output round-trips");

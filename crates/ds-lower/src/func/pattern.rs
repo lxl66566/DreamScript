@@ -1566,13 +1566,13 @@ impl FnLower<'_, '_, '_> {
             // a struct-typed inner field binds the span its checked
             // type names, however many words it spans; every other
             // field binds its one word
-            let fact = self.analyzed.checked.binders.get(&bind.0).copied();
+            let fact = self.binder_fact(bind.0)?;
             let shape = match fact {
                 Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
                 _ => PlaceShape::Word(field.slot()),
             };
             self.binders.insert(bind.0, Place { base: at, shape });
-            if let Some(fact) = self.analyzed.checked.binders.get(&bind.0).copied() {
+            if let Some(fact) = fact {
                 self.rc_bind_borrowed(bind.0, at, fact.ty)?;
             }
             self.scope_insert(&bind.1, bind.0);
@@ -1739,13 +1739,13 @@ impl FnLower<'_, '_, '_> {
                     // a struct-typed field binds the span its checked
                     // type names, however many words it spans; every
                     // other field binds its one word
-                    let fact = self.analyzed.checked.binders.get(&bind.0).copied();
+                    let fact = self.binder_fact(bind.0)?;
                     let shape = match fact {
                         Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
                         _ => PlaceShape::Word(field.slot()),
                     };
                     self.binders.insert(bind.0, Place { base, shape });
-                    if let Some(fact) = self.analyzed.checked.binders.get(&bind.0).copied() {
+                    if let Some(fact) = fact {
                         self.rc_bind_borrowed(bind.0, base, fact.ty)?;
                     }
                     self.scope_insert(&bind.1, bind.0);
@@ -1809,7 +1809,7 @@ impl FnLower<'_, '_, '_> {
                             if let Some(Pattern::Binding { span, name }) = pats.last().map(last_alt)
                             {
                                 let base = scrut.place.base + field.word;
-                                let fact = self.analyzed.checked.binders.get(span).copied();
+                                let fact = self.binder_fact(*span)?;
                                 let shape = match fact {
                                     Some(fact) if self.struct_typed(fact.ty) => {
                                         PlaceShape::Span(fact.ty)
@@ -1817,8 +1817,7 @@ impl FnLower<'_, '_, '_> {
                                     _ => PlaceShape::Word(field.slot()),
                                 };
                                 self.binders.insert(*span, Place { base, shape });
-                                if let Some(fact) = self.analyzed.checked.binders.get(span).copied()
-                                {
+                                if let Some(fact) = fact {
                                     self.rc_bind_borrowed(*span, base, fact.ty)?;
                                 }
                                 self.scope_insert(&name.name, *span);
@@ -1843,7 +1842,7 @@ impl FnLower<'_, '_, '_> {
                             // a struct-typed payload binds the span its
                             // checked type names, however many words it
                             // spans; every other field binds its one word
-                            let fact = self.analyzed.checked.binders.get(span).copied();
+                            let fact = self.binder_fact(*span)?;
                             let shape = match fact {
                                 Some(fact) if self.struct_typed(fact.ty) => {
                                     PlaceShape::Span(fact.ty)
@@ -1851,7 +1850,7 @@ impl FnLower<'_, '_, '_> {
                                 _ => PlaceShape::Word(field.slot()),
                             };
                             self.binders.insert(*span, Place { base, shape });
-                            if let Some(fact) = self.analyzed.checked.binders.get(span).copied() {
+                            if let Some(fact) = fact {
                                 self.rc_bind_borrowed(*span, base, fact.ty)?;
                             }
                             self.scope_insert(&name.name, *span);
@@ -1934,7 +1933,7 @@ impl FnLower<'_, '_, '_> {
                         base,
                         shape: PlaceShape::Word(addr.slot_ty),
                     });
-                    if let Some(fact) = self.analyzed.checked.binders.get(span).copied() {
+                    if let Some(fact) = self.binder_fact(*span)? {
                         self.rc_bind_borrowed(*span, base, fact.ty)?;
                     }
                     self.scope_insert(&name.name, *span);

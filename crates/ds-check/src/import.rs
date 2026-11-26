@@ -1648,7 +1648,7 @@ pub struct ForeignEntry {
     pub vis: Vis,
     /// What the declaration defines.
     pub kind: ForeignKind,
-    /// A generic declaration: its one body is a per-instantiation fact
+    /// A generic declaration: its bodies are per-instantiation facts
     /// the linked module serves, so it refuses selection.
     pub generic: bool,
     /// A defaulted parameter: its literal stages at the linked module's
