@@ -1407,6 +1407,12 @@ impl<'a> FnLower<'a, '_, '_> {
                 .and_then(|fn_ty| fn_sig_of(self.universe(), fn_ty))
                 .map(|(params, _)| params.to_vec()),
             Callee::Foreign { def: None, .. } => member_params.map(<[Ty]>::to_vec),
+            // a builtin call reads the checker's per-site solved
+            // parameter types: a union parameter (the string-separator
+            // pair) re-spans every argument into its whole region, so
+            // the staged words match the native's positional span
+            // whatever member the caller wrote
+            Callee::Builtin(_) => self.analyzed.checked.call_params.get(&call_span).cloned(),
             _ => None,
         };
         // whether each written argument position feeds a consuming

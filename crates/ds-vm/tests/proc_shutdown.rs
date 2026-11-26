@@ -90,7 +90,7 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 /// one word each, the separator joining then splitting them), the
 /// spawn's ok payload the handle word.
 fn spawn_def() -> FunctionDef {
-    def("spawn_child", &[Ref, Ref, Ref, Raw], 1, 3, &[
+    def("spawn_child", &[Ref, Ref, Raw, Ref], 1, 3, &[
         Uop::Funcf { frame_slots: 4 },
         // "-c<sep>" ++ script
         Uop::Kstr { dst: 1, kidx: k(2) },
@@ -99,11 +99,13 @@ fn spawn_def() -> FunctionDef {
             callee: k(0),
             nargs: 2,
         },
-        // split the joined argv on the separator
-        Uop::Kstr { dst: 2, kidx: k(3) },
+        // split the joined argv on the separator, the union tag word
+        // staging beside it
+        Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
+        Uop::Kstr { dst: 3, kidx: k(3) },
         Uop::Call {
             callee: k(1),
-            nargs: 2,
+            nargs: 3,
         },
         // the list word (slot 1) rides as the spawn's second argument
         Uop::Mov { dst: 2, src: 1 },

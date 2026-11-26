@@ -19,7 +19,7 @@ use ds_vm::{
     Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, SlotType,
-        SlotType::{Bool, I64, Raw, Ref},
+        SlotType::{Bool, I64, Raw, Ref, Tag},
         uop::Uop,
     },
     assemble,
@@ -88,13 +88,14 @@ fn fresh() -> FunctionDef {
 
 /// `(s: string) -> list`: splits on the KSTR-staged space.
 fn words() -> FunctionDef {
-    def("words", &[Ref, Ref, Raw], 1, 2, &[
-        Uop::Funcf { frame_slots: 3 },
+    def("words", &[Ref, Ref, Tag, Ref], 1, 3, &[
+        Uop::Funcf { frame_slots: 4 },
         Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(0) },
+        Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
+        Uop::Kstr { dst: 3, kidx: k(0) },
         Uop::Call {
             callee: k(1),
-            nargs: 2,
+            nargs: 3,
         },
         Uop::Ret { src: 1 },
     ])
@@ -102,13 +103,14 @@ fn words() -> FunctionDef {
 
 /// `(s, sep: string) -> list`: `split` over an arbitrary separator.
 fn parts() -> FunctionDef {
-    def("parts", &[Ref, Ref, Ref, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
+    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref], 2, 3, &[
+        Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 3, src: 0 },
-        Uop::Mov { dst: 4, src: 1 },
+        Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
+        Uop::Mov { dst: 5, src: 1 },
         Uop::Call {
             callee: k(1),
-            nargs: 2,
+            nargs: 3,
         },
         Uop::Ret { src: 3 },
     ])

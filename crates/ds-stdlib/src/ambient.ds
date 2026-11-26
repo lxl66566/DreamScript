@@ -488,8 +488,11 @@ pub extern fn len[t] (xs: t) -> int
 // by construction — no operand shape traps (a negative sqrt or ln
 // answers NaN, a NaN or infinite operand answers
 // itself). `atan2` takes (y, x), the quadrant read off both signs;
-// `pow` takes (base, exp). `abs`, `round`, and `trunc` cover the float
-// width alone; no int sibling exists.
+// `pow` takes (base, exp). `round` and `trunc` cover the float width
+// alone; `abs` joins the int width on the same spelling — the solved
+// argument type picks the numeric instance (int answers int, float
+// float), an `i64::MIN` magnitude trapping like the arithmetic family's
+// overflow, and any other width refusing at the call's lowering.
 pub extern fn sqrt (x: float) -> float
 pub extern fn sin (x: float) -> float
 pub extern fn cos (x: float) -> float
@@ -497,7 +500,13 @@ pub extern fn atan2 (y: float, x: float) -> float
 pub extern fn floor (x: float) -> float
 pub extern fn ceil (x: float) -> float
 pub extern fn pow (base: float, exp: float) -> float
-pub extern fn abs (x: float) -> float
+pub extern fn abs[t] (x: t) -> t
+// The fixed-point float formatter: exactly `digits` fraction digits
+// (half-to-even at the cut over the value's exact binary expansion),
+// the width riding 0..=767 — the widest exact f64 fraction — clamped
+// at both sides, never trapping. NaN and the infinities answer the
+// `str` spelling's own words.
+pub extern fn str_fixed (x: float, digits: int) -> string
 pub extern fn round (x: float) -> float
 pub extern fn trunc (x: float) -> float
 pub extern fn ln (x: float) -> float

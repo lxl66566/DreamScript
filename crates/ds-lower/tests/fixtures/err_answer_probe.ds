@@ -28,7 +28,7 @@ enum field_err {
 }
 
 extern fn println (s: string) -> ()
-extern fn split (s: string, sep: char) -> list[string]
+extern fn split (s: string, sep: char | string) -> list[string]
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn unwrap_or[t] (x: t?, y: t) -> t
 extern fn parse_int (s: string) -> int | parse_err

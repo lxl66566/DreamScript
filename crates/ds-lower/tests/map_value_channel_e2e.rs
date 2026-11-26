@@ -104,7 +104,8 @@ const PRELUDE: &str = concat!(
     "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "extern fn len[t] (xs: t) -> int\n",
     "extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n",
-    "extern fn join (parts: list[string], sep: string) -> string\n",
+    "tag char\n",
+    "extern fn join (parts: list[string], sep: char | string) -> string\n",
     "extern fn unwrap_or[t] (x: t?, y: t) -> t\n",
     "extern fn println (msg: string) -> ()\n",
 );

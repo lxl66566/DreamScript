@@ -611,11 +611,12 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::F64),
     },
     Native {
-        // the float width alone; no int sibling exists
-        name: "abs",
+        // the fixed-point float formatter: the digits word clamps into
+        // the honest f64 fraction window, the answer one string word
+        name: "str_fixed",
         module: NativeModule::Builtin,
-        index: 83,
-        shape: NativeShape::Total(SlotType::F64),
+        index: 57,
+        shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
         // the half rounds away from zero, the IEEE edges answering (a
@@ -1483,6 +1484,19 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         index: 37,
         evidence: 1,
         params: &[SlotType::Raw, SlotType::Raw],
+        staging: Staging::Fixed,
+        shape: NativeShape::TotalByInstance,
+        instances: &[BuiltinInstance::Int, BuiltinInstance::Float],
+    },
+    GenericNative {
+        // abs joins the int and float widths on one spelling: the solved
+        // argument type names the numeric instance the evidence word
+        // stages, the result word keying off it (`max`'s shape)
+        name: "abs",
+        module: NativeModule::Builtin,
+        index: 83,
+        evidence: 1,
+        params: &[SlotType::Raw],
         staging: Staging::Fixed,
         shape: NativeShape::TotalByInstance,
         instances: &[BuiltinInstance::Int, BuiltinInstance::Float],

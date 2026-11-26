@@ -373,6 +373,12 @@ pub struct Checked {
     /// re-span, the width guard) reads this record where a dispatch
     /// reaches a body no planned def names.
     pub member_call_params: FxHashMap<Span, Vec<Ty>>,
+    /// The solved parameter types of every non-generic free fn call,
+    /// keyed by the call's own span: recorded only when every parameter
+    /// solves, so the call-site staging (the native widening family's
+    /// union re-span) reads the site's own types instead of a
+    /// `def_types` row no free fn declaration carries.
+    pub call_params: FxHashMap<Span, Vec<Ty>>,
     /// Every checked assignment place chain (the assignment sugar),
     /// keyed by the assignment's own span: the root binder plus its
     /// field/index steps, the lowering synthesizing the mut-window
@@ -527,6 +533,7 @@ pub fn analyze_resolved(
         handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        call_params: checked.call_params,
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
         comptime_loops: checked.comptime_loops,
@@ -697,6 +704,7 @@ fn analyze_served_over(
         handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        call_params: checked.call_params,
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
         comptime_loops: checked.comptime_loops,
@@ -747,6 +755,7 @@ where
     let mut inherent_calls = FxHashMap::default();
     let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut member_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
+    let mut call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
     let mut place_stores: FxHashMap<Span, PlaceStore> = FxHashMap::default();
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
@@ -781,6 +790,7 @@ where
             comptime_loops: &mut comptime_loops,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            call_params: &mut call_params,
             place_stores: &mut place_stores,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
@@ -844,6 +854,7 @@ where
             comptime_loops: &mut comptime_loops,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            call_params: &mut call_params,
             place_stores: &mut place_stores,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
@@ -907,6 +918,7 @@ where
         comptime_loops,
         method_selections,
         member_call_params,
+        call_params,
         place_stores,
     }))
 }
@@ -1051,6 +1063,7 @@ struct Bodies<'a> {
     inherent_calls: &'a mut FxHashMap<Span, MethodId>,
     method_selections: &'a mut FxHashMap<Span, MethodId>,
     member_call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
+    call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
     place_stores: &'a mut FxHashMap<Span, PlaceStore>,
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
@@ -4522,6 +4535,14 @@ impl Bodies<'_> {
                     }
                     param_tys.push(None);
                 }
+            }
+            // The site's solved parameter types for the call-site
+            // staging's widening family: recorded when every parameter
+            // solves, so a union parameter's argument re-spans into the
+            // parameter's whole region whatever member the caller wrote.
+            if param_tys.iter().all(Option::is_some) {
+                self.call_params
+                    .insert(span, param_tys.iter().filter_map(|ty| *ty).collect());
             }
             let ret = sig
                 .ret

@@ -15,6 +15,7 @@
 // main: stage: run
 
 tag int
+tag char
 tag string
 tag bool
 struct list[t]
@@ -24,7 +25,7 @@ extern fn concat (a: string, b: string) -> string
 extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
 extern fn len[t] (xs: t) -> int
-extern fn join (parts: list[string], sep: string) -> string
+extern fn join (parts: list[string], sep: char | string) -> string
 
 trait shows {
   fn show(self) -> string

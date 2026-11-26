@@ -25,7 +25,7 @@ extern fn atan2 (y: float, x: float) -> float
 extern fn floor (x: float) -> float
 extern fn ceil (x: float) -> float
 extern fn pow (base: float, exp: float) -> float
-extern fn abs (x: float) -> float
+extern fn abs[t] (x: t) -> t
 extern fn round (x: float) -> float
 extern fn trunc (x: float) -> float
 extern fn ln (x: float) -> float

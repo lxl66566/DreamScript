@@ -13,14 +13,17 @@
 // content hash (`str_compare`, `str_hash`) the derive families read,
 // and the `char_of`/`code_of` codepoint pair.
 
-// The one separator type both ways: `split` slices per its char and
-// `join` renders the neighbors around it. An empty-separator fold has
-// no spelling through the pair, so it composes in ds source.
-pub extern fn join (parts: list[string], sep: char) -> string
+// The separator takes the char and the string beside it: `split`
+// slices per the separator's text (an empty string slicing per char)
+// and `join` renders the neighbors around it. Both members read the
+// separator's payload word, so a char (itself a one-char string word)
+// and a string stage identically inside the union's tag-plus-payload
+// span.
+pub extern fn join (parts: list[string], sep: char | string) -> string
 pub extern fn trim (s: string) -> string
 pub extern fn parse_int (s: string) -> int | parse_err
 pub extern fn parse_float (s: string) -> float | parse_err
-pub extern fn split (s: string, sep: char) -> list[string]
+pub extern fn split (s: string, sep: char | string) -> list[string]
 // The checked slice: the chars between the two positions, none
 // outside `0 <= start <= end` and the string's char count — never
 // clamping and never a trap.
@@ -42,6 +45,60 @@ pub extern fn char_at (s: string, i: int) -> char | none
 pub extern fn contains (haystack: string, needle: string) -> bool
 pub extern fn index_of (haystack: string, needle: string) -> int | none
 pub extern fn replace (haystack: string, needle: string, with: string) -> string
+
+// The format family: plain ds source over the builtin faces. `hex`
+// spells the lowercase hex digits of a non-negative word (a negative
+// value answers its minus sign and the magnitude's digits); `pad_left`
+// and `pad_right` are the two alignments, the pad char repeated to the
+// width and a past-the-width value answering itself. Floats compose
+// over the builtin `str_fixed` formatter.
+pub fn hex (n: int) -> string {
+  if n < 0 {
+    return "-${hex(-n)}"
+  }
+  if n == 0 {
+    return "0"
+  }
+  var out = ""
+  var v = n
+  while v > 0 {
+    const nibble = v & 15
+    // the codepoint reader answers the one-char string word; the digit
+    // codes are scalars, so the fallback never fires
+    const digit = char_of(if nibble < 10 { 48 + nibble } else { 87 + nibble }).unwrap_or("")
+    out = "${digit}${out}"
+    v = v >> 4
+  }
+  out
+}
+
+pub fn pad_left (s: string, width: int, pad: char) -> string {
+  const missing = width - len(s)
+  if missing <= 0 {
+    return s
+  }
+  var fill = ""
+  var i = 0
+  while i < missing {
+    fill = "${fill}${pad}"
+    i += 1
+  }
+  "${fill}${s}"
+}
+
+pub fn pad_right (s: string, width: int, pad: char) -> string {
+  const missing = width - len(s)
+  if missing <= 0 {
+    return s
+  }
+  var fill = ""
+  var i = 0
+  while i < missing {
+    fill = "${fill}${pad}"
+    i += 1
+  }
+  "${s}${fill}"
+}
 
 // The zero-copy parsing face: one view over a
 // counted share of a base string — the `s` field's Ref word is the

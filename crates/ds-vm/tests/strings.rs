@@ -249,13 +249,14 @@ fn ask_parse() -> FunctionDef {
 /// `(s, sep: string) -> list[string]`: the payload `Ref` names the list
 /// object.
 fn parts() -> FunctionDef {
-    def("parts", &[Ref, Ref, Ref, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
+    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref], 2, 3, &[
+        Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 3, src: 0 },
-        Uop::Mov { dst: 4, src: 1 },
+        Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
+        Uop::Mov { dst: 5, src: 1 },
         Uop::Call {
             callee: k(11),
-            nargs: 2,
+            nargs: 3,
         },
         Uop::Ret { src: 3 },
     ])
@@ -426,22 +427,24 @@ fn len_counts_chars_not_bytes() {
 #[test]
 fn len_dispatches_the_one_body_on_the_evidence_word() {
     let pool = vec![
-        Const::I64(1),          // k0: the list instance id
+        Const::I64(1),          // k0: the list instance id (the evidence word)
         Const::Str(";".into()), // k1: the split separator
         builtin(BUILTIN_SPLIT), // k2
         builtin(BUILTIN_LEN),   // k3
     ];
+    // the shared overlay word is a Raw wildcard: the split stages the
+    // separator's union tag there, the CALLG stages the evidence word
     let body = [
-        Uop::Funcf { frame_slots: 3 },
-        // overlay 0 stages the text, overlay 1 the separator
+        Uop::Funcf { frame_slots: 4 },
         Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(1) },
+        Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
+        Uop::Kstr { dst: 3, kidx: k(1) },
         Uop::Call {
             callee: k(2),
-            nargs: 2,
+            nargs: 3,
         },
         // the split result sits on overlay 0; the evidence word restages
-        // overlay 1 as the list instance
+        // the wildcard as the list instance
         Uop::Kimm { dst: 2, kidx: k(0) },
         Uop::Callg {
             callee: k(3),
@@ -451,7 +454,7 @@ fn len_dispatches_the_one_body_on_the_evidence_word() {
     ];
     let def = FunctionDef {
         name: "count_list".into(),
-        layout: FrameLayout::new(vec![Raw, Raw, Raw], 1, 2).expect("valid fixture layout"),
+        layout: FrameLayout::new(vec![Ref, Ref, Raw, Ref], 1, 3).expect("valid fixture layout"),
         pool,
         code: assemble(&body).expect("fixture body encodes"),
     };
@@ -461,12 +464,14 @@ fn len_dispatches_the_one_body_on_the_evidence_word() {
     let args = [string(&mut vm, "alpha;beta;gamma")];
     assert_eq!(
         vm.run("st", "count_list", &args),
-        Ok(FrameAnswer::one(Value::I64(3)))
+        Ok(FrameAnswer::one(Value::I64(3))),
+        "the split's three parts count through the list instance"
     );
     let args = [string(&mut vm, "solo")];
     assert_eq!(
         vm.run("st", "count_list", &args),
-        Ok(FrameAnswer::one(Value::I64(1)))
+        Ok(FrameAnswer::one(Value::I64(1))),
+        "the one part counts through the same evidence"
     );
 }
 
@@ -839,36 +844,46 @@ fn jn_registry() -> ModuleRegistry {
 /// chain on one overlay area: split's result overlays word 0 while the
 /// join separator survives on word 1.
 fn render() -> FunctionDef {
-    jn_def("render", &[Ref, Ref, Ref, Raw, Raw, Raw], 3, 3, &[
-        Uop::Funcf { frame_slots: 6 },
-        Uop::Mov { dst: 3, src: 0 },
-        Uop::Mov { dst: 4, src: 1 },
-        Uop::Mov { dst: 5, src: 2 },
-        Uop::Call {
-            callee: k(0),
-            nargs: 2,
-        },
-        Uop::Mov { dst: 4, src: 5 },
-        Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        },
-        Uop::Ret { src: 3 },
-    ])
+    jn_def(
+        "render",
+        &[Ref, Ref, Ref, Raw, Raw, Ref, Tag, Ref],
+        3,
+        3,
+        &[
+            Uop::Funcf { frame_slots: 8 },
+            Uop::Mov { dst: 5, src: 0 },
+            Uop::TagNew { dst: 6, tag: 0 }, // the split separator's union tag
+            Uop::Mov { dst: 7, src: 1 },
+            Uop::Call {
+                callee: k(0),
+                nargs: 3,
+            },
+            Uop::TagNew { dst: 6, tag: 0 }, // the join separator's union tag
+            Uop::Mov { dst: 7, src: 2 },
+            Uop::Call {
+                callee: k(1),
+                nargs: 3,
+            },
+            Uop::Ret { src: 5 },
+        ],
+    )
 }
 
 /// `() -> string`: the empty list joins to the empty string.
 fn blanks() -> FunctionDef {
-    jn_def("blanks", &[Raw, Raw], 0, 2, &[
-        Uop::Funcf { frame_slots: 2 },
+    jn_def("blanks", &[Raw, Tag, Ref], 0, 3, &[
+        Uop::Funcf { frame_slots: 3 },
+        // the fresh list's word is overlay 0; the tag and separator
+        // stage beside it
         Uop::Call {
             callee: k(2),
             nargs: 0,
         },
-        Uop::Kstr { dst: 1, kidx: k(3) },
+        Uop::TagNew { dst: 1, tag: 0 }, // the separator's union tag word
+        Uop::Kstr { dst: 2, kidx: k(3) },
         Uop::Call {
             callee: k(1),
-            nargs: 2,
+            nargs: 3,
         },
         Uop::Ret { src: 0 },
     ])
@@ -880,25 +895,26 @@ fn blanks() -> FunctionDef {
 fn tainted() -> FunctionDef {
     // slot 0 is the body word holding the list across both calls; the
     // two overlay words are slots 1 and 2
-    jn_def("tainted", &[Raw, Raw, Raw], 0, 2, &[
-        Uop::Funcf { frame_slots: 3 },
+    jn_def("tainted", &[Raw, Raw, Raw, Raw, Raw, Ref], 0, 3, &[
+        Uop::Funcf { frame_slots: 6 },
         Uop::Call {
             callee: k(2),
             nargs: 0,
         },
-        Uop::Mov { dst: 0, src: 1 },
-        Uop::Kimm { dst: 2, kidx: k(4) },
+        Uop::Mov { dst: 0, src: 3 },
+        Uop::Kimm { dst: 4, kidx: k(4) },
         Uop::Call {
             callee: k(5),
             nargs: 2,
         },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(3) },
+        Uop::Mov { dst: 3, src: 0 },
+        Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
+        Uop::Kstr { dst: 5, kidx: k(3) },
         Uop::Call {
             callee: k(1),
-            nargs: 2,
+            nargs: 3,
         },
-        Uop::Ret { src: 1 },
+        Uop::Ret { src: 3 },
     ])
 }
 

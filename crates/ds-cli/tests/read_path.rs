@@ -87,11 +87,11 @@ fn main() -> () {
 #[test]
 fn an_out_of_range_list_read_traps() {
     let (status, _stdout, stderr) = run_source(
-        r#"fn main() -> () {
+        r"fn main() -> () {
   const xs = [10, 20, 30]
   println(str(xs[5]))
 }
-"#,
+",
     );
     assert!(!status.success(), "the out-of-range read stops the run");
     assert!(
@@ -105,7 +105,7 @@ fn an_out_of_range_list_read_traps() {
 
 #[test]
 fn an_absent_map_key_halts_at_the_read() {
-    let (status, _stdout, stderr) = run_source(
+    let (status, stdout, stderr) = run_source(
         r#"fn main() -> () {
   var m = map[string, int]()
   m.set("a", 1)
@@ -115,10 +115,7 @@ fn an_absent_map_key_halts_at_the_read() {
 "#,
     );
     assert!(!status.success(), "the absent key stops the run");
-    assert_eq!(
-        _stdout, "1\n",
-        "the present key's read answers before the halt"
-    );
+    assert_eq!(stdout, "1\n", "the present key's read answers before the halt");
     assert!(
         stderr.contains(
             "trap: die: the map holds no value under the key; a subscript read must resolve, it \
@@ -131,7 +128,7 @@ fn an_absent_map_key_halts_at_the_read() {
 #[test]
 fn the_checked_get_members_keep_their_spelling() {
     let (status, stdout, stderr) = run_source(
-        r#"fn main() -> () {
+        r"fn main() -> () {
   const xs = [10, 20]
   var i = 0
   while i < 3 {
@@ -139,7 +136,7 @@ fn the_checked_get_members_keep_their_spelling() {
     i += 1
   }
 }
-"#,
+",
     );
     assert!(status.success(), "get keeps the checked union: {stderr}");
     assert_eq!(
@@ -151,25 +148,25 @@ fn the_checked_get_members_keep_their_spelling() {
 #[test]
 fn the_store_spelling_keeps_its_own_path() {
     let (status, stdout, stderr) = run_source(
-        r#"fn main() -> () {
+        r"fn main() -> () {
   var xs = [10, 20]
   xs[0] = 99
   xs[1] += 5
   println(str(xs[0]))
   println(str(xs[1]))
 }
-"#,
+",
     );
     assert!(status.success(), "the store spelling runs: {stderr}");
     assert_eq!(stdout, "99\n25\n0\n");
     // a const root keeps the mut-window refusal on the store
     let (status, _stdout, stderr) = run_source(
-        r#"fn main() -> () {
+        r"fn main() -> () {
   const xs = [10, 20]
   xs[0] = 99
   println(str(xs[0]))
 }
-"#,
+",
     );
     assert!(!status.success(), "a const root refuses the store");
     assert!(

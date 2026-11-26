@@ -95,7 +95,7 @@
 //! | 54    | `float_hash (f: float) -> int` |
 //! | 55    | `char_hash (c: char) -> int` |
 //! | 56    | `repl_park (answer words, variadic)` (control seam; the REPL's spliced park) |
-//! | 57    | reserved (was parse_json; the reader lives in @std ds source now) |
+//! | 57    | `str_fixed (x: float, digits: int) -> string` — the fixed-point float formatter |
 //! | 58    | `char_of (code: int) -> char \| none` — the codepoint→char reader |
 //! | 59    | `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the entry-order key list |
 //! | 60    | `code_of (c: char) -> int` — the char→codepoint reader |
@@ -750,9 +750,20 @@ pub const BUILTIN_FLOOR: u32 = 80;
 pub const BUILTIN_CEIL: u32 = 81;
 /// `pow(base: float, exp: float) -> float`.
 pub const BUILTIN_POW: u32 = 82;
-/// `abs(x: float) -> float` — the float width's absolute value; no int
-/// sibling exists, so the bare name carries no overload.
+/// `abs[t](x: t) -> t` — the absolute value over the numeric widths,
+/// the solved argument type naming the instance the CALLG evidence word
+/// stages (int answers int with the overflow family's trap at the
+/// `i64::MIN` magnitude, float float). The ONE body lives in
+/// [`GENERIC_FUNCTIONS`], CALLG-addressed; the native slot stays a
+/// reserved trap.
 pub const BUILTIN_ABS: u32 = 83;
+/// `str_fixed(x: float, digits: int) -> string` — the fixed-point float
+/// formatter: exactly `digits` fraction digits, half-to-even rounding
+/// at the cut, `digits` riding 0..=767 (the widest exact f64 fraction;
+/// a negative width clamps to 0, a wider one clamps to 767). NaN and
+/// the infinities answer `str_float`'s own spellings. Pure; the
+/// comptime fence serves it.
+pub const BUILTIN_STR_FIXED: u32 = 57;
 /// `contains(haystack, needle: string) -> bool` — the string search
 /// family's membership read (the 2026-11-21 pure-builtin round): the
 /// needle occurs in the haystack, the empty needle always occurring.
@@ -1944,7 +1955,7 @@ fn split_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let text_id = ref_arg(args, 0)?;
-    let sep = match heaps.str_at(ref_arg(args, 1)?)? {
+    let sep = match heaps.str_at(ref_arg(args, 2)?)? {
         "" => SplitSep::PerChar,
         sep if sep.len() == 1 => SplitSep::Byte(sep.chars().next().expect("one byte is one char")),
         sep => SplitSep::Text(sep.to_owned()),
@@ -2022,7 +2033,7 @@ fn char_at_fn(
 }
 
 fn join_fn(heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<NativeResult, Trap> {
-    let sep = heaps.str_at(ref_arg(args, 1)?)?.to_owned();
+    let sep = heaps.str_at(ref_arg(args, 2)?)?.to_owned();
     let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
     // one string Ref per element is the surface's contract (list[string]);
     // a wider stride reaches here only hand-assembled
@@ -2684,6 +2695,18 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         result_words: 1,
         func: max_generic_fn,
     }),
+    (BUILTIN_MODULE, BUILTIN_ABS, GenericFunction {
+        // abs over the numeric widths: the evidence word names the
+        // instance, int answering the checked magnitude (the
+        // `i64::MIN` trap the arithmetic family carries) and float the
+        // IEEE absolute value
+        name: "abs",
+        params: &[SlotType::Raw],
+        staging: Staging::Fixed,
+        evidence: 1,
+        result_words: 1,
+        func: abs_generic_fn,
+    }),
     (BUILTIN_MODULE, BUILTIN_MAP, GenericFunction {
         name: "map",
         params: &[SlotType::Ref, SlotType::Fn],
@@ -2910,6 +2933,33 @@ fn max_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
         {
             let (mut heaps, out) = vm.split();
             max_fn(&mut heaps, out, args)
+        },
+        staged => Err(Trap::UnknownInstance {
+            evidence: match staged {
+                Value::I64(id) => id,
+                _ => -1,
+            },
+        }),
+    }
+}
+
+/// `abs`'s one body: dispatch on the call's evidence word like `max`'s —
+/// the numeric instances the body answers. The value-kind match inside
+/// the shared scalar body stays the defense: a corrupted stream staging
+/// a non-numeric word refuses there instead of misreading it.
+fn abs_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
+    match instance {
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Float as i64 => {
+            let (mut heaps, out) = vm.split();
+            abs_fn(&mut heaps, out, args)
+        },
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Int as i64 => {
+            let x = i64_arg(args, 0)?;
+            // the magnitude has no in-range answer at the word's floor;
+            // the arithmetic family's own overflow trap names it
+            let magnitude = x.checked_abs().ok_or(Trap::IntegerOverflow)?;
+            Ok(NativeResult::Word(Value::I64(magnitude)))
         },
         staged => Err(Trap::UnknownInstance {
             evidence: match staged {
@@ -3500,6 +3550,7 @@ reserved!(builtin_reserved_7 in BUILTIN_MODULE at 7); // was file_exists
 reserved!(builtin_reserved_8 in BUILTIN_MODULE at 8); // was fs_list
 reserved!(builtin_reserved_9 in BUILTIN_MODULE at 9); // was file_size
 reserved!(builtin_reserved_48 in BUILTIN_MODULE at 48); // par_reduce's generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_83 in BUILTIN_MODULE at 83); // abs's generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_21 in BUILTIN_MODULE at 21); // was the monomorphic list_len; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_22 in BUILTIN_MODULE at 22); // was list_get; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_23 in BUILTIN_MODULE at 23); // was list_concat; the generic body lives in GENERIC_FUNCTIONS
@@ -3518,7 +3569,6 @@ reserved!(builtin_reserved_39 in BUILTIN_MODULE at 39); // filter; the reentrant
 reserved!(builtin_reserved_40 in BUILTIN_MODULE at 40); // reduce; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_46 in BUILTIN_MODULE at 46); // partition; the reentrant generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_47 in BUILTIN_MODULE at 47); // par_map; the fork-join generic body lives in GENERIC_FUNCTIONS
-reserved!(builtin_reserved_57 in BUILTIN_MODULE at 57); // was parse_json; the reader lives in @std ds source now
 reserved!(builtin_reserved_59 in BUILTIN_MODULE at 59); // map_keys; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_90 in BUILTIN_MODULE at 90); // sort; the reentrant generic body lives in GENERIC_FUNCTIONS
 
@@ -3675,8 +3725,12 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             func: parse_int_fn,
         },
         NativeFunction {
+            // the separator stages as the checked union's whole span (the
+            // tag word, then the one-char string or separator text) — a
+            // char word and a string word share the Ref spelling, so the
+            // body reads the payload alone
             name: "split",
-            params: &[SlotType::Ref, SlotType::Ref],
+            params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
             variadic: false,
             result_words: 1,
             control: None,
@@ -3830,8 +3884,12 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
+            // the separator stages as the checked union's whole span (the
+            // tag word, then the one-char string or separator text) — a
+            // char word and a string word share the Ref spelling, so the
+            // body reads the payload alone
             name: "join",
-            params: &[SlotType::Ref, SlotType::Ref],
+            params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
             variadic: false,
             result_words: 1,
             control: None,
@@ -3925,8 +3983,19 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             timer: None,
             func: fiber_control_bounce_fn,
         },
-        reserved_entry(builtin_reserved_57), /* was parse_json; the reader lives in @std ds
-                                              * source now */
+        NativeFunction {
+            // the fixed-point float formatter over the string slot: the
+            // digits word clamps into the honest f64 fraction window
+            name: "str_fixed",
+            params: &[SlotType::F64, SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            timer: None,
+            func: str_fixed_fn,
+        }, /* was parse_json; the reader lives in @std ds
+            * source now */
         NativeFunction {
             name: "char_of",
             params: &[SlotType::I64],
@@ -4169,16 +4238,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             timer: None,
             func: pow_fn,
         },
-        NativeFunction {
-            name: "abs",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: abs_fn,
-        },
+        reserved_entry(builtin_reserved_83),
         NativeFunction {
             name: "contains",
             params: &[SlotType::Ref, SlotType::Ref],
@@ -4974,6 +5034,30 @@ fn str_float_fn(
     }
 }
 
+fn str_fixed_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    match args {
+        [Value::F64(v), Value::I64(digits)] => {
+            // the widest exact f64 fraction bounds the width; more
+            // digits past it only answer trailing zeros the value
+            // cannot distinguish
+            // the clamp pins the width non-negative, so the usize cast
+            // cannot lose the sign
+            let digits = (*digits).clamp(0, 767);
+            let digits = usize::try_from(digits).expect("the clamped width fits usize");
+            Ok(NativeResult::Word(heaps.new_str(format!("{v:.digits$}"))))
+        },
+        _ => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::F64,
+            actual: args.first().map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
 fn str_bool_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
@@ -5215,6 +5299,7 @@ mod tests {
             (BUILTIN_COLLECT, "collect", 1, 1),
             (BUILTIN_FIRST, "first", 1, 2),
             (BUILTIN_MAX, "max", 1, 1),
+            (BUILTIN_ABS, "abs", 1, 1),
             (BUILTIN_MAP, "map", 2, 1),
             (BUILTIN_FILTER, "filter", 1, 1),
             (BUILTIN_REDUCE, "reduce", 1, 1),
@@ -5284,7 +5369,7 @@ mod tests {
         assert_eq!(fns[BUILTIN_FLOOR as usize].name, "floor");
         assert_eq!(fns[BUILTIN_CEIL as usize].name, "ceil");
         assert_eq!(fns[BUILTIN_POW as usize].name, "pow");
-        assert_eq!(fns[BUILTIN_ABS as usize].name, "abs");
+        assert_eq!(fns[BUILTIN_ABS as usize].name, "reserved");
         assert_eq!(fns[BUILTIN_CONTAINS as usize].name, "contains");
         assert_eq!(fns[BUILTIN_INDEX_OF as usize].name, "index_of");
         assert_eq!(fns[BUILTIN_REPLACE as usize].name, "replace");
@@ -5313,7 +5398,7 @@ mod tests {
         // slots stay a reserved trap
         for index in [
             0u32, 1, 5, 6, 7, 8, 9, 10, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 46,
-            47, 48, 57, 59, 90,
+            47, 48, 59, 90,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }
@@ -5432,7 +5517,7 @@ mod tests {
         traps_like(BUILTIN_MODULE, 0, &core); // the console pair's slots
         traps_like(BUILTIN_MODULE, 5, &core); // the file-IO slots
         traps_like(BUILTIN_MODULE, 24, &core); // the retired fiber_yield slot
-        traps_like(BUILTIN_MODULE, 57, &core); // the retired parse_json slot
+        traps_like(BUILTIN_MODULE, 59, &core); // the retired parse_json neighbor gap
     }
 
     #[test]
@@ -5926,6 +6011,7 @@ mod tests {
             let sep_id = heaps.current().intern(sep);
             let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
                 Value::Ref(RefId::new(FIBER_ROOT, text_id)),
+                Value::I64(0), // the separator's union tag word
                 Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
             ])
             .expect("split runs")
@@ -5962,6 +6048,7 @@ mod tests {
         let sep_id = heaps.current().intern("");
         let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
             Value::Ref(RefId::new(FIBER_ROOT, text_id)),
+            Value::I64(0), // the separator's union tag word
             Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
         ])
         .expect("split runs")
@@ -6009,11 +6096,14 @@ mod tests {
                 panic!("a list ref")
             };
             let sep_word = heaps.new_str(sep.to_owned());
-            let Value::Ref(joined) = join_fn(&mut heaps, &mut out, &[Value::Ref(list), sep_word])
-                .expect("join runs")
-                .word()
-                .expect("a single word")
-            else {
+            let Value::Ref(joined) = join_fn(
+                &mut heaps,
+                &mut out,
+                &[Value::Ref(list), Value::I64(0), sep_word], // the tag rides index 1
+            )
+            .expect("join runs")
+            .word()
+            .expect("a single word") else {
                 panic!("a string ref")
             };
             assert_eq!(heaps.str_at(joined), Ok(want), "joined {parts:?}");

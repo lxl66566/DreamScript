@@ -435,7 +435,7 @@ pub type net_err = timeout | refused | addr_in_use | reset | net_other
 #### `abs`
 
 ```ds
-pub extern fn abs(x: float) -> float
+pub extern fn abs[t](x: t) -> t
 ```
 
 #### `accept`
@@ -1118,8 +1118,11 @@ The float math family: IEEE f64 semantics over the float type, total
 by construction — no operand shape traps (a negative sqrt or ln
 answers NaN, a NaN or infinite operand answers
 itself). `atan2` takes (y, x), the quadrant read off both signs;
-`pow` takes (base, exp). `abs`, `round`, and `trunc` cover the float
-width alone; no int sibling exists.
+`pow` takes (base, exp). `round` and `trunc` cover the float width
+alone; `abs` joins the int width on the same spelling — the solved
+argument type picks the numeric instance (int answers int, float
+float), an `i64::MIN` magnitude trapping like the arithmetic family's
+overflow, and any other width refusing at the call's lowering.
 
 ```ds
 pub extern fn sqrt(x: float) -> float
@@ -1135,6 +1138,18 @@ pub extern fn str[t](v: t) -> string
 
 ```ds
 pub extern fn str_compare(a: string, b: string) -> int
+```
+
+#### `str_fixed`
+
+The fixed-point float formatter: exactly `digits` fraction digits
+(half-to-even at the cut over the value's exact binary expansion),
+the width riding 0..=767 — the widest exact f64 fraction — clamped
+at both sides, never trapping. NaN and the infinities answer the
+`str` spelling's own words.
+
+```ds
+pub extern fn str_fixed(x: float, digits: int) -> string
 ```
 
 #### `str_hash`
@@ -1784,6 +1799,19 @@ pub fn firstof[t](thunks: list[fn() -> t]) -> t
 pub fn flatten[r](xss: list[list[r]]) -> list[r]
 ```
 
+#### `hex`
+
+The format family: plain ds source over the builtin faces. `hex`
+spells the lowercase hex digits of a non-negative word (a negative
+value answers its minus sign and the magnitude's digits); `pad_left`
+and `pad_right` are the two alignments, the pad char repeated to the
+width and a past-the-width value answering itself. Floats compose
+over the builtin `str_fixed` formatter.
+
+```ds
+pub fn hex(n: int) -> string
+```
+
 #### `index_of`
 
 ```ds
@@ -1798,12 +1826,15 @@ pub fn interleave[t](thunks: list[fn() -> t]) -> list[t]
 
 #### `join`
 
-The one separator type both ways: `split` slices per its char and
-`join` renders the neighbors around it. An empty-separator fold has
-no spelling through the pair, so it composes in ds source.
+The separator takes the char and the string beside it: `split`
+slices per the separator's text (an empty string slicing per char)
+and `join` renders the neighbors around it. Both members read the
+separator's payload word, so a char (itself a one-char string word)
+and a string stage identically inside the union's tag-plus-payload
+span.
 
 ```ds
-pub extern fn join(parts: list[string], sep: char) -> string
+pub extern fn join(parts: list[string], sep: char | string) -> string
 ```
 
 #### `json_as_array`
@@ -2014,6 +2045,18 @@ pub fn max(a: int, b: int) -> int
 pub fn min(a: int, b: int) -> int
 ```
 
+#### `pad_left`
+
+```ds
+pub fn pad_left(s: string, width: int, pad: char) -> string
+```
+
+#### `pad_right`
+
+```ds
+pub fn pad_right(s: string, width: int, pad: char) -> string
+```
+
 #### `par_map`
 
 ```ds
@@ -2074,7 +2117,7 @@ pub extern fn replace(haystack: string, needle: string, with: string) -> string
 #### `split`
 
 ```ds
-pub extern fn split(s: string, sep: char) -> list[string]
+pub extern fn split(s: string, sep: char | string) -> list[string]
 ```
 
 #### `substring`

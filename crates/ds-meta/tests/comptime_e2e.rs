@@ -23,7 +23,8 @@ const AMBIENT: &str = concat!(
     "extern fn type_name (t: type) -> string\n",
     "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
     "extern fn concat (a: string, b: string) -> string\n",
-    "extern fn join (parts: list[string], sep: string) -> string\n",
+    "tag char\n",
+    "extern fn join (parts: list[string], sep: char | string) -> string\n",
     "extern fn println (msg: string) -> ()\n",
     "extern fn read_file (path: string) -> string\n",
 );
