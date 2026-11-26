@@ -38,6 +38,7 @@ const FILES: &[Scanned] = &[
             "generic_call",
             "written_generic_call_bounds",
             "member_call_params",
+            "handler_handled",
             "place_store",
             "push_const",
             "spawn_return",
@@ -84,6 +85,7 @@ const RECORDS: &[&str] = &[
     "generic_calls",
     "generic_call_bounds",
     "member_call_params",
+    "handler_handled",
     "place_stores",
 ];
 

@@ -2979,6 +2979,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(Some(params))
     }
 
+    /// The `.err`/`.ok` handler site's handled member set, read through
+    /// the lens: the checker's difference-rule record is what the tag
+    /// dispatch emits, the site's result type being unable to re-derive
+    /// it once the handler's answer re-adds a handled member.
+    fn handler_handled(&self, span: Span) -> Result<Option<Ty>, LowerError> {
+        let Some(set) = self.analyzed.checked.handler_handled.get(&span).copied() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.shapes.subst(set).map_err(|err| err.respanned(span))?,
+        ))
+    }
+
     /// The checked assignment place chain, read through the lens.
     fn place_store(&self, span: Span) -> Result<Option<PlaceStore>, LowerError> {
         let Some(store) = self.analyzed.checked.place_stores.get(&span).cloned() else {

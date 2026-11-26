@@ -83,7 +83,7 @@ impl FnLower<'_, '_, '_> {
             // `map_err` is the `.ok` handler over a named spelling: the
             // handled members jump to the inlined lambda, the remainder
             // re-spans, the handler's result unions in.
-            Extraction::MapErr => self.ok_value(recv, arg, ty),
+            Extraction::MapErr => self.ok_value(recv, arg, ty, span),
         }
     }
 

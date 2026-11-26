@@ -957,8 +957,12 @@ impl<'a> FnLower<'a, '_, '_> {
                         return Err(mismatch("a handler argument"));
                     };
                     match name.name.as_str() {
-                        "err" => return self.err_value(recv, &handler.value, ty),
-                        "ok" => return self.ok_value(recv, &handler.value, ty),
+                        "err" => {
+                            return self.err_value(recv, &handler.value, ty, call_span);
+                        },
+                        "ok" => {
+                            return self.ok_value(recv, &handler.value, ty, call_span);
+                        },
                         _ => {
                             return Err(LowerError::unsupported(
                                 name.span,
@@ -5009,7 +5013,13 @@ impl<'a> FnLower<'a, '_, '_> {
 
     /// The `.err` handler: tag tests for the handled members jump to an
     /// inlined handler body; the success value widens into the result.
-    fn err_value(&mut self, recv: &Expr, lambda: &Expr, ty: Ty) -> Result<Place, LowerError> {
+    fn err_value(
+        &mut self,
+        recv: &Expr,
+        lambda: &Expr,
+        ty: Ty,
+        site: Span,
+    ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
         let Expr::Lambda { params, body, .. } = lambda else {
@@ -5019,7 +5029,20 @@ impl<'a> FnLower<'a, '_, '_> {
                 "`.err` takes a lambda that inlines at the call site",
             ));
         };
-        let handled = set_diff(self.members(src_ty), self.members(ty));
+        let src_members = self.members(src_ty);
+        let handled = match self.handler_handled(site)? {
+            // the checker's handled-set record, filtered to the members
+            // the operand carries: a foreign annotated member never tests
+            // at runtime, and the site's result type cannot re-derive the
+            // set once the handler's answer re-adds a handled member
+            Some(set) => self
+                .members(set)
+                .iter()
+                .copied()
+                .filter(|m| src_members.contains(m))
+                .collect(),
+            None => set_diff(self.members(src_ty), self.members(ty)),
+        };
         let result = self.temp_span(ty)?;
         let handler_lbl = self.label();
         let join = self.label();
@@ -5151,6 +5174,7 @@ impl<'a> FnLower<'a, '_, '_> {
         recv: &Expr,
         lambda: &Expr,
         ty: Ty,
+        site: Span,
     ) -> Result<Place, LowerError> {
         let src = self.value(recv)?;
         let src_ty = self.val(recv.span())?.ty;
@@ -5172,7 +5196,20 @@ impl<'a> FnLower<'a, '_, '_> {
                  extraction seam owns no claim hand-off yet",
             ));
         }
-        let handled = self.ok_side(param, body, src_ty)?;
+        let src_members = self.members(src_ty);
+        let handled = match self.handler_handled(site)? {
+            // the checker's handled-set record (the `.ok` present-value
+            // default included), filtered to the members the operand
+            // carries; the site-local derivation stands only for a site
+            // the checker refused before recording
+            Some(set) => self
+                .members(set)
+                .iter()
+                .copied()
+                .filter(|m| src_members.contains(m))
+                .collect(),
+            None => self.ok_side(param, body, src_ty)?,
+        };
         let result = self.temp_span(ty)?;
         let handler_lbl = self.label();
         let join = self.label();

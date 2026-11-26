@@ -295,6 +295,12 @@ pub struct Checked {
     /// bound. The lowering pass reads the atom to emit here and never
     /// re-derives the redirection.
     pub directed_tags: FxHashMap<Span, TypeId>,
+    /// The handled member set of every `.err`/`.ok` handler site, keyed
+    /// by the call's own span: the checker's difference-rule record —
+    /// the result type alone cannot re-derive it once the handler's
+    /// answer re-adds a handled member, so the lowering pass dispatches
+    /// the tag tests from this record and never re-derives.
+    pub handler_handled: FxHashMap<Span, Ty>,
     /// The member one dot-call's type-directed selection settled on,
     /// keyed by the callee name's own span (F3): the single survivor of
     /// the value-receiver tier — a trait member a solved instance or an
@@ -458,6 +464,7 @@ pub fn analyze_resolved(
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
         directed_tags: checked.directed_tags,
+        handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
         place_stores: checked.place_stores,
@@ -624,6 +631,7 @@ fn analyze_served_over(
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
         directed_tags: checked.directed_tags,
+        handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
         place_stores: checked.place_stores,
@@ -678,6 +686,7 @@ where
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
     let mut directed_tags: FxHashMap<Span, TypeId> = FxHashMap::default();
+    let mut handler_handled: FxHashMap<Span, Ty> = FxHashMap::default();
     let mut hole_show_dispatches: FxHashMap<Span, MethodId> = FxHashMap::default();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
@@ -698,6 +707,7 @@ where
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
             directed_tags: &mut directed_tags,
+            handler_handled: &mut handler_handled,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
@@ -756,6 +766,7 @@ where
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
             directed_tags: &mut directed_tags,
+            handler_handled: &mut handler_handled,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
@@ -810,6 +821,7 @@ where
         generic_call_bounds,
         is_tests,
         directed_tags,
+        handler_handled,
         method_selections,
         member_call_params,
         place_stores,
@@ -951,6 +963,7 @@ struct Bodies<'a> {
     /// [`Checked::directed_tags`] for the lowering pass, which never
     /// re-derives the redirection.
     directed_tags: &'a mut FxHashMap<Span, TypeId>,
+    handler_handled: &'a mut FxHashMap<Span, Ty>,
     /// Whether a qualified pattern label already reported its refusal
     /// (F9.5), so the caller's unknown-pattern word stays quiet.
     pattern_label_reported: bool,
@@ -5737,7 +5750,21 @@ impl Bodies<'_> {
             written
         } else {
             let kept = self.decls.universe.inter(total, body_val.ty);
-            let handled = self.decls.universe.diff(total, kept);
+            let mut handled = self.decls.universe.diff(total, kept);
+            // `.ok` on a `t | none` receiver whose body walk derives no
+            // set defaults the handled side to the receiver minus
+            // `none`: the handler reads as the present-value arm, the
+            // `none` member flowing the remainder. `.err` keeps the
+            // difference rule's own answer.
+            if name == "ok"
+                && self.decls.universe.is_empty(body_val.ty)
+                && !self.decls.universe.is_empty(total)
+                && !recv_val.poisoned
+                && self.decls.universe.members(total).contains(&TypeId::NONE)
+            {
+                let present = self.none_ty();
+                handled = self.decls.universe.diff(total, present);
+            }
             // The handled members thread back as the parameter's expected
             // type: a handler covering a proper part of the operand checks
             // again with its parameter at that set, so a use of the
@@ -5758,6 +5785,7 @@ impl Bodies<'_> {
             }
             handled
         };
+        self.handler_handled.insert(span, handled_set);
         let body_ty = body_val.ty;
         // An annotated handler disjoint from the operand refuses; an
         // unannotated one whose result keeps every member covers nothing

@@ -7400,7 +7400,16 @@ impl Vm {
         // cancel-cut door
         self.fire_teardown_hooks(self.current, &[]);
         self.drain_claims(self.current);
-        self.die_current(Value::Tag(PLATFORM_CANCELLED), ChildOutcome::Cancelled)
+        let cut = self.current;
+        let end = self.die_current(Value::Tag(PLATFORM_CANCELLED), ChildOutcome::Cancelled);
+        // the cut scope dies with the cut: every open nursery the cut fiber
+        // owned tears down here, its live children releasing cold, so a
+        // cancelled block's parked children never hold a wait past the cut —
+        // the same fixpoint the release doors run, moved to the death that
+        // closes the scope (the race nursery's prompt close, generalized);
+        // the release doors keep it for owners that die interrupted
+        self.release_owned_nurseries(cut);
+        end
     }
 
     /// The switch behind a control native's `CALL` site (the fiber pair,
@@ -13001,5 +13010,48 @@ mod tests {
             "recycled, not accumulated: {}",
             vm.registry.version_rows()
         );
+    }
+
+    /// The recycled-slot containment the gone-joiner raise arm leans on:
+    /// a dead fiber's pool link belongs to the slot's current occupant
+    /// (every spawn overwrites it), and a consumed nursery slot reopens
+    /// with a fresh flag and ledger, so a stale trap write can never
+    /// cancel a nursery a later spawn runs under.
+    #[test]
+    fn a_recycled_slot_names_its_own_occupant_and_a_reused_nursery_reopens_fresh() {
+        let defs = vec![crate::program::FunctionDef {
+            name: "f".into(),
+            layout: FrameLayout::new(vec![SlotType::I64], 0, 1).expect("valid layout"),
+            pool: vec![Const::I64(7)],
+            code: crate::program::assemble(&[Uop::Funcf { frame_slots: 1 }, Uop::Ret { src: 0 }])
+                .expect("fixture body encodes"),
+        }];
+        let mut vm = Vm::new(ModuleRegistry::new());
+        vm.install_module(ModuleVersion::new("m", defs).expect("valid fixture module"))
+            .expect("install");
+        let nursery = vm.open_fresh_nursery();
+        let first = vm.spawn_fiber_in(nursery, "m", "f", &[]).expect("spawn");
+        assert_eq!(vm.pool[first.index()].nursery, Some(nursery));
+        vm.nurseries[nursery.index()].cancelled = true;
+        // the child dies and its block consumes; both slots sit reusable
+        vm.pool[first.index()].state = FiberState::Dead;
+        vm.nurseries[nursery.index()].state = NurseryState::Dead;
+        // a bare spawn recycles the dead slot: the link is the new
+        // occupant's own, so a stale write against the old id names nothing
+        let recycled = vm.spawn_fiber("m", "f", &[]).expect("recycle");
+        assert_eq!(recycled, first, "the dead slot is the reuse target");
+        assert_eq!(vm.pool[first.index()].nursery, None);
+        vm.trap_child(first, &Trap::DivideByZero);
+        // the consumed nursery slot reopens fresh: the stale flag cannot
+        // survive into the later spawn's block
+        let reused = vm.open_fresh_nursery();
+        assert_eq!(reused, nursery, "the consumed slot is the reuse target");
+        assert!(!vm.nurseries[nursery.index()].cancelled);
+        assert!(vm.nurseries[nursery.index()].children.is_empty());
+        assert!(vm.nurseries[nursery.index()].outcomes.is_empty());
+        // and a trap against the slot's current occupant names its own
+        // nursery link alone — no nursery stands cancelled
+        vm.trap_child(recycled, &Trap::DivideByZero);
+        assert!(vm.nurseries.iter().all(|n| !n.cancelled));
     }
 }

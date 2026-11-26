@@ -1,0 +1,35 @@
+// The handler seam's inference records end to end: the annotated `.err`
+// retry handler whose answer re-adds the handled member fires off the
+// checker's handled-set record (the site's result type re-derives the set
+// empty, so a lowering-side derivation leaves the handler dead); the
+// un-annotated `.ok` handler over a `t | none` receiver reads as the
+// present-value arm — its parameter defaults to the receiver minus `none`
+// when the body walk derives no set, the `none` member flowing the
+// remainder into the `.err` behind it; and the un-annotated `.err` keeps
+// the difference rule's answer, the handler covering only what the body's
+// own result does not keep.
+fn main() -> int {
+  // the retry re-adds the handled parse_err: the failed parse answers the
+  // re-parsed 21, the clean parse keeps 42
+  const retried = match parse_int("4x").err((e: parse_err) => parse_int("21")) {
+    parse_err => 0 - 1
+    n => n
+  }
+  const direct = match parse_int("42").err((e: parse_err) => parse_int("21")) {
+    parse_err => 0 - 1
+    n => n
+  }
+  println("retried ${retried} direct ${direct}")
+  // the un-annotated .ok handler takes the present value: +1 runs on the
+  // hit, the miss's none flows to the .err behind it
+  const hit_v = [5].get(0).ok((x) => x + 1).err((_) => 0)
+  const miss_v = [5].get(7).ok((x) => x + 1).err((_) => 0)
+  println("hit ${hit_v} miss ${miss_v}")
+  // the difference rule still governs .err: the body keeps the int, so
+  // the un-annotated handler covers only the handled member and fires on
+  // the failed parse alone
+  const caught = parse_int("4x").err((e) => 0 - 7)
+  const kept = parse_int("42").err((e) => 0 - 7)
+  println("caught ${caught} kept ${kept}")
+  0
+}

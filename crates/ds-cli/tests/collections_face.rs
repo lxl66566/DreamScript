@@ -105,6 +105,28 @@ fn the_ok_handler_over_none_runs_over_both_word_kinds() {
     );
 }
 
+/// The handler seam's recorded handled sets run end to end: the annotated
+/// `.err` retry handler whose answer re-adds the handled member fires off
+/// the checker's record (the site's result type re-derives the set empty,
+/// so a lowering-side derivation leaves the handler dead), the un-annotated
+/// `.ok` handler over a `t | none` receiver defaults its parameter to the
+/// receiver minus `none` when the body walk derives no set, and the
+/// un-annotated `.err` handler keeps the difference rule's answer.
+#[test]
+fn handler_seam_records_run_end_to_end() {
+    let out = run(ds().arg("run").arg(fixture("handler_seam_faces.ds")));
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        concat!(
+            "retried 21 direct 42\n",
+            "hit 6 miss 0\n",
+            "caught -7 kept 42\n",
+            "0\n",
+        )
+    );
+}
+
 /// The built round trip reproduces the source run exactly.
 #[test]
 fn built_module_reproduces_the_source_run() {

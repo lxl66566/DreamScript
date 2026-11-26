@@ -678,6 +678,30 @@ fn handler_parameters_take_the_handled_members() {
 }
 
 #[test]
+fn the_ok_handler_defaults_to_the_present_value_arm() {
+    // A body walk deriving no set over a `t | none` receiver defaults the
+    // handled side to the receiver minus `none`: the un-annotated parameter
+    // lands at the present type and the body re-walks there, the `none`
+    // member flowing the remainder [B2, E4].
+    clean(concat!(
+        "extern fn peek () -> int | none\n",
+        "const v = peek().ok((x) => x + 1)\n",
+    ));
+    // The defaulted answer carries the flowed `none` beside the handler's
+    // own answer.
+    let diags = check(concat!(
+        "extern fn peek () -> int | none\n",
+        "const v: string = peek().ok((x) => x + 1)\n",
+    ));
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.contains("has type `none | int`")),
+        "the defaulted answer should type `none | int`, got: {diags:?}"
+    );
+}
+
+#[test]
 fn numeric_table_int_float_split() {
     clean("fn f(a: int, b: int) -> int { a +% b }\n");
     clean("fn f(a: float, b: float) -> float { a + b }\n");
