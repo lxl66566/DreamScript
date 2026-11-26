@@ -377,6 +377,7 @@ impl Plan {
         if let Some(&index) = self.instance_args.get(&(generic.def, args.to_vec())) {
             return Ok((index, false));
         }
+        let solved_args: Rc<Vec<Ty>> = Rc::new(args.to_vec());
         let body = self.generic_body_types(found.analyzed, generic);
         let subst = found.types.subst(body_vars(found.analyzed, generic, args));
         for &ty in body.iter() {
@@ -461,6 +462,7 @@ impl Plan {
                     params: params.into(),
                 })),
                 subst: Some(subst),
+                comptime_instance: Some(Rc::new((generic.def, Rc::clone(&solved_args)))),
             });
             self.instances.insert((generic.def, key), index);
             planned = true;

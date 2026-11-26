@@ -208,7 +208,7 @@ where
         decls,
         facts: &checked.binders,
         def_types: &checked.def_types,
-        loops: &checked.comptime_loops,
+        copy_counts: comptime_copy_counts(checked),
         res: resolutions.first(),
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
@@ -311,7 +311,7 @@ where
         decls,
         facts: &checked.binders,
         def_types: &checked.def_types,
-        loops: &checked.comptime_loops,
+        copy_counts: comptime_copy_counts(checked),
         res: resolutions.first(),
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
@@ -569,13 +569,29 @@ struct StateUndo {
     prev: Option<State>,
 }
 
-/// The test-side walk's loop table: its fixtures declare no `for
-/// comptime` loops.
-#[cfg(test)]
-fn empty_loops() -> &'static FxHashMap<Span, crate::type_of::ComptimeLoop> {
-    static EMPTY: std::sync::OnceLock<FxHashMap<Span, crate::type_of::ComptimeLoop>> =
-        std::sync::OnceLock::new();
-    EMPTY.get_or_init(FxHashMap::default)
+/// The comptime copies each loop span audits: a written loop's own
+/// field count, a per-instance loop's largest expansion (one
+/// representative copy minimum — an uninstantiated loop audits its
+/// body once), and a written loop nested inside a per-instance copy
+/// the expansion's count. Every expansion unrolls the same structural
+/// body over the same copy discipline, so auditing the largest count
+/// covers each entering shape's copies exactly.
+#[must_use]
+pub fn comptime_copy_counts(checked: &Checked) -> HashMap<Span, usize> {
+    let mut counts: HashMap<Span, usize> = HashMap::default();
+    for (span, info) in &checked.comptime_loops {
+        let copies = if info.per_instance.is_some() {
+            1
+        } else {
+            info.fields.len()
+        };
+        counts.insert(*span, copies);
+    }
+    for ((.., span), info) in &checked.comptime_instance_loops {
+        let entry = counts.entry(*span).or_insert(0);
+        *entry = (*entry).max(info.fields.len());
+    }
+    counts
 }
 
 /// The forward walker. One instance covers one package; top-level
@@ -586,9 +602,9 @@ struct Lin<'a> {
     decls: &'a Decls,
     facts: &'a HashMap<Span, BinderFact>,
     def_types: &'a FxHashMap<DefId, Ty>,
-    /// The `for comptime` loops' projected fields, keyed by the loop's
+    /// The comptime copies each loop span audits, keyed by the loop's
     /// own span: a copy walks once per field, straight-line.
-    loops: &'a FxHashMap<Span, crate::type_of::ComptimeLoop>,
+    copy_counts: HashMap<Span, usize>,
     res: Option<&'a Resolutions>,
     /// The interpolation holes whose `show` the checker solved at their
     /// own span (F6): the solved dispatch, read for the receiver's
@@ -1691,9 +1707,15 @@ impl<'a> Lin<'a> {
         // The comptime expansion loop runs its copies in sequence: each
         // copy is one straight-line execution, the linear state threading
         // across them (a copy's move stays moved), no back-edge audit.
-        if let Some(loop_info) = self.loops.get(&span) {
+        // A per-instance loop audits the largest expansion's copy count —
+        // every expansion unrolls the same structural body, so the
+        // largest prefix covers each entering shape's moves exactly —
+        // and a written loop nested inside a per-instance copy counts
+        // through its expansions too, never falling to the runtime-loop
+        // walk its straight-line discipline forbids.
+        if let Some(&copies) = self.copy_counts.get(&span) {
             let _ = iter;
-            for _ in 0..loop_info.fields.len() {
+            for _ in 0..copies {
                 self.scopes.push(Vec::new());
                 self.bind_pattern(pat);
                 self.expr(body, true);
@@ -2074,7 +2096,7 @@ mod tests {
             decls: &decls,
             facts: &checked.binders,
             def_types: &checked.def_types,
-            loops: empty_loops(),
+            copy_counts: HashMap::default(),
             res: resolutions.first(),
             hole_dispatches: &checked.trait_calls,
             hole_inherents: &checked.inherent_calls,

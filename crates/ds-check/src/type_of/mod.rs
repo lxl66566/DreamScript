@@ -213,6 +213,16 @@ pub enum StoreIndex {
     Map,
 }
 
+/// The `for comptime` loop's projected iterable: the written struct
+/// type's fields (names and nominal tag strings), or the fn's own type
+/// variable the iterable names — the per-instance marker.
+enum Projection {
+    /// A written concrete struct's field names and their tag strings.
+    Written(Vec<String>, Vec<String>),
+    /// The fn's own type variable the iterable names.
+    PerInstance(Ty),
+}
+
 /// One copy's checked records of a `for comptime` body (the comptime
 /// field seam): the checker unrolls the loop over its projected fields,
 /// and the copies share their source spans, so every fact a copy's walk
@@ -253,14 +263,54 @@ pub struct CopyRecords {
 /// The projected fields of one `for comptime` loop: the declaring
 /// struct's field names in declaration order, and the pattern binder's
 /// span. The lowering and the affine walk read the count and the
-/// per-copy field names from it.
+/// per-copy field names from it. A loop over the fn's own type variable
+/// carries no fields of its own — the expansion is a per-instance fact
+/// the entering sites' walks project, keyed by the walked fn's
+/// definition and solved arguments in the instance tables.
 #[derive(Clone, Debug)]
 pub struct ComptimeLoop {
     /// The declaring struct's field names, in declaration order: one
-    /// copy per name, the copy's own constants derived from it.
+    /// copy per name, the copy's own constants derived from it. Empty
+    /// exactly on a per-instance loop.
     pub fields: Vec<String>,
+    /// Each field's nominal tag name (the type's own name when the
+    /// field type is one bare atom, empty when composite), aligned with
+    /// `fields`.
+    pub tags: Vec<String>,
+    /// The fn's own type variable the iterable names, on a per-instance
+    /// loop; `None` on a written one.
+    pub per_instance: Option<Ty>,
     /// The pattern binder's span the record projects through.
     pub binder: Span,
+}
+
+/// The solved generic arguments one per-instance expansion walks under:
+/// the walked fn's definition plus the entering site's solved argument
+/// types, in declaration order. Two sites solving the same arguments
+/// share one expansion, exactly as they share one instance body.
+pub type InstanceScope = (DefId, Rc<Vec<Ty>>);
+
+/// Where one record write lands.
+enum RecordScope {
+    /// The body-wide table.
+    Body,
+    /// A written `for comptime` loop's copy, by copy path.
+    Written(Vec<u32>),
+    /// A per-instance expansion's copy, by the walked fn's definition,
+    /// the solved arguments, and the copy path.
+    Instance(DefId, Rc<Vec<Ty>>, Vec<u32>),
+}
+
+/// The per-instance expansion one body walk runs under: the walked fn's
+/// definition and the entering site's solved argument types. The walk
+/// pushes these as the fn's generic scope instead of minting fresh
+/// variables, so a loop over the fn's own type variable projects the
+/// instance's fields, and every record write routes to the instance
+/// tables.
+#[derive(Clone)]
+struct InstanceRun {
+    def: DefId,
+    args: Rc<Vec<Ty>>,
 }
 
 /// One checked assignment place chain (the assignment sugar): the root
@@ -388,8 +438,21 @@ pub struct Checked {
     /// copy's path (outer-to-inner copy indices) and the span.
     pub comptime_records: FxHashMap<(Vec<u32>, Span), CopyRecords>,
     /// The projected fields of every `for comptime` loop, keyed by the
-    /// loop's own span.
+    /// loop's own span. A per-instance loop carries no fields here —
+    /// its expansions live in `comptime_instance_loops`.
     pub comptime_loops: FxHashMap<Span, ComptimeLoop>,
+    /// The per-copy records of every per-instance `for comptime`
+    /// expansion, keyed by the walked fn's definition and solved
+    /// arguments, the copy path, and the span. The once-check cannot
+    /// walk a loop over the fn's own type variable; each entering
+    /// site's re-walk of the fn body under its own substitution lands
+    /// its copies' facts here.
+    pub comptime_instance_records:
+        FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    /// The projected fields of every per-instance expansion, keyed by
+    /// the walked fn's definition, the solved arguments, and the loop's
+    /// own span.
+    pub comptime_instance_loops: FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -537,6 +600,8 @@ pub fn analyze_resolved(
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
         comptime_loops: checked.comptime_loops,
+        comptime_instance_records: checked.comptime_instance_records,
+        comptime_instance_loops: checked.comptime_instance_loops,
     };
     Analyzed {
         asts,
@@ -708,6 +773,8 @@ fn analyze_served_over(
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
         comptime_loops: checked.comptime_loops,
+        comptime_instance_records: checked.comptime_instance_records,
+        comptime_instance_loops: checked.comptime_instance_loops,
     };
     Analyzed {
         asts: asts.into(),
@@ -765,6 +832,11 @@ where
     let mut hole_show_dispatches: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut comptime_records: FxHashMap<(Vec<u32>, Span), CopyRecords> = FxHashMap::default();
     let mut comptime_loops: FxHashMap<Span, ComptimeLoop> = FxHashMap::default();
+    let mut instance_records: FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords> =
+        FxHashMap::default();
+    let mut instance_loops: FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop> =
+        FxHashMap::default();
+    let mut comptime_sites: FxHashMap<Span, (DefId, Vec<Ty>)> = FxHashMap::default();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
             files,
@@ -788,6 +860,10 @@ where
             hole_show_dispatches: &mut hole_show_dispatches,
             comptime_records: &mut comptime_records,
             comptime_loops: &mut comptime_loops,
+            comptime_instance_records: &mut instance_records,
+            comptime_instance_loops: &mut instance_loops,
+            comptime_sites: &mut comptime_sites,
+            instance: None,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
             call_params: &mut call_params,
@@ -852,6 +928,10 @@ where
             hole_show_dispatches: &mut hole_show_dispatches,
             comptime_records: &mut comptime_records,
             comptime_loops: &mut comptime_loops,
+            comptime_instance_records: &mut instance_records,
+            comptime_instance_loops: &mut instance_loops,
+            comptime_sites: &mut comptime_sites,
+            instance: None,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
             call_params: &mut call_params,
@@ -900,6 +980,29 @@ where
     // final and its constructor's shape is installed. The lowering pass
     // shapes the applications' values through this table.
     decls::record_apply_structs(package, &mut decls);
+    // The per-instance `for comptime` expansions: every solved call site
+    // entering a fn whose body holds a loop over the fn's own type
+    // variable re-walks that body under its own substitution, the
+    // copies' facts landing in the instance tables. The worklist takes
+    // the nested sites each walk re-records (a generic callee entered
+    // through the walked body), so instances compose.
+    let mut instance_records =
+        FxHashMap::<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>::default();
+    let mut instance_loops: FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop> =
+        FxHashMap::default();
+    let instance_diags = expand_comptime_instances(
+        files,
+        &trees[..],
+        package,
+        resolutions,
+        &mut decls,
+        &def_types,
+        &mut comptime_loops,
+        &mut comptime_sites,
+        &mut instance_records,
+        &mut instance_loops,
+    );
+    diags.extend(instance_diags);
     Ok((decls, Checked {
         diags,
         def_types,
@@ -916,11 +1019,269 @@ where
         handler_handled,
         comptime_records,
         comptime_loops,
+        comptime_instance_records: instance_records,
+        comptime_instance_loops: instance_loops,
         method_selections,
         member_call_params,
         call_params,
         place_stores,
     }))
+}
+
+/// The instance expansions one free generic body plans. The cap mirrors
+/// the lowering's own per-body instance bound: a self-entering recursion
+/// over a growing shape refuses typed instead of expanding without end.
+const MAX_INSTANCE_EXPANSIONS: usize = 256;
+
+/// Whether `ty` names no minted type variable anywhere in its shape: a
+/// solved argument the expansion worklist can walk.
+fn names_no_variable(universe: &crate::Universe, ty: Ty) -> bool {
+    universe.members(ty).iter().all(|&atom| atom_is_concrete(universe, atom))
+}
+
+fn atom_is_concrete(universe: &crate::Universe, atom: TypeId) -> bool {
+    let Ok(decl) = universe.atom_decl(atom) else {
+        return false;
+    };
+    if decl.name.starts_with('$') {
+        return false;
+    }
+    match &decl.kind {
+        AtomKind::Apply(_, args) => args.iter().all(|&ty| names_no_variable(universe, ty)),
+        AtomKind::Tuple(elements) => {
+            elements.iter().all(|&atom| atom_is_concrete(universe, atom))
+        },
+        AtomKind::FnSig(params, ret) => {
+            params.iter().all(|&ty| names_no_variable(universe, ty))
+                && names_no_variable(universe, *ret)
+        },
+        AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Enum(_) | AtomKind::Reserved => true,
+    }
+}
+
+/// The lambda body one declared free fn's definition names: the
+/// top-level Local item whose binder spans the definition's own name
+/// occurrence (the same occurrence collection registered).
+fn fn_lambda<'a>(trees: &[&'a Ast], package: &Package, def: DefId) -> Option<(&'a Ast, &'a Expr)> {
+    let entry = package.def(def);
+    let positions = FilePositions::new(trees);
+    let ast = trees[positions.get(entry.span.file)?];
+    let items = ast.blocks.iter().flat_map(|block| &block.items);
+    let mut by_name = None;
+    for item in items {
+        let ItemKind::Local(local) = &item.kind else {
+            continue;
+        };
+        let Pattern::Binding { span, name, .. } = &local.pat else {
+            continue;
+        };
+        if *span == entry.span {
+            return match &local.init {
+                Expr::Lambda { .. } => Some((ast, &local.init)),
+                _ => None,
+            };
+        }
+        if name.name == entry.name && matches!(local.init, Expr::Lambda { .. }) {
+            by_name = Some(&local.init);
+        }
+    }
+    by_name.map(|lambda| (ast, lambda))
+}
+
+/// The per-instance `for comptime` expansions: every solved call site
+/// entering a fn whose body holds a loop over the fn's own type
+/// variable re-walks that body under the site's substitution, the
+/// copies' checked facts landing in the instance tables keyed by the
+/// walked fn's definition and solved arguments. The worklist takes the
+/// nested sites each walk re-records (a generic callee entered through
+/// the walked body), so instances compose. A walk's body-wide facts run
+/// to scratch tables — the once-check's variable-typed rows are the
+/// ones every instance reads through the lowering's lens — and a
+/// written loop inside the walked body records its copies into the
+/// instance tables too, its projection never having depended on the
+/// walked variable. The walks' diagnostics dedupe by (code, primary
+/// span) across sites, first wins: two instances checking the same
+/// source line re-derive the same refusal.
+#[allow(clippy::too_many_arguments)]
+fn expand_comptime_instances(
+    files: &Files,
+    trees: &[&Ast],
+    package: &Package,
+    resolutions: &[Resolutions],
+    decls: &mut Decls,
+    def_types: &FxHashMap<DefId, Ty>,
+    comptime_loops: &mut FxHashMap<Span, ComptimeLoop>,
+    sites: &mut FxHashMap<Span, (DefId, Vec<Ty>)>,
+    instance_records: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    instance_loops: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
+) -> Vec<Diagnostic> {
+    let per_instance: Vec<Span> = comptime_loops
+        .iter()
+        .filter(|(_, info)| info.per_instance.is_some())
+        .map(|(&span, _)| span)
+        .collect();
+    if per_instance.is_empty() {
+        return Vec::new();
+    }
+    // Sites seeded in walk order; each walk's own nested sites join in
+    // span order, so the expansions, their atom mints, and the merged
+    // diagnostics stay deterministic run to run.
+    let mut seen: HashSet<(DefId, Vec<Ty>)> = HashSet::new();
+    let mut queue: Vec<(DefId, Rc<Vec<Ty>>)> = Vec::new();
+    let mut seeded: Vec<Span> = sites.keys().copied().collect();
+    seeded.sort_by_key(|span| (span.file.as_u32(), span.start));
+    for span in seeded {
+        let (def, args) = &sites[&span];
+        if seen.insert((*def, args.clone()))
+            && args.iter().all(|&ty| names_no_variable(&decls.universe, ty))
+        {
+            queue.push((*def, Rc::new(args.clone())));
+        }
+    }
+    let positions = FilePositions::new(trees);
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    let mut seen_diags: HashSet<(ErrorCode, Option<Span>)> = HashSet::new();
+    let mut walked = 0usize;
+    let mut at = 0usize;
+    while at < queue.len() {
+        let (def, args) = queue[at].clone();
+        at += 1;
+        let Some((ast, lambda)) = fn_lambda(trees, package, def) else {
+            continue;
+        };
+        let body_span = lambda.span();
+        // Only fns whose own body holds a per-instance loop expand.
+        if !per_instance.iter().any(|&span| {
+            span.file == body_span.file && span.start >= body_span.start && span.end <= body_span.end
+        }) {
+            continue;
+        }
+        walked += 1;
+        if walked > MAX_INSTANCE_EXPANSIONS {
+            diags.push(
+                Diagnostic::error(
+                    ErrorCode::InferenceFailed,
+                    "a generic fn instantiates itself without end: its per-instance `fields` \
+                     loop keeps entering new shapes"
+                        .to_owned(),
+                )
+                .with_primary(body_span, "the expansion never reaches a fixed point"),
+            );
+            break;
+        }
+        let Some(position) = positions.get(ast.file) else {
+            continue;
+        };
+        let res = &resolutions[position];
+        // Scratch body-wide tables: reads seed from the once-check's
+        // rows, writes die with the walk. `comptime_records` joins them
+        // (the instance walk's written-loop copies land under the
+        // instance key), `comptime_loops` stays the real table (the
+        // walk re-projects written loops to identical rows), and the
+        // per-instance tables plus the site table are the real ones the
+        // lowering and the worklist read.
+        let mut scratch_def_types = def_types.clone();
+        let mut scratch_binders = HashMap::default();
+        let mut scratch_expr_types = FxHashMap::default();
+        let mut scratch_generic_calls = FxHashMap::default();
+        let mut scratch_trait_calls = FxHashMap::default();
+        let mut scratch_hole_show = FxHashMap::default();
+        let mut scratch_inherent_calls = FxHashMap::default();
+        let mut scratch_inherent_bounds = FxHashMap::default();
+        let mut scratch_generic_bounds = FxHashMap::default();
+        let mut scratch_is_tests = FxHashMap::default();
+        let mut scratch_directed_tags = FxHashMap::default();
+        let mut scratch_handler = FxHashMap::default();
+        let mut scratch_member_params = FxHashMap::default();
+        let mut scratch_method_selections = FxHashMap::default();
+        let mut scratch_place_stores = FxHashMap::default();
+        let mut scratch_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
+        let mut scratch_comptime_records: FxHashMap<(Vec<u32>, Span), CopyRecords> =
+            FxHashMap::default();
+        let sites_before: HashSet<Span> = sites.keys().copied().collect();
+        let mut bodies = Bodies {
+            files,
+            package,
+            res,
+            resolutions,
+            res_by_file: &positions,
+            file: Some(ast.file),
+            decls,
+            def_types: &mut scratch_def_types,
+            binders: &mut scratch_binders,
+            expr_types: &mut scratch_expr_types,
+            generic_calls: &mut scratch_generic_calls,
+            trait_calls: &mut scratch_trait_calls,
+            inherent_calls: &mut scratch_inherent_calls,
+            inherent_call_bounds: &mut scratch_inherent_bounds,
+            generic_call_bounds: &mut scratch_generic_bounds,
+            is_tests: &mut scratch_is_tests,
+            directed_tags: &mut scratch_directed_tags,
+            handler_handled: &mut scratch_handler,
+            hole_show_dispatches: &mut scratch_hole_show,
+            comptime_records: &mut scratch_comptime_records,
+            comptime_loops,
+            comptime_instance_records: instance_records,
+            comptime_instance_loops: instance_loops,
+            comptime_sites: sites,
+            method_selections: &mut scratch_method_selections,
+            member_call_params: &mut scratch_member_params,
+            call_params: &mut scratch_call_params,
+            place_stores: &mut scratch_place_stores,
+            diags: Vec::new(),
+            linear_vars: FxHashMap::default(),
+            locals: ScopedMap::default(),
+            for_iters: Vec::new(),
+            nursery_scopes: Vec::new(),
+            spawn_answers: Vec::new(),
+            spawn_depth: 0,
+            comptime_path: Vec::new(),
+            comptime_stack: Vec::new(),
+            refined: ScopedMap::default(),
+            type_vars: Vec::new(),
+            assumptions: Vec::new(),
+            assumption_marks: Vec::new(),
+            ret: None,
+            loop_depth: 0,
+            loop_breaks: Vec::new(),
+            frame_depth: 0,
+            cond_depth: 0,
+            visiting: Vec::new(),
+            solve_reported: false,
+            pattern_label_reported: false,
+            value_pos: true,
+            expected_ty_span: None,
+            comptime: ComptimeCtx::default(),
+            instance: Some(InstanceRun {
+                def,
+                args: Rc::clone(&args),
+            }),
+        };
+        bodies.instance_fn_body(lambda, &args);
+        let mut walk_diags = std::mem::take(&mut bodies.diags);
+        // The nested sites the walk re- recorded, in walk order.
+        let mut fresh: Vec<Span> = sites
+            .keys()
+            .filter(|span| !sites_before.contains(span))
+            .copied()
+            .collect();
+        fresh.sort_by_key(|span| (span.file.as_u32(), span.start));
+        for span in fresh {
+            let (callee, callee_args) = &sites[&span];
+            if seen.insert((*callee, callee_args.clone()))
+                && callee_args.iter().all(|&ty| names_no_variable(&decls.universe, ty))
+            {
+                queue.push((*callee, Rc::new(callee_args.clone())));
+            }
+        }
+        for diag in walk_diags.drain(..) {
+            let key = (diag.code, diag.labels.first().map(|label| label.span));
+            if seen_diags.insert(key) {
+                diags.push(diag);
+            }
+        }
+    }
+    diags
 }
 
 /// The resolved graph's bound artifacts (H5): artifact name to its
@@ -1080,6 +1441,17 @@ struct Bodies<'a> {
     hole_show_dispatches: &'a mut FxHashMap<Span, MethodId>,
     comptime_records: &'a mut FxHashMap<(Vec<u32>, Span), CopyRecords>,
     comptime_loops: &'a mut FxHashMap<Span, ComptimeLoop>,
+    /// The per-instance expansions' per-copy records; the phase-1 walk
+    /// never writes them (its copies are written-loop copies), so an
+    /// empty table rides every construction but the expansion walks.
+    comptime_instance_records: &'a mut FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    /// The per-instance expansions' projected fields, same keying.
+    comptime_instance_loops: &'a mut FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
+    /// Every solved free-fn call site: the callee definition and the
+    /// solved argument types, the expansion worklist's source.
+    comptime_sites: &'a mut FxHashMap<Span, (DefId, Vec<Ty>)>,
+    /// The active per-instance expansion walk, if this walk is one.
+    instance: Option<InstanceRun>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
     /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
@@ -1728,187 +2100,279 @@ impl Bodies<'_> {
     // Every span-keyed fact the lowering reads funnels through one
     // helper per table: outside a `for comptime` body it lands in the
     // body-wide table; inside one, in the active copy's record (the
-    // copies share spans, so the body-wide table cannot hold them).
+    // copies share spans, so the body-wide table cannot hold them) —
+    // the written loops' copies in the once-check's table, a
+    // per-instance expansion's copies in the instance tables keyed by
+    // the walked fn's definition and solved arguments.
 
-    fn copy_key(&self) -> Option<Vec<u32>> {
-        if self.comptime_path.is_empty() { None } else { Some(self.comptime_path.clone()) }
+    fn record_scope(&self) -> RecordScope {
+        if self.comptime_path.is_empty() {
+            return RecordScope::Body;
+        }
+        let path = self.comptime_path.clone();
+        match &self.instance {
+            Some(run) => RecordScope::Instance(run.def, Rc::clone(&run.args), path),
+            None => RecordScope::Written(path),
+        }
     }
 
     fn record_val(&mut self, span: Span, val: Val) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.expr_types.insert(span, val);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records.entry((path, span)).or_default().val = Some(val);
             },
-            None => {
-                self.expr_types.insert(span, val);
+            RecordScope::Instance(def, args, path) => {
+                self.comptime_instance_records
+                    .entry((def, args, path, span))
+                    .or_default()
+                    .val = Some(val);
             },
         }
     }
 
     fn record_binder(&mut self, span: Span, fact: crate::linearity::BinderFact) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.binders.insert(span, fact);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .binder = Some(fact);
             },
-            None => {
-                self.binders.insert(span, fact);
+            RecordScope::Instance(def, args, path) => {
+                self.comptime_instance_records
+                    .entry((def, args, path, span))
+                    .or_default()
+                    .binder = Some(fact);
             },
         }
     }
 
-    fn record_generic_call(&mut self, span: Span, solved: Vec<Ty>) {
-        match self.copy_key() {
-            Some(path) => {
+    fn record_generic_call(&mut self, def: DefId, span: Span, solved: Vec<Ty>) {
+        // The site the expansion worklist reads: every solved call into
+        // a fn whose body could hold a per-instance loop must be
+        // reachable here, the walk mode never hiding it.
+        self.comptime_sites.insert(span, (def, solved.clone()));
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.generic_calls.insert(span, solved);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .generic_call = Some(solved);
             },
-            None => {
-                self.generic_calls.insert(span, solved);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .generic_call = Some(solved);
             },
         }
     }
 
     fn record_generic_bounds(&mut self, span: Span, bounds: GenericCallBounds) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.generic_call_bounds.insert(span, bounds);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .generic_bounds = Some(bounds);
             },
-            None => {
-                self.generic_call_bounds.insert(span, bounds);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .generic_bounds = Some(bounds);
             },
         }
     }
 
     fn record_trait_call(&mut self, span: Span, call: TraitCall) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.trait_calls.insert(span, call);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .trait_call = Some(call);
             },
-            None => {
-                self.trait_calls.insert(span, call);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .trait_call = Some(call);
             },
         }
     }
 
     fn record_inherent_call(&mut self, span: Span, method: MethodId) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.inherent_calls.insert(span, method);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .inherent_call = Some(method);
             },
-            None => {
-                self.inherent_calls.insert(span, method);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .inherent_call = Some(method);
             },
         }
     }
 
     fn record_inherent_bounds(&mut self, span: Span, bounds: InherentCallBounds) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.inherent_call_bounds.insert(span, bounds);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .inherent_bounds = Some(bounds);
             },
-            None => {
-                self.inherent_call_bounds.insert(span, bounds);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .inherent_bounds = Some(bounds);
             },
         }
     }
 
     fn record_is_test(&mut self, span: Span, ty: Ty) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.is_tests.insert(span, ty);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .is_test = Some(ty);
             },
-            None => {
-                self.is_tests.insert(span, ty);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .is_test = Some(ty);
             },
         }
     }
 
     fn record_directed_tag(&mut self, span: Span, atom: TypeId) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.directed_tags.insert(span, atom);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .directed_tag = Some(atom);
             },
-            None => {
-                self.directed_tags.insert(span, atom);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .directed_tag = Some(atom);
             },
         }
     }
 
     fn record_handler_handled(&mut self, span: Span, ty: Ty) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.handler_handled.insert(span, ty);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .handler_handled = Some(ty);
             },
-            None => {
-                self.handler_handled.insert(span, ty);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .handler_handled = Some(ty);
             },
         }
     }
 
     fn record_hole_show(&mut self, span: Span, method: MethodId) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.hole_show_dispatches.insert(span, method);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .hole_show = Some(method);
             },
-            None => {
-                self.hole_show_dispatches.insert(span, method);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .hole_show = Some(method);
             },
         }
     }
 
     fn record_member_params(&mut self, span: Span, params: Vec<Ty>) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.member_call_params.insert(span, params);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .member_params = Some(params);
             },
-            None => {
-                self.member_call_params.insert(span, params);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .member_params = Some(params);
             },
         }
     }
 
     fn record_place_store(&mut self, span: Span, store: PlaceStore) {
-        match self.copy_key() {
-            Some(path) => {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.place_stores.insert(span, store);
+            },
+            RecordScope::Written(path) => {
                 self.comptime_records
                     .entry((path, span))
                     .or_default()
                     .place_store = Some(store);
             },
-            None => {
-                self.place_stores.insert(span, store);
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .place_store = Some(store);
             },
         }
     }
@@ -4738,7 +5202,7 @@ impl Bodies<'_> {
             self.record_generic_bounds(span, call_bounds);
         }
         if !solved.is_empty() {
-            self.record_generic_call(span, solved);
+            self.record_generic_call(def, span, solved);
         }
         // Unbound variables leaking into the result are inference
         // failures: no any fallback [B1]. The member set is read by index:
@@ -6567,27 +7031,32 @@ impl Bodies<'_> {
                 },
             }
         }
-        // The comptime record binder projects its `name` member as a
-        // string constant; every other member queues with the walker
-        // round. The receiver is no value, so the walk never stages it.
+        // The comptime record binder projects its `name` member (the
+        // copy's field name) and its `tag` member (the field type's
+        // nominal name) as string constants; the `type` member is a
+        // comptime fact — no runtime word carries a type value, and its
+        // comptime staging is a per-copy fact the evaluator's span-once
+        // answers cannot hold yet. The receiver is no value, so the
+        // walk never stages it.
         if self.comptime_record_recv(recv).is_some() {
-            if name.name == "name" {
-                let string = self
-                    .named_atom_ty(name.span, "string", "the record's name")
+            if name.name == "name" || name.name == "tag" {
+                let string_ty = self
+                    .named_atom_ty(name.span, "string", "the record's member")
                     .unwrap_or_else(|| self.empty());
+                let poisoned = !self.is_string_ty(string_ty);
                 return Val {
-                    ty: string,
+                    ty: string_ty,
                     diverges: false,
-                    poisoned: false,
+                    poisoned,
                 };
             }
             self.error(
                 ErrorCode::InferenceFailed,
-                "the comptime record projects its `name` member in runtime code; its `tag` and \
-                 `type` members are comptime facts that queue with the walker round"
-                    .to_owned(),
+                "the comptime record projects its `name` and `tag` members as string constants \
+                 in runtime code; its `type` member is a comptime fact no runtime word \
+                 carries yet".to_owned(),
                 name.span,
-                "not the record's name member",
+                "not a record string member",
             );
             return Val {
                 ty: self.empty(),
@@ -7678,7 +8147,7 @@ impl Bodies<'_> {
                 poisoned: true,
             };
         }
-        let Some(fields) = self.project_loop_fields(iter, span) else {
+        let Some(projection) = self.project_loop_fields(iter, span) else {
             return Val {
                 ty: unit,
                 diverges: false,
@@ -7699,14 +8168,64 @@ impl Bodies<'_> {
                 poisoned: true,
             };
         };
-        self.comptime_loops.insert(span, ComptimeLoop {
-            fields: fields.clone(),
-            binder: name.span,
-        });
+        // A loop over the fn's own type variable cannot unroll at the
+        // once-check: its fields are a per-instance fact. The loop
+        // records its marker and defers — each entering site's
+        // expansion walk unrolls it over the site's own substitution.
+        // The once-check's table holds the written loops and the
+        // per-instance markers; an expansion walk's concrete projections
+        // land in the instance tables under the walked fn's key, so two
+        // instances of one loop never share a projection.
+        let (copies, per_instance) = match &self.instance {
+            Some(run) => {
+                let (fields, tags) = match projection {
+                    Projection::Written(fields, tags) => (fields, tags),
+                    Projection::PerInstance(_) => {
+                        return Val {
+                            ty: unit,
+                            diverges: false,
+                            poisoned: true,
+                        };
+                    },
+                };
+                let copies = fields.len();
+                self.comptime_instance_loops.insert(
+                    (run.def, Rc::clone(&run.args), span),
+                    ComptimeLoop {
+                        fields,
+                        tags,
+                        per_instance: None,
+                        binder: name.span,
+                    },
+                );
+                (copies, None)
+            },
+            None => {
+                let (fields, tags, marker) = match projection {
+                    Projection::Written(fields, tags) => (fields, tags, None),
+                    Projection::PerInstance(variable) => (Vec::new(), Vec::new(), Some(variable)),
+                };
+                let copies = fields.len();
+                self.comptime_loops.insert(span, ComptimeLoop {
+                    fields,
+                    tags,
+                    per_instance: marker,
+                    binder: name.span,
+                });
+                (copies, marker)
+            },
+        };
+        if per_instance.is_some() {
+            return Val {
+                ty: unit,
+                diverges: false,
+                poisoned: false,
+            };
+        }
         let record_ty = self.comptime_record_ty(name.span);
         self.comptime_stack.push(span);
         let diag_start = self.diags.len();
-        for index in 0..fields.len() {
+        for index in 0..copies {
             self.comptime_path
                 .push(u32::try_from(index).expect("copy index fits u32"));
             let saved = self.snapshot();
@@ -7740,11 +8259,63 @@ impl Bodies<'_> {
         }
     }
 
+    /// One per-instance expansion's body entry: the walked fn's lambda
+    /// under the entering site's solved arguments pushed as its generic
+    /// scope (no variables mint — the concrete types solve their own
+    /// instances), the parameters solved and bound over them, the body
+    /// walked once. Mirrors the lambda walk's frame discipline; the
+    /// walk's body-wide records run to scratch tables, so only the
+    /// per-instance copy facts it lands survive.
+    fn instance_fn_body(&mut self, lambda: &Expr, args: &[Ty]) {
+        let Expr::Lambda {
+            generics,
+            params,
+            ret,
+            body,
+            ..
+        } = lambda
+        else {
+            return;
+        };
+        let mut scope = FxHashMap::default();
+        for (param, ty) in generics.iter().zip(args.iter()) {
+            scope.insert(param.name.name.clone(), *ty);
+        }
+        self.type_vars.push(scope);
+        let saved = self.snapshot();
+        for param in params {
+            let Some(solved) = param.ty.as_ref().and_then(|t| self.solve_here(t)) else {
+                continue;
+            };
+            self.bind_local(param.name.span, Binding {
+                ty: solved,
+                mutable: param_is_mut(param),
+            });
+        }
+        let declared_ret = ret.as_ref().and_then(|r| self.solve_here(r));
+        let old_ret = self.ret;
+        self.ret = declared_ret;
+        let frame = self.enter_frame();
+        let outer_answers = std::mem::take(&mut self.spawn_answers);
+        self.value_pos = false;
+        let body_val = self.expr(body, self.ret);
+        self.spawn_answers = outer_answers;
+        self.exit_frame(frame);
+        if let Some(r) = declared_ret
+            && !body_val.diverges
+        {
+            self.expect_contains(body_val, r, body.span(), "instance body");
+        }
+        self.ret = old_ret;
+        self.restore(saved);
+        self.type_vars.pop();
+    }
+
     /// The projected field names of a `for comptime` loop's iterable:
     /// exactly `fields(T)` over one written parameter-less struct type.
     /// The iterable never walks as an expression — its argument is a
     /// type spelling, read through the resolution directly.
-    fn project_loop_fields(&mut self, iter: &Expr, span: Span) -> Option<Vec<String>> {
+    fn project_loop_fields(&mut self, iter: &Expr, span: Span) -> Option<Projection> {
         let Expr::Call {
             callee,
             args,
@@ -7774,21 +8345,21 @@ impl Bodies<'_> {
             );
             return None;
         }
-        let Some(struct_def) = self.written_struct_def(&args[0].value, span) else {
-            return None;
-        };
-        let shape = self.decls.structs.get(&struct_def)?;
-        Some(shape.fields.iter().map(|f| f.name.name.clone()).collect())
+        self.project_loop_type(&args[0].value)
     }
 
-    /// The parameter-less struct def one written type name denotes, for
-    /// the comptime loop's projection.
-    fn written_struct_def(&mut self, arg: &Expr, span: Span) -> Option<DefId> {
+    /// The loop's iterable argument: a written struct type name projects
+    /// its fields here; a name resolving to the fn's own type variable
+    /// marks the loop per-instance (the once-check cannot project it —
+    /// each entering site's expansion walk unrolls it under the site's
+    /// own substitution, and inside one such walk the variable scope
+    /// already holds the instance's concrete type, projecting directly).
+    fn project_loop_type(&mut self, arg: &Expr) -> Option<Projection> {
         let Expr::Path { path, .. } = peel_paren(arg) else {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the comptime loop's type is one written type name (`fields(point)`)".to_owned(),
-                span,
+                arg.span(),
                 "not a type name",
             );
             return None;
@@ -7797,16 +8368,27 @@ impl Bodies<'_> {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the comptime loop's type is one written type name (`fields(point)`)".to_owned(),
-                span,
+                arg.span(),
                 "not a type name",
             );
             return None;
         };
+        // The fn's own generic parameter, in expression position: the
+        // resolver answers no row for it (the type-variable namespace is
+        // the checker's), so the scopes decide.
+        if self.res.get(only.span).is_none()
+            && let Some(ty) = self.variable_scope_ty(&only.name)
+        {
+            if self.is_var_ty(ty) {
+                return Some(Projection::PerInstance(ty));
+            }
+            return self.project_loop_atom(ty, only.span);
+        }
         let def = match self.res.get(only.span) {
             Some(Res::Def(def)) => *def,
-            // An unresolved name is the resolver's own diagnostic; a
-            // resolved non-type (a local, a fn) refuses here.
-            Some(_) => {
+            // An unresolved non-variable name (the resolver kept quiet
+            // for the seam's arguments) refuses here.
+            _ => {
                 self.error(
                     ErrorCode::InferenceFailed,
                     format!(
@@ -7818,7 +8400,6 @@ impl Bodies<'_> {
                 );
                 return None;
             },
-            None => return None,
         };
         let Some(shape) = self.decls.structs.get(&def) else {
             self.error(
@@ -7842,7 +8423,105 @@ impl Bodies<'_> {
             );
             return None;
         }
-        Some(def)
+        let fields = shape.fields.iter().map(|f| f.name.name.clone()).collect();
+        Some(Projection::Written(fields, self.struct_def_tags(def)))
+    }
+
+    /// The type one name resolves to through the variable scopes,
+    /// innermost first; `None` when no scope names it.
+    fn variable_scope_ty(&self, name: &str) -> Option<Ty> {
+        self.type_vars
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    /// Each field's nominal tag name (the type's own name when the
+    /// field's solved type is one bare atom, empty when composite),
+    /// aligned with the declaration order.
+    fn struct_def_tags(&mut self, def: DefId) -> Vec<String> {
+        let Some(shape) = self.decls.structs.get(&def) else {
+            return Vec::new();
+        };
+        let written: Vec<Type> = shape.fields.iter().map(|f| f.ty.clone()).collect();
+        written
+            .iter()
+            .map(|t| match self.solve_here(t) {
+                Some(ty) => self.bare_atom_name(ty),
+                None => String::new(),
+            })
+            .collect()
+    }
+
+    /// The declared name of the one bare atom `ty` names, empty when the
+    /// type is composite (a tuple, an fn type, an application) or names
+    /// no single atom — the same nominal-tag rule the comptime
+    /// evaluator's reflection table keeps.
+    fn bare_atom_name(&self, ty: Ty) -> String {
+        let [only] = self.decls.universe.members(ty) else {
+            return String::new();
+        };
+        let Ok(decl) = self.decls.universe.atom_decl(*only) else {
+            return String::new();
+        };
+        match decl.kind {
+            AtomKind::Apply(..)
+            | AtomKind::Tuple(_)
+            | AtomKind::FnSig(_, _)
+            | AtomKind::Reserved => String::new(),
+            AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Enum(_) => decl.name.clone(),
+        }
+    }
+
+    /// The concrete type's field projection for a loop whose variable
+    /// scope holds it: the walked struct's fields, in declaration
+    /// order. An application, an enum, or any non-struct type refuses
+    /// exactly as a written one does.
+    fn project_loop_atom(&mut self, ty: Ty, span: Span) -> Option<Projection> {
+        let [only] = self.decls.universe.members(ty) else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "the comptime loop walks a written concrete struct; this type names no single \
+                 struct"
+                    .to_owned(),
+                span,
+                "not a struct",
+            );
+            return None;
+        };
+        let Ok(decl) = self.decls.universe.atom_decl(*only) else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "the comptime loop walks a struct's fields; this type names no declared struct"
+                    .to_owned(),
+                span,
+                "not a struct",
+            );
+            return None;
+        };
+        if !matches!(decl.kind, AtomKind::Struct(_)) {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "the comptime loop walks a written struct's fields; an enum's cases, a builtin, \
+                 and a generic application's per-instance fields name none here".to_owned(),
+                span,
+                "not a written struct",
+            );
+            return None;
+        }
+        let Some(def) = self.decls.defs_of_atoms.get(&only).copied() else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                "the comptime loop walks a struct's fields; this type names no declared struct"
+                    .to_owned(),
+                span,
+                "not a declared struct",
+            );
+            return None;
+        };
+        let shape = self.decls.structs.get(&def)?;
+        let fields = shape.fields.iter().map(|f| f.name.name.clone()).collect();
+        Some(Projection::Written(fields, self.struct_def_tags(def)))
     }
 
     /// The comptime field record's type (the ambient's `field` struct).
@@ -7852,12 +8531,19 @@ impl Bodies<'_> {
     }
 
     /// The enclosing comptime loop whose record binder a path names,
-    /// innermost match first.
+    /// innermost match first. An expansion walk reads the loop info
+    /// from the instance tables first — a written loop nested inside a
+    /// per-instance copy projects only there.
     fn comptime_record_depth(&self, bind: Span) -> Option<usize> {
         self.comptime_stack.iter().rposition(|&loop_span| {
-            self.comptime_loops
-                .get(&loop_span)
-                .is_some_and(|loop_info| loop_info.binder == bind)
+            let info = if let Some(run) = &self.instance {
+                self.comptime_instance_loops
+                    .get(&(run.def, Rc::clone(&run.args), loop_span))
+                    .or_else(|| self.comptime_loops.get(&loop_span))
+            } else {
+                self.comptime_loops.get(&loop_span)
+            };
+            info.is_some_and(|loop_info| loop_info.binder == bind)
         })
     }
 
@@ -7900,11 +8586,29 @@ impl Bodies<'_> {
             _ => return None,
         };
         let depth = self.comptime_record_depth(bind)?;
-        let loop_span = self.comptime_stack.get(depth).copied()?;
-        let fields = &self.comptime_loops.get(&loop_span)?.fields;
-        let index = *self.comptime_path.get(depth)?;
-        let field = fields.get(index as usize)?.clone();
+        let (field, _) = self.active_loop_field(depth)?;
         Some((depth, field))
+    }
+
+    /// The active copy's own field facts at a record binder's depth:
+    /// the field name and its nominal tag string. A per-instance
+    /// expansion reads its projection from the instance tables; a
+    /// written loop's from the once-check's table (an expansion walk
+    /// re-walks written loops too, whose projections never depended on
+    /// the walked variable).
+    fn active_loop_field(&self, depth: usize) -> Option<(String, String)> {
+        let loop_span = *self.comptime_stack.get(depth)?;
+        let index = *self.comptime_path.get(depth)? as usize;
+        let info = if let Some(run) = &self.instance {
+            self.comptime_instance_loops
+                .get(&(run.def, Rc::clone(&run.args), loop_span))
+                .or_else(|| self.comptime_loops.get(&loop_span))?
+        } else {
+            self.comptime_loops.get(&loop_span)?
+        };
+        let name = info.fields.get(index)?.clone();
+        let tag = info.tags.get(index)?.clone();
+        Some((name, tag))
     }
 
     /// The keyed field access `x.[f.name]`: the comptime constant

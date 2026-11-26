@@ -69,6 +69,63 @@ fn rec_rows () -> () {
   println(width.show())
 }
 
+struct nums2 { a: int, b: int }
+
+fn per_sum[t] (p: t) -> int {
+  var total = 0
+  for comptime f in fields(t) {
+    total += p.[f.name]
+  }
+  total
+}
+
+fn wrap[t] (x: t) -> int {
+  per_sum(x) * 2
+}
+
+fn names_of[t] (p: t) -> string {
+  var out = ""
+  for comptime f in fields(t) {
+    out += f.name
+    out += ","
+  }
+  out
+}
+
+fn tag_row[t] (p: t) -> string {
+  var out = ""
+  for comptime f in fields(t) {
+    out += f.name
+    out += "="
+    out += f.tag
+    out += " "
+  }
+  out
+}
+
+fn mixed[t] (p: t) -> int {
+  var total = 0
+  const q = pair { l: 1, r: 2 }
+  for comptime f in fields(t) {
+    for comptime g in fields(pair) {
+      total += q.[g.name]
+    }
+  }
+  total
+}
+
+fn per_grid[t] (p: t) -> int {
+  var count = 0
+  for comptime f in fields(t) {
+    for comptime g in fields(t) {
+      count += p.[g.name]
+    }
+  }
+  count
+}
+
+struct pair { l: int, r: int }
+
 fn main() -> () {
   println(sum_keyed(nums { a: 3, b: 4, c: 5 }).show())
   println(write_all(nums { a: 1, b: 2, c: 3 }).show())
@@ -77,4 +134,12 @@ fn main() -> () {
   println(twice(3).show())
   println(twice(5).show())
   rec_rows()
+  println(per_sum(nums { a: 1, b: 2, c: 3 }).show())
+  println(per_sum(nums2 { a: 7, b: 8 }).show())
+  println(wrap(nums2 { a: 1, b: 2 }).show())
+  println(names_of(nums2 { a: 1, b: 2 }))
+  println(tag_row(nums { a: 1, b: 2, c: 3 }))
+  println(mixed(nums { a: 1, b: 2, c: 3 }).show())
+  println(mixed(pair { l: 5, r: 6 }).show())
+  println(per_grid(pair { l: 1, r: 2 }).show())
 }

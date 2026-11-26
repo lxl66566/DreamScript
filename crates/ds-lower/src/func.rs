@@ -478,6 +478,11 @@ pub(crate) struct PlannedFn {
     /// when it is an instance, the enclosing instance's for a lambda or a
     /// spawned child minted inside one, `None` everywhere else.
     pub(crate) subst: Option<Rc<Subst>>,
+    /// The per-instance `for comptime` expansion this entry lowers
+    /// under: the walked fn's definition and solved arguments. The
+    /// instance entry carries its own; a lambda or spawned child minted
+    /// inside one inherits it; every other entry is `None`.
+    pub(crate) comptime_instance: Option<Rc<ds_check::type_of::InstanceScope>>,
 }
 
 impl PlannedFn {
@@ -812,6 +817,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
     }
 
@@ -834,6 +840,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
     }
 
@@ -855,6 +862,7 @@ impl Plan {
     ) -> u32 {
         let index = u32::try_from(self.functions.len()).expect("function index fits u32");
         let name = format!("{}${index}", self.functions[enclosing as usize].name);
+        let comptime_instance = self.functions[enclosing as usize].comptime_instance.clone();
         self.functions.push(PlannedFn {
             name,
             lambda: lambda.clone(),
@@ -869,6 +877,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst,
+            comptime_instance,
         });
         let Expr::Lambda { span, .. } = lambda else {
             unreachable!("push_lambda receives a lambda");
@@ -914,6 +923,7 @@ impl Plan {
             body: Box::new(Expr::Block(body.clone())),
         };
         let name = format!("{}${index}", self.functions[enclosing as usize].name);
+        let comptime_instance = self.functions[enclosing as usize].comptime_instance.clone();
         self.functions.push(PlannedFn {
             name,
             lambda,
@@ -928,6 +938,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst,
+            comptime_instance,
         });
         self.mints.insert((*span, enclosing), Minted {
             index,
@@ -992,6 +1003,7 @@ impl Plan {
             free_generic: true,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
         index
     }
@@ -1028,6 +1040,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
         index
     }
@@ -1074,6 +1087,7 @@ impl Plan {
             free_generic: true,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
         index
     }
@@ -1129,6 +1143,7 @@ impl Plan {
             free_generic: false,
             instance: None,
             subst: None,
+            comptime_instance: None,
         });
     }
 
@@ -2653,6 +2668,10 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// record read routes through it: inside a copy the checker's facts
     /// for the body live in the per-copy table.
     comptime_path: Vec<u32>,
+    /// The per-instance `for comptime` expansion this body lowers
+    /// under: the walked fn's definition and solved arguments. The
+    /// instance tables' key; `None` on every other body.
+    comptime_instance: Option<Rc<ds_check::type_of::InstanceScope>>,
     /// The enclosing `for comptime` loops' (loop span, record binder
     /// span) pairs, innermost last; the copy's field name reads from the
     /// loop's projected fields through the path depth.
@@ -2850,6 +2869,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             spawn_child: planned.spawn_child,
             comptime_path: Vec::new(),
             comptime_stack: Vec::new(),
+            comptime_instance: planned.comptime_instance.clone(),
             unit_slot: None,
             value_ends: Vec::new(),
             cur_span: body.span(),
@@ -2917,121 +2937,76 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// checker's facts for the body live in the per-copy table keyed by
     /// the copy path; outside one, none exists.
     fn copy_val(&self, span: Span) -> Option<Val> {
+        self.copy_record(span)?.val
+    }
+
+    /// The copy record at one span: inside a `for comptime` copy the
+    /// checker's facts for the body live in the per-copy tables. A
+    /// per-instance expansion's facts sit under the walked fn's
+    /// definition and solved arguments; a written loop's under the copy
+    /// path alone. A body-wide table cannot hold them; the lowering
+    /// reads the active expansion's record first, the once-check's
+    /// second.
+    fn copy_record(&self, span: Span) -> Option<&ds_check::type_of::CopyRecords> {
         if self.comptime_path.is_empty() {
             return None;
+        }
+        if let Some(scope) = &self.comptime_instance {
+            if let Some(rec) = self.analyzed.checked.comptime_instance_records.get(&(
+                scope.0,
+                Rc::clone(&scope.1),
+                self.comptime_path.clone(),
+                span,
+            )) {
+                return Some(rec);
+            }
         }
         self.analyzed
             .checked
             .comptime_records
             .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.val)
     }
 
     fn copy_binder(&self, span: Span) -> Option<BinderFact> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.binder)
+        self.copy_record(span)?.binder
     }
 
     fn copy_trait_call(&self, span: Span) -> Option<TraitCall> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.trait_call.clone())
+        self.copy_record(span)?.trait_call.clone()
     }
 
     fn copy_is_test(&self, span: Span) -> Option<Ty> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.is_test)
+        self.copy_record(span)?.is_test
     }
 
     fn copy_generic_call(&self, span: Span) -> Option<Vec<Ty>> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.generic_call.clone())
+        self.copy_record(span)?.generic_call.clone()
     }
 
     fn copy_member_params(&self, span: Span) -> Option<Vec<Ty>> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.member_params.clone())
+        self.copy_record(span)?.member_params.clone()
     }
 
     fn copy_handler_handled(&self, span: Span) -> Option<Ty> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.handler_handled)
+        self.copy_record(span)?.handler_handled
     }
 
     fn copy_place_store(&self, span: Span) -> Option<PlaceStore> {
-        if self.comptime_path.is_empty() {
-            return None;
-        }
-        self.analyzed
-            .checked
-            .comptime_records
-            .get(&(self.comptime_path.clone(), span))
-            .and_then(|rec| rec.place_store.clone())
+        self.copy_record(span)?.place_store.clone()
     }
 
     /// The directed label's atom at one span, the copy-active read.
     fn directed_tag(&self, span: Span) -> Option<TypeId> {
-        if !self.comptime_path.is_empty() {
-            if let Some(atom) = self
-                .analyzed
-                .checked
-                .comptime_records
-                .get(&(self.comptime_path.clone(), span))
-                .and_then(|rec| rec.directed_tag)
-            {
-                return Some(atom);
-            }
+        if let Some(atom) = self.copy_record(span).and_then(|rec| rec.directed_tag) {
+            return Some(atom);
         }
         self.analyzed.checked.directed_tags.get(&span).copied()
     }
 
     /// The hole's solved show dispatch at one span, the copy-active read.
     fn hole_show_method(&self, span: Span) -> Option<MethodId> {
-        if !self.comptime_path.is_empty() {
-            if let Some(method) = self
-                .analyzed
-                .checked
-                .comptime_records
-                .get(&(self.comptime_path.clone(), span))
-                .and_then(|rec| rec.hole_show)
-            {
-                return Some(method);
-            }
+        if let Some(method) = self.copy_record(span).and_then(|rec| rec.hole_show) {
+            return Some(method);
         }
         self.analyzed
             .checked
@@ -3182,16 +3157,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// while a solved answer's type reaches the chain start through the
     /// lens at the staging itself.
     fn written_generic_call_bounds(&self, span: Span) -> Option<GenericCallBounds> {
-        if !self.comptime_path.is_empty() {
-            if let Some(bounds) = self
-                .analyzed
-                .checked
-                .comptime_records
-                .get(&(self.comptime_path.clone(), span))
-                .and_then(|rec| rec.generic_bounds.clone())
-            {
-                return Some(bounds);
-            }
+        if let Some(bounds) = self.copy_record(span).and_then(|rec| rec.generic_bounds.clone())
+        {
+            return Some(bounds);
         }
         self.analyzed
             .checked
@@ -4774,13 +4742,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         else {
             return Err(mismatch("the comptime loop"));
         };
-        let Some(loop_info) = self.analyzed.checked.comptime_loops.get(span).cloned() else {
-            return Err(LowerError::unsupported(
-                *span,
-                "a `for comptime` loop",
-                "the checker projected no fields for it",
-            ));
-        };
+        let loop_info = self.comptime_loop_info(*span)?;
         let Pattern::Binding {
             span: binder_span,
             name: _,
@@ -4816,6 +4778,49 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(self.unit_value(*span)?.place)
     }
 
+    /// The projected fields of the loop at `span`: an active expansion's
+    /// from the instance tables under the walked fn's definition and
+    /// solved arguments — a written loop nested inside a per-instance
+    /// copy projects only there, the once-check never walking it — then
+    /// the once-check's table. A per-instance loop with no active
+    /// expansion — the ONE body lowering over its variables — refuses:
+    /// its fields are a fact of each concrete entering shape, and a
+    /// variable's shape names none.
+    fn comptime_loop_info(&self, span: Span) -> Result<ds_check::type_of::ComptimeLoop, LowerError> {
+        if let Some(scope) = &self.comptime_instance
+            && let Some(info) = self
+                .analyzed
+                .checked
+                .comptime_instance_loops
+                .get(&(scope.0, Rc::clone(&scope.1), span))
+        {
+            return Ok(info.clone());
+        }
+        let marked = self.analyzed.checked.comptime_loops.get(&span);
+        if marked.is_some_and(|info| info.per_instance.is_some()) {
+            if self.comptime_instance.is_none() {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a `for comptime` loop over the fn's own type variable",
+                    "this body lowers over its variables; only a concrete entering shape \
+                     projects the loop's fields",
+                ));
+            }
+            return Err(LowerError::unsupported(
+                span,
+                "a `for comptime` loop",
+                "the checker expanded no per-instance fields for this instance",
+            ));
+        }
+        marked.cloned().ok_or_else(|| {
+            LowerError::unsupported(
+                span,
+                "a `for comptime` loop",
+                "the checker projected no fields for it",
+            )
+        })
+    }
+
     /// The comptime constant a keyed access's name expression spells:
     /// exactly `<record binder>.name`, answering the field name of the
     /// active copy at the binder's depth.
@@ -4843,15 +4848,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .iter()
             .rposition(|(_, binder)| binder == bind)?;
         let (loop_span, _) = self.comptime_stack.get(depth).copied()?;
-        let fields = &self.analyzed.checked.comptime_loops.get(&loop_span)?.fields;
+        let fields = &self.comptime_loop_info(loop_span).ok()?.fields;
         let index = *self.comptime_path.get(depth)?;
         fields.get(index as usize).cloned()
     }
 
-    /// The copy's field name when a receiver expression names an active
-    /// comptime record binder (`f` inside `for comptime f in ...`): the
+    /// The copy's own field fact when a receiver expression names an
+    /// active comptime record binder (`f` inside `for comptime f in
+    /// ...`): the field name, and its type's nominal tag string. The
     /// binder's stack depth indexes the copy path.
-    fn comptime_record_name(&self, recv: &Expr) -> Option<String> {
+    fn comptime_record_field(&self, recv: &Expr) -> Option<(String, String)> {
         let Expr::Path { path, .. } = peel_parens(recv) else {
             return None;
         };
@@ -4866,9 +4872,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .iter()
             .rposition(|(_, binder)| binder == bind)?;
         let (loop_span, _) = self.comptime_stack.get(depth).copied()?;
-        let fields = &self.analyzed.checked.comptime_loops.get(&loop_span)?.fields;
+        let info = self.comptime_loop_info(loop_span).ok()?;
         let index = *self.comptime_path.get(depth)?;
-        fields.get(index as usize).cloned()
+        let name = info.fields.get(index as usize)?.clone();
+        let tag = info.tags.get(index as usize)?.clone();
+        Some((name, tag))
     }
 
     fn for_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
@@ -7232,12 +7240,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             },
             _ => return Err(mismatch("a field access")),
         };
-        // The comptime record binder's `name` member (`f.name`) is a
-        // string constant: the copy's own field name embeds from the
+        // The comptime record binder's `name` and `tag` members are
+        // string constants: the copy's own field name, and the field
+        // type's nominal name (empty when composite), embed from the
         // pool, no receiver word exists.
-        if let Some(record_name) = self.comptime_record_name(recv) {
+        if let Expr::Field { name: member, .. } = e
+            && let Some((field_name, tag)) = self.comptime_record_field(recv)
+        {
+            let record_string = if member.name == "tag" { tag } else { field_name };
             let dst = self.temp_word(SlotType::Ref)?;
-            let kidx = self.pool_str(&record_name);
+            let kidx = self.pool_str(&record_string);
             self.kstr(dst, kidx);
             return Ok(Place {
                 base: dst,

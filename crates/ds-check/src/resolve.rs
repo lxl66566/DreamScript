@@ -960,6 +960,7 @@ impl Package {
             imports: self.imports.get(&ast.file),
             scopes: vec![FxHashMap::default()],
             type_scopes: vec![FxHashMap::default()],
+            quiet_projection_args: 0,
         };
         for block in &ast.blocks {
             for item in &block.items {
@@ -2054,6 +2055,12 @@ struct FileResolver<'a> {
     scopes: Vec<FxHashMap<String, Span>>,
     /// Type-variable scopes, innermost last.
     type_scopes: Vec<FxHashMap<String, Span>>,
+    /// Depth of `fields` projection arguments being resolved: a bare
+    /// name no namespace binds stays quiet there (the fn's own generic
+    /// parameter the checker's variable scopes own), the checker's
+    /// projection owning the diagnostic for a name that resolves to
+    /// nothing.
+    quiet_projection_args: usize,
 }
 
 /// What a bare identifier in a pattern names.
@@ -2336,8 +2343,15 @@ impl FileResolver<'_> {
                     } => self.map_apply_use(head, key, value),
                     _ => self.expr(callee),
                 }
+                let quiet_arg = self.quiet_projection_argument(callee, args.len());
                 for arg in args {
-                    self.expr(&arg.value);
+                    if quiet_arg {
+                        self.quiet_projection_args += 1;
+                        self.expr(&arg.value);
+                        self.quiet_projection_args -= 1;
+                    } else {
+                        self.expr(&arg.value);
+                    }
                 }
                 if let Some(tail) = trailing {
                     self.expr(tail);
@@ -2567,9 +2581,27 @@ impl FileResolver<'_> {
             self.uses.push((name.span, Res::Def(def)));
         } else if let Some(module) = self.module_alias(&name.name) {
             self.uses.push((name.span, Res::Module(module)));
-        } else if name.name != "none" {
+        } else if name.name != "none" && self.quiet_projection_args == 0 {
             self.unknown_name(name, self.shadowing_candidates());
         }
+    }
+
+    /// Whether this call is the comptime loop's `fields` projection with
+    /// exactly one argument: the callee resolving to the builtin def.
+    fn quiet_projection_argument(&mut self, callee: &Expr, arity: usize) -> bool {
+        if arity != 1 {
+            return false;
+        }
+        let Expr::Path { path, .. } = callee else {
+            return false;
+        };
+        let [only] = path.segments.as_slice() else {
+            return false;
+        };
+        self.uses.iter().rev().any(|(span, res)| {
+            *span == only.span
+                && matches!(res, Res::Def(def) if self.package.def(*def).name == "fields")
+        })
     }
 
     /// The import-bound function a name selects in the resolving file
