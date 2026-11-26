@@ -276,6 +276,7 @@ impl Universe {
                 Ok(self.diff(x, y))
             },
             TypeExpr::Tuple(elements) => self.tuple_solve(elements),
+            TypeExpr::Empty => Ok(self.empty_ty()),
         }
     }
 

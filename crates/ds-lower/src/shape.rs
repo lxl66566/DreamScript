@@ -814,7 +814,11 @@ impl<'a> Shapes<'a> {
             return Ok(Some(vec![slot]));
         }
         match &decl.kind {
-            ds_check::AtomKind::Unit => Ok(Some(vec![SlotType::I64])), // a unit word
+            // a lone unit tag or case as a field type carries the
+            // case's own Tag word, the same one `atom_shape` rules the
+            // bare value, so the embedded word and the field's span
+            // agree at the construction and every read
+            ds_check::AtomKind::Unit => Ok(Some(vec![SlotType::Tag])),
             ds_check::AtomKind::Struct(_) => {
                 if let Some(def) = self.analyzed.decls.defs_of_atoms.get(&id)
                     && self.declared_deinits.contains(def)

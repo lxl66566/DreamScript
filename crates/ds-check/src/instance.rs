@@ -26,8 +26,12 @@
 //! `impl eq for int | string` becomes two instances. Every other expression
 //! is one branch whose head is its solved atom set ([`Universe::solve`]), so
 //! intersections and differences normalize away: `a & b` of distinct atoms
-//! solves to the empty set and is rejected ([`Error::EmptyInstanceHead`]),
-//! while `(a | b) - b` normalizes to the singleton `a`. A negated-constraint
+//! solves to the empty set and is rejected ([`Error::EmptyInstanceHead`])
+//! unless spelled as the canonical empty set ([`TypeExpr::Empty`], the
+//! conversion layer's form for a name that IS the empty type, a zero-case
+//! enum), whose branch declares a vacuous instance — disjoint from every
+//! head, never selected for an inhabited query — while `(a | b) - b`
+//! normalizes to the singleton `a`. A negated-constraint
 //! head (`impl draw for ~Copyable`) or a trait used as a type stays one
 //! multi-atom head. Heads are solved snapshots of the universe state at
 //! declaration (crate-root snapshot rule); the memoized query layer owns
@@ -440,7 +444,11 @@ impl InstanceEnv {
         let mut heads = Vec::with_capacity(branches.len());
         for expr in &branches {
             let head = universe.solve(expr)?;
-            if universe.is_empty(head) {
+            // The canonical empty spelling declares a vacuous instance (a
+            // zero-case enum hosts its derives over a head no value ever
+            // inhabits); any other written branch that solves empty names
+            // atoms yet denotes none, and stays refused.
+            if universe.is_empty(head) && !matches!(expr, TypeExpr::Empty) {
                 return Err(Error::EmptyInstanceHead(head));
             }
             heads.push(head);

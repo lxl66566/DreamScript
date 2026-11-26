@@ -1709,6 +1709,9 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "pub struct pairfield {\n",
         "  p: (int, int),\n",
         "}\n",
+        "pub struct tagged_pair {\n",
+        "  t: (string, list[byte]),\n",
+        "}\n",
         "pub enum tone {\n",
         "  flat,\n",
         "  loaded { n: int, data: bytes },\n",
@@ -1738,6 +1741,20 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "    flat => 0,\n",
         "    loaded(n, _) => n,\n",
         "  }\n",
+        "}\n",
+        "pub fn mk_pair(a: int, b: int) -> pairfield {\n",
+        "  pairfield { p: (a, b) }\n",
+        "}\n",
+        "pub fn pair_sum(pf: pairfield) -> int {\n",
+        "  const (a, b) = pf.p\n",
+        "  a + b\n",
+        "}\n",
+        "pub fn mk_tagged(label: string) -> tagged_pair {\n",
+        "  tagged_pair { t: (label, [b'k']) }\n",
+        "}\n",
+        "pub fn tag_weight(tp: tagged_pair) -> int {\n",
+        "  const (label, raw) = tp.t\n",
+        "  len(label) + len(raw)\n",
         "}\n",
     );
     let members = [("blobs.ds", member)];
@@ -1827,33 +1844,46 @@ fn linked_bytes_field_facts_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The field shapes the word vocabulary leaves outside itself keep
-/// their refusals at the same walk (G4): a tuple field carries no fact
-/// (it rides no ambient constructor atom), so its selection still
-/// refuses — the same DS4021. The containers over a declared member
-/// (`widemap`'s `map[string, blob]`) bind now through the Named word
-/// (the fleet e2e's legs).
+/// A linked struct's tuple field binds through its word-layout fact
+/// (G4): the positional product is one plain word per member, so it
+/// joins the linked word vocabulary and the consumer constructs,
+/// destructures in place, and passes values through the producer's own
+/// tuple-taking functions — a scalar pair and a pair over the Ref
+/// words (string, list[byte]) both crossing the packages.
 #[test]
-fn the_wider_word_field_shapes_still_refuse() {
-    let (work, pkg_id) = blobs_fixtures("blobs-tiers");
+fn the_tuple_fields_cross_and_run() {
+    let (work, pkg_id) = blobs_fixtures("blobs-tuple");
     let root_manifest = blobs_root_manifest(&pkg_id);
-    let source = concat!(
-        "import @blobs (pairfield)\n",
-        "\n",
-        "fn main() -> int {\n",
-        "7\n",
-        "}\n",
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @blobs (pairfield, tagged_pair, mk_pair, pair_sum, mk_tagged, tag_weight)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const own = pairfield { p: (3, 4) }\n",
+            "  const (a, b) = own.p\n",
+            "  const made = mk_pair(10, 20)\n",
+            "  var total = a + b + pair_sum(made) + pair_sum(own)\n",
+            "  const tagged = mk_tagged(\"hey\")\n",
+            "  const (label, raw) = tagged.t\n",
+            "  total = total + len(label) + len(raw) + tag_weight(tagged)\n",
+            "  const own_tagged = tagged_pair { t: (\"hi\", [b'z', b'q']) }\n",
+            "  total = total + tag_weight(own_tagged)\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
     );
-    let root = write_root(&work, &root_manifest, source);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
     let (ok, out, err) = ds(&["run", entry]);
-    assert!(!ok, "the tuple-field selection refuses");
-    assert_eq!(out, "");
-    assert!(
-        err.contains("layout and tag rows are the artifact round"),
-        "the tuple-field refusal names its tier (stderr: {err})"
-    );
+    assert!(ok, "the tuple-field run exits 0 (stderr: {err})");
+    // the destructure 7, the made pair 30, the own pair 7, the tagged
+    // legs 3+1+4, and the consumer-built tagged pair 2+2 — 56 in all,
+    // the run echoing the entry's return after the println
+    assert_eq!(out, "56\n56\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 

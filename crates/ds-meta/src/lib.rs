@@ -1558,6 +1558,7 @@ fn render_type_expr(ty: &TypeExpr, analyzed: &Analyzed) -> String {
                 .collect();
             format!("({})", rendered.join(", "))
         },
+        TypeExpr::Empty => "empty".to_owned(),
     }
 }
 

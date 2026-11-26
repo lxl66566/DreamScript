@@ -304,8 +304,10 @@ pub struct TypeField {
 /// The consuming compile resolves a Named word through the linked
 /// surface onto its own minted entity for that same declaration —
 /// identity, not name lookup, never its ambient or local names. A tuple
-/// field stays outside (it rides no ambient constructor atom), as does
-/// a type the member cannot itself link.
+/// crosses as one word per positional member — no ambient constructor
+/// atom rides it, the mint re-spelling the written product the consuming
+/// universe solves — while the empty tuple `()` and a type the member
+/// cannot itself link stay outside.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeWord {
     /// A scalar atom word.
@@ -335,8 +337,17 @@ pub enum TypeWord {
     /// case-subset union (`red | green`) or a mixed scalar-and-case set.
     /// Each member spells a word of its own; `t | none` rides the
     /// optional word, a lone unit-typed member stays outside (a field
-    /// naming one keeps its refusal, the local spelling's own seam).
+    /// naming one keeps its refusal — the linked vocabulary's own line,
+    /// narrower than the local spelling the Tag word serves).
     Union(Vec<Self>),
+    /// A tuple `(word, word, ...)`: positional members over the
+    /// vocabulary, one word each — the same product a local tuple
+    /// field's conversion builds, so the consuming compile's mint
+    /// re-spells the written tuple whose solving hash-conses the
+    /// structural atom a local spelling would. The empty tuple `()`
+    /// stays outside (the lone unit-typed word's own seam), as does a
+    /// bare unit-typed member (the atom word's own gate).
+    Tuple(Vec<Self>),
 }
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
@@ -656,15 +667,33 @@ struct WordSolver<'a> {
 
 impl WordSolver<'_> {
     /// One solved field type's word kind, when it spells in the
-    /// vocabulary: a bare atom, or a union — `t | none` either order is
+    /// vocabulary: a bare atom, a union — `t | none` either order is
     /// exactly `t?` (B4), and any other union is one enum's complete
-    /// case set or a union of words.
+    /// case set or a union of words — or a tuple, one word per
+    /// positional member.
     fn word_of_expr(&self, expr: &crate::TypeExpr) -> Option<TypeWord> {
         match expr {
             crate::TypeExpr::Atom(id) => self.atom_word(*id),
             crate::TypeExpr::Union(left, right) => self.union_word(left, right),
+            crate::TypeExpr::Tuple(members) => self.tuple_word(members),
             _ => None,
         }
+    }
+
+    /// One solved tuple field's word kind: one word per positional
+    /// member, each spelling in the vocabulary. The empty tuple (the
+    /// arity-0 atom) stays outside — the lone unit-typed word's own
+    /// seam — and a bare unit-typed member refuses through the atom
+    /// word's own gate.
+    fn tuple_word(&self, members: &[crate::TypeExpr]) -> Option<TypeWord> {
+        let [first, rest @ ..] = members else {
+            return None;
+        };
+        let mut out = Vec::with_capacity(1 + rest.len());
+        for member in std::iter::once(first).chain(rest) {
+            out.push(self.word_of_expr(member)?);
+        }
+        Some(TypeWord::Tuple(out))
     }
 
     /// One solved argument type's word kind — a container member's
@@ -692,8 +721,9 @@ impl WordSolver<'_> {
     }
 
     /// One atom's word kind: the ambient scalars and `bytes` by name,
-    /// the `list`/`map` constructors recursively over their members,
-    /// and a declared type's own atom as the Named word.
+    /// the `list`/`map` constructors recursively over their members, a
+    /// solved tuple atom as one word per element, and a declared
+    /// type's own atom as the Named word.
     fn atom_word(&self, id: crate::atom::TypeId) -> Option<TypeWord> {
         let decl = self.decls.universe.atom_decl(id).ok()?;
         match &decl.kind {
@@ -725,6 +755,20 @@ impl WordSolver<'_> {
                 } else {
                     None
                 }
+            },
+            // a solved tuple atom — a container member over a tuple
+            // (a field's own spelling held the product expr): one word
+            // per element, the empty tuple refusing like the lone
+            // unit-typed word
+            crate::AtomKind::Tuple(elements) => {
+                let [first, rest @ ..] = &elements[..] else {
+                    return None;
+                };
+                let mut out = Vec::with_capacity(1 + rest.len());
+                for &element in std::iter::once(first).chain(rest) {
+                    out.push(self.atom_word(element)?);
+                }
+                Some(TypeWord::Tuple(out))
             },
             // a declared type's own atom: a struct, a minted case, a
             // payloaded tag — or the shape-pending opaque reservation
@@ -1356,10 +1400,10 @@ mod tests {
     /// closed over the vocabulary itself — a list of any word (a nested
     /// list included), a map of any two words, an optional over any word
     /// (an optional list included) — and the part-less struct, a linear
-    /// declaration carrying its move-discipline bit beside the fields; a
-    /// generic struct, an enum, a tag, and a field naming a declared
-    /// type or a tuple carry nothing — those keep their selection
-    /// refusals.
+    /// declaration carrying its move-discipline bit beside the fields,
+    /// a tag's unit identity, the Named word's identity reference, and
+    /// a tuple field's one word per positional member; a generic struct
+    /// carries nothing — it keeps its selection refusal.
     #[test]
     fn the_fact_is_the_flat_struct_s_word_layout() {
         let source = concat!(
@@ -1413,6 +1457,16 @@ mod tests {
             "}\n",
             "pub struct keyed_wide {\n",
             "  index: map[string, cell],\n",
+            "}\n",
+            "pub struct over_pair {\n",
+            "  v: (int, twin),\n",
+            "}\n",
+            "pub struct unit_field {\n",
+            "  u: (),\n",
+            "}\n",
+            "pub tag mark\n",
+            "pub struct marked_pair {\n",
+            "  m: (int, mark),\n",
             "}\n",
             "pub tag point\n",
             "fn main() -> int {\n",
@@ -1553,7 +1607,36 @@ mod tests {
             }])
         );
         assert_eq!(fact("point"), Some(super::TypeFact::Tag));
-        for refused in ["boxed", "twin", "list"] {
+        // a tuple field carries one word per positional member
+        assert_eq!(
+            fact("twin"),
+            fields(vec![super::TypeField {
+                name: "p".to_owned(),
+                word: super::TypeWord::Tuple(vec![
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                ]),
+            }])
+        );
+        for refused in ["boxed", "list"] {
+            assert_eq!(fact(refused), None, "{refused} carries no fact");
+        }
+        // a Named tuple member rides like any word — the consumer's own
+        // lowering owns the multi-word element refusal, exactly like the
+        // local spelling's
+        assert_eq!(
+            fact("over_pair"),
+            fields(vec![super::TypeField {
+                name: "v".to_owned(),
+                word: super::TypeWord::Tuple(vec![
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                    super::TypeWord::Named("twin".to_owned()),
+                ]),
+            }])
+        );
+        // the empty tuple (the arity-0 atom, the lone unit-typed word's
+        // own seam) and a unit-typed tuple member keep their refusals
+        for refused in ["unit_field", "marked_pair"] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
     }
@@ -1561,10 +1644,11 @@ mod tests {
     /// The Named word's own gates: a reference naming a def outside the
     /// member (here every def is one member, so the gate rides on the
     /// eligible set instead) and a type whose own fact refuses (a
-    /// generic struct, a deinit carrier, a tuple field) spell no word —
-    /// the referencing fact refuses with them. A lone case field keeps
-    /// its refusal (a unit word spells only inside a union), while a
-    /// multi-atom case subset carries the union word.
+    /// generic struct, a deinit carrier) spell no word — the
+    /// referencing fact refuses with them, while a reference to a
+    /// tuple-carrying struct rides like any Named word. A lone case
+    /// field keeps its refusal (a unit word spells only inside a
+    /// union), while a multi-atom case subset carries the union word.
     #[test]
     fn the_named_word_gates_on_the_referenced_fact() {
         let source = concat!(
@@ -1654,15 +1738,28 @@ mod tests {
         };
         // the referenced facts that refuse take the referencing fact
         // with them; a lone case field keeps its refusal
-        for refused in [
-            "over_boxed",
-            "over_owned",
-            "over_twin",
-            "over_pick",
-            "subset",
-        ] {
+        for refused in ["over_boxed", "over_owned", "over_pick", "subset"] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
+        // a tuple field carries its positional words, so a reference to
+        // the tuple-carrying struct rides like any Named word
+        assert_eq!(
+            fact("twin"),
+            fields(vec![super::TypeField {
+                name: "p".to_owned(),
+                word: super::TypeWord::Tuple(vec![
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                    super::TypeWord::Scalar(super::ScalarWord::Int),
+                ]),
+            }])
+        );
+        assert_eq!(
+            fact("over_twin"),
+            fields(vec![super::TypeField {
+                name: "v".to_owned(),
+                word: named("twin"),
+            }])
+        );
         // a partial case-subset union and a mixed case-scalar set carry
         // the union word, one word per member
         assert_eq!(
@@ -2501,6 +2598,198 @@ mod tests {
         assert!(
             matches!(body, ds_parse::Type::Union { .. }),
             "the union alias's body spells the union tree"
+        );
+    }
+
+    /// The consumer-side mint of the tuple word: a linked struct whose
+    /// field holds a tuple of scalar members, and one whose list
+    /// element is a tuple, mint exactly the products a local
+    /// declaration would — the field's solved signature the product
+    /// expr the universe solves into the structural atom, the written
+    /// body the tuple spelling — so the consumer constructs,
+    /// destructures, and lists over them checking clean.
+    #[test]
+    fn the_tuple_word_mints_on_the_consumer() {
+        let source = concat!(
+            "pub tag int\n",
+            "pub tag string\n",
+            "pub struct list[t] {\n",
+            "}\n",
+            "import @lib (twin, ledger)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const own = twin { p: (3, 4) }\n",
+            "  const (a, b) = own.p\n",
+            "  const book = ledger { rows: [(1, 2)] }\n",
+            "  a + b\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("tuple_mint.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let at = ds_diag::Span::new(file, 1, 1);
+        let ty_entry = |name: &str, ty: super::TypeFact| crate::ForeignEntry {
+            name: name.to_owned(),
+            vis: crate::Vis::Pub,
+            kind: crate::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: crate::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: Some(std::sync::Arc::new(ty)),
+            link: 0,
+            origin: None,
+            func: None,
+            std: false,
+        };
+        let pair = || {
+            super::TypeWord::Tuple(vec![
+                super::TypeWord::Scalar(super::ScalarWord::Int),
+                super::TypeWord::Scalar(super::ScalarWord::Int),
+            ])
+        };
+        let surface = crate::MemberSurface {
+            tags: Vec::new(),
+            entries: vec![
+                ty_entry("twin", super::TypeFact::Struct {
+                    fields: vec![super::TypeField {
+                        name: "p".to_owned(),
+                        word: pair(),
+                    }],
+                    linear: false,
+                }),
+                ty_entry("ledger", super::TypeFact::Struct {
+                    fields: vec![super::TypeField {
+                        name: "rows".to_owned(),
+                        word: super::TypeWord::List(Box::new(pair())),
+                    }],
+                    linear: false,
+                }),
+            ],
+        };
+        let mut imports = crate::ImportGraph::new();
+        for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+            if let ds_parse::ItemKind::Import(import) = &item.kind {
+                imports.add(import.span, crate::ImportSurface::Linked(surface.clone()));
+            }
+        }
+        let (package, resolutions, diags) = crate::resolve_package_linked(&[&ast], &imports);
+        assert!(diags.is_empty(), "the rows bind clean: {diags:?}");
+        let analyzed = crate::type_of::analyze_resolved(
+            &files,
+            vec![std::sync::Arc::new(ast)].into(),
+            package.into(),
+            resolutions.into(),
+            Vec::new(),
+            std::sync::Arc::default(),
+        );
+        assert!(
+            analyzed.checked.diags.is_empty(),
+            "the probe checks clean: {:?}",
+            analyzed.checked.diags
+        );
+        let atom_name = |expr: &crate::TypeExpr| match expr {
+            crate::TypeExpr::Atom(id) => Some(
+                analyzed
+                    .decls
+                    .universe
+                    .atom_decl(*id)
+                    .expect("a declared atom")
+                    .name
+                    .clone(),
+            ),
+            _ => None,
+        };
+        let struct_fields = |name: &str| {
+            let def = analyzed
+                .decls
+                .foreign_type(name)
+                .unwrap_or_else(|| panic!("{name} registers"));
+            let atom = analyzed
+                .decls
+                .atoms
+                .get(&def)
+                .copied()
+                .unwrap_or_else(|| panic!("{name}'s atom mints"));
+            let crate::AtomKind::Struct(ref fields) = analyzed
+                .decls
+                .universe
+                .atom_decl(atom)
+                .expect("shapes")
+                .kind
+            else {
+                panic!("{name}'s atom carries its fields");
+            };
+            fields.clone()
+        };
+        // the tuple field's minted signature is the product expr over
+        // the scalar atoms — exactly the local spelling's tree
+        let twin_fields = struct_fields("twin");
+        let crate::TypeExpr::Tuple(ref members) = twin_fields[0].ty else {
+            panic!("the tuple field's signature spells the product");
+        };
+        assert_eq!(
+            members.iter().map(atom_name).collect::<Vec<_>>(),
+            vec![Some("int".to_owned()), Some("int".to_owned())],
+            "the product holds the scalar atoms in order"
+        );
+        // the written body spells the tuple a local field would
+        let twin = analyzed.decls.foreign_type("twin").expect("twin registers");
+        let shape = analyzed
+            .decls
+            .structs
+            .get(&twin)
+            .expect("the struct row mints");
+        let ds_parse::Type::Tuple { items, .. } = &shape.fields[0].ty else {
+            panic!("the written body spells the tuple");
+        };
+        assert_eq!(items.len(), 2, "one written member per word");
+        // the list-over-tuple field's element set holds the one
+        // structural tuple atom, its elements the scalar atoms
+        let ledger_fields = struct_fields("ledger");
+        let crate::TypeExpr::Atom(list_atom) = ledger_fields[0].ty else {
+            panic!("the field's signature names the list");
+        };
+        let crate::AtomKind::Apply(_, args) = &analyzed
+            .decls
+            .universe
+            .atom_decl(list_atom)
+            .expect("shapes")
+            .kind
+        else {
+            panic!("the list application mints");
+        };
+        let [arg, ..] = args.as_ref() else {
+            panic!("one constructor argument");
+        };
+        let elements: Vec<String> = analyzed
+            .decls
+            .universe
+            .members(*arg)
+            .iter()
+            .filter_map(
+                |&id| match &analyzed.decls.universe.atom_decl(id).ok()?.kind {
+                    crate::AtomKind::Tuple(words) => Some(words.clone()),
+                    _ => None,
+                },
+            )
+            .flatten()
+            .filter_map(|id| {
+                analyzed
+                    .decls
+                    .universe
+                    .atom_decl(id)
+                    .ok()
+                    .map(|decl| decl.name.clone())
+            })
+            .collect();
+        assert_eq!(
+            elements,
+            vec!["int".to_owned(), "int".to_owned()],
+            "the element set holds the one structural tuple atom"
         );
     }
 }

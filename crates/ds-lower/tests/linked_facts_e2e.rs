@@ -1,9 +1,10 @@
 //! The widened link-fact vocabulary end to end: a consumer over a linked
 //! member surface carrying the artifact round's shapes — a
 //! list-literal const, a map-field and optional-field struct, a map
-//! alias, the Named-word chain, a partial case-subset union field, and
-//! the richer alias bodies (a container over a linked type, a scalar
-//! union) — checks clean, lowers with the const's elements embedded over
+//! alias, the Named-word chain, a partial case-subset union field, a
+//! tuple field destructured in place, and the richer alias bodies (a
+//! container over a linked type, a scalar union) — checks clean, lowers
+//! with the const's elements embedded over
 //! the same `list_new`/`list_push` seam a local list literal lowers
 //! through, round-trips through the ds-mod writer and reader, installs
 //! into the VM, and runs with the exact golden stdout.
@@ -28,7 +29,7 @@ const SOURCE: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "import @lib (pages, counts, keyed, opt, rrow, chain, cell)\n",
     "import @lib as w\n",
-    "import @lib (shade, red, green, blue, partisan, cells, either)\n",
+    "import @lib (shade, red, green, blue, partisan, cells, either, twin)\n",
     "\n",
     "fn port_of(o: opt) -> int {\n",
     "  const p = o.n\n",
@@ -69,6 +70,9 @@ const SOURCE: &str = concat!(
     "  const e: either = \"hi\"\n",
     "  var pick_sum = sub + list_len(held)\n",
     "  if e is string { pick_sum = pick_sum + 1 } else { pick_sum = pick_sum + 100 }\n",
+    "  const tw = twin { p: (2, 5) }\n",
+    "  const (x, y) = tw.p\n",
+    "  pick_sum = pick_sum + x + y\n",
     "  println(\"${pick_sum}\")\n",
     "  list_len(pages) + list_len(seen) + pick_sum\n",
     "}\n",
@@ -248,6 +252,18 @@ fn build_vm() -> (Vm, Lowered) {
                     TypeWord::Scalar(ScalarWord::Str),
                 ]))),
             ),
+            // the tuple word: a linked struct whose field holds the
+            // positional product, constructed and destructured in place
+            ty_entry("twin", ds_check::TypeFact::Struct {
+                fields: vec![field(
+                    "p",
+                    TypeWord::Tuple(vec![
+                        TypeWord::Scalar(ScalarWord::Int),
+                        TypeWord::Scalar(ScalarWord::Int),
+                    ]),
+                )],
+                linear: false,
+            }),
         ],
     };
     let mut imports = ds_check::ImportGraph::new();
@@ -301,8 +317,8 @@ fn the_widened_facts_embed_round_trip_and_run() {
     vm.capture_output();
     assert_eq!(
         vm.run("linked_facts", "main", &[]),
-        Ok(FrameAnswer::one(Value::I64(8))),
-        "the entry answers the embedded lists, the subset match, and the aliases"
+        Ok(FrameAnswer::one(Value::I64(15))),
+        "the entry answers the embedded lists, the subset match, the aliases, and the tuple word"
     );
     assert_eq!(
         vm.captured_output(),
@@ -313,10 +329,10 @@ fn the_widened_facts_embed_round_trip_and_run() {
             "4\n",
             "1 8080 0 0\n",
             "7\n",
-            "4\n",
+            "11\n",
         )
         .as_bytes(),
-        "the embedded list consts, the map and optional words, the aliases, and the subset word \
-         answer"
+        "the embedded list consts, the map and optional words, the aliases, the subset word, and \
+         the tuple word answer"
     );
 }

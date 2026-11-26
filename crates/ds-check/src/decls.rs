@@ -1068,6 +1068,26 @@ fn foreign_field_type(
             }
             Some((solved, written))
         },
+        TypeWord::Tuple(members) => {
+            // One positional word per member, the same pair a local
+            // tuple field's conversion builds: the solved product the
+            // universe distributes over union elements into one
+            // structural atom per combination, the written tuple the
+            // checker's per-use solving reads back. The empty tuple
+            // never rides a fact (the walk refuses it), so it keeps
+            // the silent skip here.
+            let [first, rest @ ..] = &members[..] else {
+                return None;
+            };
+            let mut solved = Vec::with_capacity(1 + rest.len());
+            let mut items = Vec::with_capacity(1 + rest.len());
+            for member in std::iter::once(first).chain(rest) {
+                let (expr, written) = foreign_field_type(ctx, member.clone(), span, decls)?;
+                solved.push(expr);
+                items.push(written);
+            }
+            Some((TypeExpr::Tuple(solved), Type::Tuple { span, items }))
+        },
     }
 }
 
@@ -1850,14 +1870,18 @@ fn path_def_expr(
 }
 
 /// The union of one enum's minted case atoms; `None` when a case did
-/// not mint (or the enum is empty, which is uninhabited either way). A
-/// linked enum's case defs sit outside the package's own namespace, so
+/// not mint. A zero-case enum is the canonical empty spelling — the
+/// uninhabited union of zero atoms, so heads and fields over it convert.
+/// A linked enum's case defs sit outside the package's own namespace, so
 /// the name index the linked install filled answers them.
 fn enum_case_union(
     package: &Package,
     cases: &[(String, Span, EnumPayload)],
     decls: &Decls,
 ) -> Option<TypeExpr> {
+    if cases.is_empty() {
+        return Some(TypeExpr::Empty);
+    }
     let mut union: Option<TypeExpr> = None;
     for (name, ..) in cases {
         let atom = package
@@ -1911,7 +1935,9 @@ fn conv_node(
         Type::Paren { inner, .. } => conv_node(package, inner, vars, decls)?,
         other => {
             // Everything else: solve to a Ty, then re-express as a union of
-            // atoms the TypeExpr world can carry.
+            // atoms the TypeExpr world can carry — the empty set through
+            // its canonical spelling, so a head naming a zero-case enum
+            // (or any solved-empty shape) converts.
             let solved = solve_written(package, other, vars, decls)?;
             let mut expr = None::<TypeExpr>;
             for atom in decls.universe.members(solved) {
@@ -1920,7 +1946,7 @@ fn conv_node(
                     Some(e) => e.union((*atom).into()),
                 });
             }
-            expr?
+            expr.unwrap_or(TypeExpr::Empty)
         },
     })
 }

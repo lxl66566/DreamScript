@@ -100,6 +100,7 @@ impl Fixture {
             // This fixture's family expresses no tuples; `tuples.rs` owns the
             // tuple-bearing oracle.
             TypeExpr::Tuple(_) => unreachable!("tuple expressions are covered by tuples.rs"),
+            TypeExpr::Empty => 0,
         }
     }
 

@@ -326,6 +326,47 @@ fn non_atom_heads_normalize_or_reject() {
     assert_eq!(f.universe.render_witness(witness), "bool");
 }
 
+/// The canonical empty spelling declares a vacuous instance: a head no
+/// value inhabits (a zero-case enum's name) hosts its trait, stays
+/// disjoint from every other head — including another empty head —
+/// records no trait members, and is never selected for an inhabited
+/// query. The written intersection that solves empty keeps its refusal
+/// (the pin above): only the canonical spelling hosts.
+#[test]
+fn canonical_empty_head_hosts_a_vacuous_instance() {
+    let mut f = fixture();
+    let ids = f.declare(f.show, TypeExpr::Empty).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.universe.render(f.env.head(ids[0]).unwrap()), "empty");
+    assert_eq!(f.universe.render(f.env.written(ids[0]).unwrap()), "empty");
+
+    // Disjoint from every inhabited head, and from a second vacuous
+    // instance of the same trait: both coexist and the closure pass
+    // proves the whole set coherent.
+    let int_ids = f.declare(f.show, TypeExpr::atom(f.int)).unwrap();
+    f.declare(f.show, TypeExpr::Empty).unwrap();
+    f.env.check_all(&mut f.universe).unwrap();
+
+    // An inhabited query never selects the vacuous heads.
+    let int = f.ty(f.int);
+    assert_eq!(
+        f.env.resolve(&f.universe, f.show, int),
+        int_ids,
+        "the empty heads never contain an inhabited query"
+    );
+    let empty = f.universe.empty_ty();
+    let solved = ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, empty);
+    assert!(
+        !solved.satisfied(),
+        "an empty target matches nothing at a call site"
+    );
+
+    // The vacuous instance records no trait members: `show` as a type
+    // keeps exactly the inhabited heads' atoms.
+    let members = f.universe.solve(&TypeExpr::trait_ref(f.show)).unwrap();
+    assert_eq!(f.universe.render(members), "int");
+}
+
 #[test]
 fn direct_self_condition_rejected_with_rollback() {
     let mut f = fixture();

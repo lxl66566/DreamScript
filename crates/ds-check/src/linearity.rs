@@ -484,6 +484,8 @@ fn expr_copyable(
         TypeExpr::Tuple(elements) => elements
             .iter()
             .all(|e| expr_copyable(decls, e, linear_vars, seen)),
+        // No inhabitant ever moves, so the empty set copies vacuously.
+        TypeExpr::Empty => true,
     }
 }
 

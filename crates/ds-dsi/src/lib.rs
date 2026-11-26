@@ -432,6 +432,8 @@ pub enum TypeExprData {
     Diff(Box<Self>, Box<Self>),
     /// A tuple.
     Tuple(Vec<Self>),
+    /// The empty set (a zero-case enum's name).
+    Empty,
 }
 
 /// The plain and signature declaration tables, keyed by raw def and
@@ -1265,7 +1267,7 @@ fn assert_stable(expr: &TypeExpr) {
             assert_stable(a);
             assert_stable(b);
         },
-        TypeExpr::Atom(_) => {},
+        TypeExpr::Atom(_) | TypeExpr::Empty => {},
         TypeExpr::Tuple(items) => {
             for item in items {
                 assert_stable(item);
@@ -1315,6 +1317,7 @@ fn type_expr_data(expr: &TypeExpr, universe: &Universe, names: &mut Names) -> Ty
                 .map(|item| type_expr_data(item, universe, names))
                 .collect(),
         ),
+        TypeExpr::Empty => TypeExprData::Empty,
     }
 }
 
@@ -1806,6 +1809,7 @@ fn resolve_expr(
             }
             TypeExpr::Tuple(out)
         },
+        TypeExprData::Empty => TypeExpr::Empty,
     })
 }
 

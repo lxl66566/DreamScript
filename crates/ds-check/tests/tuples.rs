@@ -409,6 +409,7 @@ impl TupleFixture {
                     .map(|combo| self.tuple_bit(combo))
                     .fold(0, |acc, bit| acc | bit)
             },
+            TypeExpr::Empty => 0,
         }
     }
 }

@@ -1078,16 +1078,19 @@ fn the_json_families_host_an_empty_enum() {
     );
 }
 
-/// The trait-impl families keep their refusal over an empty enum: the
-/// instance core names an impl head as a union of atoms, and the empty
-/// set spells no atom — so show, hash, ord, and clone each refuse at
-/// the head they synthesized (the checker's honest boundary, one
-/// diagnostic per family), while `default` refuses at the attribute
-/// (an empty enum has no default value). The landed bodies never
-/// touch the impossible receiver (show, hash, ord answer constants;
-/// clone hands the receiver back), but the head seam owns them all.
+/// A zero-case enum hosts the trait-impl families over its name-solved
+/// head — the instance core's canonical empty spelling, mirroring the
+/// json families' resolution: show, hash, ord, and clone each declare a
+/// vacuous instance (the head disjoint from every other head, the
+/// synthesized bodies never touching the impossible receiver — show,
+/// hash, ord answer constants; clone hands the receiver back), so the
+/// four derive, check, and lower, while `default` keeps its own
+/// attribute refusal (an empty enum has no default value). A call site
+/// naming a value of the empty type stays honestly refused: no instance
+/// is selected for a query no value inhabits.
 #[test]
-fn the_trait_families_keep_their_empty_enum_refusal() {
+fn the_trait_families_host_an_empty_enum() {
+    // The four families host; only `default` refuses, at the attribute.
     let rendered = refusals(concat!(
         "tag int\n",
         "tag string\n",
@@ -1107,16 +1110,7 @@ fn the_trait_families_keep_their_empty_enum_refusal() {
         "enum never { }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 5, "the five refusals: {rendered:?}");
-    assert!(
-        rendered
-            .iter()
-            .filter(|r| r.contains("DS2001")
-                && r.contains("impl head `never` does not name atoms the type core can check"))
-            .count()
-            == 4,
-        "one head refusal per trait family: {rendered:?}"
-    );
+    assert_eq!(rendered.len(), 1, "only default refuses: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains(
@@ -1124,6 +1118,76 @@ fn the_trait_families_keep_their_empty_enum_refusal() {
                  value"
             )),
         "{rendered:?}"
+    );
+
+    // One vacuous instance per family, each head the empty set, checking
+    // and lowering clean.
+    let hosted = concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "trait hash {\n",
+        "  fn hash(self) -> int\n",
+        "}\n",
+        "trait ord {\n",
+        "  fn compare(self, other: Self) -> int\n",
+        "}\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "#[derive(show, hash, ord, clone)]\n",
+        "enum never { }\n",
+        "fn main() -> int { 0 }\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("empty_enum_host.ds", hosted);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the name-solved heads check: {:?}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|d| human(d, &files))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(analyzed.decls.instances.len(), 4, "one instance per family");
+    for index in 0..4_u32 {
+        let instance = ds_check::InstanceId::from_raw(index);
+        let head = analyzed.decls.instances.head(instance).unwrap();
+        assert_eq!(analyzed.decls.universe.render(head), "empty");
+    }
+    lower(
+        "empty_enum_host",
+        Hash128::compute(hosted.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    )
+    .expect("the hosted impls lower");
+
+    // A call site over the empty type names no dispatchable value: the
+    // missing-instance diagnostic answers, the empty set rendered as
+    // itself.
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "#[derive(show)]\n",
+        "enum never { }\n",
+        "fn f(v: never) -> string { v.show() }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert!(
+        rendered[0].contains("DS2013") && rendered[0].contains("no instance of `show` for `empty`"),
+        "{}",
+        rendered[0]
     );
 }
 

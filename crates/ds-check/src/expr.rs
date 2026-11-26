@@ -10,7 +10,10 @@ use crate::atom::{TraitId, TypeId};
 /// A type expression: unions, intersections, differences of nominal atoms,
 /// plus trait constraints (B1). [`TypeExpr::Not`] is the complement of a
 /// marker trait such as `~Copyable` (C1); [`TypeExpr::Diff`] is compile-time
-/// only and erases entirely (B1).
+/// only and erases entirely (B1). [`TypeExpr::Empty`] is the canonical
+/// empty set, minted by the conversion layer where a written name solves to
+/// no atoms (a zero-case enum); the surface spells no empty-type keyword,
+/// so no written form produces it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeExpr {
     /// A nominal atom by identity.
@@ -29,6 +32,10 @@ pub enum TypeExpr {
     /// product over union elements into one structural atom per combination,
     /// so `(a | b, c)` solves to `(a, c) | (b, c)`.
     Tuple(Vec<Self>),
+    /// The empty set: the canonical spelling of a solved-empty type (a
+    /// zero-case enum's name). The conversion layer mints it; the written
+    /// surface never does.
+    Empty,
 }
 
 impl TypeExpr {
