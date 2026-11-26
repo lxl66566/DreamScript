@@ -931,7 +931,7 @@ fn main() -> int {{
 }}
 "
         ),
-        "an enum or application value",
+        "an atom with no resolved shape",
     );
 }
 

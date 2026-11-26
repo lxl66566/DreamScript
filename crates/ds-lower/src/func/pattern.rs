@@ -137,7 +137,14 @@ impl FnLower<'_, '_, '_> {
         let entries: Vec<usize> = (0..=arms.len()).map(|_| self.label()).collect();
         let arm_atoms: Vec<Vec<TypeId>> = arms
             .iter()
-            .map(|arm| self.pattern_atoms(&arm.pat))
+            .map(|arm| {
+                self.pattern_atoms(&arm.pat).and_then(|atoms| {
+                    atoms
+                        .into_iter()
+                        .map(|atom| self.pattern_member_atom(scrut, atom, arm.span))
+                        .collect()
+                })
+            })
             .collect::<Result<_, _>>()?;
         let mut catchall = None;
         for (index, arm) in arms.iter().enumerate() {
@@ -180,6 +187,7 @@ impl FnLower<'_, '_, '_> {
                 let mut distinct: Vec<TypeId> = Vec::new();
                 for alt in pats {
                     for atom in self.pattern_atoms(alt)? {
+                        let atom = self.pattern_member_atom(scrut, atom, arm.span)?;
                         if !distinct.contains(&atom) {
                             distinct.push(atom);
                         }
@@ -765,6 +773,7 @@ impl FnLower<'_, '_, '_> {
                     return Ok(());
                 };
                 let layout = self.shapes.shape(scrut.ty)?;
+                let atom = self.pattern_member_atom(scrut, atom, pattern_span(pat))?;
                 let member_fields = layout
                     .member_fields(atom)
                     .ok_or_else(|| mismatch("a union member read"))?;
@@ -1241,6 +1250,56 @@ impl FnLower<'_, '_, '_> {
         }
     }
 
+    /// Whether an atom is the constructor of a user-declared generic
+    /// struct: the head a nested struct sub-pattern over an applied
+    /// field names, whose own atom carries no value shape.
+    fn generic_struct_head(&self, atom: TypeId) -> bool {
+        let Some(&def) = self.analyzed.decls.defs_of_atoms.get(&atom) else {
+            return false;
+        };
+        self.analyzed
+            .decls
+            .structs
+            .get(&def)
+            .is_some_and(|shape| !shape.params.is_empty())
+    }
+
+    /// The union member atom one pattern head tests: the head's own
+    /// atom when the union carries it, else the member the head's
+    /// constructor application matches — a user-declared generic
+    /// struct's ctor head names its applied member. A head matching two
+    /// applied members refuses (the arm names two tags).
+    fn pattern_member_atom(
+        &mut self,
+        scrut: &TypedPlace,
+        head: TypeId,
+        span: Span,
+    ) -> Result<TypeId, LowerError> {
+        let members = self.members(scrut.ty);
+        if members.len() <= 1 || members.contains(&head) {
+            return Ok(head);
+        }
+        let applications: Vec<TypeId> = members
+            .iter()
+            .copied()
+            .filter(|&member| {
+                matches!(
+                    self.universe().atom_decl(member).ok().map(|d| &d.kind),
+                    Some(AtomKind::Apply(ctor, _)) if *ctor == head
+                )
+            })
+            .collect();
+        match applications.as_slice() {
+            [] => Ok(head),
+            [one] => Ok(*one),
+            _ => Err(LowerError::unsupported(
+                span,
+                "a member arm over two applications of one constructor",
+                "the head names two members; spell the arm's own application or split the members",
+            )),
+        }
+    }
+
     /// The declared fields of the struct a nested struct sub-pattern's
     /// path names: the checker proved the pattern's atom is the
     /// struct-typed field's own type, so the atom's declaration owns the
@@ -1252,8 +1311,16 @@ impl FnLower<'_, '_, '_> {
             return Err(mismatch("a nested struct sub-pattern"));
         };
         let Some(atom) = self.pattern_head_atom(path) else {
-            return Err(mismatch("a struct sub-pattern's atom"));
+            return Err(mismatch("a nested struct sub-pattern's atom"));
         };
+        if self.generic_struct_head(atom) {
+            return Err(LowerError::unsupported(
+                pattern_span(pat),
+                "a nested struct sub-pattern over an applied field",
+                "the field's type is an application of the head's own struct; bind the field and \
+                 destructure the binding in the arm body",
+            ));
+        }
         let shape = self.shapes.atom_shape(atom)?;
         let Shape::Struct(s) = &*shape else {
             return Err(mismatch("a nested struct sub-pattern's field"));
@@ -1614,6 +1681,7 @@ impl FnLower<'_, '_, '_> {
                 let Some(atom) = self.pattern_head_atom(path) else {
                     return Err(mismatch("a pattern's member atom"));
                 };
+                let atom = self.pattern_member_atom(scrut, atom, pattern_span(pat))?;
                 let PlaceShape::Span(underlying) = scrut.place.shape else {
                     return Err(mismatch("a struct pattern on a scalar"));
                 };

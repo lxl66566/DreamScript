@@ -445,11 +445,11 @@ fn a_deinit_value_inside_an_enum_member_payload_refuses() {
 }
 
 /// A generic struct whose declaration carries a deinit refuses at every
-/// value: no monomorphic instantiation synthesizes the hook, and the
-/// application value has no word shape under the M3 contract — the
-/// reachable refusal is the application-value seam, the deinit hook's
-/// own generic arm ("the struct's deinit is generic") guarding behind
-/// it for the seam's later stages.
+/// value, its application included: the constructed value would claim
+/// the struct's own hook, and no per-shape hook instantiates, so the
+/// deinit hook's generic arm ("the struct's deinit is generic; the
+/// monomorphic instantiation is the CALL_GENERIC seam") is the reachable
+/// refusal.
 #[test]
 fn a_generic_struct_deinit_value_refuses_at_the_application_seam() {
     refused(
@@ -467,7 +467,7 @@ fn a_generic_struct_deinit_value_refuses_at_the_application_seam() {
             "  0\n",
             "}\n",
         )),
-        "an enum or application value is outside the M3 runtime contract",
+        "the struct's deinit is generic",
     );
 }
 

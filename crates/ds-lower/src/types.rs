@@ -84,15 +84,30 @@ pub(crate) struct Types<'a> {
     /// Types a substitution resolved, keyed by (substitution, source
     /// type).
     minted: HashMap<(u32, Ty), Ty>,
+    /// The solved field signature of every application atom a
+    /// substitution minted, derived from its source's own entry — the
+    /// checker's recorded fields when the source atom is one it minted,
+    /// else an outer substitution's derivation. Keyed by the minted
+    /// atom; the analyzed package's own entries live on its tables.
+    apply_structs: HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
+    /// The analyzed package's own solved signatures, the derivation's
+    /// source table for the atoms the checker minted.
+    analyzed_apply_structs: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
 }
 
 impl<'a> Types<'a> {
-    /// The lens over the analyzed package's registry.
-    pub(crate) fn new(universe: &'a Universe) -> Self {
+    /// The lens over the analyzed package's registry and its own solved
+    /// application signatures.
+    pub(crate) fn new(
+        universe: &'a Universe,
+        analyzed_apply_structs: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
+    ) -> Self {
         Self {
             uni: Uni::Analyzed(universe),
             next_id: 1,
             minted: HashMap::new(),
+            apply_structs: HashMap::new(),
+            analyzed_apply_structs,
         }
     }
 
@@ -120,6 +135,49 @@ impl<'a> Types<'a> {
     /// discovery already substituted it, `None` when it did not.
     pub(crate) fn substituted(&self, subst: &Subst, ty: Ty) -> Option<Ty> {
         self.minted.get(&(subst.id, ty)).copied()
+    }
+
+    /// The substitution's own derived signatures, the frozen read's
+    /// first table.
+    pub(crate) fn apply_map(&self) -> &HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>> {
+        &self.apply_structs
+    }
+
+    /// The solved field signature one application atom carries: the
+    /// substitution's own derivations first, the analyzed package's
+    /// entries under them.
+    pub(crate) fn apply_fields(&self, atom: TypeId) -> Option<Rc<[ds_check::decls::SolvedField]>> {
+        self.apply_structs
+            .get(&atom)
+            .cloned()
+            .or_else(|| self.analyzed_apply_structs.get(&atom).cloned())
+    }
+
+    /// Records the substituted signature of one minted application: the
+    /// source application's fields under the same substitution. A
+    /// source naming no declared struct (a heap container) records
+    /// nothing, its shape argument-independent.
+    fn derive_apply_fields(
+        &mut self,
+        applied: TypeId,
+        ctor: TypeId,
+        subst: &Subst,
+    ) -> Result<(), LowerError> {
+        if self.apply_structs.contains_key(&applied) {
+            return Ok(());
+        }
+        let Some(fields) = self.apply_fields(ctor) else {
+            return Ok(());
+        };
+        let mut derived = Vec::with_capacity(fields.len());
+        for field in fields.iter() {
+            derived.push(ds_check::decls::SolvedField {
+                name: field.name.clone(),
+                ty: self.substitute(subst, field.ty)?,
+            });
+        }
+        self.apply_structs.insert(applied, derived.into());
+        Ok(())
     }
 
     fn universe_mut(&mut self) -> &mut Universe {
@@ -202,11 +260,12 @@ impl<'a> Types<'a> {
                     if args.iter().any(|&arg| subst.mentions(self.universe(), arg)) =>
                 {
                     let args = self.args_under(subst, args)?;
-                    Some(
-                        self.universe_mut()
-                            .apply_atom(*ctor, &args)
-                            .map_err(|_| unsubstituted())?,
-                    )
+                    let applied = self
+                        .universe_mut()
+                        .apply_atom(*ctor, &args)
+                        .map_err(|_| unsubstituted())?;
+                    self.derive_apply_fields(applied, *ctor, subst)?;
+                    Some(applied)
                 },
                 AtomKind::Tuple(elements)
                     if elements
@@ -294,7 +353,8 @@ mod tests {
         let optional = universe.union(var_ty, io_ty);
         let expected = universe.union(point_ty, io_ty);
 
-        let mut types = Types::new(&universe);
+        let empty_apply = HashMap::new();
+        let mut types = Types::new(&universe, &empty_apply);
         let subst = types.subst(HashMap::from([(var, point_ty)]));
         // a type naming no substituted variable is itself, and nothing
         // minted yet

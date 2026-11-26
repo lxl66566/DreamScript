@@ -560,7 +560,7 @@ fn a_subunion_argument_respans_into_the_head() {
 /// layout), so the head refuses before any site stages — the member
 /// write seam never sees it.
 #[test]
-fn a_struct_over_variable_member_refuses_at_the_unions_shape() {
+fn a_struct_over_variable_member_lays_out_its_reserved_word() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -580,10 +580,28 @@ fn a_struct_over_variable_member_refuses_at_the_unions_shape() {
         "  0\n",
         "}\n",
     );
-    refuse_lowering(
-        "struct_over_variable_member.ds",
-        source,
-        "an enum or non-heap application member is outside the M3 runtime contract",
+    // a part-less generic struct's application keeps the reserved word
+    // the part-less struct carries in every value position: the union
+    // member claims it like any member payload, argument-independent,
+    // so the head story lowers and runs
+    let analyzed = check_clean("struct_over_variable_member.ds", source);
+    let lowered = lower(
+        "struct_over_variable_member",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    )
+    .expect("the head story lowers: the application member claims its reserved word");
+    let mut vm = run_lowered(&lowered, source);
+    assert_eq!(
+        vm.run("struct_over_variable_member", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"x\n" as &[u8],
+        "the dispatch answers"
     );
 }
 

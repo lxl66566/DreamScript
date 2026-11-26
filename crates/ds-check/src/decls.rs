@@ -147,6 +147,19 @@ impl ParamSig {
     }
 }
 
+/// One solved field of a user-declared generic struct's application:
+/// the declared field's name and its type solved under the
+/// application's arguments — the same substitution field access and
+/// construction solve their sites with. The whole application's
+/// signature rides [`Decls::apply_structs`].
+#[derive(Clone, Debug)]
+pub struct SolvedField {
+    /// The declared field name.
+    pub name: String,
+    /// The field's type under the application's arguments.
+    pub ty: Ty,
+}
+
 /// A struct's declared shape, AST-shaped: generic parameter names plus
 /// named fields as written, solved per use by the checker.
 #[derive(Clone, Debug, Default)]
@@ -320,6 +333,14 @@ pub struct Decls {
     /// solving impl spells no member addresses, the linked mirror of
     /// the plan's own default-body table.
     pub linked_trait_defaults: IdTable<DefId, Arc<ForeignImplLink>>,
+    /// The solved field signature of every minted application of a
+    /// user-declared generic struct: the declared fields' names with
+    /// each field type solved under the application's arguments.
+    /// Recorded once per application atom after the whole package
+    /// resolves; the lowering pass shapes the application's values
+    /// through it, and an instantiation derives the substituted
+    /// application's entry from its source's.
+    pub apply_structs: std::collections::HashMap<TypeId, std::rc::Rc<[SolvedField]>>,
 }
 
 impl Decls {
@@ -1879,6 +1900,22 @@ fn trait_of_type(package: &Package, ty: &Type, decls: &Decls) -> Option<TraitId>
     decls.traits.get(&def).copied()
 }
 
+/// The traits one written bound names: a path its trait, an
+/// intersection every arm's traits — an intersect bound's every arm
+/// reads as trait evidence, the same rule the admission's check runs,
+/// so a synthesized impl's bound keeps its condition and the member's
+/// dispatch stages its evidence word.
+fn bound_traits(package: &Package, ty: &Type, decls: &Decls) -> Vec<TraitId> {
+    match ty {
+        Type::Intersect { left, right, .. } => {
+            let mut out = bound_traits(package, left, decls);
+            out.extend(bound_traits(package, right, decls));
+            out
+        },
+        _ => trait_of_type(package, ty, decls).into_iter().collect(),
+    }
+}
+
 /// Converts annotated struct/enum fields into solved universe fields; a
 /// field whose type does not live in the [`TypeExpr`] world (function
 /// types, foreign types) contributes nothing — the checker works from the
@@ -2223,13 +2260,75 @@ fn declare_foreign_unit_name(decls: &mut Decls, name: &str) -> Option<TypeId> {
     }
 }
 
+/// Records the solved field signature of every application of a
+/// user-declared generic struct, after the whole package resolves: the
+/// walk enumerates the universe's atoms in id order (growing as field
+/// solving mints nested applications), reads the constructor's
+/// declared shape, and solves each declared field under the
+/// parameter-to-argument substitution — the same solving field access
+/// and construction run at their sites, the field types resolving
+/// under the declaring file's shadow map. An application whose fields
+/// do not all solve records nothing, and its values keep the lowering
+/// refusal they always carried; a self-containing application records
+/// the entry its fields name, and the shape layer's cycle budget
+/// refuses the value shape the entry describes.
+pub(crate) fn record_apply_structs(package: &Package, decls: &mut Decls) {
+    let mut at = 0u32;
+    while at < decls.universe.atom_count() {
+        let id = TypeId::from_raw(at);
+        at += 1;
+        let kind = match decls.universe.atom_decl(id) {
+            Ok(decl) => decl.kind.clone(),
+            Err(_) => continue,
+        };
+        let crate::AtomKind::Apply(ctor, args) = kind else {
+            continue;
+        };
+        let Some(&def) = decls.defs_of_atoms.get(&ctor) else {
+            continue;
+        };
+        let Some(shape) = decls.structs.get(&def) else {
+            continue;
+        };
+        if shape.params.is_empty() || shape.params.len() != args.len() {
+            continue;
+        }
+        let mut vars: FxHashMap<String, Ty> = FxHashMap::default();
+        for (param, arg) in shape.params.iter().zip(args.iter()) {
+            vars.insert(param.name.clone(), *arg);
+        }
+        // the shape's own rows copy ahead of the solving, whose minting
+        // borrows the tables mutably
+        let written: Vec<Type> = shape.fields.iter().map(|field| field.ty.clone()).collect();
+        let names: Vec<String> = shape
+            .fields
+            .iter()
+            .map(|field| field.name.name.clone())
+            .collect();
+        let saved = decls.current_file;
+        decls.current_file = Some(package.def(def).span.file);
+        let mut fields = Vec::with_capacity(written.len());
+        let mut solved_all = true;
+        for (name, ty_written) in names.into_iter().zip(written.iter()) {
+            match solve_written(package, ty_written, &vars, decls) {
+                Some(ty) => fields.push(SolvedField { name, ty }),
+                None => solved_all = false,
+            }
+        }
+        decls.current_file = saved;
+        if solved_all {
+            decls.apply_structs.insert(id, fields.into());
+        }
+    }
+}
+
 /// Converts one written type into a solved singleton [`TypeExpr`] for
 /// instance heads and conditions: unions stay unions in [`conv_head`],
 /// everything else becomes its solved atom set.
 fn conv_node(
     package: &Package,
     ty: &Type,
-    vars: &FxHashMap<String, TypeId>,
+    vars: &FxHashMap<String, Ty>,
     decls: &mut Decls,
 ) -> Option<TypeExpr> {
     Some(match ty {
@@ -2260,7 +2359,7 @@ fn conv_node(
 fn solve_written(
     package: &Package,
     ty: &Type,
-    vars: &FxHashMap<String, TypeId>,
+    vars: &FxHashMap<String, Ty>,
     decls: &mut Decls,
 ) -> Option<Ty> {
     Some(match ty {
@@ -2268,8 +2367,8 @@ fn solve_written(
             let [only] = path.segments.as_slice() else {
                 return None
             };
-            if let Some(&var) = vars.get(&only.name) {
-                decls.universe.atom_ty(var).ok()?
+            if let Some(&ty) = vars.get(&only.name) {
+                ty
             } else if args.is_empty() {
                 if let Some(atom) = atom_of_path(package, only, decls) {
                     decls.universe.atom_ty(atom).ok()?
@@ -2345,8 +2444,10 @@ fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls
         // variables carry the shared counter
         decls.var_counter += 1;
         let unique = format!("${}#{}", param.name.name, decls.var_counter);
-        if let Ok(var) = decls.universe.declare_tag(&unique) {
-            vars.insert(param.name.name.clone(), var);
+        if let Ok(var) = decls.universe.declare_tag(&unique)
+            && let Ok(ty) = decls.universe.atom_ty(var)
+        {
+            vars.insert(param.name.name.clone(), ty);
         }
     }
     let Some(head_expr) = conv_node(package, &imp.target, &vars, decls) else {
@@ -2358,13 +2459,10 @@ fn declare_inherent_bounds(package: &Package, item: &Item, imp: &ImplDecl, decls
     let mut conditions = Vec::new();
     for param in &imp.generics {
         let Some(bound) = &param.bound else { continue };
-        let Some(bound_trait) = trait_of_type(package, bound, decls) else {
-            continue;
-        };
-        let Some(&var) = vars.get(&param.name.name) else {
-            continue
-        };
-        if let Ok(ty) = decls.universe.atom_ty(var) {
+        for bound_trait in bound_traits(package, bound, decls) {
+            let Some(&ty) = vars.get(&param.name.name) else {
+                continue
+            };
             conditions.push(Condition::new(bound_trait, ty));
         }
     }
@@ -2425,8 +2523,10 @@ fn declare_instance(
         // variables carry the shared counter.
         decls.var_counter += 1;
         let unique = format!("${}#{}", param.name.name, decls.var_counter);
-        if let Ok(var) = decls.universe.declare_tag(&unique) {
-            vars.insert(param.name.name.clone(), var);
+        if let Ok(var) = decls.universe.declare_tag(&unique)
+            && let Ok(ty) = decls.universe.atom_ty(var)
+        {
+            vars.insert(param.name.name.clone(), ty);
         }
     }
 
@@ -2447,11 +2547,12 @@ fn declare_instance(
     let mut conditions = Vec::new();
     for param in &imp.generics {
         let Some(bound) = &param.bound else { continue };
-        let Some(bound_trait) = trait_of_type(package, bound, decls) else {
-            continue;
-        };
-        if let Some(&var) = vars.get(&param.name.name) {
-            conditions.push(Condition::new(bound_trait, TypeExpr::atom(var)));
+        for bound_trait in bound_traits(package, bound, decls) {
+            if let Some(&ty) = vars.get(&param.name.name)
+                && let Some(&atom) = decls.universe.members(ty).first()
+            {
+                conditions.push(Condition::new(bound_trait, TypeExpr::atom(atom)));
+            }
         }
     }
 

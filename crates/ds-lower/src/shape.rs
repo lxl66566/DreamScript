@@ -294,6 +294,9 @@ pub(crate) struct Shapes<'a> {
     /// The substituted types the discovery minted, keyed by (substitution,
     /// source type).
     minted: &'a HashMap<(u32, Ty), Ty>,
+    /// The solved field signatures the plan's substitutions derived, the
+    /// frozen read's first table over the analyzed package's own.
+    apply_lens: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
     /// The instantiation the body being lowered was planned under.
     active: Option<Rc<Subst>>,
     /// Every struct whose declaration carries a `deinit` member: the
@@ -332,6 +335,7 @@ impl<'a> Shapes<'a> {
             analyzed,
             universe: types.universe(),
             minted: types.minted(),
+            apply_lens: types.apply_map(),
             active: None,
             declared_deinits,
             cache: HashMap::new(),
@@ -342,6 +346,79 @@ impl<'a> Shapes<'a> {
             unkeyed_rows: Vec::new(),
             next_tag: 0,
         }
+    }
+
+    /// The solved field signature one application atom carries: the
+    /// plan's derived entries first, the analyzed package's recorded
+    /// ones under them.
+    pub(crate) fn apply_fields_of(
+        &self,
+        atom: TypeId,
+    ) -> Option<Rc<[ds_check::decls::SolvedField]>> {
+        self.apply_lens
+            .get(&atom)
+            .cloned()
+            .or_else(|| self.analyzed.decls.apply_structs.get(&atom).cloned())
+    }
+
+    /// The word span of a solved field type: the same vocabulary the
+    /// written field types take, read over the type's own members. A
+    /// struct-typed field carries its whole flattened span, a union its
+    /// own tag-plus-region span, and a tuple one plain word per
+    /// element.
+    fn ty_field_span(&mut self, ty: Ty, depth: usize) -> Result<Option<Vec<SlotType>>, LowerError> {
+        const SPAN_DEPTH_LIMIT: usize = 32;
+        if depth >= SPAN_DEPTH_LIMIT {
+            return Err(unsupported(
+                "a struct payload field",
+                "the field's inline span nests past the depth budget; a cyclic field type has no \
+                 finite span",
+            ));
+        }
+        let members = self.universe.members(ty).to_vec();
+        match members.as_slice() {
+            [] => Ok(Some(vec![SlotType::I64])),
+            [only] => self.atom_field_span(*only, depth),
+            _ => {
+                let shape = self.members_shape(&members, depth + 1)?;
+                Ok(Some(shape_words(&shape)))
+            },
+        }
+    }
+
+    /// The fields of one solved application signature as member fields
+    /// at consecutive words, the walk a nominal struct's declared
+    /// fields takes. A part-less application keeps the reserved word
+    /// the part-less struct carries.
+    fn solved_struct_fields(
+        &mut self,
+        fields: &[ds_check::decls::SolvedField],
+    ) -> Result<Vec<MemberField>, LowerError> {
+        if fields.is_empty() {
+            return Ok(vec![MemberField {
+                name: None,
+                slots: vec![SlotType::I64],
+                word: 0,
+            }]);
+        }
+        let mut laid = Vec::with_capacity(fields.len());
+        let mut cursor = 0usize;
+        for field in fields {
+            let Some(slots) = self.ty_field_span(field.ty, 0)? else {
+                return Err(unsupported(
+                    "an application value's field",
+                    "the field's shape stays outside the inline-span vocabulary",
+                ));
+            };
+            let word = word_of(cursor)?;
+            cursor += slots.len();
+            laid.push(MemberField {
+                name: Some(field.name.clone()),
+                slots,
+                word,
+            });
+        }
+        Ok(laid)
     }
 
     /// The module-wide tag id of one atom, assigned in first-use order
@@ -609,9 +686,26 @@ impl<'a> Shapes<'a> {
             // the empty type never flows; it keys as its one inert word
             [] => return Ok(ShapeKey::Word(WordKey::Slot(SlotType::I64))),
             [only] => {
-                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(only)
-                    && self.declared_deinits.contains(def)
-                {
+                // a deinit-carrying atom keys by its own identity: a
+                // nominal struct its atom, an application the applied
+                // atom — the hook each body claims is the struct's own
+                let deinit_def = self
+                    .analyzed
+                    .decls
+                    .defs_of_atoms
+                    .get(only)
+                    .copied()
+                    .or_else(
+                        || match self.universe.atom_decl(*only).ok().map(|d| &d.kind) {
+                            Some(ds_check::AtomKind::Apply(ctor, _)) => {
+                                self.analyzed.decls.defs_of_atoms.get(ctor).copied()
+                            },
+                            _ => None,
+                        },
+                    )
+                    .filter(|def| self.declared_deinits.contains(def));
+                if let Some(def) = deinit_def {
+                    let _ = def;
                     return Ok(ShapeKey::DeinitStruct(*only));
                 }
                 match &*self.shape(ty)? {
@@ -948,6 +1042,23 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
                 Ok(Shape::Word(SlotType::Ref))
             },
+            // A user-declared generic struct's application: the solved
+            // field signature over the application's arguments, laid out
+            // as a bare struct — the value shape the sites construct,
+            // read, and stage. A field nesting through the application
+            // itself has no finite span; the depth budget refuses it
+            // typed.
+            ds_check::AtomKind::Apply(..) => {
+                let Some(fields) = self.apply_fields_of(atom) else {
+                    return Err(unsupported(
+                        "an application value",
+                        "its constructor declares no fields this lowering solved; a generic \
+                         enum's payloaded cases wait on their own seam",
+                    ));
+                };
+                let fields = self.solved_struct_fields(&fields)?;
+                Ok(Shape::Struct(StructShape { fields }))
+            },
             // A fn value is one Fn word (the callable-word ruling, F2):
             // a non-capturing lambda mints its copyable scalar FuncRef
             // into the slot; a capturing lambda's VALUE is a Ref word
@@ -955,8 +1066,10 @@ impl<'a> Shapes<'a> {
             // places and callable-defaulted fn-typed parameter slots.
             ds_check::AtomKind::FnSig(..) => Ok(Shape::Word(SlotType::Fn)),
             _ => Err(unsupported(
-                "an enum or application value",
-                "the M3 runtime contract covers unit, primitive, and struct atoms only",
+                "an atom with no resolved shape",
+                "the runtime contract lowers unit, primitive, struct, tuple, and application \
+                 atoms; this atom's own shape never resolved (a generic enum's opaque head, a \
+                 case payload whose fields never solved), and its values wait on their own seams",
             )),
         }
     }
@@ -1039,16 +1152,47 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::FnSig(..) => Ok(vec![PayloadField::word(None, SlotType::Fn)]),
             // A heap-reference application member (a list, a map): the
             // same one Ref word `atom_shape` rules the bare value — the
-            // object behind it owned by the runtime — claimed positionally
-            // exactly like a tuple member's element word
+            // object behind it owned by the runtime — claimed
+            // positionally exactly like a tuple member's element word
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
                 Ok(vec![PayloadField::word(None, SlotType::Ref)])
             },
+            // A user-declared generic struct's application as a union
+            // member: its solved fields claim the region exactly like a
+            // struct member's (the deinit guard `union_shape` runs
+            // already resolved the constructor's own hook)
+            ds_check::AtomKind::Apply(..) => {
+                let Some(fields) = self.apply_fields_of(atom) else {
+                    return Err(unsupported(
+                        "an application member",
+                        "its constructor declares no fields this lowering solved; a generic \
+                         enum's payloaded cases wait on their own seam",
+                    ));
+                };
+                let mut out = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    match self.ty_field_span(field.ty, depth)? {
+                        Some(slots) if !slots.is_empty() => out.push(PayloadField {
+                            name: Some(field.name.clone()),
+                            slots,
+                        }),
+                        _ => {
+                            return Err(unsupported(
+                                "an application member's field",
+                                "the field's shape stays outside the inline-span vocabulary",
+                            ))
+                        },
+                    }
+                }
+                if out.is_empty() {
+                    out.push(reserved_word());
+                }
+                Ok(out)
+            },
             _ => Err(unsupported(
-                "an enum or non-heap application member",
-                "a union member lowers as unit, primitive, struct, tuple, callable, or heap- \
-                 reference application words; anything else waits on the seam its own value shape \
-                 names",
+                "an enum member",
+                "a union member lowers as unit, primitive, struct, tuple, callable, or \
+                 application words; anything else waits on the seam its own value shape names",
             )),
         }
     }
@@ -1152,6 +1296,33 @@ impl<'a> Shapes<'a> {
             // word `atom_shape` rules the bare value
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
                 Ok(Some(vec![SlotType::Ref]))
+            },
+            // a user-declared generic struct's application: its solved
+            // fields' whole flattened span claims the field, the same
+            // walk a nominal struct's field takes; a deinit-carrying
+            // constructor keeps the refusal its own binding takes
+            ds_check::AtomKind::Apply(ctor, _) => {
+                if let Some(def) = self.analyzed.decls.defs_of_atoms.get(ctor)
+                    && self.declared_deinits.contains(def)
+                {
+                    return Err(unsupported(
+                        "a struct payload field",
+                        "a deinit-carrying field type has no claim of its own inside the inline \
+                         span, so its hook would run at the wrong death; per-span deinit claims \
+                         own the seam",
+                    ));
+                }
+                let Some(fields) = self.apply_fields_of(id) else {
+                    return Ok(None);
+                };
+                let mut slots = Vec::new();
+                for field in fields.iter() {
+                    match self.ty_field_span(field.ty, depth + 1)? {
+                        Some(span) => slots.extend(span),
+                        None => return Ok(None),
+                    }
+                }
+                Ok(Some(slots))
             },
             // an aliased tuple: the same one-word-per-element rule the
             // written tuple spelling takes, the empty tuple refusing on
@@ -1335,9 +1506,31 @@ impl<'a> Shapes<'a> {
         let mut matched = u.members.iter().filter(|member| {
             let mut bindings = Vec::new();
             self.atom_under(member.atom, atom, &mut bindings)
+                || self.applied_member_of(member.atom, atom)
         });
         let only = matched.next()?;
         matched.next().is_none().then_some(only)
+    }
+
+    /// Whether a member's atom is an application of `head`'s own atom
+    /// while the head names a user-declared generic struct: the
+    /// ctor-head arm of the structural matcher. Two applications of the
+    /// one constructor both answer true, so the caller's single-match
+    /// rule refuses the ambiguous arm.
+    fn applied_member_of(&self, member: TypeId, head: TypeId) -> bool {
+        let Some(&def) = self.analyzed.decls.defs_of_atoms.get(&head) else {
+            return false;
+        };
+        let Some(shape) = self.analyzed.decls.structs.get(&def) else {
+            return false;
+        };
+        if shape.params.is_empty() {
+            return false;
+        }
+        matches!(
+            self.universe.atom_decl(member).ok().map(|d| &d.kind),
+            Some(ds_check::AtomKind::Apply(ctor, _)) if *ctor == head
+        )
     }
 
     /// Whether `pattern` (a member's atom, its variables as binders)
@@ -1654,7 +1847,8 @@ mod tests {
             .map(|val| val.ty)
             .find(|ty| analyzed.decls.universe.render(*ty) == rendered)
             .unwrap_or_else(|| panic!("no expression of {rendered}"));
-        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let empty_apply = HashMap::new();
+        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
         let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes.shape(ty).expect("the shape lowers")
     }
@@ -2040,7 +2234,8 @@ mod tests {
 
         // the keyed seed: quiet at 5, loud at 6, an exact repeat skipped,
         // the local atom's row dropped, a name resolving to nothing dropped
-        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let empty_apply = HashMap::new();
+        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
         let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes
             .seed_linked(&[
@@ -2059,7 +2254,8 @@ mod tests {
 
         // a second linked name claiming a keyed id refuses, naming the
         // row and the holder
-        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let empty_apply = HashMap::new();
+        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
         let mut crossed = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         crossed
             .seed_linked(&[row("quiet", 5)])
@@ -2073,7 +2269,8 @@ mod tests {
         );
 
         // a row reaching the reserved range refuses
-        let types = crate::types::Types::new(&analyzed.decls.universe);
+        let empty_apply = HashMap::new();
+        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
         let mut reserved = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         let err = reserved
             .seed_linked(&[row("quiet", FIRST_RESERVED_TAG)])

@@ -3322,16 +3322,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The deinit hook of a value's concrete type (C5): a single struct
     /// atom whose declaration carries a `deinit` member names its
-    /// synthesized function through the pool. A declared deinit with no
-    /// plan (a generic struct's) refuses; unions, scalars, and
-    /// deinit-less structs carry none.
+    /// synthesized function through the pool — the struct's application
+    /// resolving its constructor's own. A declared deinit with no plan
+    /// (a generic struct's) refuses; unions, scalars, and deinit-less
+    /// structs carry none.
     fn deinit_hook(&mut self, ty: Ty, span: Span) -> Result<Option<Hook>, LowerError> {
         let members = self.members(ty);
         let [atom] = members else {
             return Ok(None);
         };
-        let Some(def) = self.analyzed.decls.defs_of_atoms.get(atom).copied() else {
-            return Ok(None);
+        let def = match self.analyzed.decls.defs_of_atoms.get(atom).copied() {
+            Some(def) => def,
+            None => match self
+                .universe()
+                .atom_decl(*atom)
+                .ok()
+                .map(|decl| decl.kind.clone())
+            {
+                Some(AtomKind::Apply(ctor, _)) => {
+                    match self.analyzed.decls.defs_of_atoms.get(&ctor).copied() {
+                        Some(def) => def,
+                        None => return Ok(None),
+                    }
+                },
+                _ => return Ok(None),
+            },
         };
         if !self.plan.declares_deinit(def) {
             return Ok(None);
@@ -6932,8 +6947,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // A member value into a union-typed field re-spans
                 // through the field's own region; anything else is the
                 // honest mismatch.
-                let decl_expr = self.field_decl_expr(static_ty, index);
-                self.store_union_member_field(target.base + field.word, decl_expr, &v, name.span)?;
+                let members = self.field_members(static_ty, index);
+                self.store_union_member_field(
+                    target.base + field.word,
+                    members.as_deref(),
+                    &v,
+                    name.span,
+                )?;
                 continue;
             }
             // a fn-typed field must prove scalar provenance: a closure word
@@ -6962,14 +6982,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(target)
     }
 
-    /// The declared type expression of one field of a struct atom, by
+    /// The declared union sides of one field of a struct atom, by
     /// position: the shape's fields pair with the declaration's, so the
-    /// union store reads the field's own union sides.
-    fn field_decl_expr(&self, ty: Ty, index: usize) -> Option<&'a TypeExpr> {
+    /// union store reads the field's own union sides — a nominal
+    /// struct's written field type, an application value's solved field
+    /// type.
+    fn field_members(&self, ty: Ty, index: usize) -> Option<Vec<TypeId>> {
         let atom = self.only_atom(ty, no_span()).ok()?;
         let decl = self.universe().atom_decl(atom).ok()?;
         match &decl.kind {
-            AtomKind::Struct(fields) => fields.get(index).map(|f| &f.ty),
+            AtomKind::Struct(fields) => fields.get(index).and_then(|f| expr_members(&f.ty)),
+            AtomKind::Apply(..) => {
+                let fields = self.shapes.apply_fields_of(atom)?;
+                let field = fields.get(index)?;
+                Some(self.universe().members(field.ty).to_vec())
+            },
             _ => None,
         }
     }
@@ -6983,18 +7010,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn store_union_member_field(
         &mut self,
         region_base: u8,
-        decl_expr: Option<&'a TypeExpr>,
+        members: Option<&[TypeId]>,
         v: &TypedPlace,
         span: Span,
     ) -> Result<(), LowerError> {
         let mismatched = || mismatch("a struct literal field's span");
-        let Some(expr) = decl_expr else {
-            return Err(mismatched());
-        };
-        let Some(members) = expr_members(expr) else {
-            return Err(mismatched());
-        };
-        let shape = self.shapes.members_shape(&members, 1)?;
+        let members = members.ok_or_else(mismatched)?;
+        let shape = self.shapes.members_shape(members, 1)?;
         let Shape::Union(u) = &shape else {
             return Err(mismatched());
         };

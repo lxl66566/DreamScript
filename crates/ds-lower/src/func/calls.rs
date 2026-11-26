@@ -861,8 +861,13 @@ impl<'a> FnLower<'a, '_, '_> {
             if addrs.len() != field.width() {
                 // a member value into a union-typed payload field re-spans
                 // through the field's own region, the literal store's rule
-                let decl_expr = self.field_decl_expr(ty, position);
-                self.store_union_member_field(target.base + field.word, decl_expr, &v, arg.span)?;
+                let members = self.field_members(ty, position);
+                self.store_union_member_field(
+                    target.base + field.word,
+                    members.as_deref(),
+                    &v,
+                    arg.span,
+                )?;
                 continue;
             }
             self.store_field_span(target.base, field, &addrs);

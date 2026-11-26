@@ -808,6 +808,11 @@ where
         }
         def_types.extend(linked_types);
     }
+    // The solved field signatures of every struct application: the whole
+    // package's resolution is done, so every minted application atom is
+    // final and its constructor's shape is installed. The lowering pass
+    // shapes the applications' values through this table.
+    decls::record_apply_structs(package, &mut decls);
     Ok((decls, Checked {
         diags,
         def_types,

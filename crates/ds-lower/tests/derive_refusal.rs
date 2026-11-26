@@ -200,7 +200,7 @@ fn non_data_items_and_plain_packages() {
 /// reads every arm of the intersection.
 #[test]
 fn a_generic_struct_derives_and_meets_the_runtime_door() {
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -210,7 +210,7 @@ fn a_generic_struct_derives_and_meets_the_runtime_door() {
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -467,21 +467,48 @@ fn lift_mirror_refuses_at_lowering(source: &str) {
     );
 }
 
-/// The `show` family's lift door, pinned as the hand-written mirror of
+/// The struct-application door the receiver frames ride since the
+/// per-shape instantiation landed: the mirror checks clean and lowers —
+/// the ONE body's receiver lays out over the application's solved field
+/// signature, a part still naming the impl's variable riding its Raw
+/// word with the dispatch's runtime evidence.
+fn lift_mirror_lowers(source: &str) {
+    let mut files = Files::new();
+    let id = files.add_source("mirror.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the mirror checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    lower(
+        "mirror",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    )
+    .expect("the mirror's product lowers: the receiver frame lays out over the application");
+}
+
+/// The `show` family's lift, pinned as the hand-written mirror of
 /// exactly what the admitted derive synthesizes (the bounded generic
 /// impl `impl_item` builds; the real-derive pins above ride the same
-/// door): a fields-carrying generic struct's
-/// impl checks clean — the receiver `self: pair[t]` is a solved head and
-/// the parts dispatch through the bound's runtime evidence — while
-/// lowering refuses at the member's receiver frame, because a concrete
-/// application of a user generic struct has no runtime value: the shape
-/// pass admits only heap-reference applications (one Ref word), so the
-/// ONE body the seam lowers per impl would need the receiver laid out
-/// per instantiation at the entering site — the JIT specialization
-/// tier's frame, not the interpreter's.
+/// door): a fields-carrying generic struct's impl checks clean and
+/// lowers — the receiver `self: pair[t]` lays out over the
+/// application's solved field signature (each part a Raw word), the
+/// parts dispatching through the bound's runtime evidence — while the
+/// generic enum's application keeps its refusal (an enum application's
+/// payloaded cases are per-instantiation facts no mint grows yet), the
+/// ONE body the seam lowers per impl never gaining an enum receiver.
 #[test]
-fn the_lifted_show_product_refuses_at_the_receiver_frame() {
-    lift_mirror_refuses_at_lowering(concat!(
+fn the_lifted_show_product_lowers_over_the_applied_receiver() {
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -495,9 +522,10 @@ fn the_lifted_show_product_refuses_at_the_receiver_frame() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    // the enum shape meets the same receiver frame: the member's
-    // `self: flag[t]` spans the application's words whatever the body
-    // reads (the arms here touch no part)
+    // the enum shape keeps the door closed: the member's `self:
+    // flag[t]` names an enum application whose payloaded cases are
+    // per-instantiation facts no mint grows yet, so the receiver has no
+    // solved field signature to lay out
     lift_mirror_refuses_at_lowering(concat!(
         "tag int\n",
         "tag string\n",
@@ -520,16 +548,19 @@ fn the_lifted_show_product_refuses_at_the_receiver_frame() {
     ));
 }
 
-/// The admitted families' real products meet the same runtime door:
-/// each family over a generic struct checks clean and lowering
-/// refuses — the receiver frame for the trait families (the parts
-/// dispatch through the added bound), the construction for `default`
-/// (a receiverless member building the application value from
-/// concrete parts), the union member for `from_json` (the member's
-/// answer spans the application plus `parse_err`).
+/// The admitted families' real products ride the applied-receiver
+/// door: each family over a generic struct checks clean and lowers —
+/// the receiver frame for the trait families (the parts dispatch
+/// through the added bound), the construction for `default` (a
+/// receiverless member building the application value from concrete
+/// parts), and the decode walk's answer union over the application —
+/// while the encode walk's mirror keeps its refusal on its own spelled
+/// surface (its synthesized body stages the field map's inherent
+/// `set` member, and the harness's bodiless spelling plans no body; the
+/// ambient-backed run stays the @std seam's own verification).
 #[test]
 fn the_admitted_generic_families_meet_their_runtime_doors() {
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "trait ord {\n",
         "  fn compare(self, other: Self) -> int\n",
@@ -538,7 +569,7 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "trait hash {\n",
         "  fn hash(self) -> int\n",
@@ -547,7 +578,7 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "trait clone {\n",
         "  fn clone(self) -> Self\n",
@@ -556,7 +587,7 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "impl int {\n",
         "  fn default() -> int { 0 }\n",
@@ -565,7 +596,7 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "struct box[t] { n: int }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "struct map[k, v]\n",
@@ -700,8 +731,8 @@ fn the_type_keyed_families_refuse_a_variable_part() {
 /// substitution solves `pair[int]` at check time and the construction
 /// refuses at lowering's runtime-value door instead.
 #[test]
-fn the_lifted_default_product_refuses_at_the_construction() {
-    lift_mirror_refuses_at_lowering(concat!(
+fn the_lifted_default_product_lowers_at_the_construction() {
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "struct box[t] { n: int }\n",
         "impl[t] box[t] {\n",
@@ -711,7 +742,7 @@ fn the_lifted_default_product_refuses_at_the_construction() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int {\n",

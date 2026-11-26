@@ -167,11 +167,21 @@ impl Bodies<'_> {
                     return;
                 };
                 // Substitute the constructor's parameters from the
-                // scrutinee application, like field access.
+                // scrutinee application, like field access: the member
+                // the head names — its own application when the head is
+                // the member itself, else the applied member the head's
+                // constructor application matches.
+                let applied = self
+                    .applied_struct_member(atom, scrut, *span)
+                    .and_then(|member| self.single_apply_of(member).map(|(_, args)| args))
+                    .or_else(|| {
+                        members
+                            .first()
+                            .and_then(|m| self.single_apply_of(*m))
+                            .and_then(|(ctor, args)| (ctor == atom).then_some(args))
+                    });
                 let mut subst = FxHashMap::default();
-                if let Some((ctor, args)) = members.first().and_then(|m| self.single_apply_of(*m))
-                    && ctor == atom
-                {
+                if let Some(args) = applied {
                     for (param, arg) in shape.params.iter().zip(args.iter()) {
                         subst.insert(param.name.clone(), *arg);
                     }
@@ -191,11 +201,18 @@ impl Bodies<'_> {
                     match sub {
                         Some(sub) => {
                             let scrut_field = field_ty.unwrap_or_else(|| self.empty());
+                            // the field's own sub-pattern proves nothing
+                            // about the scrutinee's members: its types are
+                            // the field's, and one sharing an atom with a
+                            // sibling member would cover the member the
+                            // arm never named. The member's cover is this
+                            // arm's own case decision, taken below.
+                            let mut field_covered = Vec::new();
                             self.pattern_walk(
                                 sub,
                                 scrut_field,
                                 None,
-                                covered,
+                                &mut field_covered,
                                 binders,
                                 depth + 1,
                                 arm,
@@ -434,15 +451,20 @@ impl Bodies<'_> {
     /// exhaustiveness is value-level, out of the set core's reach). A
     /// unit case over an applied enum head is a member too — the head is
     /// opaque to the set algebra, so the membership reads the head's
-    /// minted case atoms.
+    /// minted case atoms — and a user-declared generic struct's ctor
+    /// head names the applied member of the scrutinee it matches, the
+    /// coverage reading the member the head spells.
     fn case_cover(
         &mut self,
         span: Span,
-        atom: TypeId,
+        head: TypeId,
         members: &[TypeId],
         scrut: Ty,
         covered: &mut Vec<TypeId>,
     ) {
+        let atom = self
+            .applied_struct_member(head, scrut, span)
+            .unwrap_or(head);
         let is_member = self
             .decls
             .universe
@@ -463,6 +485,53 @@ impl Bodies<'_> {
                 span,
                 "not a member",
             );
+        }
+    }
+
+    /// The applied member a user-declared generic struct's ctor head
+    /// names in a scrutinee: the head's own atom keys no application,
+    /// so the membership reads the member whose atom is an application
+    /// of it. One application answers the member, several report the
+    /// ambiguity (the head names two members), and none answers `None`
+    /// for the caller's own membership error.
+    fn applied_struct_member(&mut self, head: TypeId, scrut: Ty, span: Span) -> Option<TypeId> {
+        let def = self.decls.defs_of_atoms.get(&head).copied()?;
+        let shape = self.decls.structs.get(&def)?;
+        if shape.params.is_empty() {
+            return None;
+        }
+        let matches: Vec<TypeId> = self
+            .decls
+            .universe
+            .members(scrut)
+            .iter()
+            .copied()
+            .filter(|&member| {
+                matches!(
+                    self.decls.universe.atom_decl(member).ok().map(|d| &d.kind),
+                    Some(AtomKind::Apply(ctor, _)) if *ctor == head
+                )
+            })
+            .collect();
+        match matches.as_slice() {
+            [one] => Some(*one),
+            [] => None,
+            many => {
+                let spelled: Vec<String> = many.iter().map(|&m| self.atom_name(m)).collect();
+                self.error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the head `{}` matches several members of `{}`: {}; name the head's \
+                         application",
+                        self.atom_name(head),
+                        self.decls.universe.render(scrut),
+                        spelled.join(", ")
+                    ),
+                    span,
+                    "ambiguous member",
+                );
+                None
+            },
         }
     }
 
