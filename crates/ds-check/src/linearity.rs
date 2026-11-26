@@ -113,6 +113,11 @@ pub struct BinderFact {
     /// whether a field projection copies (a scalar read) or transfers
     /// (a linear field).
     pub ty: Ty,
+    /// Whether the binding is a `var` (a mut parameter or window binder
+    /// counts too): a lambda capturing a mutable binding moves it into
+    /// the capture block, so the binding is dead in the enclosing scope
+    /// from the construction on (the affine-closure ruling, C1).
+    pub mutable: bool,
 }
 
 /// One consuming use of an owned non-copyable binding: the value flows
@@ -215,6 +220,7 @@ where
         audit: false,
         reported: HashSet::new(),
         last_use: FxHashMap::default(),
+        capture_sink: None,
         epoch: 0,
         escaping: false,
     };
@@ -316,6 +322,7 @@ where
         audit: false,
         reported: HashSet::new(),
         last_use: FxHashMap::default(),
+        capture_sink: None,
         epoch: 0,
         escaping: false,
     };
@@ -594,6 +601,13 @@ struct Lin<'a> {
     reported: HashSet<(Place, Span)>,
     /// The last use per binding: (use span, borrowed).
     last_use: FxHashMap<Place, (Span, bool)>,
+    /// The lambda walk's collected mutable captures: a `var` binding the
+    /// body captures moves at the construction, so the post-walk records
+    /// its death in the enclosing scope. `None` outside a lambda body
+    /// (a spawned child's captures keep the spawn seam's acquire
+    /// discipline), and the innermost lambda's list replaces the outer's
+    /// for the walk's duration.
+    capture_sink: Option<Vec<Place>>,
     /// Capture depth: inside a lambda or spawn body, every use of a
     /// binding from an outer epoch is a capture and moves it (C1).
     epoch: usize,
@@ -920,6 +934,18 @@ impl<'a> Lin<'a> {
                 // Inside a lambda or spawn body, using an outer binding is
                 // a capture: the closure owns the value from here on [C1].
                 let captured = self.epoch > info.epoch;
+                // A lambda's capture of a mutable owned binding moves it
+                // into the capture block (the affine-closure ruling): the
+                // sink records the place so the lambda's post-walk kills
+                // it in the enclosing scope. A spawned body keeps the
+                // spawn seam's acquire discipline — the spawn arm suspends
+                // the sink for its walk, so its captures never land here.
+                if self.is_captured_var(place)
+                    && let Some(sink) = &mut self.capture_sink
+                    && !sink.contains(&place)
+                {
+                    sink.push(place);
+                }
                 let moving = info.owned && !info.copyable && (consuming || captured);
                 // A consuming use of a borrowed `~Copyable` value (a
                 // borrow/`mut` parameter's window) at a position whose
@@ -961,6 +987,25 @@ impl<'a> Lin<'a> {
             },
             None => {},
         }
+    }
+
+    /// Whether `place` is a mutable owned local captured by a body the
+    /// current lambda walk is inside (the kill sink's admission
+    /// predicate): the binding moves into the capture block at the
+    /// construction, so the enclosing scope's later uses are use-after-move
+    /// [C1]. Borrows and `mut` windows never qualify (ownership the
+    /// frame does not hold), nor do spawned captures (the sink is
+    /// suspended there).
+    fn is_captured_var(&self, place: Place) -> bool {
+        let Place::Local(bind) = place else {
+            return false;
+        };
+        let Some(info) = self.info.get(&place).copied() else {
+            return false;
+        };
+        info.owned
+            && self.epoch > info.epoch
+            && self.facts.get(&bind).is_some_and(|fact| fact.mutable)
     }
 
     /// Pushes `diag` for this use site unless the audit round already
@@ -1197,10 +1242,15 @@ impl<'a> Lin<'a> {
             // their source position until defer lowering lands [E5].
             Expr::Nursery { body, .. } | Expr::Defer { body, .. } => self.block(body),
             // The child body's uses are captures: ownership moves at the
-            // spawn expression, on the current state [E2].
+            // spawn expression, on the current state [E2]. The capture
+            // sink suspends for the walk — a spawned child's captures
+            // keep the spawn seam's acquire discipline, so no kill fires
+            // for them at any enclosing construction.
             Expr::Spawn { body, .. } => {
                 self.epoch += 1;
+                let sink = self.capture_sink.take();
                 self.block(body);
+                self.capture_sink = sink;
                 self.epoch -= 1;
                 false
             },
@@ -1277,13 +1327,39 @@ impl<'a> Lin<'a> {
         for param in params {
             self.bind_param(param);
         }
+        // The lambda's capture kill runs at the construction, after the
+        // body walk: the sink collects the mutable bindings the body
+        // captured (a nested lambda swaps in its own list, so the inner
+        // construction's kill is the inner walk's).
+        let outer_sink = self.capture_sink.replace(Vec::new());
         // The lambda's answer leaves it at its call, so the body
         // expression is an escape context like a function body's tail.
         let outer = self.escaping;
         self.escaping = true;
         let diverges = self.expr(body, true);
         self.escaping = outer;
+        let captured_vars = self
+            .capture_sink
+            .take()
+            .expect("the lambda walk installs its sink");
+        self.capture_sink = outer_sink;
         self.epoch -= 1;
+        // A captured `var` binding moved into the capture block at this
+        // construction: every use in the enclosing scope after it reads a
+        // dead binding [C1]. Only a binding still live here moves — an
+        // affine capture already died at its own consuming use inside the
+        // body, and a nested lambda's kill may have beaten this walk here.
+        if !self.audit {
+            for place in captured_vars {
+                if matches!(self.state.get(&place), Some(State::Live)) {
+                    self.out.moves.push(Move {
+                        binder: place.binder_span(self.package),
+                        at: *span,
+                    });
+                    self.set_state(place, State::Dead { at: *span });
+                }
+            }
+        }
         self.drop_scope(*span);
         diverges
     }
@@ -1329,6 +1405,19 @@ impl<'a> Lin<'a> {
             self.expr(right, true);
             return false;
         };
+        // A plain assignment to a captured `var` binding inside a lambda
+        // body is the capture's own use: the sink records the place and
+        // the last-use row names the assignment, so the lowerer's
+        // construction sees the binding's final use inside the lambda and
+        // moves it (the compound arm's read() records both).
+        if *op == ds_parse::AssignOp::Plain
+            && self.is_captured_var(place)
+            && let Some(sink) = &mut self.capture_sink
+            && !sink.contains(&place)
+        {
+            sink.push(place);
+            self.last_use.insert(place, (left.span(), true));
+        }
         if *op == ds_parse::AssignOp::Plain {
             self.expr(right, true);
             if !self.audit && self.owns_live_noncopyable(place) {
@@ -1920,6 +2009,7 @@ mod tests {
             audit: false,
             reported: HashSet::new(),
             last_use: FxHashMap::default(),
+            capture_sink: None,
             epoch: 0,
             escaping: false,
         };

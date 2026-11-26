@@ -14,9 +14,10 @@
 //! capturing a closure, and an omitted default on a callable value
 //! (the last refused by the checker's indirect-call arity check).
 
+use ds_abi::Uop;
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, Lowered, lower};
+use ds_lower::{LowerError, Lowered, PlacedOp, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
@@ -234,5 +235,200 @@ fn an_omitted_default_on_a_callable_value_refuses() {
     assert!(
         rendered.contains("DS2007"),
         "the indirect-call arity check refuses the probe: {rendered}"
+    );
+}
+
+// The affine-closure shapes (the mut window over the uniquely-held
+// capture block, C1/C3/D1): a lambda capturing a `var` binding moves it,
+// the binding dead in the enclosing scope, and the closure's own
+// assignments re-store the object's capture slot — the mutation visible
+// across calls. The refusals below pin the kill's boundary.
+
+/// The probe source for the affine-closure shapes: a counter moved into
+/// a closure, mutated through the window, read back across calls, and a
+/// string capture churning its counts through the store's edge acquire
+/// and release.
+const AFFINE_SOURCE: &str = "
+tag int
+tag string
+
+extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
+
+fn main() -> int {
+  var counter: int = 0
+  const cell = (op: int) => {
+    if op == 1 {
+      counter = counter + 1
+    }
+    counter
+  }
+  println(\"count = ${cell(1)}\")
+  println(\"count = ${cell(1)}\")
+  println(\"count = ${cell(0)}\")
+  var name: string = \"a\"
+  const grow = () => {
+    name = concat(name, \"b\")
+    name
+  }
+  println(grow())
+  println(grow())
+  0
+}";
+
+/// Lowers the affine probe through the full pipeline, asserting the
+/// check is clean so failures are the lowerer's.
+fn lower_affine() -> (String, ds_lower::Lowered) {
+    let mut files = Files::new();
+    let id = files.add_source("affine_closure.ds", AFFINE_SOURCE);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "affine_closure",
+        Hash128::compute(AFFINE_SOURCE.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the probe lowers");
+    (AFFINE_SOURCE.to_owned(), lowered)
+}
+
+/// Runs the lowered affine probe and asserts the golden stdout plus the
+/// heap drain: the counter mutation is visible across calls (the window
+/// re-stores the object's slot) and the string capture's count churn
+/// balances.
+#[test]
+fn a_closure_mutates_its_captured_var_across_calls() {
+    let (source, lowered) = lower_affine();
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(
+        vm.run("affine_closure", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"count = 1\ncount = 2\ncount = 2\nab\nabb\n",
+        "the window's re-stores are visible across calls"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}
+
+/// The mutation rides the CAPTURE_STORE uop: the lambda frame's placed
+/// stream carries one per assignment to a captured binding, and the
+/// construction site stages the captures as borrows (the op acquires its
+/// own count per Ref capture, so the frame places no inc at the
+/// construction).
+#[test]
+fn the_mutation_lowers_onto_capture_store_words() {
+    let (_, lowered) = lower_affine();
+    let lambda = lowered
+        .functions()
+        .iter()
+        .find(|name| name.starts_with("main$"))
+        .expect("the counter lambda lands in the module table");
+    let placed = lowered
+        .placed(lambda)
+        .expect("the lambda's placed stream exists");
+    let stores = placed
+        .iter()
+        .filter(|op| matches!(op, PlacedOp::Uop(Uop::CaptureStore { .. })))
+        .count();
+    assert_eq!(
+        stores, 1,
+        "one assignment to the captured counter, one window store: {placed:?}"
+    );
+}
+
+/// The affine rows of one probe source: the walk's own diagnostics,
+/// rendered.
+fn affine_diags(source: &str, file: &str) -> String {
+    let mut files = Files::new();
+    let id = files.add_source(file, source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe typechecks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lin = ds_check::linearity_check(
+        &asts,
+        &analyzed.package,
+        &analyzed.resolutions,
+        &analyzed.decls,
+        &analyzed.checked,
+    );
+    lin.diags
+        .iter()
+        .map(|diag| human(diag, &files))
+        .collect::<String>()
+}
+
+/// A use of the moved binding after the capture is the affine pass's
+/// two-span MovedThenUsed refusal (DS3001): the closure owns the state
+/// from the construction on, so the enclosing scope reads a dead
+/// binding.
+#[test]
+fn a_moved_captures_later_use_refuses_at_the_check() {
+    let rendered = affine_diags(
+        "tag int
+fn main() -> int {
+  var counter: int = 0
+  const bump = () => { counter = counter + 1 }
+  bump()
+  counter
+}",
+        "moved_capture.ds",
+    );
+    assert!(
+        rendered.contains("DS3001"),
+        "the affine pass kills the binding at the construction: {rendered}"
+    );
+}
+
+/// A second lambda capturing the same `var` refuses the same way: the
+/// first construction's kill owns the binding, the second capture a use
+/// of the dead.
+#[test]
+fn a_second_capture_of_the_moved_var_refuses_at_the_check() {
+    let rendered = affine_diags(
+        "tag int
+fn main() -> int {
+  var counter: int = 0
+  const bump = () => { counter = counter + 1 }
+  const read = () => counter
+  0
+}",
+        "second_capture.ds",
+    );
+    assert!(
+        rendered.contains("DS3001"),
+        "one closure owns the moved binding: {rendered}"
     );
 }

@@ -9,6 +9,7 @@
 // call_stored: stage: run
 // call_passed: stage: run
 // capture_over_local: stage: run
+// mutates-its-captured-var: stage: run
 
 fn apply(f: fn() -> int) -> int {
   f()
@@ -47,4 +48,20 @@ fn call_passed() -> int {
 fn capture_over_local() -> int {
   const base = 7
   apply { base + 1 }
+}
+
+// the affine closure (the 2026-11-25 ruling): a lambda capturing a var
+// binding moves it, the closure mutating its own captured state through
+// the mut window over the uniquely-held capture block
+fn mutates_its_captured_var() -> int {
+  var counter: int = 0
+  const cell = (op: int) => {
+    if op == 1 {
+      counter = counter + 1
+    }
+    counter
+  }
+  cell(1)
+  cell(1)
+  cell(0)
 }

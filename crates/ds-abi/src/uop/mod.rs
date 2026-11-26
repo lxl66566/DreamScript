@@ -45,9 +45,9 @@
 //! | FloatCmp (0x4)       | EQF64 .. GTF64          | dst slot | lhs slot   | rhs slot   | —
 //! | BoolCmp (0x5)        | EQBOOL, NEQBOOL         | dst slot | lhs slot   | rhs slot   | —
 //! | Ref (0xD)            | EQSTR, NEQSTR, STRCAT,  | dst slot | lhs slot   | rhs slot   | —
-//! |                      | STRCAT_ARENA,           |          | lhs slot   | rhs slot   |
-//! |                      | CLOSURE_NEW              |          | or fn slot | or capture |
-//! |                      |                          |          | (NEW only) | count (NEW)|
+//! |                      | STRCAT_ARENA,           | or src    | or fn slot | or n or    |
+//! |                      | CLOSURE_NEW,            | (STORE)  | or obj     | cap idx    |
+//! |                      | CAPTURE_STORE            |          | (NEW/STORE)| (NEW/STORE) |
 //! | Tag (0x6)            | TAG_TEST(_NOT), TAG_NEW | dst slot | src slot   | tag id     | —
 //! |                      |                         |          | (TEST) or  | (TEST only)|
 //! |                      |                         |          | tag (NEW)  |            |
@@ -130,6 +130,12 @@
 //! of the banned dynamic "V" variants (BL-1): the word's type is a
 //! compile-time fact, and only which function it names is dynamic — the
 //! same register-operand shape as JMPIF's condition slot.
+//!
+//! A closure callee's frame reserves one extra Ref-classified slot right
+//! past the capture block (at `params_len + block_len`, the block the
+//! object carried in): CALLS writes the callee word there, and
+//! CAPTURE_STORE reads it back as the `obj` operand — the mut window's
+//! one address of the closure object inside its own body.
 //!
 //! # Budgets and caps
 //!
@@ -311,12 +317,33 @@ pub enum Uop {
     /// Allocating, so impure for the same reason as KSTR and STRCAT, and
     /// the object acquires one count per `Ref` capture word as it adopts
     /// the block (the store-acquires rule: the staged sources keep their
-    /// own counts and die their ordinary deaths). M3 extension, justified:
+    /// own counts and die their ordinary deaths — a captured `var`'s
+    /// binding is dead in the source scope by the checker's move row,
+    /// its frame word's count dying at the binder's scope end). The
+    /// acquire stays inside the op on purpose: an object's count must
+    /// stay unreachable from frame-word dec noise (the fuzz mirror's
+    /// structured-stop property pins it). M3 extension, justified:
     /// a capturing lambda value is one `Ref` word naming the object (the
     /// callable-word ruling, F2), and no existing uop builds one; the
     /// FuncRef rides a slot because the fixed format cannot carry a
     /// destination, a capture span, and a pool index in one word.
     ClosureNew { dst: u8, func: u8, n: u8 },
+    /// `0xD.5` — `slots[obj]` names the running closure object (the
+    /// callee word CALLS staged for this frame) and `idx` one word of its
+    /// capture block; the op replaces that word with `slots[src]`, the
+    /// mut window a closure body's assignment to its own captured binding
+    /// lowers onto [F2, C3]. The object is the closure's own and the
+    /// slot uniquely held (the capture moved at construction), so no
+    /// runtime check guards the window. The op acquires one edge count
+    /// for the incoming `Ref` word and releases the replaced word's —
+    /// the same retain contract a closure's free cascade carries — so
+    /// the frame keeps its own copy and the store is never a move.
+    /// Impure for the same reason as RCINC/RCDEC: reordering or
+    /// duplicating a count mutation breaks M4's dup/drop balance. M3
+    /// extension, justified: no existing uop writes another object's
+    /// stored word, and the callable-word ruling leaves captures
+    /// addressable only through the callee's own frame word.
+    CaptureStore { src: u8, obj: u8, idx: u8 },
     /// `0x6.0` — `slots[dst] = (slots[src] == tag)`, unboxed bool: reads the
     /// tag word of a tag+payload union (BL-2) and compares its discriminant
     /// against immediate tag id `tag` (in the `c` field). `0x6.0 ^ 1 ==

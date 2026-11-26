@@ -6,11 +6,11 @@ use super::{
     Uop,
     Uop::{
         AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64, Call, Callg,
-        Calls, Callt, Calltg, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64,
-        EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst, Kimm, Kstr,
-        KstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool, NeqF64,
-        NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew,
-        TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
+        Calls, Callt, Calltg, CaptureStore, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool,
+        EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst,
+        Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool,
+        NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64,
+        TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -39,7 +39,8 @@ pub enum Major {
     BoolCmp = 0x5,
     /// 0xD — heap-reference data ops: EQSTR, NEQSTR (XOR-negated pair),
     /// STRCAT over string contents, CLOSURE_NEW building a closure object,
-    /// STRCAT_ARENA building an arena temporary.
+    /// STRCAT_ARENA building an arena temporary, CAPTURE_STORE replacing
+    /// one of a closure object's own capture words (the mut window).
     Ref = 0xd,
     /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
@@ -176,7 +177,8 @@ impl Uop {
             | NeqStr { .. }
             | StrCat { .. }
             | StrCatArena { .. }
-            | ClosureNew { .. } => Major::Ref,
+            | ClosureNew { .. }
+            | CaptureStore { .. } => Major::Ref,
             TagTest { .. } | TagTestNot { .. } | TagNew { .. } => Major::Tag,
             CvtI2F { .. } | CvtF2I { .. } => Major::Cvt,
             Mov { .. } => Major::Mov,
@@ -220,6 +222,7 @@ impl Uop {
             // the capture span reads overlay positions 0..n, a
             // layout-relative effect documented in the module docs
             ClosureNew { func, .. } => SlotList::new(*func, &[]),
+            CaptureStore { src, obj, .. } => SlotList::new(*src, &[*obj]),
             CvtI2F { src, .. }
             | CvtF2I { src, .. }
             | ArenaRestore { src }
@@ -327,6 +330,7 @@ impl Uop {
             | Calls { .. }
             | Callt { .. }
             | Calltg { .. }
+            | CaptureStore { .. }
             | Ret { .. }
             | RetSpan { .. }
             | Funcf { .. }
@@ -342,7 +346,9 @@ impl Uop {
     /// FUNCF entry protocol, and HALT are impure. So are the allocating
     /// ops (KSTR, STRCAT, CLOSURE_NEW): reordering or duplicating an
     /// allocation breaks M4's dup/drop balance, and interning touches
-    /// shared heap state.
+    /// shared heap state. CAPTURE_STORE is impure the same way: its
+    /// count mutations and possible free are heap effects a dataflow
+    /// window may not reorder or duplicate.
     #[must_use]
     pub fn is_pure(&self) -> bool {
         !matches!(
@@ -364,6 +370,7 @@ impl Uop {
                 | ArenaMark { .. }
                 | ArenaRestore { .. }
                 | ClosureNew { .. }
+                | CaptureStore { .. }
                 | Funcf { .. }
                 | Halt { .. }
         )

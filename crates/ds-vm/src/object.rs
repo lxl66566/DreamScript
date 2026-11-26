@@ -1811,6 +1811,28 @@ impl Objects {
         }
     }
 
+    /// Replaces closure object `obj`'s capture word at `idx` with
+    /// `word`, returning the word it displaced. The mut window a closure
+    /// body's assignment to its own captured binding lowers onto: the
+    /// caller owns both count moves around the swap (the incoming word's
+    /// acquire, the displaced word's release).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no closure object;
+    /// [`Trap::CaptureIndex`] when `idx` names no word of the block.
+    pub fn replace_capture(&mut self, obj: u32, idx: usize, word: Value) -> Result<Value, Trap> {
+        let header = self.header_of(obj)?;
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Closure(closure) => closure
+                .captures
+                .get_mut(idx)
+                .map(|slot| std::mem::replace(slot, word))
+                .ok_or(Trap::CaptureIndex { obj, idx }),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// Visits every heap-held callable word — closure headers, closure
     /// captures, list elements, map keys and values — letting the caller
     /// inspect or rewrite each in place (the slot swap's staged-word
@@ -2488,6 +2510,27 @@ impl<'a> Heaps<'a> {
     pub(crate) fn inc_edge(&mut self, word: RefId) -> Result<(), Trap> {
         self.store(word)?.inc(word.id())?;
         self.settle(word.fiber())
+    }
+
+    /// `rc_dec` routed by the word's owner for an object-graph edge: the
+    /// replaced capture word a closure's mut store releases. The count
+    /// belonged to the holding object (the store-acquire edge the window
+    /// now spends), so no ledger row rides the release.
+    pub(crate) fn dec_edge(&mut self, word: RefId) -> Result<(), Trap> {
+        self.store(word)?.dec(word.id())?;
+        self.settle(word.fiber())
+    }
+
+    /// Replaces one word of closure object `word`'s capture block,
+    /// routed by the word's owner (the mut window over a foreign-held
+    /// closure serves on its own heap).
+    pub(crate) fn replace_capture(
+        &mut self,
+        word: RefId,
+        idx: usize,
+        value: Value,
+    ) -> Result<Value, Trap> {
+        self.store(word)?.replace_capture(word.id(), idx, value)
     }
 
     /// `rc_dec` routed by the word's owner, the claim the running

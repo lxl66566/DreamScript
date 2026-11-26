@@ -123,6 +123,16 @@ fn samples() -> Vec<Uop> {
             func: 255,
             n: 2,
         },
+        CaptureStore {
+            src: 0,
+            obj: 255,
+            idx: 0,
+        },
+        CaptureStore {
+            src: 255,
+            obj: 1,
+            idx: 255,
+        },
     ]);
     s.extend(call_samples());
     s.extend(jump_samples());
@@ -547,6 +557,14 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
             },
             0xd4,
         ),
+        (
+            CaptureStore {
+                src: 0,
+                obj: 0,
+                idx: 0,
+            },
+            0xd5,
+        ),
         (ArenaMark { dst: 0 }, 0x93),
         (ArenaRestore { src: 0 }, 0x94),
     ]
@@ -651,6 +669,14 @@ fn field_map_matches_the_module_doc_table() {
                 n: 0x33,
             },
             0xd311_2233,
+        ),
+        (
+            CaptureStore {
+                src: 0x11,
+                obj: 0x22,
+                idx: 0x33,
+            },
+            0xd511_2233,
         ),
         (
             TagTest {
@@ -767,7 +793,7 @@ fn field_map_matches_the_module_doc_table() {
         0x15 WrapAddI64, 0x16 WrapSubI64, 0x17 WrapMulI64, 0x18 ShlI64, 0x19 ShrI64,
         0x1A BitAndI64, 0x1B BitXorI64, 0x1C BitOrI64,
     ]);
-    assert_eq!(cases.len(), 60, "one sentinel per variant");
+    assert_eq!(cases.len(), 61, "one sentinel per variant");
     for (uop, word) in cases {
         assert_eq!(uop.encode(0), Ok(word), "field map drift: {uop:?}");
     }
@@ -941,12 +967,13 @@ fn malformed_encodings_are_rejected() {
             minor: 0xd
         })
     );
-    // unassigned minor inside the Ref major
+    // unassigned minor inside the Ref major (CAPTURE_STORE took 0xD.5,
+    // leaving 0xD.6 the next free)
     assert_eq!(
-        Uop::decode(0, 0xd5_00_00_00),
+        Uop::decode(0, 0xd6_00_00_00),
         Err(DecodeError::UnknownOpcode {
             major: 0xd,
-            minor: 0x5
+            minor: 0x6
         })
     );
     // CALLTG (0xA.5) decodes with CALL's operand layout and re-encodes to
@@ -1069,6 +1096,7 @@ fn effects_are_consistent_with_slot_operands() {
             | TagTestNot { dst, src, .. } => vec![dst, src],
             Jmpif { cond, .. } | JmpifNot { cond, .. } => vec![cond],
             ClosureNew { dst, func, .. } => vec![dst, func],
+            CaptureStore { src, obj, .. } => vec![src, obj],
             Ret { src } | RetSpan { src, .. } | ArenaRestore { src } => vec![src],
             Halt { slot } => vec![slot],
             Calls { callee_slot, .. } => vec![callee_slot],
@@ -1143,6 +1171,7 @@ fn effects_are_consistent_with_slot_operands() {
                 | Calls { .. }
                 | Callt { .. }
                 | Calltg { .. }
+                | CaptureStore { .. }
                 | Ret { .. }
                 | RetSpan { .. }
                 | Funcf { .. }
@@ -1209,6 +1238,7 @@ fn purity_table_is_exact() {
                 | ArenaMark { .. }
                 | ArenaRestore { .. }
                 | ClosureNew { .. }
+                | CaptureStore { .. }
                 | Funcf { .. }
                 | Halt { .. }
         );

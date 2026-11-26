@@ -668,7 +668,7 @@ fn linearity_negative_rejects_render_recorded_shapes() {
     };
     assert_eq!(
         rejects.len(),
-        6,
+        7,
         "every reject item carries exactly its affine diagnostic"
     );
     for (id, _, diag) in &rejects {
@@ -720,6 +720,17 @@ fn linearity_negative_rejects_render_recorded_shapes() {
     );
     assert_eq!(diag.labels[0].label, "moved here");
     assert_eq!(diag.labels[1].label, "used again here after move");
+
+    let (id, what, diag) = by_id("captured-var-then-used");
+    assert!(what.contains("DS3001"), "{id}: {what}");
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.message, "value `n` is no longer usable");
+    assert_eq!(
+        diag.labels.len(),
+        2,
+        "the construction/use pair is two spans"
+    );
+    assert_eq!(diag.labels[0].label, "moved here");
 
     let (id, what, diag) = by_id("projection-moved-then-used");
     assert!(what.contains("DS3001"), "{id}: {what}");

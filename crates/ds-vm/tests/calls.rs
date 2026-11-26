@@ -499,19 +499,21 @@ fn a_closure_call_receives_its_captures() {
     let mut reg = ModuleRegistry::new();
     reg.install(
         ModuleVersion::new("cl", vec![
-            def("body", &[I64, I64, I64, I64], 1, 0, Vec::new(), &[
-                Uop::Funcf { frame_slots: 4 },
+            // slot 3 is the reserved closure word CALLS writes past the
+            // capture block (the mutation window), slot 4 the body temp
+            def("body", &[I64, I64, I64, Ref, I64], 1, 0, Vec::new(), &[
+                Uop::Funcf { frame_slots: 5 },
                 Uop::MulI64 {
-                    dst: 3,
+                    dst: 4,
                     lhs: 1,
                     rhs: 2,
                 }, // c0 * c1
                 Uop::AddI64 {
-                    dst: 3,
-                    lhs: 3,
+                    dst: 4,
+                    lhs: 4,
                     rhs: 0,
                 }, // + n
-                Uop::Ret { src: 3 },
+                Uop::Ret { src: 4 },
             ]),
             def("main", &[Ref, I64], 1, 1, vec![Const::I64(1)], &[
                 Uop::Funcf { frame_slots: 2 },
@@ -545,14 +547,16 @@ fn a_closure_word_in_a_fn_slot_calls_through_calls() {
     let mut reg = ModuleRegistry::new();
     reg.install(
         ModuleVersion::new("cd", vec![
-            def("body", &[I64, I64, I64], 1, 0, Vec::new(), &[
-                Uop::Funcf { frame_slots: 3 },
+            // slot 2 is the reserved closure word CALLS writes past the
+            // capture block (the mutation window), slot 3 the body temp
+            def("body", &[I64, I64, Ref, I64], 1, 0, Vec::new(), &[
+                Uop::Funcf { frame_slots: 4 },
                 Uop::AddI64 {
-                    dst: 2,
+                    dst: 3,
                     lhs: 0,
                     rhs: 1,
                 }, // n + c0
-                Uop::Ret { src: 2 },
+                Uop::Ret { src: 3 },
             ]),
             def("main", &[FnSlot, I64], 1, 1, vec![Const::I64(1)], &[
                 Uop::Funcf { frame_slots: 2 },
@@ -681,10 +685,12 @@ fn garbage_callable_words_trap_honestly() {
         FuncRef::new(module, 2), // tiny: two body slots
         vec![Value::I64(0); 5],
     );
+    // the range check counts the block plus the reserved closure word
+    // past it, so the out-of-range slot is the word's, one past the block
     assert_eq!(
         vm.run("bogus", "call_ref", &[closure]),
         Err(Trap::SlotOutOfRange {
-            slot: 4,
+            slot: 5,
             frame_slots: 2,
         })
     );

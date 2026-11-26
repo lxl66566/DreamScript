@@ -855,7 +855,7 @@ impl Placement {
         }
     }
 
-    /// One Ref word staged into the overlay for a local callee (the Mov is
+    /// One Ref word staged for a local callee (the Mov is
     /// emitted): the callee's borrow parameter owns the handed word and
     /// drops it at its own exit, so a dying source forwards its count and
     /// a live source dups. A word an enclosing native window still reads

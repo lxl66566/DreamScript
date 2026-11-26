@@ -284,6 +284,16 @@ pub enum Trap {
         /// The width the call staged.
         given: usize,
     },
+    /// CAPTURE_STORE addressed a word past a closure object's capture
+    /// block. Lowered code cannot trip this — the lowerer derives the
+    /// index from the capture list it lowered the block with — so it
+    /// names hand-assembled code.
+    CaptureIndex {
+        /// The closure object's table id.
+        obj: u32,
+        /// The addressed capture index.
+        idx: usize,
+    },
     /// A map store staged a fresh row under a reference word foreign to
     /// the map's heap: the content probe reads a stored key's payload on
     /// the map's own store and ids are per-store, so the row would be
@@ -2857,6 +2867,7 @@ const OP_TAG_TEST: u8 = 0x60;
 const OP_TAG_TEST_NOT: u8 = 0x61;
 const OP_TAG_NEW: u8 = 0x62;
 const OP_CLOSURE_NEW: u8 = 0xd3;
+const OP_CAPTURE_STORE: u8 = 0xd5;
 const OP_CVT_I2F: u8 = 0x70;
 const OP_CVT_F2I: u8 = 0x71;
 const OP_MOV: u8 = 0x80;
@@ -7515,8 +7526,8 @@ impl Vm {
         owner: Option<VersionIdx>,
     ) -> Result<FrameAnswer, Trap> {
         let nargs = u8::try_from(args.len()).expect("hosted-call arities are tiny");
-        let (funcref, captures) = match callee {
-            Value::Fn(funcref) => (funcref, None),
+        let (funcref, captures, closure_id) = match callee {
+            Value::Fn(funcref) => (funcref, None, None),
             Value::Ref(obj) => {
                 let (header, block) = stage_closure(
                     &mut self.objects,
@@ -7525,7 +7536,7 @@ impl Vm {
                     &mut self.calls_staging,
                     obj,
                 )?;
-                (header, Some(block))
+                (header, Some(block), Some(obj))
             },
             other => {
                 return Err(Trap::SlotTypeMismatch {
@@ -7581,7 +7592,10 @@ impl Vm {
         // closure object keeps its own count untouched
         let capture_body_len = target.layout.body_len();
         if let Some(block) = &captures {
-            let end = target.layout.params_len() + block.len();
+            // the range check counts the block plus the reserved closure
+            // word right past it (the mutation window's address of the
+            // object), mirroring the CALLS copy-in
+            let end = target.layout.params_len() + block.len() + 1;
             if end > capture_body_len {
                 return Err(Trap::SlotOutOfRange {
                     slot: u8::try_from(end - 1).unwrap_or(u8::MAX),
@@ -7612,6 +7626,17 @@ impl Vm {
                     value,
                 )?;
             }
+            let closure_slot = u8::try_from(target.layout.params_len() + block.len())
+                .expect("the closure word slot fits u8 after the range check");
+            let closure_word = closure_id.expect("a block rides only a closure callee");
+            write_slot(
+                &mut self.stack,
+                base,
+                closure_slot,
+                target.layout.slots(),
+                capture_body_len,
+                Value::Ref(closure_word),
+            )?;
         }
         self.callinfo.push(CallInfo {
             fp: base,
@@ -7698,6 +7723,13 @@ impl Vm {
     /// Routed `rc_dec` by the word's owner axis, queues drained.
     fn dec_ref(&mut self, word: RefId) -> Result<(), Trap> {
         self.heaps().dec(word)
+    }
+
+    /// The replaced capture word's edge release (CAPTURE_STORE's displaced
+    /// half): routed by owner, no frame claim — the count belonged to the
+    /// closure object's block.
+    fn dec_edge(&mut self, word: RefId) -> Result<(), Trap> {
+        self.heaps().dec_edge(word)
     }
 
     /// [`Vm::inc_ref`] over disjoint fields, for sites holding a live
@@ -9632,8 +9664,12 @@ impl Vm {
                         // word at `func` (KCONST-minted), the capture block the
                         // n words staged at overlay positions 0..n. The object
                         // acquires one count per Ref capture as it adopts the
-                        // block — the staged sources keep their own counts — and
-                        // the fresh Ref lands in dst with birth count one.
+                        // block — the staged sources keep their own counts and
+                        // die their ordinary deaths — and the fresh Ref lands
+                        // in dst with birth count one. The acquire stays inside
+                        // the op on purpose: the object's count must stay
+                        // unreachable from frame-word dec noise (the fuzz
+                        // mirror's structured-stop property pins it).
                         let funcref = match read_value(&self.stack, fp, func, slots, body_len)
                             .map_err(|e| (e, pc))?
                         {
@@ -9680,6 +9716,50 @@ impl Vm {
                             Value::Ref(closure_word),
                         )
                         .map_err(|e| (e, pc))?;
+                        pc.0 += 1;
+                    },
+                    OP_CAPTURE_STORE => {
+                        let src = fa;
+                        let obj_slot = fb;
+                        let idx = fc;
+                        // CAPTURE_STORE (F2, C3): the mut window over the
+                        // running closure's own capture block. `obj_slot` holds
+                        // the closure word CALLS wrote into this frame — the
+                        // frame's borrowed copy, its count the caller still
+                        // owns — and the incoming word at `src` replaces the
+                        // block's word `idx`. The incoming Ref acquires one
+                        // edge count for the object before the swap and the
+                        // displaced word's releases after, both routed by
+                        // owner, so a self-assignment over the same object
+                        // cannot free the word it re-stores and the frame's
+                        // own copies keep their counts.
+                        let incoming = read_value(&self.stack, fp, src, slots, body_len)
+                            .map_err(|e| (e, pc))?;
+                        let closure = match read_value(&self.stack, fp, obj_slot, slots, body_len)
+                            .map_err(|e| (e, pc))?
+                        {
+                            Value::Ref(word) => word,
+                            v => {
+                                return Err((
+                                    Trap::SlotTypeMismatch {
+                                        slot: obj_slot,
+                                        expected: SlotType::Ref,
+                                        actual: v.slot_type(),
+                                    },
+                                    pc,
+                                ))
+                            },
+                        };
+                        if let Value::Ref(word) = incoming {
+                            self.heaps().inc_edge(word).map_err(|e| (e, pc))?;
+                        }
+                        let replaced = self
+                            .heaps()
+                            .replace_capture(closure, usize::from(idx), incoming)
+                            .map_err(|e| (e, pc))?;
+                        if let Value::Ref(word) = replaced {
+                            self.dec_edge(word).map_err(|e| (e, pc))?;
+                        }
                         pc.0 += 1;
                     },
                     OP_TAG_TEST => {
@@ -10261,8 +10341,8 @@ impl Vm {
                                 pc,
                             ));
                         }
-                        let (funcref, captures) = match word {
-                            Value::Fn(funcref) => (funcref, None),
+                        let (funcref, captures, closure_id) = match word {
+                            Value::Fn(funcref) => (funcref, None, None),
                             Value::Ref(obj) => {
                                 let (header, block) = stage_closure(
                                     &mut self.objects,
@@ -10272,7 +10352,7 @@ impl Vm {
                                     obj,
                                 )
                                 .map_err(|e| (e, pc))?;
-                                (header, Some(block))
+                                (header, Some(block), Some(obj))
                             },
                             v => {
                                 return Err((
@@ -10301,7 +10381,10 @@ impl Vm {
                         // against the slot's declared type.
                         let capture_body_len = target.layout.body_len();
                         if let Some(block) = captures {
-                            let end = target.layout.params_len() + block.len();
+                            // the range check counts the block plus the
+                            // reserved closure word right past it (the
+                            // mutation window's address of the object)
+                            let end = target.layout.params_len() + block.len() + 1;
                             if end > capture_body_len {
                                 return Err((
                                     Trap::SlotOutOfRange {
@@ -10360,6 +10443,26 @@ impl Vm {
                                 )
                                 .map_err(|e| (e, pc))?;
                             }
+                            // the callee's closure word lands right past the
+                            // capture block (the mutation window's one
+                            // address of the running object): the lowerer
+                            // reserves a Ref-classified slot there, and the
+                            // word needs no claim — the caller's frame keeps
+                            // the count it handed the staged callee
+                            let closure_slot =
+                                u8::try_from(target.layout.params_len() + block.len())
+                                    .expect("the closure word slot fits u8 after the range check");
+                            let closure_word =
+                                closure_id.expect("a block rides only a closure callee");
+                            write_slot(
+                                &mut self.stack,
+                                callee_fp,
+                                closure_slot,
+                                target.layout.slots(),
+                                capture_body_len,
+                                Value::Ref(closure_word),
+                            )
+                            .map_err(|e| (e, pc))?;
                         }
                         active = Active {
                             version: t.version,

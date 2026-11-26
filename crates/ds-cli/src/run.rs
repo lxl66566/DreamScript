@@ -788,6 +788,9 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::ElementStride { obj, stride, given } => {
             format!("collection object {obj} holds {stride}-word elements, the call staged {given}")
         },
+        Trap::CaptureIndex { obj, idx } => {
+            format!("capture store addresses index {idx} past closure object {obj}'s block")
+        },
         Trap::ForeignMapKey { obj, key } => format!(
             "map object {obj} refuses a fresh row keyed by foreign reference {key:?}: the key \
              must live on the map's own heap for any content probe to find it"

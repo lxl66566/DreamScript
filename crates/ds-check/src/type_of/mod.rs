@@ -1011,12 +1011,16 @@ struct ComptimeCtx {
 
 impl Bodies<'_> {
     /// Binds one local and records its affine facts (C1): copyability of
-    /// the solved type under the in-scope generic bounds.
+    /// the solved type under the in-scope generic bounds, and the
+    /// binding's own mutability — a `var` local's capture by a lambda
+    /// moves it, so the affine pass reads the flag at the capture kill.
     fn bind_local(&mut self, span: Span, binding: Binding) {
         let copyable = crate::linearity::ty_copyable(self.decls, binding.ty, &self.linear_vars);
+        let mutable = binding.mutable;
         self.binders.insert(span, crate::linearity::BinderFact {
             copyable,
             ty: binding.ty,
+            mutable,
         });
         self.locals.insert(span, binding);
     }

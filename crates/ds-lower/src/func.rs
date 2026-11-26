@@ -285,6 +285,17 @@ pub(crate) enum Op {
         func: u8,
         n: u8,
     },
+    /// CAPTURE_STORE (F2, C3): `src` is the incoming word, `obj` the
+    /// closure word CALLS wrote into this frame, `idx` the capture
+    /// block's word offset — the mut window over the closure's own
+    /// uniquely-held capture slot. The op owns the count traffic
+    /// (one edge acquire for the incoming Ref, one release for the
+    /// replaced word), so the frame's own copy stays untouched.
+    CaptureStore {
+        src: u8,
+        obj: u8,
+        idx: u8,
+    },
     Ret {
         src: Slot,
     },
@@ -2450,6 +2461,18 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// The innermost open nurseries' id words [E2], innermost last: the
     /// `spawn` sites of one `nursery` block stage the top word.
     nurseries: Vec<u8>,
+    /// The closure word of this lambda frame's own running closure (the
+    /// Ref word CALLS writes right past the capture block): the mut
+    /// window's `obj` operand. `None` for every declared, deinit, and
+    /// spawned-child frame (a spawned child keeps its own copy of the
+    /// captured words; its captures never mutated the original).
+    capture_word: Option<u8>,
+    /// A mutable captured binding's base offset in the closure's
+    /// capture block: the CAPTURE_STORE `idx` operand. Entries exist only
+    /// in a lambda frame whose block carries at least one capture (a
+    /// non-capturing lambda runs as a scalar FuncRef, never a frame with
+    /// a closure word).
+    capture_index: HashMap<Span, usize>,
     /// Whether this frame is a spawned child [E2]: the child's own
     /// return is its answer type, not the enclosing function's union,
     /// so the cancel-containment proof belongs to the parent's spawn
@@ -2623,6 +2646,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             loops: Vec::new(),
             loop_spans: Vec::new(),
             nurseries: Vec::new(),
+            capture_word: None,
+            capture_index: HashMap::new(),
             spawn_child: planned.spawn_child,
             unit_slot: None,
             value_ends: Vec::new(),
@@ -2635,13 +2660,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // start exactly where the spawned fiber's entry frame writes
             // it — the spawn site staged the evidence words into that
             // same block, so they bind as the entry area's trailing
-            // parameters
-            this.bind_captures(&planned.captures)?;
+            // parameters. The child holds its own copy of each captured
+            // word (the spawn seam acquires one count per Ref capture),
+            // so no mutation window opens here.
+            this.bind_captures(&planned.captures, false)?;
             this.params_len = this.slots.len();
             this.bind_evidence(&planned.evidence)?;
         } else {
             this.bind_params(params)?;
-            this.bind_captures(&planned.captures)?;
+            this.bind_captures(&planned.captures, planned.decl.is_none())?;
             if planned.decl.is_some() {
                 this.bind_evidence(&planned.evidence)?;
             } else {
@@ -2649,6 +2676,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // slots bind right after the real captures, exactly where
                 // the CALLS copy-in writes them
                 this.bind_capture_evidence(&planned.evidence)?;
+                // a closure-building lambda's frame (real captures,
+                // runtime-evidence words, or both) reserves one more
+                // word right past the block: CALLS writes the callee's
+                // closure word there, and every assignment to a captured
+                // binding addresses the object through it (the mut
+                // window)
+                if !planned.captures.is_empty() || !planned.evidence.is_empty() {
+                    let word = this.temp_word(SlotType::Ref)?;
+                    this.capture_word = Some(word);
+                }
             }
         }
         this.tail(body)?;
@@ -3166,8 +3203,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// captured enclosing binding, in the construction's capture order
     /// (F2). Each Ref word is a count the call acquired at its copy-in;
     /// the frame owns it for the call's duration and its exit drops
-    /// balance the acquire, precisely a borrow parameter's story.
-    fn bind_captures(&mut self, captures: &[(Span, Ty)]) -> Result<(), LowerError> {
+    /// balance the acquire. A `mutation` frame (a capturing lambda's own
+    /// body) additionally records each captured binder's base offset:
+    /// the assignment machinery addresses the closure object's capture
+    /// slot through it. A spawned child's captures stay copies (the
+    /// spawn seam acquires one count per Ref capture and the enclosing
+    /// bindings keep their own), so its bindings register borrowed like
+    /// a parameter's.
+    fn bind_captures(&mut self, captures: &[(Span, Ty)], mutation: bool) -> Result<(), LowerError> {
+        let mut offset = 0;
         for &(bind, ty) in captures {
             let words = self.shapes.words(ty).map_err(|err| err.respanned(bind))?;
             let base = self.alloc(&words)?;
@@ -3179,7 +3223,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             for word in self.count_words(base, ty)? {
                 self.rc.produced(word);
             }
-            self.rc_bind_borrowed(bind, base, ty)?;
+            // the mutation window needs no borrowed registration: a
+            // deinit-carrying capture refused at the construction, so no
+            // claim can anchor here; the plain `bound` keeps the
+            // checker's last-use rows in force for the frame copy
+            if mutation {
+                let words = self.count_words(base, ty)?;
+                self.rc.bound(bind, &words);
+                self.capture_index.insert(bind, offset);
+            } else {
+                self.rc_bind_borrowed(bind, base, ty)?;
+            }
+            offset += words.len();
         }
         Ok(())
     }
@@ -4011,6 +4066,27 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.refuse_closure_widen(&assigned, declared, e.span())?;
         self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
         self.widen_into(&place, declared, &assigned, e.span())?;
+        // An assignment inside a lambda body to the frame's own captured
+        // binding also publishes the new words into the running closure
+        // object's capture block (the mut window over the uniquely-held
+        // slot): the frame's copy stays this frame's, the object acquires
+        // its own count per Ref word and releases the replaced word's.
+        // The store happens after `widen_into` wrote the frame words, so
+        // the op reads the new content; the frame's replaced copy died
+        // at `store_over` above.
+        if let Some(&offset) = self.capture_index.get(&binder) {
+            let obj = self
+                .capture_word
+                .expect("a mutation frame carries its closure word");
+            for (word, addr) in self.word_addrs(&place, declared)?.iter().enumerate() {
+                self.emit(Op::CaptureStore {
+                    src: addr.slot,
+                    obj,
+                    idx: u8::try_from(offset + word)
+                        .expect("the capture block fits the u8 idx field"),
+                });
+            }
+        }
         // The replaced value's claim re-registers at its slot: the store
         // fired the old content's drop (spending the site's band) and the
         // incoming claim's transfer spent its own, so without this the
@@ -5083,7 +5159,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // so a produced temporary (an arena StrCat result, a
                 // borrow KSTR) transits here and keeps its counted
                 // spelling — the count-bearing capture site refuses the
-                // arena and borrow servings
+                // arena and borrow servings. A captured `var`'s binding
+                // is dead in the source scope by the checker's move
+                // row, so the frame word's own count still dies its
+                // ordinary death at the binder's scope end.
                 self.rc.captured(addr.slot);
                 moves.push(addr.slot);
                 staged.push(addr.slot_ty);
@@ -8349,6 +8428,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     PlacedOp::Uop(Uop::Calls { callee_slot, nargs })
                 },
                 Op::ClosureNew { dst, func, n } => PlacedOp::Uop(Uop::ClosureNew { dst, func, n }),
+                Op::CaptureStore { src, obj, idx } => {
+                    PlacedOp::Uop(Uop::CaptureStore { src, obj, idx })
+                },
                 Op::Ret { src } => PlacedOp::Uop(Uop::Ret { src: body(src) }),
                 Op::RetSpan { src, n } => PlacedOp::Uop(Uop::RetSpan { src: body(src), n }),
                 Op::Halt { slot } => PlacedOp::Uop(Uop::Halt { slot: body(slot) }),

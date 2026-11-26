@@ -1100,3 +1100,80 @@ fn the_served_prefix_walk_answers_the_one_walk_per_compile() {
         "the parked dead binding surfaces for the second member"
     );
 }
+
+// The affine-closure kill (the 2026-11-25 ruling): a lambda capturing a
+// `var` binding moves it into the capture block, so the binding is dead
+// in the enclosing scope from the construction on — every later use the
+// two-span MovedThenUsed refusal, and a spawn's captures keep the spawn
+// seam's acquire discipline (no kill fires for them).
+
+#[test]
+fn a_lambda_capturing_a_var_moves_it_into_the_block() {
+    // the capture's use inside the body, then the assignment to it: both
+    // record the place, and the construction's kill owns the binding
+    let (checked, lin) = case(concat!(
+        "  var n: int = 0\n",
+        "  const cell = (op: int) => {\n",
+        "    if op == 1 {\n",
+        "      n = n + 1\n",
+        "    }\n",
+        "    n\n",
+        "  }\n",
+        "  0\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert_eq!(
+        lin.moves.len(),
+        1,
+        "the construction is the binding's one move row: {:#?}",
+        lin.moves
+    );
+}
+
+#[test]
+fn a_moved_var_capture_uses_after_the_construction_refuse() {
+    // the read after the construction is a use of the dead binding
+    let (checked, lin) = case(concat!(
+        "  var n: int = 0\n",
+        "  const cell = () => { n = n + 1 }\n",
+        "  cell()\n",
+        "  n\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    let diag = expect_one(&lin);
+    assert_eq!(diag.code.as_str(), "DS3001");
+    assert_eq!(diag.labels[0].label, "moved here");
+}
+
+#[test]
+fn a_const_capture_keeps_the_borrow_discipline() {
+    // a `const` binding's capture copies (the value stays live in the
+    // enclosing scope), so a later use reads a live binding
+    let (checked, lin) = case(concat!(
+        "  const k: int = 3\n",
+        "  const cell = () => k + 1\n",
+        "  cell() + k\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(lin.moves.is_empty(), "no move fires for a const capture");
+}
+
+#[test]
+fn a_spawned_bodys_capture_kills_nothing() {
+    // the spawn seam acquires one count per Ref capture, so the spawn
+    // walk suspends the kill sink: the binding stays live for the
+    // enclosing scope's later use
+    let (checked, lin) = case(concat!(
+        "  var n: int = 0\n",
+        "  spawn { n = n + 1 }\n",
+        "  n\n",
+    ));
+    assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
+    assert!(lin.diags.is_empty(), "{:#?}", lin.diags);
+    assert!(
+        lin.moves.is_empty(),
+        "the spawn seam owns the capture count"
+    );
+}

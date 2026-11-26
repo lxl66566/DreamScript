@@ -16,6 +16,7 @@
 // open-slot: stage: typecheck
 // param-moved-then-used: stage: reject a `move`-mode parameter is consumed by the first close_handle and used again by the second (DS3001) [C1, C2]
 // projection-moved-then-used: stage: reject the first `s.inner` projection consumes `s` and the second uses it again (DS3001) [C1]
+// captured-var-then-used: stage: reject the lambda moved `n` into its capture block and the tail reads it after the construction (DS3001) [C1, the 2026-11-25 affine-closure ruling]
 
 tag bool
 
@@ -80,4 +81,11 @@ fn projection_moved_then_used(p: string) -> () {
   const i = s.inner
   close_handle(i)
   const j = s.inner
+}
+
+fn captured_var_then_used() -> int {
+  var n = 0
+  const bump = () => { n = n + 1 }
+  bump()
+  n
 }

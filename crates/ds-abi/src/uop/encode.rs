@@ -15,12 +15,12 @@ use super::{
     Uop::{
         self, AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64,
         Call as UCall, Callg as UCallg, Calls as UCalls, Callt, Calltg as UCalltg,
-        ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool, EqF64, EqI64, EqStr,
-        Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst,
-        Kimm as UKimm, Kstr as UKstr, KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64,
-        ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64,
-        ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew, TagTest, TagTestNot, WrapAddI64,
-        WrapMulI64, WrapSubI64,
+        CaptureStore as UCaptureStore, ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64,
+        EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif,
+        JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, KstrBorrow as UKstrBorrow,
+        LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64,
+        NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew, TagTest,
+        TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -171,6 +171,13 @@ impl Uop {
                     n: c,
                 }),
                 4 => r3!(StrCatArena),
+                // a = the incoming word's slot, b = the closure word's
+                // slot, c = the capture block index
+                5 => Ok(UCaptureStore {
+                    src: a,
+                    obj: b,
+                    idx: c,
+                }),
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Tag => match minor {
@@ -345,9 +352,13 @@ impl Uop {
             | UCallg { .. }
             | ArenaRestore { .. }
             | StrCatArena { .. } => 4,
-            // minor 5 spans majors: GTI64/GTF64, CALLTG, and the first
-            // IntArith wrap variant WRAPADDI64
-            GtI64 { .. } | GtF64 { .. } | UCalltg { .. } | WrapAddI64 { .. } => 5,
+            // minor 5 spans majors: GTI64/GTF64, CALLTG, the first
+            // IntArith wrap variant WRAPADDI64, and CAPTURE_STORE
+            GtI64 { .. }
+            | GtF64 { .. }
+            | UCalltg { .. }
+            | WrapAddI64 { .. }
+            | UCaptureStore { .. } => 5,
             WrapSubI64 { .. } | UCalls { .. } => 6,
             WrapMulI64 { .. } => 7,
             ShlI64 { .. } => 8,
@@ -413,7 +424,10 @@ impl Uop {
             | UCallg { nargs, .. }
             | UCalltg { nargs, .. }
             | UCalls { nargs, .. } => nargs,
-            Ret { src } | RetSpan { src, .. } | ArenaRestore { src } => src,
+            UCaptureStore { src, .. }
+            | Ret { src }
+            | RetSpan { src, .. }
+            | ArenaRestore { src } => src,
             UHalt { slot } => slot,
             Jmp { .. } | Funcf { .. } => 0,
         }
@@ -450,6 +464,7 @@ impl Uop {
             },
             TagNew { tag, .. } => Bc::Reg { b: tag, c: 0 },
             UClosureNew { func, n, .. } => Bc::Reg { b: func, c: n },
+            UCaptureStore { obj, idx, .. } => Bc::Reg { b: obj, c: idx },
             TagTest { src, tag, .. } | TagTestNot { src, tag, .. } => Bc::Reg { b: src, c: tag },
             CvtI2F { src, .. } | CvtF2I { src, .. } | UMov { src, .. } => Bc::Reg { b: src, c: 0 },
             AddI64 { lhs, rhs, .. }
