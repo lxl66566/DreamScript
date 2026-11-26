@@ -1,4 +1,4 @@
-//! The derive engine (G1): the meta-language is the language, so a
+//! The derive engine: the meta-language is the language, so a
 //! derive attribute expands into an ordinary impl declaration —
 //! AST-level synthesis after parse, before resolution — and the
 //! synthesized impl flows through the normal checker (trait coherence,
@@ -18,14 +18,14 @@
 //! whose Ref parts dup through the placement pass — the one family
 //! whose body adds no runtime work beyond the count traffic; `default`
 //! answers the receiverless construction (`fn default() -> Self` in
-//! the type's own impl, the 2026-11-15 ruling), one default per field
+//! the type's own impl), one default per field
 //! keyed by the field's type expression — a bare type name a `default`
 //! dispatch, a tuple the per-element construction, an optional `none`,
 //! an application over the collection heads (`list`, `map`) the empty
 //! construction and every other application the instantiated `default`
 //! dispatch — a part-less struct the
 //! unit-word construction, an enum its first unit case, a tag itself.
-//! A union's `#[default]` member annotation (the 2026-11-15 ruling)
+//! A union's `#[default]` member annotation
 //! names the one member the family synthesizes over: the annotated
 //! enum defaults to that member's construction — a bare case the tag
 //! itself, a payloaded case the call over per-part defaults — a
@@ -33,8 +33,7 @@
 //! construction, a union over one enum's cases member-wise; no
 //! annotation keeps the ambiguity refusal, a second annotated member
 //! refusing as a duplicate.
-//! `from_json` answers the decode walk (the 2026-11-18 ruling,
-//! re-targeted onto the @std driver face per the 2026-11-21 ruling) —
+//! `from_json` answers the decode walk over the @std driver face —
 //! a receiverless inherent member `fn from_json(v: json) -> Self |
 //! parse_err` whose body reads through the `decoder` trait members
 //! alone, never a comptime extension and never a json face name: the
@@ -43,7 +42,7 @@
 //! member per field (`dec_member`, a required member none-testing into
 //! `parse_err`, an optional member reading absence as `none`), and
 //! answers the construction — a scalar field through its reader inline
-//! (byte, u32, char, and bytes included per the 2026-11-19 ruling: a
+//! (byte, u32, char, and bytes included: a
 //! json number as byte or u32, a one-character json string as char, a
 //! number array as bytes), a list
 //! field through the array read plus
@@ -54,8 +53,7 @@
 //! matching the string read against their own names, the sole payloaded
 //! case from its payload's bare shape (the object read for a struct
 //! payload, the array read for a tuple payload), and several payloaded
-//! cases each from the member its own name keys (the 2026-11-21
-//! discriminator ruling), any other shape answering `parse_err` at the
+//! cases each from the member its own name keys, any other shape answering `parse_err` at the
 //! probe chain's tail; a zero-case enum hosts the member over its
 //! name-solved head, the body answering `parse_err` unconditionally
 //! (no member case can match). The walk refuses: a field whose type spells no read (a
@@ -67,8 +65,7 @@
 //! convention), the plain `to_json: (json) -> string` writer staying
 //! the composition point: the struct body fills one object map with
 //! one member per field — a scalar field through its `enc_*`
-//! construction inline (the four widths per the same 2026-11-19
-//! ruling), a list field
+//! construction inline (the four widths), a list field
 //! through one document element per position, a field whose type
 //! spells no construction through that type's own `to_json` member (a
 //! type carrying none failing at the synthesized call with the
@@ -78,7 +75,7 @@
 //! body matches the receiver, the unit cases answering their names
 //! through `enc_string`, the sole payloaded case its bare payload
 //! shape, and several payloaded cases one-member objects keyed by
-//! their own names (the 2026-11-21 discriminator ruling); a zero-case
+//! their own names; a zero-case
 //! enum hosts the member over its name-solved head, the body vacuous
 //! over the impossible receiver and answering the driver's empty
 //! document. The walk refuses: a field whose
@@ -87,8 +84,8 @@
 //! a part (a `t?` list element, an optional payload field) narrows at
 //! its consumer — the presence narrow over the element binder or the
 //! payload binder, absence contributing nothing.
-//! `==` refuses with the B9 diagnostic (equality is universal and never
-//! derived); unknown names refuse naming the ruled set; a
+//! `==` refuses (equality is universal and never
+//! derived); unknown names refuse naming the vocabulary; a
 //! function-typed or `~Copyable` part refuses naming the part; a
 //! generic declaration passes its check-side doors (a generic struct
 //! through the added bound, a unit-only generic enum through arms that
@@ -108,7 +105,7 @@ use ds_parse::{
     UnaryOp,
 };
 
-/// The ruled derive vocabulary (G1), in ruling order.
+/// The derive vocabulary: the family names a `#[derive(...)]` list accepts.
 pub const RULED_SET: &str = "hash, show, ord, clone, to_json, from_json, default";
 
 /// The hash family's fold constants: FNV-1a's offset basis and prime,
@@ -118,7 +115,7 @@ pub const RULED_SET: &str = "hash, show, ord, clone, to_json, from_json, default
 const HASH_SEED: &str = "3750763034362895579";
 const HASH_MIX: &str = "1099511628211";
 
-/// The written type names the interpolation context prints itself (F6);
+/// The written type names the interpolation context prints itself;
 /// every other part derives through a `show` dispatch.
 const PRINTABLE: &[&str] = &["int", "float", "bool", "char", "string"];
 
@@ -202,7 +199,7 @@ fn expand_tree_in_place(ast: &mut Ast, linear: &[String], diags: &mut Vec<Diagno
     // The `#[default]` member annotations are declaration data of this
     // file's enums, so the context collects once per tree ahead of the
     // walk: a field key reads an annotation only when the annotated
-    // enum is declared in the same file (G4).
+    // enum is declared in the same file.
     let unions = UnionDefaults::collect(
         &ast.blocks
             .iter()
@@ -241,7 +238,7 @@ fn has_expansion(ast: &Ast) -> bool {
 }
 
 /// The names of struct/enum declarations whose supers carry a negated
-/// constraint (the `~Copyable` linear layer, C1): a part of such a type
+/// constraint (the `~Copyable` linear layer): a part of such a type
 /// refuses structural derivation.
 fn linear_heads(asts: &[&Ast]) -> Vec<String> {
     let mut heads = Vec::new();
@@ -568,9 +565,9 @@ fn payload_parts<'a>(payload: &'a EnumPayload, case: &str) -> Vec<(String, &'a T
     }
 }
 
-/// The ruled part carve-outs: a function-typed part never shows (B9's
-/// static refusal), a written negation (`~Copyable`) is the linear
-/// layer, and a part headed by a linear-declared nominal is a resource.
+/// The part carve-outs: a function-typed part never shows, a written
+/// negation (`~Copyable`) is the linear layer, and a part headed by a linear-declared nominal is a
+/// resource. layer, and a part headed by a linear-declared nominal is a resource.
 /// Every other part flows through the ordinary checker: a part without
 /// `show` fails at the synthesized call with the standard missing-impl
 /// diagnostic over the part's own span.
@@ -767,7 +764,7 @@ fn name_body(name: &str, mint: &mut Mint) -> Expr {
 /// One interpolation hole over a part whose value expression is already
 /// assembled (a field read in a struct body, a bound binder in an enum
 /// arm): a printable primitive converts through the string context
-/// itself (F6); every other type dispatches through `show`, so a part
+/// itself; every other type dispatches through `show`, so a part
 /// without an impl fails at its own span. Every name the hole carries
 /// gets its own minted span, because resolution records name uses by
 /// span.
@@ -1232,8 +1229,8 @@ fn sign_expr(mint: &mut Mint, index: usize, other_index: usize) -> Expr {
 }
 
 /// Synthesizes `impl hash for <decl> { fn hash(self) -> int { ... } }`:
-/// the field-order content fold over the wrap arithmetic (B7's `+%`/`*%`,
-/// the operators the record names for hash use), one fixed seed and mix
+/// the field-order content fold over the wrap arithmetic (`+%`/`*%`,
+/// the operators the hash fold uses), one fixed seed and mix
 /// constant — the FNV-1a pair the content-hash natives hash under — so
 /// structurally equal data answers equal hashes. Every part folds
 /// through a `hash` dispatch, so a part whose type carries no impl fails
@@ -1432,7 +1429,7 @@ fn h_use(mint: &mut Mint) -> Expr {
 }
 
 /// One part's fold step: `h = h *% <mix> +% part.hash()`, both operators
-/// wrapping (B7), the part through the uniform `hash` dispatch.
+/// wrapping, the part through the uniform `hash` dispatch.
 fn mix_stmt(part: Expr, mint: &mut Mint) -> Stmt {
     let value = Expr::Binary {
         span: mint.span(),
@@ -1480,7 +1477,7 @@ fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
 }
 
 /// Synthesizes `impl clone for <decl> { fn clone(self) -> Self { ... } }`:
-/// the shallow duplicate (C4's contract: the body is a construction over
+/// the shallow duplicate (the body is a construction over
 /// the live borrowed receiver, and the placement pass dups each Ref
 /// word the construction reads — a count bump per reference, never a
 /// deep copy — so the family adds no uop and no native, the one whose
@@ -1572,7 +1569,7 @@ fn clone_impl(
     ))
 }
 
-// ---- the union-default member annotation (the 2026-11-15 ruling) ----
+// ---- the union-default member annotation ----
 
 /// One case of a collected enum, the `#[default]` annotation carried
 /// with it.
@@ -1602,7 +1599,7 @@ struct AnnotatedEnum {
 /// The per-file union-default context: the `#[default]` member
 /// annotations of this file's enums and the default targets a
 /// derivation reads them through. The annotation is declaration data,
-/// so the family reads it only inside the declaring file (G4) — a
+/// so the family reads it only inside the declaring file — a
 /// foreign union answers through its own `default` member, whatever
 /// derived it there.
 struct UnionDefaults {
@@ -1853,7 +1850,7 @@ fn unread_annotation(span: Span, union: &str, case: &str) -> Diagnostic {
 }
 
 /// Synthesizes `impl <decl> { fn default() -> Self { ... } }`: the
-/// receiverless construction (the 2026-11-15 ruling) — the member lives
+/// receiverless construction — the member lives
 /// in the type's own impl with no receiver parameter, callable as
 /// `<type>.default()` through the type-keyed surface with no instance
 /// word. The struct body is the construction with one default per field
@@ -1864,10 +1861,9 @@ fn unread_annotation(span: Span, union: &str, case: &str) -> Diagnostic {
 /// (`list[int]()`, `map[k, v]()`) — a part-less struct the unit-word
 /// construction `X { }`; the enum body is the first case, which must be
 /// a unit case — or, when one case carries the `#[default]` member
-/// annotation, that member's construction, payloaded cases included
-/// (the union-default ruling) — and the tag body is the tag itself. A field whose type
-/// spells no construction key refuses at the attribute (a union naming
-/// the open ruling, a shape the key cannot reach naming itself), and so
+/// annotation, that member's construction, payloaded cases included —
+/// and the tag body is the tag itself. A field whose type
+/// spells no construction key refuses at the attribute, and so
 /// does an enum whose first case carries a payload or an enum with no
 /// cases; a field type the key reaches but whose construction the
 /// language refuses (a bare name carrying no `default` member, a
@@ -2097,7 +2093,7 @@ fn default_member(mint: &mut Mint) -> Member {
 /// applied type's own `default` member through the instantiated
 /// receiverless call; a parenthesized type keys by its inner shape; the
 /// unit type answers the unit value. Every other shape refuses — a
-/// union names the open ruling, anything else names the unkeyed shape.
+/// union naming no annotated member, anything else the unkeyed shape.
 fn default_value(
     ty: &Type,
     mint: &mut Mint,
@@ -2115,7 +2111,7 @@ fn default_value(
                 [] => match unions.member(&only.name) {
                     // The bare name of a union this file annotates:
                     // the member's construction answers over the
-                    // dispatch (the union-default ruling).
+                    // dispatch.
                     Err(_) => Err(NoDefault::AlreadyRefused),
                     Ok(None) => Ok(type_keyed_call(&only.name, "default", mint)),
                     Ok(Some(case)) => case_default(&case.name, &case.payload, unions, mint, params),
@@ -2190,9 +2186,8 @@ fn default_value(
         Type::Optional { .. } => Ok(path_expr("none", mint.span())),
         Type::Union { .. } => {
             // A union spelled over one enum's cases: the one annotated
-            // member names the union's default (the union-default
-            // ruling); every other spelling keeps the ambiguity
-            // refusal.
+            // member names the union's default; every other spelling keeps
+            // the ambiguity refusal.
             let members = union_members(ty).ok_or(NoDefault::Union)?;
             let owner = unions.union_owner(&members).ok_or(NoDefault::Union)?;
             match unions.member(&unions.enums[owner].name) {
@@ -2284,8 +2279,8 @@ fn bracket_arg(ty: &Type, mint: &mut Mint) -> Result<Expr, NoDefault> {
     }
 }
 
-/// The annotated member's default construction (the union-default
-/// ruling): a bare case the case name itself, a tuple payload the call
+/// The annotated member's default construction: a bare case the case name
+/// itself, a tuple payload the call
 /// over per-part defaults, a struct payload the named-argument call —
 /// every part keyed by the family's ordinary per-part rules, a part
 /// spelling no construction refusing through them.
@@ -2645,7 +2640,7 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
     }
 }
 
-// ---- the from_json family (the 2026-11-18 ruling) ----
+// ---- the from_json family ----
 
 /// Synthesizes `impl <decl> { fn from_json(v: json) -> Self | parse_err { ... } }`:
 /// the receiverless decode member over the landed typed readers
@@ -2751,8 +2746,8 @@ fn from_json_impl(
                     mint,
                 ));
             }
-            // Every payload mix decodes under the discriminator ruling
-            // (the sole case from its bare shape, several from their own
+            // Every payload mix decodes by the discriminator: the sole case
+            // from its bare shape, several from their own member keys.
             // member keys).
             let fail = fresh_binder(&mut 0, "f");
             let body = vec![
@@ -2883,7 +2878,7 @@ fn field_rows(
 /// The value read keyed by one written type over the json value named
 /// `source`: a scalar reads through its reader inline (byte, u32, char,
 /// and bytes included, each through the json face's own width reader —
-/// the 2026-11-19 ruling: a json number as byte or u32, a
+/// a json number as byte or u32, a
 /// one-character json string as char, a number array as bytes, every
 /// wrong shape answering `parse_err`); a bare-name or
 /// application type dispatches its own `from_json` member (the
@@ -3017,7 +3012,7 @@ fn value_read(
 /// The optional read's else half: a scalar inner answers its reader's
 /// `?`, a member-typed inner answers the raw recursive call (its
 /// wrong-shape narrow running at statement position after the if — a
-/// `return` inside a value-position block is outside the M3 lowering
+/// `return` inside a value-position block is outside the lowering
 /// seam); every other inner shape spells no read the else can carry
 /// (a list inner never reaches here — the member row owns it).
 fn optional_else(
@@ -3287,9 +3282,8 @@ fn list_read(
 /// from their own names (a json string), the sole payloaded case from
 /// its payload's bare shape (a struct payload's members as a json
 /// object, a tuple payload's positions as a json array), and several
-/// payloaded cases each from the member its own name keys (the
-/// 2026-11-21 discriminator ruling), any other shape answering
-/// `parse_err`.
+/// payloaded cases each from the member its own name keys, any other
+/// shape answering `parse_err`.
 fn enum_decode_body(
     decl: &EnumDecl,
     mint: &mut Mint,
@@ -3755,8 +3749,7 @@ fn to_json_impl(
                     mint,
                 ));
             }
-            // Every payload mix encodes under the discriminator ruling;
-            // the body's own refusal owns the lone tuple case's
+            // Every payload mix encodes by the discriminator; the body's own
             // unlowerable single-arm member test.
             let body = vec![
                 doc_seed_local(mint),
@@ -3898,8 +3891,7 @@ fn member_set(mint: &mut Mint, map: &str, key: Expr, value: Expr) -> Stmt {
 /// already assembled (a field read, an arm's bound binder, a for-bound
 /// element): a scalar writes its case construction inline, the four
 /// widths the case vocabulary cannot spell from (byte, u32, char,
-/// bytes) through the json face's own encode helpers (the 2026-11-19
-/// ruling); a bare-name
+/// bytes) through the json face's own encode helpers;
 /// or application type dispatches its own `to_json` member (a type
 /// carrying none failing at the synthesized call with the standard
 /// missing-member diagnostic); a list walks one json element per
@@ -3946,8 +3938,7 @@ fn json_value(
             if args.is_empty() {
                 // The driver face's constructions: every scalar and
                 // width writes through one `enc_*` member over the walk's
-                // seed (the widths per the 2026-11-19 ruling — byte/u32
-                // as numbers, char as its one-character string, bytes as
+                // seed (byte/u32 as numbers, char as its one-character string, bytes as
                 // the number array), so the walk names no json case.
                 let enc = match only.name.as_str() {
                     "int" => Some("enc_int"),
@@ -4098,7 +4089,7 @@ fn list_write(
 
 /// The optional narrow: `match <name> { none => { } <inner> => { <rows>
 /// } }` — the catchall binder binds the inner type as its own word (a
-/// narrowed read of the optional's own word has no M3 lowering), the
+/// narrowed read of the optional's own word has no lowering), the
 /// empty none arm contributing nothing, so absence leaves the member
 /// out.
 fn presence_narrow(mint: &mut Mint, name: &str, inner: &str, rows: Vec<Stmt>) -> Stmt {
@@ -4158,11 +4149,10 @@ fn presence_narrow(mint: &mut Mint, name: &str, inner: &str, rows: Vec<Stmt>) ->
 /// answering their json_string names, the sole payloaded case its bare
 /// payload shape (a struct payload's members as a json object, a tuple
 /// payload's positions as a json array), and several payloaded cases
-/// one-member objects keyed by their own names (the 2026-11-21
-/// discriminator ruling's encode half).
+/// one-member objects keyed by their own names.
 fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic>) -> Option<Expr> {
     debug_assert!(!decl.cases.is_empty(), "the empty enum hosts its own body");
-    // Several payloaded cases wrap (the discriminator ruling); the sole
+    // Several payloaded cases wrap; the sole
     // payloaded case answers its bare shape.
     let wrap = decl
         .cases

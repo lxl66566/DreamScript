@@ -1,4 +1,4 @@
-//! The M4 RC activation under the diag layer (C4): the 0xE words execute
+//! The RC activation under the diag layer: the 0xE words execute
 //! over counted heap blocks, and the balance tripwires (hard rc
 //! underflow/overflow asserts, the ds-rt diag discipline) guard a fixture
 //! exercising refcounts above one — a call-staging dup hands the callee a
@@ -739,8 +739,8 @@ fn tail_and_collect_copies_balance_per_element() {
     );
 }
 
-/// The in-language spawn seam's copy-in is a counted fiber crossing [E2
-/// over C4]: `nursery_spawn` stages a closure word, the spawn core
+/// The in-language spawn seam's copy-in is a counted fiber crossing:
+/// `nursery_spawn` stages a closure word, the spawn core
 /// acquires one count per `Ref` capture for the child's entry frame, and
 /// the child's own exit drop balances it. The steady state is observable
 /// because the host-staged closure keeps no capture count of its own, so

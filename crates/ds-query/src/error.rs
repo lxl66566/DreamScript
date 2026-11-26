@@ -11,10 +11,10 @@ use crate::key::{BlockId, DefId, QueryKey};
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum QueryError {
     /// A query transitively read its own in-flight result. Query-level
-    /// non-termination is an engine error (H6 item 1); `path` lists the full
+    /// non-termination is an engine error; `path` lists the full
     /// cycle, starting and ending at the repeated key. Intra-package
     /// definition cycles are different — legal language semantics resolved
-    /// by whole-package fixpoint at M2 (G3), no concern of this engine.
+    /// by whole-package fixpoint, no concern of this engine.
     #[error("query cycle: {path:?}")]
     Cycle {
         /// The cycle, from the repeated key through every query on the path
@@ -38,12 +38,12 @@ pub enum QueryError {
     )]
     DefIdOverflow(BlockId),
     /// The key belongs to a query whose compute is not registered: either a
-    /// placeholder M2+ variant or a kind unregistered via
+    /// placeholder variant or a kind unregistered via
     /// [`Db::set_compute`](crate::Db::set_compute).
     #[error("no compute registered for {0:?}")]
     Unavailable(QueryKey),
     /// The id names no definition of the package, or the definition is a
-    /// type-level declaration, which carries no effect row (B1).
+    /// type-level declaration, which carries no effect row.
     #[error("no effect row for definition {}", .0.as_u32())]
     NoEffectRow(DefId),
     /// A value of the wrong kind was produced for the key: an internal

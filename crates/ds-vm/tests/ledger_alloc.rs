@@ -13,8 +13,8 @@
 //!   ledger: the capture batch pays a measured 129 allocations over the bare batch (64 child ledger
 //!   tables, 64 capture-block copies at spawn, the closure's own capture block), a cost that
 //!   survives unchanged because the row's allocation is not a time cost (a scratch that removed it
-//!   entirely left the cycle inside the timing noise floor, the ruling that refused the small-map
-//!   hybrid).
+//!   entirely left the cycle inside the timing noise floor, which is why the small-map hybrid is
+//!   refused).
 //! - the delivered shape — one joiner's ledger holding one foreign row per child-owned `Ref` answer
 //!   of a 64-answer batch: many rows in one table, amortized; the pin reads: a steady-state batch's
 //!   allocation count is stable run over run.

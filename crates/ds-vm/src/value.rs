@@ -1,16 +1,15 @@
-//! Unboxed slot values [BL-2] and the words of the typed value stack [BL-6].
+//! Unboxed slot values and the words of the typed value stack.
 
 use ds_abi::SlotType;
 
 use crate::fiber::FiberId;
 
-/// The scalar callable word (the `Fn` slot classification, F2): a module
+/// The scalar callable word (the `Fn` slot classification): a module
 /// id plus a function-table index packed into one copyable word. Never a
 /// code pointer — resolution goes through the two-slot module table at
-/// call time, so a staged word picks up a swapped module at its next call
-/// [H6 item 5]. The module id space is the registry's (one id per module
-/// name, assigned at first install) until the M7 loading round's link
-/// table assigns module indices.
+/// call time, so a staged word picks up a swapped module at its next call.
+/// The module id space is the registry's: one id per module name, assigned at
+/// first install.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FuncRef {
     module: u32,
@@ -39,20 +38,20 @@ impl FuncRef {
     }
 }
 
-/// A raw unboxed scalar in one frame slot [BL-2]: no NaN-boxing, no per-slot
-/// tags, no boxed scalars. Covers every kind the uop set operates on
-/// [BL-5]: the scalars, union tag words, the reference word into the
-/// VM's heap object store (M3: string objects; [`crate::object::Objects`]),
-/// and the callable word (the `Fn` classification, F2).
+/// A raw unboxed scalar in one frame slot: no NaN-boxing, no per-slot
+/// tags, no boxed scalars. Covers every kind the uop set operates on:
+/// the scalars, union tag words, the reference word into the VM's heap
+/// object store (string objects; [`crate::object::Objects`]), and the
+/// callable word (the `Fn` classification).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
-    /// A 64-bit integer, the `int` default [B7].
+    /// A 64-bit integer, the `int` default.
     I64(i64),
-    /// A 64-bit float, the `float` default [B7].
+    /// A 64-bit float, the `float` default.
     F64(f64),
     /// An unboxed boolean.
     Bool(bool),
-    /// The tag word of an unboxed tag+payload union [BL-2]: a bare
+    /// The tag word of an unboxed tag+payload union: a bare
     /// discriminant in one slot; payload words are the following slots.
     Tag(u8),
     /// A raw reference to a heap object: the owner-routing word, the
@@ -60,9 +59,9 @@ pub enum Value {
     /// (the word self-describes its owner, so a delivered or host-held
     /// word routes to its heap anywhere). `Ref` slots hold only these
     /// words, so no null niche is spent and `T | none` packing stays a
-    /// legal later pass [B4].
+    /// legal later pass.
     Ref(RefId),
-    /// A callable word (the `Fn` classification, F2): the scalar
+    /// A callable word (the `Fn` classification): the scalar
     /// [`FuncRef`] naming a non-capturing function. Copied by MOV like any
     /// scalar, zero RC traffic. A capturing lambda is not this word: it is
     /// a `Ref` word to a closure object whose header word is the FuncRef.
@@ -83,7 +82,7 @@ pub const ARENA_CHUNK_LIMIT: usize = 1 << 16;
 
 /// The `Arena` word's payload: the packed handle — chunk index 16 bits,
 /// byte offset 24 bits, byte length 24 bits — so the value stays one
-/// 16-byte word (the stage-three representation ruling). Runtime words
+/// 16-byte word. Runtime words
 /// never serialize, so the packing has no dsmod impact; pack boundaries
 /// trap by name rather than truncating.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -208,7 +207,7 @@ impl Value {
 
 /// One word of the value stack: a value slot, or a frame's metadata word.
 ///
-/// Frames are contiguous spans of [`Word`]s inline in the stack [BL-6]: the
+/// Frames are contiguous spans of [`Word`]s inline in the stack: the
 /// metadata word at the frame base, then the statically typed slots, then
 /// the call word (which hosts a callee's metadata word during a call) and
 /// the outgoing-argument area — see the layout diagram in `ds-abi/src/layout.rs`.

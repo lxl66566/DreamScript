@@ -361,7 +361,7 @@ fn a_missing_artifact_refuses_the_bind() {
     );
 }
 
-/// The externs' consumption seam is live (H5): a scalar-signature bound
+/// The externs' consumption seam is live: a scalar-signature bound
 /// extern runs the installed artifact's C symbol through the run's bound
 /// install, the answers pinning every register-class shape the slice
 /// rules — the i64 GP pair, the f64 FP pair, the u8 GP word, and the
@@ -416,7 +416,7 @@ fn the_register_class_shapes_answer_over_the_installed_artifact() {
     assert_eq!(lines[2], "42", "the empty call marshals");
 }
 
-/// The marshaling round's language-side consumption (H5): a `string`
+/// The language-side consumption of marshaled externs: a `string`
 /// or `bytes` parameter rides its call-scoped (pointer, length) pair
 /// and a unit return rides the absent word, both live through `ds run`
 /// over the installed artifact — the pair legs' values answered
@@ -496,7 +496,7 @@ fn a_missing_symbol_refuses_the_run() {
 
 /// A signature outside the marshaling slice refuses at lowering, the
 /// refusal naming the slice: a string return here (the returning
-/// direction is the ownership round's own).
+/// direction is outside this face).
 #[test]
 fn a_wrong_signature_refuses_the_run() {
     let (root, cache, _) = fixture_source(

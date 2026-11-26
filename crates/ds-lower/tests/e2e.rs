@@ -184,7 +184,7 @@ fn interpolation_chain_uses_print_and_the_float_conversion() {
 fn tail_recursion_runs_a_million_deep_at_constant_stack() {
     // a non-tail call at this depth would need ~9M stack words against
     // the VM's 1MiB-word limit, so completing at all proves the CALLT
-    // slide kept the stack constant [H2]
+    // slide kept the stack constant
     let (mut vm, _) = build_vm();
     assert_eq!(
         vm.run("types_hybrid", "count", &[
@@ -232,7 +232,7 @@ fn lower_inline(source: &str) -> Result<Lowered, LowerError> {
 
 #[test]
 fn float_remainder_rejects_at_the_lowering_boundary() {
-    // the numeric table admits float rem [B7]; the locked uop set has no
+    // the numeric table admits float rem; the locked uop set has no
     // ModF64, so both spellings reject at compile time instead of
     // compiling a runtime SlotTypeMismatch trap
     for source in [
@@ -251,7 +251,7 @@ fn float_remainder_rejects_at_the_lowering_boundary() {
 
 #[test]
 fn byte_literals_lower_through_the_integer_slot() {
-    // `b'x'` stages as its 0-255 integer value [F6]: the byte atom rides
+    // `b'x'` stages as its 0-255 integer value: the byte atom rides
     // the integer slot encoding while staying outside the int conversion
     // family at the checker; the run-level shapes live in bytes_e2e.rs
     lower_inline("tag byte\nfn main() -> byte { b'x' }").expect("the byte literal lowers");
@@ -276,9 +276,9 @@ fn integer_compound_remainder_assign_runs() {
 
 #[test]
 fn frame_layouts_follow_the_locked_slot_rules() {
-    // the trimmed probe union has three members; per BL-6 the parameter
-    // frames start at the incoming overlay words with true per-word
-    // types: [Tag, I64(got|value|port), Ref(host|text)]
+    // the trimmed probe union has three members; the parameter frames
+    // start at the incoming overlay words with true per-word types:
+    // [Tag, I64(got|value|port), Ref(host|text)]
     let (_, lowered) = build_vm();
     let bytes = write(lowered.module());
     let source = include_str!("fixtures/types_hybrid_probe.ds");
@@ -304,7 +304,7 @@ fn frame_layouts_follow_the_locked_slot_rules() {
     assert_eq!(fn_layout(&module, &lowered, "load").arg_area_len(), 3);
     assert_eq!(fn_layout(&module, &lowered, "main").arg_area_len(), 4);
     // main mixes Tag, Bool, I64 and Ref staging in its first overlay
-    // word: the per-word rule widens it to Raw [H1]
+    // word: the per-word rule widens it to Raw
     assert_eq!(
         &fn_layout(&module, &lowered, "main").slots()[35..39],
         // word 0 mixes Tag/Ref staging, word 2 mixes Ref/I64 results:

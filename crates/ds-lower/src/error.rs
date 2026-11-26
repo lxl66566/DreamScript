@@ -7,7 +7,7 @@ use ds_diag::Span;
 /// none of them is a checker gap — the package checked clean first.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LowerError {
-    /// A construct with no runtime contract yet [BL-2, BL-5].
+    /// A construct with no runtime contract yet.
     #[error(
         "{what} is outside the M3 runtime contract ({reason}); the checker accepted it, the uop \
          set does not cover it yet"
@@ -20,7 +20,7 @@ pub enum LowerError {
         /// Which seam the construct needs.
         reason: &'static str,
     },
-    /// A bound extern's declaration refuses at the C-ABI seam (H5): the
+    /// A bound extern's declaration refuses at the C-ABI seam: the
     /// artifact the graph resolves, the symbol the library exports, or
     /// the signature shape the scalar marshaling slice serves.
     #[error("the bound extern `{name}` refuses at the C-ABI seam: {reason}")]
@@ -49,7 +49,7 @@ pub enum LowerError {
     /// A function record was rejected by the ds-mod builder.
     #[error("the function record was rejected: {0}")]
     Build(String),
-    /// A frame needs more than the 256-slot cap [BL-5].
+    /// A frame needs more than the 256-slot cap.
     #[error("the frame of `{name}` needs {need} slots, past the 256-slot cap")]
     FrameTooWide {
         /// The function's name.

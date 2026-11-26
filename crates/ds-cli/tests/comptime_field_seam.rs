@@ -62,8 +62,23 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// each other (2 copies x the pair's sum 3). The trailing `0` is the
 /// run's own answer line, as every golden pins.
 const GOLDEN: &str = concat!(
-    "12\n", "27\n", "abc\n", "9\n", "6\n", "6\n", "nu\n", "2\n", "6\n", "15\n", "6\n", "a,b,\n",
-    "a=int b=int c=int \n", "9\n", "6\n", "6\n", "0\n",
+    "12\n",
+    "27\n",
+    "abc\n",
+    "9\n",
+    "6\n",
+    "6\n",
+    "nu\n",
+    "2\n",
+    "6\n",
+    "15\n",
+    "6\n",
+    "a,b,\n",
+    "a=int b=int c=int \n",
+    "9\n",
+    "6\n",
+    "6\n",
+    "0\n",
 );
 
 #[test]

@@ -8,7 +8,7 @@ Plans DreamScript from empty repository to 1.0 in Rust (edition 2024), subordina
 3. Compiler-as-query-library: every consumer reads the same memoized queries, invalidated at separator-block and package grain; the two-slot hot-reload runtime exists from day one [H6 item 1, item 5].
 4. Invariants everywhere: no import-time execution [G3, entry-file script-mode statements excepted]; guaranteed self-and-mutual TCO [H2]; dispatch correctness never depends on cache state [H3]; a generic body's correctness never waits on the JIT tier — per-shape instantiation is compile-time [H3.5]; no `any` fallback — inference failure is a compile error [B1].
 
-Rust engineering: edition 2024; fmt and clippy clean per commit; nextest; `codegen-units = 1` with `lto = "thin"`. Unsafe code lives in `ds-rt` and `ds-jit` behind the debug-assertion layer CI enables; stencil builds need clang/LLVM, and CI is windows-msvc plus linux. Fibers are interpreter data: no native stack switching, no async color; fork-join workers receive ownership transfers only, keeping non-atomic RC sound [C4, E3]. The `ds` binary is the only crate configuring spdlog-rs; libraries log through the `log` facade.
+Rust engineering: edition 2024; fmt and clippy clean per commit; nextest; `codegen-units = 1` with `lto = "thin"`. Unsafe code lives in `ds-rt` and `ds-jit` behind the debug-assertion layer CI enables; stencil builds need clang/LLVM, and CI is windows-msvc plus linux. Fibers are interpreter data: no native stack switching, no async color; fork-join workers receive ownership transfers only, keeping non-atomic RC sound [C4, E3]. The `ds` binary alone configures logging; libraries log through the `log` facade.
 
 ## 2. Workspace layout
 One Cargo workspace at the repository root; a crate appears in the milestone that first fills it (no empty shells).
@@ -27,13 +27,14 @@ One Cargo workspace at the repository root; a crate appears in the milestone tha
 | `ds-lower` | Frame layouts, uop bytecode, dup/drop placement | M3 |
 | `ds-vm` | Tier-1 interpreter, fibers, nurseries, module table, inline caches, natives | M0 skeleton, M3 real, M5 fibers |
 | `ds-rt` | Arenas, non-atomic RC, reuse threading, object layout | M4 |
-| `ds-meta` | Derives, comptime evaluator, static reflection | M6 |
+| `ds-meta` | The derive engine and the derive-expanding analyze entries | M6 |
+| `ds-comptime` | The comptime evaluator, its world fence, and the embedded answers | M6, split out of `ds-meta` in M7 hardening |
 | `ds-dsi` | The `.dsi` checked-prefix artifact: reader, writer, blob serve | M7 |
 | `ds-pkg` | Manifests, MVS resolution, content-addressed store, script mode | M7 |
 | `ds-ffi` | `extern` declarations, `ds bind`, embedding API | M7 |
 | `ds-jit` | SSA lowering, copy-and-patch stencils, Cranelift/wasm | M8, SSA may start M7 |
 | `ds-pins` | gungraun instruction pins and their pin-bake gate | M9 |
-| `ds-cli` | The `ds` binary: run, build, check, info, fmt, save, bind, dev, repl, lsp | grows from M3 |
+| `ds-cli` | The `ds` binary: run, build, check, test, info, doc, fmt, save, bind, dev, repl, lsp | grows from M3 |
 | `ds-lsp` | LSP server over `ds-query` | M7 |
 
 Supporting directories: `conformance/` (seed corpus, stage expectations, goldens) from M1, `fuzz/`, `benchmarks/`. Consumption runs ds-parse -> ds-query -> ds-check -> ds-lower -> ds-vm -> ds-jit, ds-abi beneath the lowerer, VM and JIT, ds-mod beneath the VM loader and package store, ds-diag beneath everything.

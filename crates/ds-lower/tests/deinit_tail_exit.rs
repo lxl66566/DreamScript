@@ -5,8 +5,8 @@
 //! so the call's staged words re-stage after the drops — the transfer
 //! hands the callee its arguments intact, the claim fires once while the
 //! value's fields are alive, and every count still balances (a local
-//! callee's arguments ride the transfer; a root native's staged borrows
-//! stay the R13 abandoned corner). The literal-final contrast pins the
+//! callee's arguments ride the transfer; a root native's staged borrow is
+//! never flushed). The literal-final contrast pins the
 //! frame exit that never stages arguments.
 
 use ds_check::analyze;
@@ -92,8 +92,8 @@ fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
     assert_eq!(vm.captured_output(), stdout, "the golden stdout");
 }
 
-/// One acceptance plus the heap drain: the R13 abandoned corner aside,
-/// every count the frame owes balances to zero.
+/// One acceptance plus the heap drain: the root native's unflushed borrow
+/// aside, every count the frame owes balances to zero.
 fn drained(name: &str, source: &str, result: Value, stdout: &[u8]) {
     acceptance(name, source, result, stdout);
     let (vm, _) = run_source(name, source);
@@ -129,9 +129,9 @@ fn a_user_call_final_transfers_the_claim_and_the_argument() {
 
 /// An entry ending in a native call is the root frame's native tail
 /// (CALLT): the claim fires before the transfer, the staged argument
-/// reaches the native intact, and the staged borrow stays the R13
-/// abandoned corner — its count dies with the program, so the heap may
-/// hold the handed string at exit.
+/// reaches the native intact, and the staged borrow stays unflushed — its
+/// count dies with the program, so the heap may hold the handed string at
+/// exit.
 #[test]
 fn a_native_call_final_transfers_the_claim_and_the_argument() {
     let source = source(concat!(

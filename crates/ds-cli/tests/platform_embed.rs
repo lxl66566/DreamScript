@@ -1,4 +1,4 @@
-//! End-to-end through the `ds` binary: the embed platform provider (H5)
+//! End-to-end through the `ds` binary: the embed platform provider
 //! — the run path installs the console-only `embed` handler beside the
 //! default `std`, so a source declaring `platform "embed"` runs over
 //! the console face, while a source whose declaration claims a world op

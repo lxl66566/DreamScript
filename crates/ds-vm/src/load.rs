@@ -1,4 +1,4 @@
-//! The deps-first load protocol (G3.5's loading semantics, 2026-11-15):
+//! The deps-first load protocol:
 //! one walk installs a root module and every uop dependency its dep list
 //! names, through a caller-supplied provider.
 //!
@@ -11,9 +11,8 @@
 //!   installed dep composes with loaded dependents.
 //! - Validation. A provider-fetched module whose source hash differs from the linked content hash
 //!   refuses the load; one dep list linking one name at two hashes refuses (same-name multi-hash
-//!   coexistence stays refused this round, owned by the packages round). A dep entry naming the
-//!   enclosing module resolves against the table under construction (the install's own-table path)
-//!   and is never fetched.
+//!   coexistence is refused). A dep entry naming the enclosing module resolves against the table
+//!   under construction (the install's own-table path) and is never fetched.
 //! - Failure. A provider miss, a dep cycle, a hash disagreement, or any install refusal fails the
 //!   load. Every dependency that finished installing stays installed — its id stays assigned, the
 //!   deterministic prefix of the walk order — and the module whose install failed is absent from

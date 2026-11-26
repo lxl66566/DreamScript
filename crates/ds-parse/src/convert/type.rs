@@ -311,7 +311,7 @@ impl Ctx {
                 match tail {
                     Some(c) if c.as_rule() == Rule::pat_call => self.pat_call(c, span, path),
                     Some(c) => self.pat_struct(c, span, path),
-                    // a bare qualified label pattern (F9.5): the path
+                    // a bare qualified label pattern: the path
                     // alone is the test
                     None => Pattern::Path { span, path },
                 }

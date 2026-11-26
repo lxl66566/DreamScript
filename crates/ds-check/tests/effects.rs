@@ -1,6 +1,6 @@
-//! The `effects_of` pass [B5, B7, E1, E2, E4]: row composition through
-//! calls and branches, declared ambient rows, the E4 consuming forms,
-//! nursery rows, the fixpoint over call cycles, and corpus sanity — every
+//! The `effects_of` pass: row composition through calls and branches,
+//! declared ambient rows, the consuming forms, nursery rows, the fixpoint
+//! over call cycles, and corpus sanity — every
 //! corpus file computes rows over constructs of later milestones
 //! (nursery, spawn, comptime) without panicking.
 
@@ -90,7 +90,7 @@ fn declared_rows_are_respected_as_lower_bounds() {
     // externs carry exactly their declared row.
     assert_eq!(row_of(&effects, "fetch").render(), "error | world");
     // an undeclared extern is row-pure: the ambient table is the surface
-    // for extern effects until M7's platform declaration [E1].
+    // for extern effects until a platform declaration.
     assert!(row_of(&effects, "undeclared_only").is_pure());
     assert_eq!(row_of(&effects, "declared_only").render(), "error | world");
     // a declared row on an in-package function is a lower bound, unioning
@@ -129,7 +129,7 @@ fn consuming_forms_mask_the_lefts_failure_members() {
         &declared,
     );
     // `.err(h)` consumes the failure set: read's `error` is consumed,
-    // `world` survives [E4].
+    // `world` survives.
     assert_eq!(row_of(&effects, "handled").render(), "world");
     // the mask is scoped to the operand: surrounding code is unmasked.
     assert_eq!(row_of(&effects, "chained").render(), "trap | world");
@@ -176,13 +176,13 @@ fn nursery_carries_the_internal_effects() {
         ),
         &DeclaredRows::new(),
     );
-    // the nursery boundary dispatches `cancel`/`discontinue` [E1, E2];
+    // the nursery boundary dispatches `cancel`/`discontinue`;
     // spawn bodies run inside the enclosing definition's extent.
     assert_eq!(
         row_of(&effects, "n").render(),
         "trap | cancel | discontinue"
     );
-    // defer runs at scope exit [E5], under cancellation too.
+    // defer runs at scope exit, under cancellation too.
     assert_eq!(row_of(&effects, "d").render(), "trap");
 }
 
@@ -220,7 +220,7 @@ fn trait_calls_union_every_impl_body() {
         &DeclaredRows::new(),
     );
     // one impl body traps; without solved receiver types the candidate set
-    // unions conservatively [F3].
+    // unions conservatively.
     assert_eq!(row_of(&effects, "via_dot").render(), "trap");
     assert_eq!(row_of(&effects, "via_hatch").render(), "trap");
     assert_eq!(row_of(&effects, "use_inherent").render(), "trap");
@@ -288,7 +288,7 @@ fn effects_nursery_rows_match_the_record() {
     assert_eq!(row_of(&effects, "with_retry").render(), "error");
     let main = row_of(&effects, "main");
     assert!(main.contains(Effect::Cancel));
-    // the `.err` handler consumed fetch_all's failure members [E4]; the
+    // the `.err` handler consumed fetch_all's failure members; the
     // trap is the par fold's trapping `+` (die's own trap row died with
     // the ambient declaration it rode — the file-owned extern declares
     // no row).
@@ -312,11 +312,11 @@ fn linearity_rows_match_the_record() {
 fn types_hybrid_rows_match_the_record() {
     let effects = corpus("types_hybrid.ds");
     // bare `return` is no propagation site: only `?` contributes `error`,
-    // and get_port calls nothing declared [E4].
+    // and get_port calls nothing declared.
     assert_eq!(row_of(&effects, "get_port").render(), "trap");
     assert_eq!(row_of(&effects, "load").render(), "error | trap");
     // the `.err` handler consumed load's failure members; its `trap`
-    // survives [E4].
+    // survives.
     let cfg = row_of(&effects, "cfg");
     assert!(cfg.contains(Effect::Trap));
     assert!(!cfg.contains(Effect::Error));
@@ -329,8 +329,8 @@ fn generics_rows_match_the_record() {
     let effects = corpus("generics_coherent_traits.ds");
     assert!(row_of(&effects, "push").is_pure());
     assert!(row_of(&effects, "pop").is_pure());
-    // js names the m6 derive's to_json, which has no bodies this round,
-    // so its row stays pure; schema's string `+` traps.
+    // js names the m6 derive's to_json, which has no bodies, so its row
+    // stays pure; schema's string `+` traps.
     assert!(row_of(&effects, "js").is_pure());
     assert_eq!(row_of(&effects, "schema").render(), "trap");
 }
@@ -369,7 +369,7 @@ fn ambient_declared_rows_flow_over_the_corpus() {
         &[("ambient.ds", ambient), ("corpus.ds", &source)],
         &declared,
     );
-    // the world rows flow through the ambient externs [E1]; the `.err`
+    // the world rows flow through the ambient externs; the `.err`
     // handler still consumes only the failure members.
     assert_eq!(row_of(&effects, "load").render(), "error | trap | world");
     let cfg = row_of(&effects, "cfg");

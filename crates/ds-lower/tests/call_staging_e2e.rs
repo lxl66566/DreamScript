@@ -1,12 +1,8 @@
-//! The call-site staging regressions found by the tutorial verification
-//! pass: a defaulted parameter call stages the literal default (it
-//! previously miscompiled into the VM's arity trap — the checker
-//! accepted the omission and the call staged one word short), an inline
-//! union member argument re-spans into the multi-word parameter region
-//! at the call (an inline unit tag or payload case previously trapped
-//! inside the VM's slide validation, then refused at lowering), and a
-//! type-keyed shape refusal reports at the observing node instead of the
-//! sentinel span that rendered against an unrelated file's first line.
+//! The call-site staging pins: a defaulted parameter call stages the
+//! literal default (the checker accepts the omission, so the call stages
+//! every declared word), an inline union member argument re-spans into the
+//! multi-word parameter region at the call, and a type-keyed shape refusal
+//! reports at the observing node instead of a sentinel span.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -315,7 +311,7 @@ fn named_arguments_fill_case_construction_fields_by_name() {
 
 /// The named-argument boundary, refused side: the checker accepts named
 /// arguments at every function-call spelling (it fills parameters by
-/// name), but the M3 uop set stages arguments positionally — so every
+/// name), but the uop set stages arguments positionally — so every
 /// spelling refuses at the one lowering seam, the message naming the
 /// contract and the span pinning the offending argument.
 #[test]

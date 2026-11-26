@@ -83,7 +83,7 @@ fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
 }
 
 /// The std platform minus the tls capability: a tls-omitting host (the
-/// "selected or omitted per host" ruling), its `http_get` slot carrying
+/// selected or omitted per host), its `http_get` slot carrying
 /// the plain body that refuses https URLs.
 fn no_tls_registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();

@@ -1,4 +1,4 @@
-//! The effects-of query `[E1]`: the ds-check compute registered by
+//! The effects-of query: the ds-check compute registered by
 //! [`Db::new`] over the real parse — memoization, package-grain
 //! invalidation, graceful degradation on broken files, the out-of-range
 //! id error, and the declared-rows table the database carries.
@@ -33,7 +33,7 @@ fn edits_recompute_the_row() {
     db.add_file("b.ds", "fn g(x: int) -> int { f(x) }\n");
     assert!(db.get::<EffectsOf>(DefId::new(1)).unwrap().is_pure());
 
-    // package grain [M2]: an edit of the first file re-derives the second
+    // package grain: an edit of the first file re-derives the second
     // file's definition's row through the callee edge.
     db.set_file_content(a, "fn f(x: int) -> int { x + 1 }\n")
         .unwrap();
@@ -57,7 +57,7 @@ fn propagation_contributes_error_through_the_query() {
     assert_eq!(row.render(), "error");
 }
 
-/// The database's declared-row table `[E1]` is a lower bound on the computed
+/// The database's declared-row table is a lower bound on the computed
 /// row: a world-touching ambient name carries its row into every caller.
 #[test]
 fn declared_rows_flow_through_the_database() {

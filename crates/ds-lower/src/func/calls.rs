@@ -324,7 +324,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// `list_push` per element — the list word staged first, the
     /// element's words after it (an element expression may itself
     /// call). The list is a freshly created Ref its frame uniquely
-    /// owns, so the in-place appends carry no window discipline [B3].
+    /// owns, so the in-place appends carry no window discipline.
     /// The staged element borrows or transfers by its own death: `list_push`
     /// acquires its own count when storing, so a dying element's post-call
     /// drop hands the count to the list (the push window's flush); a live
@@ -454,7 +454,7 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(list)
     }
 
-    /// One generic-application constructor call `list[t]()` [F9, B3]:
+    /// One generic-application constructor call `list[t]()`:
     /// the head resolved in the type namespace and the checker typed
     /// the result `list<arg>`; the runtime half is `list_new` — the
     /// element type argument never reaches the code, every list being
@@ -481,9 +481,9 @@ impl<'a> FnLower<'a, '_, '_> {
             .structs
             .get(&def)
             .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty());
-        // the channel's construction (the 2026-11-21 shared-state
-        // ruling): the one type application carrying a value argument —
-        // the bound staged to `chan_new`, whose Ref answer the frame owns
+        // the channel's construction: the one type application carrying a
+        // value argument — the bound staged to `chan_new`, whose Ref answer
+        // the frame owns
         if one_param_fieldless && head.name.as_str() == "chan" {
             let [cap] = args else {
                 return Err(mismatch("the channel constructor's bound"));
@@ -563,7 +563,7 @@ impl<'a> FnLower<'a, '_, '_> {
         })
     }
 
-    /// One map constructor call `map[k, v]()` [F9, B3]: the checker typed
+    /// One map constructor call `map[k, v]()`: the checker typed
     /// the result `map<key, value>`; the runtime half is `map_new` — the
     /// type arguments never reach the code, every map being the one Ref
     /// word. The empty-map word's overlay discipline is `list_new`'s: the
@@ -836,7 +836,7 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(TypedPlace { place, ty })
     }
 
-    /// Constructs one minted enum case by call form [B3]: the case's own
+    /// Constructs one minted enum case by call form: the case's own
     /// struct span, fields filled positionally or by name, exactly like a
     /// struct literal with positional slots admitted.
     fn case_value(&mut self, args: &[CallArg], ty: Ty) -> Result<Place, LowerError> {
@@ -896,8 +896,8 @@ impl<'a> FnLower<'a, '_, '_> {
         // checker records the solved instance there); the callee-shape
         // destructure below rebinds `span` to the callee path's own
         let call_span = *span;
-        // A minted case constructor takes named arguments [B3]; named
-        // arguments on functions stay outside the M3 contract. A
+        // A minted case constructor takes named arguments; named
+        // arguments on functions are outside the lowered surface. A
         // payloaded tag constructs through the same call form.
         let case_ctor = match callee.as_ref() {
             Expr::Path { span, .. } => match self.res.get(*span) {
@@ -927,12 +927,12 @@ impl<'a> FnLower<'a, '_, '_> {
                 ));
             }
         }
-        // A generic-application constructor `list[t]()` [F9]: the
+        // A generic-application constructor `list[t]()`: the
         // bracketed callee head resolved in the type namespace.
         if let Expr::Index { recv, .. } = &**callee {
             return self.ctor_call(recv, args, *span);
         }
-        // The map constructor `map[k, v]()` [F9, B3]: the two-argument
+        // The map constructor `map[k, v]()`: the two-argument
         // application of the map struct.
         if let Expr::MapApply { .. } = &**callee {
             return self.map_ctor_call(args);
@@ -948,7 +948,7 @@ impl<'a> FnLower<'a, '_, '_> {
         // the callee and its argument expressions in call order: a plain
         // name call feeds the written arguments; a UFCS dot-call `x.f(a)`
         // resolves to the free function and stages the receiver as its
-        // first argument — `f(x, a)`, zero runtime cost [F3]. A
+        // first argument — `f(x, a)`, zero runtime cost. A
         // trait-method site carries no def: the solved instance names
         // the impl body (the dispatch side channel below), and `None`
         // marks the trait path.
@@ -989,7 +989,7 @@ impl<'a> FnLower<'a, '_, '_> {
                             "only the first data parameter feeds the dot position [F3]",
                         ));
                     }
-                    // The F3 receiver fallback (2026-11-22): a free fn
+                    // The receiver fallback: a free fn
                     // that cannot take the receiver typed through the
                     // method tier, so the checker's dispatch record at
                     // the call span owns the lowering — the native
@@ -1085,7 +1085,7 @@ impl<'a> FnLower<'a, '_, '_> {
                         Some(dispatch),
                     )
                 },
-                // A module alias's qualified call (G4): the receiver is
+                // A module alias's qualified call: the receiver is
                 // the alias itself — no word stages — and the dot's
                 // recorded def is the linked package's function, a plain
                 // def call through the import's link facts.
@@ -1096,7 +1096,7 @@ impl<'a> FnLower<'a, '_, '_> {
                     None,
                 ),
                 // An implicit dispatch site (an interpolation hole's
-                // `show`, F6): no surface name sits behind the dot, so
+                // `show`): no surface name sits behind the dot, so
                 // the resolutions carry nothing here — the checker's
                 // span-keyed dispatch records ARE the site's resolution
                 // (an assumption-answered hole records only the hole
@@ -1152,7 +1152,7 @@ impl<'a> FnLower<'a, '_, '_> {
                     "only name and dot callees are lowerable this round",
                 ));
             };
-            // `Trait::f(x)` qualification (F3): the checker records the
+            // `Trait::f(x)` qualification: the checker records the
             // solved instance at the call's own span like the dot form,
             // and the receiver is the first written argument
             let qualified = match path.segments.as_slice() {
@@ -1181,7 +1181,7 @@ impl<'a> FnLower<'a, '_, '_> {
                         )
                 )
             {
-                // The qualified `type::label` call form (F9.5): a payloaded
+                // The qualified `type::label` call form: a payloaded
                 // label constructs through the same case-value door as
                 // the bare spelling, over the call's own checked type
                 // (a unit label's call never leaves the checker).
@@ -1195,7 +1195,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 )
             } else if let Some(Res::Local { bind }) = self.res.get(*span) {
                 // a clean check makes this a fn-typed binding: the
-                // call dispatches through its Fn word [F2]
+                // call dispatches through its Fn word
                 let mut arg_exprs: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
                 if let Some(block) = trailing {
                     arg_exprs.push(&**block);
@@ -1209,7 +1209,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 ));
             }
         };
-        // The block-argument sugar [F7]: the checker fed the parser's
+        // The block-argument sugar: the checker fed the parser's
         // zero-parameter trailing block at the next open positional slot,
         // and with named arguments refused above that slot is exactly the
         // written arguments' end, so the block stages below like a
@@ -1221,7 +1221,7 @@ impl<'a> FnLower<'a, '_, '_> {
         if case_ctor.is_some() && case_ctor == def {
             return self.case_value(args, ty);
         }
-        // A comptime call's answer embeds at the call site (G1): the
+        // A comptime call's answer embeds at the call site: the
         // evaluator ran the callee on the fenced VM and recorded the
         // result on this call's span, so lowering emits it exactly like
         // a written literal and the call never reaches the runtime
@@ -1242,7 +1242,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 ));
             }
         }
-        // The E4 extraction family inlines at the call site over the
+        // The extraction family inlines at the call site over the
         // checked receiver's own union shape — no callee, no control
         // transfer, word kinds from the call site like every covered
         // generic-safe native.
@@ -1294,7 +1294,7 @@ impl<'a> FnLower<'a, '_, '_> {
             )?,
         };
         // a member call stages its omitted literal defaults at the call
-        // site like the free-fn spelling [F7]: a trait dispatch stages
+        // site like the free-fn spelling: a trait dispatch stages
         // the trait's declared defaults (the declaration is the single
         // authority — call sites check those literals), while an
         // inherent dispatch stages the impl body's own
@@ -1376,7 +1376,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let mut counted: Vec<bool> = Vec::new();
         let mut moves: Vec<(usize, u8)> = Vec::new();
         // the written argument each staged word belongs to: a consuming
-        // (`move`) parameter's words stage as a hand-off (C2)
+        // (`move`) parameter's words stage as a hand-off
         let mut word_arg: Vec<usize> = Vec::new();
         // staged indices whose Ref word lands in a callable-defaulted `Fn`
         // parameter (the closure-capable callable surface): the callee
@@ -1428,10 +1428,10 @@ impl<'a> FnLower<'a, '_, '_> {
         // whether each written argument position feeds a consuming
         // (`move`) parameter: the staging then forwards the source's
         // count and any deinit claim — the checker's forced move makes
-        // the death test true at exactly this use (C2/C1)
+        // the death test true at exactly this use
         let consuming = self.consuming_args(target, trait_dispatch.as_ref(), arg_exprs.len());
         // the receiver's checked type mints a generic call's evidence
-        // words (the builtin instance it addresses) [H3]
+        // words (the builtin instance it addresses)
         let mut receiver_ty: Option<Ty> = None;
         // the receiver's written type — the runtime-evidence slot path's
         // key, which peels the entering frame's own variable however the
@@ -1591,11 +1591,10 @@ impl<'a> FnLower<'a, '_, '_> {
                     };
                 }
                 self.guard_list_element(&arg_val, arg.span(), what)?;
-                // an arena element stages exactly one word this round:
-                // the slot array stores one element word per handle, so
-                // a wider element (a multi-word record or tuple, a
-                // union's region) refuses at the staging with the
-                // per-instantiation seam its own residual
+                // an arena element stages exactly one word: the slot array
+                // stores one element word per handle, so a wider element (a
+                // multi-word record or tuple, a union's region) refuses at the
+                // staging with the per-instantiation seam's own refusal
                 if matches!(target, Callee::Builtin(native) if native.name == "arena_insert") {
                     let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
                     if addrs.len() != 1 {
@@ -1746,15 +1745,16 @@ impl<'a> FnLower<'a, '_, '_> {
         // path: the transfer leaves no post-call position for the borrow
         // flush, and the pre-transfer exit drops would free the object
         // under the callee's read. Its tail lowers in place instead (CALL
-        // plus flush plus return, the R13 native-tail shape) —
+        // plus flush plus return, the native-tail shape) —
         // stack-identical and count-exact; the frame-reuse guarantee
-        // [H2] keeps every scalar-staging tail site, a linked callee's
+        // keeps every scalar-staging tail site, a linked callee's
         // included
         let closure_tail = !defaulted.is_empty()
             && tail
             && matches!(target, Callee::Local(_) | Callee::Foreign { .. });
         // a trait-method tail transfers through CALLTG now (the dispatch
-        // tail form, H2's guarantee closure): a Static site's evidence and
+        // tail form, the guarantee admits no callee-class exception): a
+        // Static site's evidence and
         // instance words and a Runtime site's sentinel FuncRef ride the
         // same frame-reuse slide a local tail's arguments take, staged
         // after the exit claims. An inherent dispatch stays excluded — it
@@ -1767,10 +1767,9 @@ impl<'a> FnLower<'a, '_, '_> {
             );
         // a closure-staging local tail lowers in place for the root frame
         // too: the callee reads the word during the call, so the count
-        // cannot ride the abandoned corner nor die at the pre-transfer
-        // exit drops
+        // cannot ride the transfer nor die at the pre-transfer exit drops
         // a linked package's tail call takes the same CALLT frame-reuse
-        // transfer a local's does (H2): the pool FuncRef carries the
+        // transfer a local's does: the pool FuncRef carries the
         // module boundary, the slide a pure fact of the two layouts, so
         // the transfer crosses the dsmod seam with the stack flat
         // a collection-mutating member (`push`/`set`) answers the receiver
@@ -1874,11 +1873,11 @@ impl<'a> FnLower<'a, '_, '_> {
         {
             return self.native_span_result(native, ty, tail, callee_span, &staged);
         }
-        // a generic call site [H3]: stage the instantiated types as
+        // a generic call site: stage the instantiated types as
         // evidence words after the real arguments and dispatch the
         // callee's ONE body through CALLG — or, from the root frame's
         // tail position, through the CALLTG transfer (a non-root frame
-        // lowers the native tail in place below, the R13 shape, because
+        // lowers the native tail in place below, the shape, because
         // the body runs inside the instruction and no frame is pushed)
         let generic_target = match target {
             Callee::Generic(generic) => Some(generic),
@@ -1906,7 +1905,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 native_member.is_some(),
             )?);
         }
-        // a trait-method dispatch site [H3]: a call into a generic impl
+        // a trait-method dispatch site: a call into a generic impl
         // body stages the runtime-evidence words its substitution
         // resolves (one evidence-chain object index per demand, in body
         // order) and then the solved declared-instance word; a call into
@@ -2042,7 +2041,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 }
             }
         }
-        // a free generic fn's call site [H3]: the callee's ONE body
+        // a free generic fn's call site: the callee's ONE body
         // claims its runtime-evidence demands as trailing parameters,
         // so the entering site stages them after the true arguments in
         // this outgoing-argument area — one evidence-chain object index
@@ -2134,7 +2133,7 @@ impl<'a> FnLower<'a, '_, '_> {
         // a dispatch tail (a trait site, or the root frame's generic
         // call) transfers through CALLTG: the dispatch resolution is the
         // CALLG emission's own and the transfer is the CALLT slide's, so
-        // the guarantee admits no callee-class exception [H2]
+        // the guarantee admits no callee-class exception
         let dispatch_tail = generic_target.is_some()
             || matches!(
                 trait_dispatch,
@@ -2145,15 +2144,15 @@ impl<'a> FnLower<'a, '_, '_> {
                 )
             );
         if tail_transfer {
-            // control transfers to the callee; the stack never grows [H2].
+            // control transfers to the callee; the stack never grows.
             // A local or linked callee owns its handed words (their counts
             // ride the transfer, its own exit drops them); every other
             // owned reference drops before the transfer, and a root-frame
-            // native's staged borrows are the abandoned corner above. The
-            // exit drops and every claim hook staged through the overlay
-            // as their own argument windows, so the call's argument span
-            // and the dispatch tail's evidence words stage after them —
-            // the transfer hands the callee its words intact.
+            // native's staged borrow stays unflushed (the handed word's count
+            // dies with the program). The exit drops and every claim hook are
+            // staged through the overlay as their own argument windows, so the
+            // call's argument span and the dispatch tail's evidence words stage
+            // after them — the transfer hands the callee its words intact.
             self.rc.native_tail_transfer();
             self.rc.exit(&mut self.code, &[]);
             self.stage_member_evidence(&member_evidence, member_evidence_at);
@@ -2219,7 +2218,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
             });
         } else if matches!(trait_dispatch, Some(TraitDispatch::Foreign { .. })) {
-            // the linked body claims no evidence pairs this round, so
+            // the linked body claims no evidence pairs, so
             // only the solved instance word trails the real arguments
             let real_args = staged.len() - 1;
             self.emit(Op::Callg {
@@ -2325,7 +2324,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 self.rc.produced(word);
             }
         }
-        // a deinit-carrying result owns its hook wherever it lands (C5):
+        // a deinit-carrying result owns its hook wherever it lands:
         // the temp holds the value until a binder aliases or discards it
         if let Some(claim) = self.deinit_claim(ty, span)? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
@@ -2346,13 +2345,13 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(Place { base, shape })
     }
 
-    /// CALLS (the callable-word call form, F2): the callee is a local
+    /// CALLS (the callable-word call form): the callee is a local
     /// binding whose single word names the function — a scalar Fn word,
     /// or a Ref word naming a closure object (the read dispatches on the
     /// word's kind; the emitted op is the same). Arguments stage on the
     /// overlay exactly like a pool call, the callee frame overlays it,
     /// and the result copies out of the overlay. A tail position runs
-    /// the maybe-Ref callee tracking [H2's closure ruling]: the callee
+    /// the maybe-Ref callee tracking: the callee
     /// word is maybe-Ref by classification, and the provenance tables
     /// (`scalar_fn_words` naming the function through `fn_words`) prove
     /// some words count-free scalars naming exactly one planned function
@@ -2586,7 +2585,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 });
             }
             // a borrow parameter owns the handed word: forward on the
-            // source's death, dup otherwise (C2/C4); a callable-defaulted
+            // source's death, dup otherwise; a callable-defaulted
             // closure word is a plain borrow — the callee reads it (CALLS
             // never consumes) and never owns its count. A transferring
             // tail's count rides the callee like every staged local word
@@ -2619,7 +2618,7 @@ impl<'a> FnLower<'a, '_, '_> {
         if tail_transfer {
             // the tracking proved the callee word a count-free scalar
             // naming one planned function: the tail transfers through
-            // CALLT with that function's own pool FuncRef [H2], the exit
+            // CALLT with that function's own pool FuncRef, the exit
             // claims staging first and the argument moves after them
             let index = proven_fn.expect("the transfer requires a proven function");
             let kidx = self.pool(Constant::FuncRef {
@@ -2731,7 +2730,7 @@ impl<'a> FnLower<'a, '_, '_> {
         self.checked_native_result(Callee::Builtin(native), ty, staged, staged.len())
     }
 
-    /// Stages one generic call's evidence words [H3]: the receiver's
+    /// Stages one generic call's evidence words: the receiver's
     /// builtin instance — one statically-resolved instance reference,
     /// an i64 pool constant — staged on the overlay after the real
     /// arguments, one word per entry of the callee's constraint list.
@@ -2824,7 +2823,7 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(instance)
     }
 
-    /// A method-call site's solved dispatch [B6, H3]: the impl body's
+    /// A method-call site's solved dispatch: the impl body's
     /// function-table index plus the instance id the checker recorded at
     /// the call's own span. An inherent survivor resolves through its
     /// own record below, and a site satisfied only through an in-scope
@@ -3154,7 +3153,7 @@ impl<'a> FnLower<'a, '_, '_> {
     }
 
     /// The evidence-chain object one statically-resolved demand resolves
-    /// to [H3]: the serving member body's function-table index for
+    /// to: the serving member body's function-table index for
     /// `method` over the substitution `start` names, plus one tail chain
     /// per the serving body's own evidence demands — each demand's own
     /// member and substituted type, walked recursively. The staged word
@@ -3548,7 +3547,7 @@ impl<'a> FnLower<'a, '_, '_> {
     }
 
     /// The staged evidence words a call into a free generic fn's body
-    /// stages for one of the body's demands [H3]: the checker's
+    /// stages for one of the body's demands: the checker's
     /// per-call record answers the pair's bound under this site's own
     /// substitution — a concrete answer stages the serving chain
     /// object, and a `None` answer (the substitution is the calling
@@ -3739,7 +3738,7 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Some(index) = self.plan.index_of(def) {
             return Ok(Callee::Local(index));
         }
-        // an import-bound def is a linked package's function (G4): the
+        // an import-bound def is a linked package's function: the
         // check comes ahead of the native fallback so a linked function
         // never silently answers as a same-named native
         if let Some(link) = self.analyzed.decls.foreign_links.get(&def) {
@@ -3749,7 +3748,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 func: link.func,
             });
         }
-        // a bound extern's declaration names an artifact (H5): the call
+        // a bound extern's declaration names an artifact: the call
         // resolves through the graph's fold — the artifact's exported
         // symbols in enumeration order, the same table the run installs
         // as the artifact's native module — ahead of the compiler-wired
@@ -3817,7 +3816,7 @@ impl<'a> FnLower<'a, '_, '_> {
         ))
     }
 
-    /// Resolves one bound extern's declaration (H5): the bind target
+    /// Resolves one bound extern's declaration: the bind target
     /// names an artifact the graph resolved, the extern's name a symbol
     /// its installed library exports — the FuncRef addressing the
     /// artifact's native module at the symbol's enumeration index. The
@@ -3904,7 +3903,7 @@ impl<'a> FnLower<'a, '_, '_> {
         })
     }
 
-    /// The literal-only parameter defaults [F7] a local call stages
+    /// The literal-only parameter defaults a local call stages
     /// for its omitted trailing parameters: the checker proved each
     /// default's literal against its parameter type, so the call lowers
     /// them exactly like written arguments. A non-defaulted omission is
@@ -3940,7 +3939,7 @@ impl<'a> FnLower<'a, '_, '_> {
         staged
     }
 
-    /// The literal-only parameter defaults [F7] a trait-method dispatch
+    /// The literal-only parameter defaults a trait-method dispatch
     /// call stages at the call site for its omitted trailing parameters:
     /// the trait declaration is a defaulted member parameter's single
     /// authority, so the dot spelling and the qualified
@@ -3968,7 +3967,7 @@ impl<'a> FnLower<'a, '_, '_> {
             .collect()
     }
 
-    /// The literal-only parameter defaults [F7] an inherent-member call
+    /// The literal-only parameter defaults an inherent-member call
     /// stages at the call site for its omitted trailing parameters: the
     /// checker proves each default's literal against the parameter type
     /// at the call (inherent members own their body defaults — no trait
@@ -4087,7 +4086,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// The declared parameter modes of one planned function (a declared
     /// body's or a lambda's own parameters, a def's recorded signature):
     /// a consuming (`move`) parameter's staging forwards its argument's
-    /// count and any deinit claim (C2) — the checker's forced move makes
+    /// count and any deinit claim — the checker's forced move makes
     /// the death test true at exactly that use. `None` when the body's
     /// parameters are not statically readable here.
     fn planned_param_modes(&self, index: u32) -> Option<Vec<ds_parse::ParamMode>> {
@@ -4106,7 +4105,7 @@ impl<'a> FnLower<'a, '_, '_> {
     }
 
     /// Whether the parameter at one written-argument position consumes
-    /// its argument (`move` mode, C2): the callee is a planned body (a
+    /// its argument (`move` mode): the callee is a planned body (a
     /// local callee or a trait dispatch's impl body) or a runtime
     /// dispatch through the trait member's declared signature (impl
     /// bodies agree with the declaration). Natives carry no modes, and a
@@ -4325,7 +4324,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// file-owned extern declaring the success type alone) extracts the
     /// payload into the call's result temp, and failure prints
     /// `<prefix><detail>` through println and halts on the discriminant
-    /// — the M3 stand-in for the unhandled-failure handler the `error`
+    /// — the stand-in for the unhandled-failure handler the `error`
     /// row has no source syntax for.
     fn fallible_native_result(
         &mut self,
@@ -4524,7 +4523,7 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(Place { base, shape })
     }
 
-    /// The unit-value member: the arity-0 tuple atom [B3] — the `()` of
+    /// The unit-value member: the arity-0 tuple atom — the `()` of
     /// a classed fallible native's unit-word success member, distinct
     /// from the payload-less class members (the unit tags).
     fn is_unit_member(&self, atom: TypeId) -> bool {
@@ -5055,7 +5054,7 @@ impl<'a> FnLower<'a, '_, '_> {
             // a dead Ref payload word keeps its zero-init claim: the miss
             // path decs its interned empty-string reference here (the
             // word is dead by construction — the live member's words are
-            // the only ones ever read [BL-2])
+            // the only ones ever read)
             let mut epilogue = Vec::new();
             Placement::emit_drops(&mut epilogue, none);
             self.splice(epilogue, none_jmp);
@@ -5476,7 +5475,7 @@ fn embedded_const_expr(constant: &crate::ComptimeConst, span: Span) -> Result<Ex
     })
 }
 
-/// The C words a written parameter type marshals (H5): the scalar words
+/// The C words a written parameter type marshals: the scalar words
 /// one, a `string` or `bytes` parameter its call-scoped (pointer,
 /// length) pair — two. `None` for every type outside the marshaling
 /// slice (handles, aggregates, type variables), the same slice the
@@ -5500,7 +5499,7 @@ pub(super) fn marshal_word(ty: &Type) -> Option<usize> {
     }
 }
 
-/// The return's marshaling word a written return type names (H5): the
+/// The return's marshaling word a written return type names: the
 /// scalar words their own, anything else none — the unit return rides
 /// the absent word the caller spells. Shared with the pool constant's
 /// return payload, the same slice the callee resolution validated.
@@ -5514,7 +5513,7 @@ pub(super) fn bound_ret_word(ty: &Type) -> Option<BoundRet> {
 }
 
 /// The scalar word a written type names, when it is one of the
-/// marshaling slice's atoms (H5): `int` the i64 word, `bool` the bool
+/// marshaling slice's atoms: `int` the i64 word, `bool` the bool
 /// word, `float` the f64 word. Shared with the pool constant's return
 /// payload, the same slice the callee resolution validated.
 pub(super) fn scalar_word(ty: &Type) -> Option<SlotType> {

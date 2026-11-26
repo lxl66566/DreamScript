@@ -1,42 +1,35 @@
-//! The golden negative suite: every diagnostic class the M2 checker
+//! The golden negative suite: every diagnostic class the checker
 //! rejects, driven through `ds check` on one minimal fixture per class,
 //! pinned byte-identical in both renderings. A renderer or message
 //! change is a one-line golden diff, never a silent drift.
 //!
-//! Coverage decisions: DS2001 is exempt (ordering noise confined to the
-//! get_port tension per the corpus README); DS3002 has no triggering
-//! surface yet (every M2 binding form carries an initializer, so the
-//! uninitialized state never reaches a use; the lattice base is pinned by
-//! a unit test inside the affine pass instead). DS2012 is pinned here on
-//! both of its surface routes: the tuple expression and the tuple type
-//! annotation. The tag re-key round adds DS2045 with both of its routes
-//! (the bare and qualified spellings of an unknown member) and DS2014's
-//! fn-versus-tag arm retires into the constructor collision the fixture
-//! narrows to. The fn-only round adds its retirement classes: DS1013
-//! (a lambda named at the top level), DS2015 (`self` as a type name), and
-//! DS2016 (the annotated receiver). The namespace round adds the second
-//! DS2014 route: the call-form collision between the type and value
-//! namespaces [F9]. The script-entry round adds DS1014 (a top-level
-//! statement outside the entry file); DS1015, the script-mode collision
-//! with a written `main`, fires only through `parse_script` and is pinned
-//! in ds-parse's unit suite instead. The mut-window round adds DS3006
-//! (a `const` binding fed to a `mut` window parameter [D2]) and its
-//! member-tier route (a `mut self` trait member on a `const` receiver);
-//! the affine-window round adds DS3005 (a `~Copyable` borrow returning
-//! out of its call [C2]). The
-//! signature-agreement round adds DS2018 (an impl member diverging from
-//! its trait member's registered signature) and DS2019 (an impl member
-//! re-declaring a defaulted parameter, whose single authority is the
-//! trait declaration); the trait-residuals round
-//! adds its inferred-return route and the generic-head route of DS2006
-//! (the instantiation probe's witness). The check_all wiring round adds
-//! DS2006's package-level route: the ordering-hidden generic pair whose
-//! bounds only a later impl intersects, reported by the closure pass
-//! over the closed instance set. The loop-exit round adds DS2002's lambda-frame route: a break
-//! lexically inside a lambda within a loop reports the crossed frame boundary at check time.
-//! The assignment-sugar round adds DS3006's place-store route: a place
-//! chain rooted at a `const` binding rejects by the mut window's own
-//! spelling gate.
+//! Coverage: DS2001 is exempt (ordering noise confined to the
+//! get_port tension); DS3002 has no triggering surface (every binding
+//! form carries an initializer, so the uninitialized state never
+//! reaches a use; a unit test inside the affine pass pins the lattice
+//! base instead). DS2012 is pinned on both of its surface routes: the
+//! tuple expression and the tuple type annotation. DS2045 is pinned on
+//! both of its routes (the bare and qualified spellings of an unknown
+//! member); DS2014's fn-versus-tag route is the constructor collision
+//! the fixture narrows to, and its second route is the call-form
+//! collision between the type and value namespaces. Also pinned here:
+//! DS1013 (a lambda named at the top level), DS2015 (`self` as a type
+//! name), DS2016 (the annotated receiver), DS1014 (a top-level statement
+//! outside the entry file), DS3006 (a `const` binding fed to a `mut`
+//! window parameter; the place-store route rooted at a `const` binding
+//! rejects by the mut window's own spelling gate; a `mut self` trait
+//! member on a `const` receiver), DS3005 (a `~Copyable` borrow returning
+//! out of its call), DS2018 (an impl member diverging from its trait
+//! member's registered signature), DS2019 (an impl member re-declaring a
+//! defaulted parameter, whose single authority is the trait
+//! declaration), and DS2006's three routes: the generic-head instantiation
+//! probe, the inferred return, and the package-level ordering-hidden
+//! generic pair whose bounds only a later impl intersects (reported by
+//! the closure pass over the closed instance set). DS2002's lambda-frame
+//! route is pinned too: a break lexically inside a lambda within a loop
+//! reports the crossed frame boundary at check time. DS1015, the
+//! script-mode collision with a written `main`, fires only through
+//! `parse_script` and is pinned in ds-parse's unit suite instead.
 
 use std::{
     env, fs,

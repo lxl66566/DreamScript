@@ -1,11 +1,11 @@
 //! Spanned AST of the DreamScript decided surface.
 //!
 //! Every node carries a [`Span`]. Comments are attached as [`Trivia`] payload
-//! (leading on the following item, trailing at container end) so the M1
+//! (leading on the following item, trailing at container end) so the
 //! formatter is lossless over comments; the `///` doc run a definition owns
 //! is carried a second time in [`Item::doc`] — and a member's or field's in
-//! its own `doc` slot — as attachment data (G3). A file
-//! is a `Vec<Block>` of `##`-separated blocks (G3); a file without separators
+//! its own `doc` slot — as attachment data. A file
+//! is a `Vec<Block>` of `##`-separated blocks; a file without separators
 //! is one block. Top-level definitions are order-independent data — no
 //! ordering validation happens at parse time.
 
@@ -23,7 +23,7 @@ pub struct Ast {
     pub blocks: Vec<Block>,
 }
 
-/// A `##`-delimited slice of a file (G3).
+/// A `##`-delimited slice of a file.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Block {
@@ -75,7 +75,7 @@ pub struct Item {
     pub synthesized: bool,
     /// Comments before the item's first token.
     pub leading_trivia: Vec<Trivia>,
-    /// The `///` run attached to this definition (G3): the maximal suffix
+    /// The `///` run attached to this definition: the maximal suffix
     /// of `leading_trivia` made of `///` line comments on consecutive
     /// source lines, the last immediately above the item's first token.
     /// The same trivia also stay in `leading_trivia` — the formatter's
@@ -99,7 +99,7 @@ pub struct Attribute {
     pub args: Vec<Path>,
 }
 
-/// Visibility of a definition (G4).
+/// Visibility of a definition.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Vis {
@@ -123,34 +123,34 @@ impl Vis {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ItemKind {
-    /// `import path (sel)? as alias? if cond?` (G4).
+    /// `import path (sel)? as alias? if cond?`.
     Import(ImportDecl),
     /// `const`/`var` binding (top level); also the converted shape of a
-    /// bodied `fn name(params) -> t { ... }` declaration (F2) — one binding
+    /// bodied `fn name(params) -> t { ... }` declaration — one binding
     /// of one lambda, the named-function representation downstream.
     Local(LocalDecl),
     /// A bodiless `fn name(params) -> t` signature (top level); bodied
     /// declarations convert onto [`ItemKind::Local`].
     Fn(FnDecl),
-    /// `extern fn name(params) -> t` (H5).
+    /// `extern fn name(params) -> t`.
     ExternFn(FnDecl),
-    /// `struct Name: supers? { fields, deinit? }` (B3).
+    /// `struct Name: supers? { fields, deinit? }`.
     Struct(StructDecl),
-    /// `enum Name { Case, Case(t), Case { f } }` (B3).
+    /// `enum Name { Case, Case(t), Case { f } }`.
     Enum(EnumDecl),
-    /// `tag Name` — unit tag (B1).
+    /// `tag Name` — unit tag.
     Tag(TagDecl),
-    /// `type Name = type` (F7).
+    /// `type Name = type`.
     TypeAlias(TypeAliasDecl),
-    /// `trait Name { type A; fn sig }` (B6).
+    /// `trait Name { type A; fn sig }`.
     Trait(TraitDecl),
-    /// `impl[g]? Trait? for? type { fn }` (B6).
+    /// `impl[g]? Trait? for? type { fn }`.
     Impl(ImplDecl),
-    /// `platform "std" provides <console, fsys, net, time>` (H5).
+    /// `platform "std" provides <console, fsys, net, time>`.
     Platform(PlatformDecl),
 }
 
-/// An import declaration (G4).
+/// An import declaration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImportDecl {
@@ -224,13 +224,13 @@ pub struct FnDecl {
     pub ret: Option<Type>,
     /// Body block; absent for signatures (traits, externs).
     pub body: Option<BlockExpr>,
-    /// The extern's bind target (H5): the optional plain string literal
+    /// The extern's bind target: the optional plain string literal
     /// between `extern` and `fn`, naming the `[artifacts]` entry whose
     /// installed library owns the C symbol the declaration binds. `None`
     /// on every bodied `fn` and on the compiler-wired natives' own
     /// bodiless declarations.
     pub bind: Option<BindName>,
-    /// The `///` run attached to this member declaration (G3): filled for
+    /// The `///` run attached to this member declaration: filled for
     /// trait/impl member `fn`s, where the run immediately precedes the `fn`.
     /// Top-level declarations carry their doc in [`Item::doc`], so this slot
     /// stays empty there. The same trivia also stay in the enclosing item's
@@ -238,7 +238,7 @@ pub struct FnDecl {
     pub doc: Vec<Trivia>,
 }
 
-/// The extern's bind target (H5): one plain string literal's text, the
+/// The extern's bind target: one plain string literal's text, the
 /// `[artifacts]` name the declaration resolves through the package graph.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
@@ -267,19 +267,19 @@ pub struct TypeParam {
 pub struct Param {
     /// Span of the parameter.
     pub span: Span,
-    /// Passing mode (C2): borrow (default), `mut`, consume (`move`),
+    /// Passing mode: borrow (default), `mut`, consume (`move`),
     /// or `comptime`.
     pub mode: ParamMode,
     /// Parameter name.
     pub name: Ident,
     /// Optional type annotation.
     pub ty: Option<Type>,
-    /// Optional literal-only default `x: t = lit` (F7); conversion rejects
+    /// Optional literal-only default `x: t = lit`; conversion rejects
     /// non-literal defaults, so a `Some` value is always a literal shape.
     pub default: Option<Expr>,
 }
 
-/// A parameter's passing mode (C2).
+/// A parameter's passing mode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ParamMode {
@@ -287,9 +287,9 @@ pub enum ParamMode {
     Borrow,
     /// `mut`: exclusive mutable window.
     Mut(Span),
-    /// `move`: consume (C2); exact spelling is a parse-time liberal choice.
+    /// `move`: consume; exact spelling is a parse-time liberal choice.
     Consume(Span),
-    /// `comptime`: compile-time parameter (G1).
+    /// `comptime`: compile-time parameter.
     Comptime(Span),
 }
 
@@ -317,7 +317,7 @@ pub struct StructDecl {
 pub enum StructMember {
     /// `name: type` field.
     Field(FieldDecl),
-    /// `deinit { ... }` (C5).
+    /// `deinit { ... }`.
     Deinit {
         /// Span of `deinit { ... }`.
         span: Span,
@@ -336,7 +336,7 @@ pub struct FieldDecl {
     pub name: Ident,
     /// Field type.
     pub ty: Type,
-    /// The `///` run attached to this field (G3): filled for struct-body
+    /// The `///` run attached to this field: filled for struct-body
     /// fields and enum-case payload fields, where the run immediately
     /// precedes the field. The same trivia also stay in the enclosing
     /// item's deep trivia — pure attachment data, not a move.
@@ -369,7 +369,7 @@ pub struct EnumCase {
     pub name: Ident,
     /// Tuple payload types, struct payload fields, or none.
     pub payload: EnumPayload,
-    /// The `#[default]` member annotation (the union-default ruling):
+    /// The `#[default]` member annotation:
     /// the annotation's span, `None` when the case carries none.
     pub default: Option<Span>,
 }
@@ -386,7 +386,7 @@ pub enum EnumPayload {
     Struct(Vec<FieldDecl>),
 }
 
-/// A platform declaration (H5): the platform a package is checked
+/// A platform declaration: the platform a package is checked
 /// against. The checker verifies the package's effect usage is a subset
 /// of the platform's declared row — the provides list names the world
 /// capabilities the platform serves, an absent list providing nothing
@@ -412,7 +412,7 @@ pub struct PlatformName {
     pub name: String,
 }
 
-/// A tag declaration (B1): bare the unit form, payloaded the
+/// A tag declaration: bare the unit form, payloaded the
 /// inhabited-by-construction form a minted payload case has.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
@@ -425,7 +425,7 @@ pub struct TagDecl {
     pub payload: EnumPayload,
 }
 
-/// A type alias (F7).
+/// A type alias.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TypeAliasDecl {
@@ -439,7 +439,7 @@ pub struct TypeAliasDecl {
     pub ty: Type,
 }
 
-/// A trait declaration (B6).
+/// A trait declaration.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraitDecl {
@@ -459,7 +459,7 @@ pub struct TraitDecl {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TraitMember {
-    /// Associated type `type A` (B6).
+    /// Associated type `type A`.
     AssocType {
         /// Span of the member.
         span: Span,
@@ -473,7 +473,7 @@ pub enum TraitMember {
     Fn(Box<FnDecl>),
 }
 
-/// An impl block (B6): inherent (`impl list<t> { ... }`) or
+/// An impl block: inherent (`impl list<t> { ... }`) or
 /// trait (`impl[T: ord] ord for list<t> { ... }`).
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
@@ -505,7 +505,7 @@ pub enum Delim {
     Bracket,
 }
 
-/// A type expression (B1, B4).
+/// A type expression.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Type {
@@ -520,14 +520,14 @@ pub enum Type {
         /// The application's delimiter; read only when `args` is non-empty.
         delim: Delim,
     },
-    /// `t?` — exactly `t | none` (B4).
+    /// `t?` — exactly `t | none`.
     Optional {
         /// Span of `t?`.
         span: Span,
         /// The inner type.
         inner: Box<Type>,
     },
-    /// `~t` negated constraint (C1).
+    /// `~t` negated constraint.
     Negation {
         /// Span of `~t`.
         span: Span,
@@ -552,7 +552,7 @@ pub enum Type {
         /// Right side.
         right: Box<Type>,
     },
-    /// `a - b` difference (compile-time only) (B1).
+    /// `a - b` difference (compile-time only).
     Difference {
         /// Span of `a - b`.
         span: Span,
@@ -568,7 +568,7 @@ pub enum Type {
         /// Inner type.
         inner: Box<Type>,
     },
-    /// Anonymous tuple type `(a, b)` (B3).
+    /// Anonymous tuple type `(a, b)`.
     Tuple {
         /// Span including parens.
         span: Span,
@@ -586,7 +586,7 @@ pub enum Type {
         /// Return type.
         ret: Option<Box<Type>>,
     },
-    /// Raw pointer `*const t` / `*mut t` (extern surface) (H5).
+    /// Raw pointer `*const t` / `*mut t` (extern surface).
     Ptr {
         /// Span of the whole type.
         span: Span,
@@ -595,9 +595,9 @@ pub enum Type {
         /// Pointee type.
         inner: Box<Type>,
     },
-    /// The `type` keyword as a type atom (`comptime T: type`) (G2).
+    /// The `type` keyword as a type atom (`comptime T: type`).
     TypeKw(Span),
-    /// Opaque foreign type named by a string argument, `c["sqlite3"]` (H5).
+    /// Opaque foreign type named by a string argument, `c["sqlite3"]`.
     Foreign {
         /// Span of the whole reference.
         span: Span,
@@ -672,7 +672,7 @@ pub struct Ident {
     pub name: String,
 }
 
-/// A pattern (F4).
+/// A pattern.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pattern {
@@ -751,7 +751,7 @@ pub enum Pattern {
     },
 }
 
-/// One match arm (F4).
+/// One match arm.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchArm {
@@ -767,7 +767,7 @@ pub struct MatchArm {
     pub body: Expr,
 }
 
-/// A `{ ... }` block; its value is the final expression (F2).
+/// A `{ ... }` block; its value is the final expression.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockExpr {
@@ -793,7 +793,7 @@ pub struct Stmt {
     pub trailing_trivia: Vec<Trivia>,
 }
 
-/// A statement is a binding or an expression (F1).
+/// A statement is a binding or an expression.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StmtKind {
@@ -807,21 +807,21 @@ pub enum StmtKind {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Expr {
-    /// Integer literal (B7); text is unparsed digits plus suffix.
+    /// Integer literal; text is unparsed digits plus suffix.
     Literal {
         /// Span of the literal.
         span: Span,
         /// The literal.
         lit: Literal,
     },
-    /// Interpolating or plain string; holes are structured (F6).
+    /// Interpolating or plain string; holes are structured.
     Str {
         /// Span including quotes.
         span: Span,
         /// Parts in source order.
         parts: Vec<StrPart>,
     },
-    /// A raw string; no escapes, no interpolation (F6).
+    /// A raw string; no escapes, no interpolation.
     RawStr {
         /// Span including `r`, hashes, and quotes.
         span: Span,
@@ -830,7 +830,7 @@ pub enum Expr {
         /// The raw content between the delimiters.
         text: String,
     },
-    /// A lambda: `(x, y: t) -> t { ... }` or `x => e` (F2).
+    /// A lambda: `(x, y: t) -> t { ... }` or `x => e`.
     Lambda {
         /// Span of the whole lambda.
         span: Span,
@@ -845,7 +845,7 @@ pub enum Expr {
         /// Body expression.
         body: Box<Expr>,
     },
-    /// A path expression (`x`, `Trait::f`) (F3).
+    /// A path expression (`x`, `Trait::f`).
     Path {
         /// Span of the path.
         span: Span,
@@ -877,7 +877,7 @@ pub enum Expr {
         /// Inner expression.
         inner: Box<Expr>,
     },
-    /// A list literal `[a, b, c]` (F7, B3); the empty form types only
+    /// A list literal `[a, b, c]`; the empty form types only
     /// against an expected `list[t]`.
     List {
         /// Span including brackets.
@@ -885,13 +885,13 @@ pub enum Expr {
         /// Elements in source order.
         items: Vec<Expr>,
     },
-    /// A call `f(args)`; `trailing` is the block-argument lambda (F7).
+    /// A call `f(args)`; `trailing` is the block-argument lambda.
     Call {
         /// Span of the whole call.
         span: Span,
         /// Called expression.
         callee: Box<Expr>,
-        /// Arguments; named arguments follow positional ones (F7).
+        /// Arguments; named arguments follow positional ones.
         args: Vec<CallArg>,
         /// Trailing block argument, if present.
         trailing: Option<Box<Expr>>,
@@ -900,7 +900,7 @@ pub enum Expr {
         /// outside the default vocabulary.
         selection: Option<Ident>,
     },
-    /// Field access `x.f` — for calls, UFCS applies (F3).
+    /// Field access `x.f` — for calls, UFCS applies.
     Field {
         /// Span of `x.f`.
         span: Span,
@@ -909,7 +909,7 @@ pub enum Expr {
         /// Field name.
         name: Ident,
     },
-    /// Index `xs[i]` (F5).
+    /// Index `xs[i]`.
     Index {
         /// Span of `xs[i]`.
         span: Span,
@@ -930,7 +930,7 @@ pub enum Expr {
         /// The comptime constant name expression.
         name: Box<Expr>,
     },
-    /// The map constructor's type application `map[k, v]` (F9, B3): the
+    /// The map constructor's type application `map[k, v]`: the
     /// one expression-position application with two type arguments, pinned
     /// to the head spelled `map` by the grammar — no other head takes a
     /// two-element bracket. Call position constructs the empty map
@@ -958,14 +958,14 @@ pub enum Expr {
         /// The fn type itself (always `Type::Fn`).
         ty: Box<Type>,
     },
-    /// Postfix `?` propagation (E4).
+    /// Postfix `?` propagation.
     Try {
         /// Span of `e?`.
         span: Span,
         /// Operand.
         expr: Box<Expr>,
     },
-    /// Unary `-`, `-%`, `!` (F5, B7).
+    /// Unary `-`, `-%`, `!`.
     Unary {
         /// Span including the operator.
         span: Span,
@@ -974,7 +974,7 @@ pub enum Expr {
         /// Operand.
         expr: Box<Expr>,
     },
-    /// `expr is type` narrowing test (F7); the right side is a type.
+    /// `expr is type` narrowing test; the right side is a type.
     Is {
         /// Span of the whole test.
         span: Span,
@@ -984,7 +984,7 @@ pub enum Expr {
         ty: Box<Type>,
     },
     /// A binary operation (arithmetic, shifts, comparison, `in`,
-    /// logical, bitwise) (F5).
+    /// logical, bitwise).
     Binary {
         /// Span of the whole expression.
         span: Span,
@@ -995,7 +995,7 @@ pub enum Expr {
         /// Right side.
         right: Box<Expr>,
     },
-    /// A range `a..b` or `a..=b` (F7).
+    /// A range `a..b` or `a..=b`.
     Range {
         /// Span of the whole range.
         span: Span,
@@ -1017,7 +1017,7 @@ pub enum Expr {
         /// Value.
         right: Box<Expr>,
     },
-    /// `if cond { a } else { b }` — an expression (F1).
+    /// `if cond { a } else { b }` — an expression.
     If {
         /// Span of the whole expression.
         span: Span,
@@ -1028,7 +1028,7 @@ pub enum Expr {
         /// `else` block or `else if` chain.
         else_: Option<Box<Expr>>,
     },
-    /// `match scrutinee { arms }` — an expression (F4).
+    /// `match scrutinee { arms }` — an expression.
     Match {
         /// Span of the whole expression.
         span: Span,
@@ -1046,7 +1046,7 @@ pub enum Expr {
         /// Body.
         body: BlockExpr,
     },
-    /// `for pat in iter { body }` or `for (pat in iter) body` (F7).
+    /// `for pat in iter { body }` or `for (pat in iter) body`.
     /// The comptime flag spells `for comptime`: the loop expands once
     /// per projected field at check time, the record's name a constant
     /// each copy (the comptime field seam).
@@ -1063,7 +1063,7 @@ pub enum Expr {
         /// fields; an ordinary loop leaves this false.
         comptime: bool,
     },
-    /// `return e?` — also the `or return e` tail (F2, E4).
+    /// `return e?` — also the `or return e` tail.
     Return {
         /// Span of the whole return.
         span: Span,
@@ -1079,21 +1079,21 @@ pub enum Expr {
     /// leaves `parse`, and downstream passes must refuse it rather than
     /// read it as a keyword.
     Invalid(Span),
-    /// `nursery { ... }` (E2).
+    /// `nursery { ... }`.
     Nursery {
         /// Span of the whole expression.
         span: Span,
         /// Body.
         body: BlockExpr,
     },
-    /// `spawn { ... }` (E2).
+    /// `spawn { ... }`.
     Spawn {
         /// Span of the whole expression.
         span: Span,
         /// Body.
         body: BlockExpr,
     },
-    /// `defer { ... }` scope-exit sugar (E5).
+    /// `defer { ... }` scope-exit sugar.
     Defer {
         /// Span of the whole expression.
         span: Span,
@@ -1146,7 +1146,7 @@ impl Expr {
     }
 }
 
-/// One argument of a call (F7): positional, or named (`f(x: 1)`).
+/// One argument of a call: positional, or named (`f(x: 1)`).
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallArg {
@@ -1158,7 +1158,7 @@ pub struct CallArg {
     pub value: Expr,
 }
 
-/// One part of an interpolated string (F6).
+/// One part of an interpolated string.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StrPart {
@@ -1189,14 +1189,14 @@ pub enum StrPart {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Literal {
-    /// Integer (B7): raw digits text (radix prefix kept) and suffix.
+    /// Integer: raw digits text (radix prefix kept) and suffix.
     Int {
         /// Suffix text, e.g. `i64`; empty when unsuffixed.
         suffix: String,
         /// Raw digit text without separators, e.g. `0xff`.
         text: String,
     },
-    /// Float (B7): raw mantissa/exponent text and suffix.
+    /// Float: raw mantissa/exponent text and suffix.
     Float {
         /// Suffix text, e.g. `f32`; empty when unsuffixed.
         suffix: String,
@@ -1211,25 +1211,25 @@ pub enum Literal {
     Bool(bool),
 }
 
-/// Unary operator (F5, B7).
+/// Unary operator.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UnaryOp {
     /// Negate (traps on int-min).
     Neg,
-    /// Negate wrapping (B7).
+    /// Negate wrapping.
     WrapNeg,
     /// Boolean not.
     Not,
 }
 
-/// Binary operator — the frozen set (F5).
+/// Binary operator — the frozen set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryOp {
     /// `+` (traps).
     Add,
-    /// `+%` wrapping (B7).
+    /// `+%` wrapping.
     WrapAdd,
     /// `-`.
     Sub,
@@ -1247,7 +1247,7 @@ pub enum BinaryOp {
     Shl,
     /// `>>`.
     Shr,
-    /// `==` structural (B9).
+    /// `==` structural.
     Eq,
     /// `!=`.
     Ne,
@@ -1259,7 +1259,7 @@ pub enum BinaryOp {
     Gt,
     /// `>=`.
     Ge,
-    /// `x in y` containment (F7).
+    /// `x in y` containment.
     In,
     /// `&&`.
     And,

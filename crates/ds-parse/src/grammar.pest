@@ -1,5 +1,4 @@
-// DreamScript grammar — the M1 decided surface (docs/en/design-decisions.md
-// F1-F7, B3, B4, B7, G3). Newline sensitivity: statements are terminated by
+// DreamScript grammar. Newline sensitivity: statements are terminated by
 // newlines (or by the enclosing `}`), binary operators must sit on the same
 // line as their left operand, and only `.`-continuation may open on the next
 // line. `expr_nos` variants ban struct literals and trailing lambda blocks in
@@ -105,7 +104,7 @@ int_suffix = { "i128" | "i64" | "i32" | "i16" | "i8" | "isize"
 fsuffix = { "f64" | "f32" }
 exp_part = @{ ("e" | "E") ~ ("+" | "-")? ~ digits }
 
-// B7: separators between digits, radix prefixes, width/float suffixes.
+// Separators between digits, radix prefixes, width/float suffixes.
 radix_int = @{ ("0x" ~ hex_digits | "0o" ~ oct_digits | "0b" ~ bin_digits) ~ int_suffix? }
 dec_int = @{ digits ~ int_suffix? }
 int_lit = @{ radix_int | dec_int }
@@ -117,8 +116,8 @@ float_lit = @{ digits ~ float_rest }
 esc = @{ "\\" ~ ( "n" | "t" | "r" | "0" | "\\" | "\"" | "$" | "'"
         | "u" ~ "{" ~ hex_digit{1,6} ~ "}" ) }
 
-// F6: `$x` and `${expr}` interpolation holes are structured pairs, not
-// lexer-concatenated text. Ordinary strings are single-line [6.1], so a
+// `$x` and `${expr}` interpolation holes are structured pairs, not
+// lexer-concatenated text. Ordinary strings are single-line, so a
 // hole's spacing is `h` (same line only): a hole cannot carry the string
 // across a newline.
 str_text = @{ (!("\"" | "$" | "\\" | nl) ~ ANY)+ }
@@ -154,20 +153,20 @@ type_atom = _{ fn_type | ptr_type | tuple_type | case_type | path_type | type_kw
 type_kw = { kw_type }
 fn_type = { kw_fn ~ h ~ params ~ ret_ann? }
 ptr_type = { "*" ~ h ~ ("const" ~ !ident_cont | kw_mut) ~ sp ~ type_unary }
-// `()`, `(t)`, and `(a, b)` — unit, parenthesized, and tuple types [B3].
+// `()`, `(t)`, and `(a, b)` — unit, parenthesized, and tuple types.
 tuple_type = { "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
 case_type = { path ~ h ~ "(" ~ sp ~ (type_expr ~ (sp ~ "," ~ sp ~ type_expr)* ~ h ~ ","?)? ~ sp ~ ")" }
 path_type = { type_path ~ type_args? }
 type_path = { ident ~ (path_sep ~ h ~ ident)* }
 path_sep = _{ "::" | "." }
 // Generic application takes bracketed arguments (`list[int]`, the corpus and
-// record spelling); angle arguments are accepted as a legacy alias of the
-// C2 example text and flagged for M2 canonicalization.
+// record spelling); angle arguments are accepted as a legacy alias and
+// flagged for canonicalization.
 type_args = _{ type_args_bracket | type_args_angle }
 type_args_bracket = { "[" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ "]" }
 type_args_angle = { "<" ~ sp ~ type_arg ~ (sp ~ "," ~ sp ~ type_arg)* ~ sp ~ ","? ~ sp ~ ">" }
 // A type argument is a type, or a string literal naming an opaque foreign
-// type (`c["sqlite3"]`, the extern surface ) [H5].
+// type (`c["sqlite3"]`, the extern surface).
 type_arg = _{ type_expr | foreign_name }
 foreign_name = _{ string_lit | raw_hashed | raw_zero }
 
@@ -186,7 +185,7 @@ pat_ident = { ident ~ !(h ~ ("::" | "(" | "{")) }
 pat_neg = @{ "-" }
 pat_literal = { pat_neg? ~ (float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false) }
 // A qualified or tail-taking name pattern: one path parse for every shape.
-// A bare qualified `type::label` (F9.5) carries no call or struct tail —
+// A bare qualified `type::label` carries no call or struct tail —
 // `pat_ident`'s exclusion of the `::`-taking spellings routes them here.
 pat_head = { path ~ h ~ (pat_call | pat_struct)? }
 pat_call = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ sp ~ ","?)? ~ sp ~ ")" }
@@ -195,15 +194,16 @@ pat_field = { ident ~ (h ~ ":" ~ sp ~ pattern)? }
 tuple_pattern = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ pt_trail?)? ~ sp ~ ")" }
 
 // ===== expressions: precedence chain (loose to tight) =====
-// assign > or-extraction > range > || > && > is > | > ^ > & > comparison
-// (+ `in`, F5's C-family table) > shifts > additive > multiplicative >
-// unary > postfix > primary
+// assign > range > || > && > is > | > ^ > & > comparison (+ `in`) > shifts
+// > additive > multiplicative > unary > postfix > primary. The order is
+// frozen: each level binds tighter than the one above it. Reordering a level
+// reparses every expression silently; adding one is a surface change.
 
 expr = { assign_lvl }
 
-// Compound `*=` `/=` `%=` `<<=` `>>=` are kept as adopted laxity over the F5
-// table (which lists plain assignment only): the conformance corpus's
-// arithmetic demos use them, and they cost no new precedence slot.
+// Compound `*=` `/=` `%=` `<<=` `>>=` ride one additional assign level: the
+// conformance corpus's arithmetic demos use them, and they cost no new
+// precedence slot.
 assign_op = { "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "=" }
 assign_lvl = { range_lvl ~ (h ~ assign_op ~ sp ~ range_lvl)* }
 
@@ -219,7 +219,7 @@ bitor_lvl = { bitxor_lvl ~ (h ~ "|" ~ sp ~ bitxor_lvl)* }
 bitxor_lvl = { bitand_lvl ~ (h ~ "^" ~ sp ~ bitand_lvl)* }
 bitand_lvl = { cmp_lvl ~ (h ~ "&" ~ sp ~ cmp_lvl)* }
 cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
-// `in` sits at comparison level per F5 (tighter than `&&` and the bitwise
+// `in` sits at comparison level (tighter than `&&` and the bitwise
 // levels), so `x in xs && flag` reads `(x in xs) && flag`. Its right side
 // still admits one bare range (`x in a..b`), with range-shift-level ends.
 cmp_lvl = { shift_lvl ~ cmp_tail* }
@@ -261,22 +261,24 @@ call_select = { h ~ "as" ~ !ident_cont ~ h ~ ident }
 // a dot immediately followed by the bracketed constant name expression,
 // disjoint from the plain `xs[i]` index by its dot.
 keyed_field = { sp ~ "." ~ h ~ postfix_index }
+// An index takes exactly one operand: `xs[a..b]` carries a range operand, and
+// no collection index accepts one, so no slicing form exists.
 postfix_index = { "[" ~ sp ~ ctor_arg ~ sp ~ "]" }
 // A keyword is a legal field name after `.` (the record uses `f.type`).
 
 // A constructor bracket's content: a type spelled as an expression, or
-// the one type form no expression can spell — a fn type [F2]
+// the one type form no expression can spell — a fn type
 // (`list[fn(int) -> int]()`). `fn` is reserved and heads no expression,
 // so the ordered alternative cannot misfire on an ordinary index or map
 // application.
 ctor_arg = _{ fn_type | expr }
 
-// A list literal `[a, b, c]` [F7, B3]: newline-crossing spacing like
+// A list literal `[a, b, c]`: newline-crossing spacing like
 // every bracketed form; the empty `[]` types only against an expected
 // `list[t]` (bidirectional inference, the checker's).
 list_lit = { "[" ~ sp ~ (expr ~ (sp ~ "," ~ sp ~ expr)* ~ h ~ ","?)? ~ sp ~ "]" }
 
-// F7: call arguments are positional or named (`f(x: 1)`); named arguments
+// Call arguments are positional or named (`f(x: 1)`); named arguments
 // follow positional ones. Duplicate names and positional-after-named are
 // conversion diagnostics, not grammar failures.
 args = { (arg ~ (sp ~ "," ~ sp ~ arg)* ~ h ~ ","?)? }
@@ -308,7 +310,7 @@ lambda_bare = { ident ~ h ~ "=>" ~ sp ~ lambda_rhs }
 lambda_rhs = { block_expr | expr }
 
 params = { "(" ~ sp ~ (param ~ (sp ~ "," ~ sp ~ param)* ~ h ~ ","?)? ~ sp ~ ")" }
-// F7: parameters take literal-only defaults (`x: int = 0`); the grammar is
+// Parameters take literal-only defaults (`x: int = 0`); the grammar is
 // total (any expression parses) and conversion rejects non-literal defaults.
 param = { param_mode? ~ h ~ ident
          ~ (h ~ ":" ~ sp ~ param_mode? ~ sp ~ type_expr ~ param_default?)? }
@@ -319,8 +321,8 @@ control = _{ if_expr | match_expr | while_expr | for_expr | return_expr
 
 if_expr = { kw_if ~ sp ~ expr_nos ~ sp ~ block_expr ~ (sp ~ kw_else ~ sp ~ (if_expr | block_expr))? }
 match_expr = { kw_match ~ sp ~ expr_nos ~ sp ~ "{" ~ sp ~ arm_list? ~ sp ~ "}" }
-// Arms are comma-separated [F4]; a newline additionally separates arms of
-// any body shape — 6.1 rules newline separation canonical for match arms.
+// Arms are comma-separated; a newline additionally separates arms of any
+// body shape, and newline separation is the canonical form.
 arm_list = { arm ~ arm_sep* ~ h ~ ","? }
 arm_sep = _{ (sp ~ "," ~ sp ~ arm) | (nlreq ~ arm) }
 arm = { arm_pat ~ guard? ~ h ~ "=>" ~ sp ~ arm_body }
@@ -331,7 +333,7 @@ arm_body = { block_expr | expr }
 while_expr = { kw_while ~ sp ~ expr_nos ~ sp ~ block_expr }
 // `for comptime` is the expansion loop over a written struct's fields
 // (the comptime field seam); the plain loop keeps its shape. The flag
-// precedes the pattern, so a binding may no longer spell `comptime`.
+// precedes the pattern, so a binding cannot be named `comptime`.
 for_expr = { kw_for ~ sp ~ kw_comptime? ~ sp ~ (for_paren | for_plain) }
 for_plain = { pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ block_expr }
 for_paren = { "(" ~ sp ~ pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ ")" ~ sp ~ for_body }
@@ -346,8 +348,8 @@ defer_expr = { kw_defer ~ sp ~ block_expr }
 
 literal = _{ float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false }
 
-// The map constructor's two-argument type application `map[k, v]` [F9,
-// B3]: pinned to the head spelled `map`, so no other expression head takes
+// The map constructor's two-argument type application `map[k, v]`: pinned
+// to the head spelled `map`, so no other expression head takes
 // a two-element bracket — arbitrary two-parameter type application stays
 // out of call position. The bracketed arguments are type spellings
 // parsed as expressions, the list application's `[t]` convention.
@@ -393,8 +395,8 @@ item = { (attr ~ sp)* ~ vis? ~ h ~ item_kind }
 attr = { "#" ~ "[" ~ sp ~ ident ~ attr_args? ~ sp ~ "]" }
 attr_args = { "(" ~ sp ~ (attr_arg ~ (sp ~ "," ~ sp ~ attr_arg)* ~ sp ~ ","?)? ~ sp ~ ")" }
 // `==` is the one non-path derive spelling: the grammar admits it so the
-// B9 refusal (equality is never derived) owns the diagnostic instead of
-// a syntax error; it converts as a one-segment path named `==`.
+// equality refusal (equality is never derived) owns the diagnostic instead
+// of a syntax error; it converts as a one-segment path named `==`.
 attr_arg = { path | "==" }
 
 vis = { kw_pub ~ ("(" ~ h ~ "pkg" ~ !ident_cont ~ h ~ ")")? }
@@ -410,7 +412,7 @@ sel_item = { ident ~ (h ~ "as" ~ !ident_cont ~ sp ~ ident)? }
 import_alias = { "as" ~ !ident_cont ~ sp ~ ident }
 import_cond = { kw_if ~ sp ~ expr_nos }
 
-// H5: `platform "std" provides <console, fsys, net, time>` — the platform
+// `platform "std" provides <console, fsys, net, time>` — the platform
 // a package is checked against (the checker's effect-subset gate). The
 // provides clause is optional: a platform that provides nothing
 // (`platform "embed"`) is the embed target.
@@ -422,7 +424,7 @@ generics = { "[" ~ sp ~ (gparam ~ (sp ~ "," ~ sp ~ gparam)* ~ sp ~ ","?)? ~ sp ~
 gparam = { ident ~ (h ~ ":" ~ sp ~ type_expr)? }
 
 fn_item = { kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? ~ (sp ~ block_expr)? }
-// H5: `extern fn name(params) -> t` keeps the compiler-wired reading
+// `extern fn name(params) -> t` keeps the compiler-wired reading
 // (the name addresses a native the lowering answers), while the optional
 // plain string names the bind target — the `[artifacts]` entry whose
 // installed library owns the C symbol the declaration binds.
@@ -478,7 +480,7 @@ impl_member = _{ fn_item | local }
 // Like trait member lists: comma or newline separators, trailing comma OK.
 impl_body = { "{" ~ sp ~ (impl_member ~ (decl_sep ~ impl_member)* ~ decl_sep?)? ~ sp ~ "}" }
 
-// G3: a file is `##`-separated blocks; a file without separators is one
+// A file is `##`-separated blocks; a file without separators is one
 // block. A separator is a line-initial `##` only (column 0): mid-line or
 // indented `##` is a parse error, never a separator. The rest of a
 // separator line is separator text. A top-level expression is the

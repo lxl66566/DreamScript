@@ -4,7 +4,7 @@
 //! tag, then tests its literal/or-ladder sub-patterns over the case's
 //! claimed region offsets at the section's top — a mismatch sliding to
 //! the next arm's dispatch entry, re-running its tag tests over the full
-//! scrutinee (the B2 remainder rule's tag-dispatch form, no reordering)
+//! scrutinee (the remainder rule's tag-dispatch form, no reordering)
 //! — and binds its binding sub-patterns there (a one-word payload binds
 //! its word, a struct-typed payload its whole span, and a nested struct
 //! sub-pattern over a struct-typed payload tests and binds its fields at
@@ -478,7 +478,7 @@ fn main() -> int {
         "alternatives with payload tests must name one member",
     );
     // an atom-named payload binder resolves through the type namespace
-    // [F9], so it binds nothing — and the payload has no union of its
+    // so it binds nothing — and the payload has no union of its
     // own to test
     refused(
         r#"

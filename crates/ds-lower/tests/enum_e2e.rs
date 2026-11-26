@@ -1,4 +1,4 @@
-//! End-to-end for the enum-block payload-case story [B3]: a minted bare
+//! End-to-end for the enum-block payload-case story: a minted bare
 //! case and a tuple-payload case construct, dispatch, and compare
 //! exactly like standalone tags and structs — parse, check, lower,
 //! round-trip, install, run, golden stdout.

@@ -1,4 +1,4 @@
-//! The assignment sugar end to end (ruled 2026-11-25): `p.x = v` and a
+//! The assignment sugar end to end: `p.x = v` and a
 //! nested field path store into the var-bound root's frame sub-span in
 //! place; `xs[i] = v` stages the collection's `set` native exactly like
 //! the member call's own spelling (identical behavior by construction);

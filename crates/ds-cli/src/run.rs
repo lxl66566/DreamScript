@@ -29,17 +29,17 @@ use ds_vm::{
 
 use crate::{package, run_cache::RunCache, shutdown::ShutdownWatch, source};
 
-/// The CLI is the platform provider (H5, E1): every run installs the
+/// The CLI is the platform provider: every run installs the
 /// default `std` platform handler (console, fsys, net, time) into its
 /// registry, and the console-only `embed` handler beside it under its
 /// own name, so a source declaring `platform "embed"` runs against
 /// the bare face — every world op beyond print/println refusing at
-/// install as an unprovided op. This must precede [`Vm::install_dsmod`]
-/// — the loader validates pool FuncRefs against the installed
-/// platforms' served ops at install time, so a world call site in the
-/// module would fail as an unprovided or unresolved op otherwise
-/// (`Vm::new` installs the builtin core only, and too late for this
-/// path regardless).
+/// install as an unprovided op. Every native table and the platform go
+/// in before the module: this must precede [`Vm::install_dsmod`], whose
+/// pool FuncRefs resolve against the installed tables at install time,
+/// so a world call site in the module would fail as an unprovided or
+/// unresolved op otherwise (`Vm::new` installs the builtin core only,
+/// and too late for this path regardless).
 fn provide_platform(registry: &mut ModuleRegistry) {
     registry.install_platform(Platform::std());
     registry.install_platform(Platform::embed());
@@ -274,7 +274,7 @@ fn run_package(args: &RunArgs, graph: &package::Graph, script: bool) -> Result<P
     );
     // the root's members enter the cache key the way the graph's dep
     // identities do: a manifest root composes every member of its
-    // namespace (G3), and the composed fold re-keys on a sibling edit
+    // namespace, and the composed fold re-keys on a sibling edit
     let members = package::root_members(&args.file)?;
     if let Some(module) = cache.lookup_root(&args.file, &members) {
         return run_cached_package(module, graph, &cache);
@@ -328,7 +328,7 @@ fn install_package_root(
 ) -> Result<Vm> {
     let mut registry = ModuleRegistry::new();
     provide_platform(&mut registry);
-    // the graph's bindable artifacts install before the modules (H5): the
+    // the graph's bindable artifacts install before the modules: the
     // deps-first walk's pool validation resolves a bound extern's
     // constant against the bound tables, exactly like a platform's
     // served ops — a load that refused leaves the artifact uninstalled
@@ -464,7 +464,7 @@ fn resolve_and_run(
 /// trap carries no report at all — the host's door observed the event
 /// and owns the status.
 fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
-    // the error-trace switch (H7) is a VM debug switch the boundary
+    // the error-trace switch is a VM debug switch the boundary
     // report reads: armed, every `?` error leg records the failing
     // frame's position into the fiber's private ring, and an
     // unhandled-failure run prints the chain beside the report
@@ -722,7 +722,7 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
     }
 }
 
-/// Prints the recorded error chain (H7) to stderr beside the boundary's
+/// Prints the recorded error chain to stderr beside the boundary's
 /// unhandled-error report: one line per `?` error leg the entry fiber
 /// took, innermost first, each named through the module's span table.
 /// A chain the ring never recorded (no `?` on the path, or a stripped

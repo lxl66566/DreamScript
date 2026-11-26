@@ -1,6 +1,6 @@
 //! The shared source generator for the VM execution fuzz leg's match
 //! and fork-join vocabulary: fuzz bytes become one well-typed DS program
-//! — straight-line episodes over the pattern rounds' landed shapes and
+//! — straight-line episodes over the pattern shapes and
 //! the fork-join combinators — that runs the whole chain end to end:
 //! parse, the derive-expanding check, lower, module round trip, loader
 //! install, VM run, and the captured answers must equal the generator's
@@ -103,7 +103,7 @@
 //! `urls` list const embedding its elements over the list seam, its
 //! trip count the const's own two elements. A drawn refusal variant
 //! keeps the honest boundary in the set: `response`'s name binds in the
-//! import row while its value use keeps the local spelling's own M3
+//! import row while its value use keeps the local spelling's own
 //! contract refusal at lowering, the episode's compile refusing exactly
 //! once and never running. The parser-budget episode draws the chain
 //! and depth shapes at both sides of the parser's budgets: long type
@@ -275,7 +275,7 @@ pub struct Drawn {
     /// read by length.
     pub std_url_consts: u32,
     /// The `response` member's honest boundary drawn: the opaque
-    /// bodiless struct's name binding while its value use keeps the M3
+    /// bodiless struct's name binding while its value use keeps the
     /// contract refusal at lowering, the episode refusing exactly once
     /// and never running.
     pub std_opaque_refusals: u32,
@@ -329,7 +329,7 @@ pub struct Program {
     /// surface's link facts.
     pub std_members: String,
     /// Whether the @std episode drew the `response` value-use refusal:
-    /// the opaque member's name binds while the value use keeps the M3
+    /// the opaque member's name binds while the value use keeps the
     /// contract refusal at lowering, the module refusing and never
     /// running.
     pub std_opaque: bool,
@@ -1836,7 +1836,7 @@ impl Gen<'_> {
     /// answered by the natives the consumer's own lowering wires by name.
     /// A drawn refusal variant keeps the honest boundary in the set:
     /// `response`'s name binds in the import row while its value use
-    /// keeps the local spelling's own M3 contract refusal, the episode's
+    /// keeps the local spelling's own contract refusal, the episode's
     /// compile refusing exactly once and never running (the oracle
     /// staying empty).
     fn ep_std_graph(&mut self) {
@@ -1901,7 +1901,7 @@ impl Gen<'_> {
         let mut source = import_row;
         if self.std_opaque {
             // the opaque member's honest boundary: the name binds in the
-            // import row while the value use keeps the M3 contract
+            // import row while the value use keeps the contract
             // refusal, the local spelling's own pass-through spelling
             source.push_str("\nfn pass(r: response) -> response {\n  r\n}\n");
         }
@@ -2641,7 +2641,7 @@ fn pub_chain(program: &Program) -> Option<PubChain> {
 /// ambient member, the members file beside it — while the @std row
 /// binds through the linked surface over both. The drawn `response`
 /// refusal variant (the opaque member's name binding while its value
-/// use keeps the M3 contract refusal) refuses at the consumer's own
+/// use keeps the contract refusal) refuses at the consumer's own
 /// lowering — asserted at its seam — so a refusal answers `None` and
 /// the episode never runs. Answers the compiled consumer module, its
 /// dep list naming the reserved package at the core's own identity
@@ -2718,7 +2718,7 @@ fn std_chain(program: &Program) -> Option<Module> {
         Ok(lowered) => lowered,
         Err(LowerError::Unsupported { span, .. }) if program.std_opaque => {
             // the honest refusal: the opaque member's value use keeps the
-            // local spelling's own M3 contract refusal, refused at the
+            // local spelling's own contract refusal, refused at the
             // consumer's own file exactly once
             assert_eq!(
                 span.file, std_id,

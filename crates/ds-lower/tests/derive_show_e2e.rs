@@ -1,4 +1,4 @@
-//! The derive-show acceptance [G1]: `#[derive(show)]` on a struct, an
+//! The derive-show acceptance: `#[derive(show)]` on a struct, an
 //! enum, and a tag expands into ordinary `impl show`
 //! items after parse, and the derived member is callable through the
 //! same trait-dispatch path as a hand-written impl — the direct dot call

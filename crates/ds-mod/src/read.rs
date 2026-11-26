@@ -334,7 +334,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
 }
 
 /// Like [`read`], then verifies the checked source hash against `source`
-/// (PEP 552 style hash validation, never mtime) (G3.5).
+/// (PEP 552 style hash validation, never mtime).
 ///
 /// # Errors
 ///
@@ -558,7 +558,7 @@ fn parse_blocks(
 }
 
 /// Parses a versioned placeholder payload (type metadata, effect rows):
-/// payload version 0 plus a reserved zero uleb. Completed at M2/M3 inside
+/// payload version 0 plus a reserved zero uleb, inside
 /// the locked framing.
 fn parse_placeholder(bytes: &[u8], offset: usize, len: usize) -> Result<(), ReadError> {
     let mut p = Cursor::section(bytes, offset, len);

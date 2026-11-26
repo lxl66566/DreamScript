@@ -1,10 +1,9 @@
 //! dsmod, DreamScript's binary module format: writer, validating reader,
 //! mmap loader, and cache path layout.
 //!
-//! The byte layout implements the LOCKED contract of design decisions G3.5
-//! and BL-7 (`docs/en/design-decisions.md`). Any change to the header, the
-//! section framing, or the constants payload requires a written
-//! justification recorded in that file before the code changes.
+//! The byte layout is locked: readers, writers, and installed artifacts share
+//! these bytes, so a change to the header, the section framing, or the
+//! constants payload needs written justification and a format-version decision.
 //!
 //! # Byte layout
 //!
@@ -23,8 +22,8 @@
 //! 7       1     collector flags (reserved; bit 0 = two-hook interface active)
 //! 8       8     collector hook slot 0 (reserved; 0 = dormant)
 //! 16      8     collector hook slot 1 (reserved; 0 = dormant)
-//! 24      4     max call depth (committed BL-7 field; 0 = value pending)
-//! 28      4     IR-version checksum (committed BL-7 field; 0 = value pending)
+//! 24      4     max call depth (0 = value pending)
+//! 28      4     IR-version checksum (0 = value pending)
 //! 32      var   target triple (uleb length + UTF-8 bytes), only when the
 //!               target class is `triple`
 //! ...     var   module name (uleb length + UTF-8 bytes)
@@ -57,14 +56,14 @@
 //!
 //! # Locked now, completed later
 //!
-//! The header, the section framing, and the constants payload are locked
-//! now. The BL-7 module-level scalars (max call depth, IR-version
+//! The header, the section framing, and the constants payload are locked.
+//! The module-level scalars (max call depth, IR-version
 //! checksum) are committed fields with pending values: writers emit 0
-//! until M3 defines their computation, and the reader accepts and
+//! until a lowering defines their computation, and the reader accepts and
 //! round-trips non-zero values without validating them. The blocks payload
 //! is version 5 (below); the type-metadata and effect-rows payloads remain
 //! versioned minimal placeholders (payload version 0 plus a reserved zero
-//! uleb), completed at M2/M3 inside the locked framing by bumping their
+//! uleb), completed inside the locked framing by bumping their
 //! per-section payload version. The debug-spans payload is the
 //! pc-to-span table — a file-name table plus, per covered function, the
 //! ascending region starts naming file, line, and column — and the only
@@ -73,7 +72,7 @@
 //! plus a reserved zero uleb, the placeholder sections' framing), so a
 //! later reshape bumps the payload version, not the format version.
 //!
-//! # Blocks payload, version 5 `[BL-5, BL-6, BL-7]`
+//! # Blocks payload, version 5
 //!
 //! ```text
 //! u8    payload version = 4
@@ -91,7 +90,7 @@
 //!                      constants-pool encoding (the function's own pool;
 //!                      uop ConstIdx operands index it)
 //!   uleb               code word count, then that many u32 LE canonical
-//!                      uop words (ds-abi's BL-5 encoding)
+//!                      uop words (the ds-abi encoding)
 //!   u32 + u32          entry-descriptor placeholder word pair: zero on
 //!                      disk, filled with tier pointers by the loader at
 //!                      install time
@@ -103,7 +102,7 @@
 //! uleb  tag-table count (the name side of the code's tag ids; version
 //!      3's addition; version 5 adds the declaring declaration name),
 //!      then per row:
-//!   uleb len + UTF-8   the declaring declaration's name (F9.5)
+//!   uleb len + UTF-8   the declaring declaration's name
 //!   uleb len + UTF-8   member atom's declared label
 //!   uleb               the module-wide tag id
 //! ```
@@ -115,9 +114,9 @@
 //! agreement, slot-range checking,
 //! and pool-index resolution are loader/VM concerns, not format concerns.
 //!
-//! # Two-hook collector interface (C4, H4)
+//! # Two-hook collector interface
 //!
-//! The two reserved u64 hook slots plus the activity flag commit the H4(d)
+//! The two reserved u64 hook slots plus the activity flag commit the
 //! two-hook collector interface (cycle-candidate registration, weak refs)
 //! in the header from byte one. The slots are dormant (zero) today; the
 //! reader tolerates and preserves any stored values so activating the
@@ -153,12 +152,12 @@ pub use module::{
 pub use read::{ReadError, read, read_checked};
 pub use write::write;
 
-/// Magic bytes every dsmod file starts with: NUL + `DSM`, four bytes (G3.5).
+/// Magic bytes every dsmod file starts with: NUL + `DSM`, four bytes.
 pub const MAGIC: [u8; 4] = *b"\0DSM";
 
 /// The dsmod format version this crate reads and writes.
 ///
-/// Version 2 commits the BL-7 module-level scalars (max call depth at
+/// Version 2 commits the module-level scalars (max call depth at
 /// offset 24, IR-version checksum at offset 28) in the fixed header
 /// prefix. Version 3 adds the FuncRef constants-pool kind (tag 4) for
 /// qualified callees. Version 4 makes that FuncRef selector-led: a
@@ -169,7 +168,5 @@ pub const MAGIC: [u8; 4] = *b"\0DSM";
 /// constants-pool kind (tag 5) joined under version 4 without a bump —
 /// a reader that predates it rejects the unknown tag as malformed data,
 /// never misreads the entry. Version 5
-/// retires the entry staging table (the process surface's string argv
-/// superseded entry-parameter staging). Files of older versions are
-/// rejected.
+/// drops the entry staging table. Files of older versions are rejected.
 pub const FORMAT_VERSION: u8 = 5;

@@ -130,7 +130,7 @@ fn the_generic_equality_spelling_refuses_at_the_abort_shape() {
 /// the site's solved one-word shape plans an instance whose compare
 /// dispatches through the builtin instance the call stages, so the
 /// concrete per-width landing answers through its own body. The abort
-/// arm keeps item 139's shape.
+/// arm keeps the abort shape.
 #[test]
 fn the_generic_equality_compare_runs_through_its_instance() {
     let out = run(&["run", &fixture("assert_generic_equality.ds")]);

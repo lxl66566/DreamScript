@@ -1,5 +1,5 @@
-//! Native (Rust-implemented) functions: the H5.5 layering after the M7
-//! platform seam — the VM core's `builtin` module (this file) and the
+//! Native (Rust-implemented) functions: the tier layering at the platform
+//! seam — the VM core's `builtin` module (this file) and the
 //! world surface served by the installed platform handler
 //! ([`crate::platform`]).
 //!
@@ -18,7 +18,7 @@
 //!
 //! # The core module and the platform handler
 //!
-//! The H5.5 layering after its M7 migration: the pure, irreducible
+//! The layering: the pure, irreducible
 //! primitives every VM carries ([`BUILTIN_MODULE`], installed by
 //! [`crate::Vm`] itself), and the world surface — console, fsys, net —
 //! which is an installed platform handler's to serve
@@ -48,7 +48,7 @@
 //! `net_close`) touch the world: that is a static fact (the ambient's
 //! declared effect rows), so the VM needs no effect machinery — the
 //! natives stay total, OS failures become tag words instead of VM traps.
-//! They answer with a uniform two-word tag+payload span [BL-2] on the
+//! They answer with a uniform two-word tag+payload span on the
 //! caller's argument slots 0 and 1: word 0 is the discriminant, word 1
 //! the success value or the error message `Ref`. The span width is fixed
 //! per native, so callers size their overlay area to two — the same
@@ -65,8 +65,7 @@
 //! tag id widens. `PLATFORM_IO_OK` marks every fallible native's success
 //! (the caller already knows which native it called, so one shared id
 //! disambiguates nothing); an IO failure answers the io class
-//! discriminant of its error kind (the `io_err` alias's members, the
-//! 2026-11-21 failure-taxonomy ruling), with the message `Ref` in the
+//! discriminant of its error kind, with the message `Ref` in the
 //! span's payload word.
 //!
 //! The net ops (`crate::net`) answer the same convention over the
@@ -100,8 +99,8 @@
 //! single-char string `Ref`, and an empty separator splits per character.
 //!
 //! `parse_int` is the pure fallible one: its ambient row is `error` (the
-//! caller-handled failure, standing for the record's `int | parse_err`
-//! exactly as `read_file`'s row stands for `string | io_err`), and it
+//! caller-handled failure, the `int | parse_err` shape exactly as
+//! `read_file`'s row is `string | io_err`), and it
 //! answers the same uniform two-word span — [`PLATFORM_IO_OK`] with the
 //! parsed `int`, or [`PLATFORM_PARSE_ERR`] (the next id below `net_err`
 //! in the platform reservation's countdown) with the position the reader
@@ -111,7 +110,7 @@
 //!
 //! A list is one RC'd heap object — len, capacity, and the element value
 //! words inline in a single object-table entry (the header's
-//! `{type_id, rc}` words are M4's precise-RC slot over the same table;
+//! `{type_id, rc}` words are the precise-RC slot over the same table;
 //! see [`crate::object::Objects`]). Elements are plain value words, so
 //! the one kind serves every element type, and a multi-word element (a
 //! struct) is stored as its whole inline word span at a per-list element
@@ -133,7 +132,7 @@
 //!
 //! # The map natives (indices 28-31)
 //!
-//! The map surface over the builder-call interim [B3]: a map is one RC'd
+//! The map surface over the builder-call interim: a map is one RC'd
 //! heap object behind one `Ref` word — an association vector of key-value
 //! pairs, string keys matching by content and every other word by
 //! identity (see [`crate::object::Object::Map`]; no ordering or iteration
@@ -162,7 +161,7 @@
 //! The six generic container natives the ambient declares past the map
 //! block, CALLG-addressed like the container reads above them: `cons`,
 //! `tail`, and `collect` are producers — fresh lists over the source's
-//! element words, construction copying per the D2 ruling, the copy
+//! element words, construction copying, the copy
 //! acquiring one count per `Ref` element it adopts; `first` is the
 //! one checked first-element body (the retired `head` spelling's
 //! historical slot at 33 stays reserved), answering
@@ -180,7 +179,7 @@
 //! The lambda-taking container combinators — `map`, `filter`,
 //! `reduce`, `partition` — are the first generic bodies that call user
 //! code: the staged lambda parameter is a `Fn` word (the callable-word
-//! classification, F2) naming a planned function, and the body runs it
+//! classification) naming a planned function, and the body runs it
 //! per element through the VM's reentrancy seam (a synthetic reentry
 //! frame driven to its return; see `vm::Vm::call_hosted`). `map`
 //! collects each answered word into a fresh list, `filter` keeps the
@@ -199,8 +198,8 @@
 //!
 //! The engine seams behind the @std `par_map`/`par_reduce` library
 //! fns (the ds-source spellings live in the @std bodied member; these
-//! natives are what their bodies call). `fork_map` [E3, the parked-CALLG
-//! fork-join]: the combinator body is
+//! natives are what their bodies call). `fork_map` (the parked-CALLG
+//! fork-join): the combinator body is
 //! spawn-only — fork is one spawned child per element applying the
 //! callable under a fresh nursery, the callable's own function entered
 //! with the element's whole inline span, the spawn copy-in acquiring
@@ -212,9 +211,9 @@
 //! (deterministic replay by construction), and the assembled result
 //! list delivers onto the parked call site. An element may park at a
 //! yield mid-flight where the hosted `map` loop refuses — the worklist
-//! bounces the parked child back in [E2]. The first failure cancels
+//! bounces the parked child back in. The first failure cancels
 //! the siblings at their next preemption point and re-raises at the
-//! call site [E5] — exactly a spawn-body failure at its enclosing
+//! call site — exactly a spawn-body failure at its enclosing
 //! boundary. The completion channel is whole-span (a `FrameAnswer`):
 //! the callable's answer rides it one word or whole (a multi-word
 //! RETSPAN or tail-native answer), its width the callable's
@@ -228,7 +227,7 @@
 //! the drive frames stacking on the interlock's heap stack — depth
 //! costs heap, never the Rust stack.
 //!
-//! `par_reduce` [E3, the same park over the fold]: the fold's left
+//! `par_reduce` (the same park over the fold): the fold's left
 //! data dependency chains the children — each element's application is
 //! one spawned child entered with the running accumulator's whole word
 //! span and the element's span, the seam's chain state carrying the
@@ -242,7 +241,7 @@
 //! width matching it, and the final accumulator delivers whole onto
 //! the parked call site. The accumulator's counts follow `reduce`'s
 //! owned discipline (the init borrowed until the first answer adopts,
-//! each delivered answer owned by the joiner, each superseded word
+//! each delivered answer owned by the joiner, each replaced word
 //! dec'd at adoption); the callable is a scalar `Fn` word or a closure
 //! object's `Ref` (the capture block staged per spawn exactly
 //! par_map's) over any fold width — and the first failure re-raises at
@@ -250,7 +249,7 @@
 //!
 //! # The fiber control natives (indices 24-26)
 //!
-//! The fiber substrate's debug switch [E2], appended past the list block:
+//! The fiber substrate's debug switch, appended past the list block:
 //! `fiber_resume` parks the caller and enters the named pool fiber with
 //! the payload. It is a native so fixtures address it with an ordinary
 //! pool FuncRef through `CALL` — but the dispatcher, not the body,
@@ -263,8 +262,8 @@
 //! request (`Vm::request_suspend`), never a user-spellable native.
 //!
 //! `nursery_join` (26) extends the switch with the nursery boundary's
-//! debug face [E2]: the caller parks, the dispatcher drives the named
-//! nursery's children to death (first failure cancels the rest [E5]),
+//! debug face: the caller parks, the dispatcher drives the named
+//! nursery's children to death (first failure cancels the rest),
 //! and the call answers the failed-children count. The full per-child
 //! outcomes are the host API's ([`crate::Vm::join_nursery`]); an
 //! in-language surface over them lands with the checker/lowerer rounds.
@@ -346,7 +345,7 @@ pub fn is_net_class(tag: u8) -> bool {
     )
 }
 
-/// The control natives of the fiber substrate [E2]: the dispatcher
+/// The control natives of the fiber substrate: the dispatcher
 /// intercepts them at `CALL` sites and performs the switch itself — the
 /// body only ever runs from a `CALLT` site (tail position), where no
 /// switch is possible, answering the bare `PLATFORM_NONE` tag as the
@@ -392,7 +391,7 @@ pub enum ControlNative {
     ReplPark,
 }
 
-/// The channel natives (the 2026-11-21 shared-state ruling): like the
+/// The channel natives: like the
 /// control natives, the dispatcher intercepts them at `CALL` and `CALLT`
 /// sites — the channel step needs the scheduler's run queue and the
 /// pool's fiber states, which a native body never sees — so the table
@@ -484,7 +483,7 @@ pub enum NativeResult {
         /// The assembly or fold stage the join runs.
         stage: ForkStage,
     },
-    /// A world op's park request (the 2026-11-21 scheduler ruling): the
+    /// A world op's park request: the
     /// op would block, so the calling fiber parks instead — the drive
     /// registers the wait, runs the next ready fiber, and the reactor's
     /// readiness (or the wait's deadline) completes the op and delivers
@@ -561,7 +560,7 @@ pub struct NativeFunction {
     /// lowering sizes the area, RETSPAN's discipline).
     pub result_words: u8,
     /// Marks the two fiber-control natives the dispatcher intercepts at
-    /// `CALL` sites [E2]; `None` for every ordinary native.
+    /// `CALL` sites; `None` for every ordinary native.
     pub control: Option<ControlNative>,
     /// Marks the channel natives the dispatcher intercepts at `CALL`
     /// and `CALLT` sites (the channel step is the dispatcher's, like
@@ -717,7 +716,7 @@ fn float_hash_fn(
         [Value::F64(f)] => {
             // the fold: -0.0 shares +0.0's bits and every NaN payload the
             // one canonical NaN's, so bit-structurally equal floats hash
-            // equal (B9)
+            // equal
             let canonical = if f.is_nan() {
                 f64::NAN
             } else if *f == 0.0 {
@@ -1104,8 +1103,7 @@ fn int_of_u32_fn(
     Ok(NativeResult::Word(Value::I64(v)))
 }
 
-/// The float math family's one-argument shape (the 2026-11-21
-/// pure-builtin round): IEEE over the f64 word, total by construction —
+/// The float math family's one-argument shape: IEEE over the f64 word, total by construction —
 /// no operand shape traps (a negative `sqrt` answers NaN).
 macro_rules! float_unary {
     ($name:ident, $op:expr) => {
@@ -1154,7 +1152,7 @@ fn pow_fn(_heaps: &mut Heaps, _out: &mut OutputSink, args: &[Value]) -> Result<N
 }
 
 /// `contains(haystack, needle: string) -> bool` — the string search
-/// family's membership read (the 2026-11-21 pure-builtin round): the
+/// family's membership read: the
 /// needle occurs in the haystack, the empty needle always occurring.
 /// Both operands borrow shared, so neither side copies out.
 fn contains_fn(
@@ -1213,8 +1211,8 @@ fn replace_fn(
     Ok(NativeResult::Word(heaps.new_str(replaced)))
 }
 
-/// `bytes_eq(a, b: bytes) -> bool` — the structural content compare
-/// [B9]: the payloads compare byte for byte, a length mismatch a
+/// `bytes_eq(a, b: bytes) -> bool` — the structural content compare:
+/// the payloads compare byte for byte, a length mismatch a
 /// certain false. Both operands stay borrowed (the native call
 /// convention's staging owns no count).
 fn bytes_eq_fn(
@@ -1296,7 +1294,7 @@ fn utf8_decode_fn(
 }
 
 /// `list_eq(a, b: list) -> bool` — the list collection's structural
-/// content compare [B9]: the content walk over both objects' element
+/// content compare: the content walk over both objects' element
 /// words, every nested reference pair compared the same way. Both
 /// operands stay borrowed (the native call convention's staging owns no
 /// count).
@@ -1311,7 +1309,7 @@ fn list_eq_fn(
 }
 
 /// `map_eq(a, b: map) -> bool` — the map collection's structural content
-/// compare [B9]: the content walk over both objects' rows, key lookup the
+/// compare: the content walk over both objects' rows, key lookup the
 /// face `map_get` serves and value spans compared word for word. Both
 /// operands stay borrowed.
 fn map_eq_fn(
@@ -1531,7 +1529,7 @@ fn list_get_fn(
 }
 
 /// A checked read's one-word hit: the element word handed out under one
-/// count when it is a `Ref` (the list keeps its own, C4) — the
+/// count when it is a `Ref` (the list keeps its own) — the
 /// allocation-free `Tag` shape.
 fn native_result_word(heaps: &mut Heaps, word: Value) -> Result<NativeResult, Trap> {
     if let Value::Ref(id) = word {
@@ -1545,7 +1543,7 @@ fn native_result_word(heaps: &mut Heaps, word: Value) -> Result<NativeResult, Tr
 
 /// A checked read's wider hit (two or more words): the element's whole
 /// word span handed out with one count per `Ref` word for the reader (the
-/// list keeps its own, C4). The vec moves into the span payload, so the
+/// list keeps its own). The vec moves into the span payload, so the
 /// span the caller sliced out of the store is the copy's only one.
 fn native_result_span(heaps: &mut Heaps, words: Vec<Value>) -> Result<NativeResult, Trap> {
     for value in &words {
@@ -1607,7 +1605,7 @@ fn map_len_fn(
 /// `map_keys[k, v](map) -> list[k]`: the ordered key face — the map's
 /// entry order (the order rows were first stored), one word per key,
 /// the fresh list's edge owning one count per `Ref` key (the sources
-/// keep their own, C4).
+/// keep their own).
 fn map_keys_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,
@@ -1643,7 +1641,7 @@ fn map_get_fn(
         },
         Some(words) => {
             // the read hands the value span out: a Ref word gains a count
-            // for the reader per word, the map keeps its own (C4) — the
+            // for the reader per word, the map keeps its own — the
             // list checked read's own span shape
             native_result_span(heaps, words.to_vec())?
         },
@@ -1756,7 +1754,7 @@ fn map_entries_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     // the entry-order pair list: the fresh list's edge owns one count
-    // per `Ref` word of key and value alike (the map keeps its own, C4),
+    // per `Ref` word of key and value alike (the map keeps its own),
     // the `map_keys` adoption discipline over the value words too
     let (words, stride) = heaps.map_entries(ref_arg(args, 0)?)?;
     for word in &words {
@@ -1769,7 +1767,7 @@ fn map_entries_fn(
 
 /// The copy natives' shared finisher: the fresh list's edge owns one
 /// count per `Ref` word of `elems` (taken on the one walk the copy
-/// already pays), the sources keep their own (C4), and the vec moves
+/// already pays), the sources keep their own, and the vec moves
 /// into the adopting list with no second pass. The fresh list carries
 /// the source's stride (an empty copy keeps stride 0).
 fn copy_into_fresh_list(
@@ -1848,7 +1846,7 @@ fn collect_fn(
 
 /// `first`'s one body: the checked first element in
 /// `list_get`'s span shape — the hit is the first element's whole
-/// inline span, handed out under one count per `Ref` word (C4), and an
+/// inline span, handed out under one count per `Ref` word, and an
 /// empty list answers the `none` span member, never a trap. The miss
 /// payload is the inert unit word: there is no rejected index to carry,
 /// and callers read the payload only on the hit.
@@ -1924,7 +1922,7 @@ fn fiber_control_bounce_fn(
 /// like an uninstalled one (`UnknownCallee` naming the module and index).
 /// The lowering never emits these indices; each module's table keeps them
 /// so the historical index run stays positionally stable.
-/// One generic builtin body [H3, phase 1]: the ONE body a CALLG site
+/// One generic builtin body: the ONE body a CALLG site
 /// dispatches, addressed by the pool FuncRef (module, native index) the
 /// same way a CALL addresses a native. `params` are the real argument
 /// words (checked against the staged words like any native's), and
@@ -2068,7 +2066,7 @@ fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
     }
 }
 
-// The container reads and counts' one bodies [H3, phase 2]:
+// The container reads and counts' one bodies:
 // element-agnostic — the container word is one `Ref` whatever the
 // element, so each adapter drops the evidence words (they record the
 // receiver's container instance for the dispatch registry) and runs the
@@ -2214,7 +2212,7 @@ fn abs_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
 // body's; a mid-loop trap leaks the partial result's birth count, the
 // same single-leak class the producer bodies' traps leave.
 
-/// The staged lambda word: callable-defaulted (F2) — the scalar FuncRef
+/// The staged lambda word: callable-defaulted — the scalar FuncRef
 /// of a non-capturing lambda or named function, or a closure object's
 /// `Ref` word. The hosted call resolves either kind; every other word
 /// kind refuses like a mismatched slot.
@@ -2572,7 +2570,7 @@ pub fn is_fork_join(module: &str, index: u32) -> bool {
 }
 
 /// Reads the callable word at argument `index` (the callable-defaulted
-/// `Fn` slot admits both spellings, F2).
+/// `Fn` slot admits both spellings).
 fn fork_callable(args: &[Value], index: usize) -> Result<ForkCallable, Trap> {
     match fn_arg(args, index)? {
         Value::Fn(fref) => Ok(ForkCallable::Scalar(fref)),
@@ -2595,7 +2593,7 @@ pub(crate) fn fork_spawn(
     }
 }
 
-/// `par_map`'s spawn phase [E3, the parked-CALLG fork-join]: fork is
+/// `par_map`'s spawn phase: fork is
 /// one spawned child per element applying the callable under a fresh
 /// nursery — the callable's own function entered with the element's
 /// whole inline span, the spawn copy-in acquiring one count per `Ref`
@@ -2606,9 +2604,9 @@ pub(crate) fn fork_spawn(
 /// answer's whole word span pushing as one element, the first push
 /// fixing the list's stride, the push taking the list's own edge count
 /// per `Ref` word, the child's delivered count ending at the joiner's
-/// single dec — one per `Ref` word, a ruled cross-heap channel). The
+/// single dec — one per `Ref` word, the cross-heap channel). The
 /// first failure in spawn-drive order cancels the siblings at their
-/// next preemption point [E5] and re-raises at the parked call site,
+/// next preemption point and re-raises at the parked call site,
 /// exactly a spawn-body failure at its enclosing boundary; a failed
 /// spawn tears the already-spawned children down under the cancel
 /// discipline before its trap surfaces. An empty input answers the
@@ -2656,7 +2654,7 @@ fn par_map_generic_fn(
     })
 }
 
-/// `par_reduce`'s spawn phase [E3, the parked-CALLG fork-join]: the
+/// `par_reduce`'s spawn phase: the
 /// fold's left data dependency chains the children — each element's
 /// application is one spawned child entered with the running
 /// accumulator's whole word span and the element's span (the
@@ -2671,7 +2669,7 @@ fn par_map_generic_fn(
 /// the parked call site. The accumulator's counts follow `reduce`'s
 /// owned discipline: the init stays borrowed until the first delivered
 /// answer adopts (the child's completion count landing on the joiner —
-/// the ruled cross-heap channel), each superseded owned word dec'd at
+/// the cross-heap channel), each replaced owned word dec'd at
 /// adoption; an empty input answers the init, inc'd to own it. The
 /// callable is a scalar `Fn` word or a closure object's `Ref` (the
 /// capture block staged per spawn exactly par_map's).
@@ -2742,7 +2740,7 @@ pub(crate) fn fork_abandon(vm: &mut Vm, nursery: NurseryId, stage: ForkStage) ->
     }
 }
 
-/// Decs each `Ref` word of an owned span (a fold's superseded
+/// Decs each `Ref` word of an owned span (a fold's replaced
 /// accumulator) through the given router; a borrowed span (`owned`
 /// false, the init before the first adoption) skips every word — its
 /// counts belong to the caller.
@@ -3030,7 +3028,7 @@ pub struct OutputSink {
     procs: crate::proc::Procs,
     /// The file-handle table of the fsys natives (`crate::fsys`).
     files: crate::fsys::Files,
-    /// The close seams' wake notes (item 79): each close native notes
+    /// The close seams' wake notes: each close native notes
     /// the handle it closed, the dispatcher's native call site draining
     /// the notes to wake the parked waits the closed handles name — the
     /// one door the sink's own state reaches the wait table through,
@@ -3178,8 +3176,7 @@ impl OutputSink {
         self.procs.set_timeout(timeout);
     }
 
-    /// Installs the host's blocking-drive stop flag (the 2026-11-24
-    /// signal ruling's non-reactor twin): the bounded blocking accept
+    /// Installs the host's blocking-drive stop flag: the bounded blocking accept
     /// poll and the blocking proc wait twin observe it between their
     /// poll rounds and answer the shutdown trap — a
     /// reactor-installing host's parked twin rides the registered
@@ -3663,8 +3660,7 @@ pub(crate) fn time_fn(
 /// time, the absolute word carries no meaning.
 static MONO_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-/// `mono() -> int`: the body behind the platform ABI's `mono` op (the
-/// time face's timer capability, the 2026-11-21 ruling) — monotonic
+/// `mono() -> int`: the body behind the platform ABI's `mono` op — monotonic
 /// nanoseconds since the process-fixed origin, never moving backward
 /// and never bending with the host's wall-clock adjustments. The
 /// natural pair for `sleep`: a span measured over `mono` words is the
@@ -4234,7 +4230,7 @@ mod tests {
 
     /// `float_hash` folds every NaN payload to the one canonical NaN and
     /// the two zeros to one before hashing, so bit-structurally equal
-    /// floats hash equal (B9): a payloaded qNaN, a negative NaN, and the
+    /// floats hash equal: a payloaded qNaN, a negative NaN, and the
     /// canonical NaN answer identically, the zero pair likewise.
     #[test]
     fn float_hash_folds_nan_payloads_and_zeros_to_one() {
@@ -4264,8 +4260,7 @@ mod tests {
     }
 
     /// `char_hash` and `str_hash` fold the same FNV-1a over the same
-    /// UTF-8 bytes, so a char and its one-char string answer identically
-    /// (the hash family's char/string ruling).
+    /// UTF-8 bytes, so a char and its one-char string answer identically.
     #[test]
     fn char_hash_answers_str_hash_over_the_same_bytes() {
         let mut objects = Objects::new(FIBER_ROOT);

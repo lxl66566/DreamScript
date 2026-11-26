@@ -1,4 +1,4 @@
-//! Encoded programs: the constant pool [BL-1, BL-7] and assembled bodies.
+//! Encoded programs: the constant pool and assembled bodies.
 
 use ds_abi::{BoundRet, EncodeError, Inst};
 
@@ -12,17 +12,17 @@ pub enum ConstKind {
     /// A bool loaded by KCONST.
     Bool,
     /// A function reference loaded by CALL/CALLT (a callee) and by KCONST
-    /// (the scalar fn word a callable binding holds, F2).
+    /// (the scalar fn word a callable binding holds).
     FuncRef,
     /// A string constant loaded by KSTR: the VM materializes it as an
     /// interned heap string reference.
     Str,
 }
 
-/// One constant-pool entry [BL-1]: the single immediate channel. KIMM loads
+/// One constant-pool entry: the single immediate channel. KIMM loads
 /// the i64 entries, KCONST the f64/bool/fn-word entries (a FuncRef entry
-/// materializes as the scalar callable word, F2), and CALL/CALLT load
-/// [`Const::FuncRef`] callees [H6 item 5].
+/// materializes as the scalar callable word), and CALL/CALLT load
+/// [`Const::FuncRef`] callees.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Const {
     /// An i64 immediate.
@@ -34,7 +34,7 @@ pub enum Const {
     /// A pool callee, the contract's "module index + function index"
     /// FuncRef: the module half names an installed uop module by its
     /// registry id or a native surface by its name, and the function
-    /// index is the entry-descriptor word-0 convention [BL-7].
+    /// index is the entry-descriptor word-0 convention.
     FuncRef(ConstFuncRef),
     /// A string constant riding the pool; KSTR loads it as an interned
     /// heap string reference.
@@ -49,8 +49,7 @@ pub enum ConstFuncRef {
     /// enclosing module, `n` the `n-1`-th dependency entry — plus the
     /// callee's function index. The id is per-VM install state, never
     /// serialized into any artifact; issue-time resolution reads the
-    /// id's current slot, so a hot-reload swap redirects the next call
-    /// [H6 item 5].
+    /// id's current slot, so a hot-reload swap redirects the next call.
     Uop {
         /// The callee module's registry id.
         module: u32,
@@ -68,7 +67,7 @@ pub enum ConstFuncRef {
         /// The callee's function-table index.
         func: u32,
     },
-    /// A bound artifact's C symbol (H5): the `[artifacts]` name whose
+    /// A bound artifact's C symbol: the `[artifacts]` name whose
     /// installed module holds the symbol's address, the symbol's index
     /// in the export enumeration, and the return's marshaling word —
     /// the absent word or a scalar word, the parameters marshaling per
@@ -102,15 +101,15 @@ impl Const {
 
 /// A function as handed to the module loader: everything except the entry
 /// descriptor, whose word 0 the loader writes once from the function's table
-/// index at load time (word 0 is immutable after load [H2]). The body is the
-/// canonical 32-bit word stream [BL-1] — see [`assemble`] — and the pool is
+/// index at load time (word 0 is immutable after load). The body is the
+/// canonical 32-bit word stream — see [`assemble`] — and the pool is
 /// the function's own, matching the dsmod blocks payload (one pool per
 /// function; uop `ConstIdx` operands index it).
 #[derive(Clone, Debug)]
 pub struct FunctionDef {
     /// The function's name within its module.
     pub name: String,
-    /// The function's static frame layout [BL-6].
+    /// The function's static frame layout.
     pub layout: ds_abi::FrameLayout,
     /// The function's constant pool.
     pub pool: Vec<Const>,
@@ -119,7 +118,7 @@ pub struct FunctionDef {
 }
 
 /// Assembles an instruction body (uops and the 0xE RC pair alike) into its
-/// canonical 32-bit word stream [BL-1], resolving jump targets against each
+/// canonical 32-bit word stream, resolving jump targets against each
 /// instruction's pc. The inverse — [`Inst::decode`] — runs in the dispatcher
 /// and at module load.
 ///

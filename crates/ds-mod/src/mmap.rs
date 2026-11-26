@@ -1,4 +1,4 @@
-//! Read-only mmap loader (G3.5).
+//! Read-only mmap loader.
 //!
 //! Zero-copy intent: the reader validates every section range against the
 //! map length up front and copies header-owned data (names, hashes,

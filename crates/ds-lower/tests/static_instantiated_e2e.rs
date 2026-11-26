@@ -1,5 +1,5 @@
-//! The instantiated type-keyed call (the receiverless-member ruling's
-//! applied spelling): a type application in the receiver position —
+//! The instantiated type-keyed call (the receiverless member's applied
+//! spelling): a type application in the receiver position —
 //! `list[int].make()` — dispatches the applied type's own receiverless
 //! impl member with the site's substitution staged: the generic impl's
 //! head pattern binds its variables from the receiver's application,

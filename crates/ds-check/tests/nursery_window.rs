@@ -1,10 +1,8 @@
-//! The nursery result channel's checker face [E2, the 2026-11-21
-//! scheduler rulings]: the block's value is the collected answers' list,
-//! a `cancel` arm inside a spawned body never answers (it drops out of
-//! the body's own unions), and a spawned body's `mut` window over a
-//! binding outliving the nursery block refuses — permanent and
-//! drive-independent (DS3008), the tutorial's shared-list pattern's
-//! replacement.
+//! The nursery result channel's checker face: the block's value is the
+//! collected answers' list, a `cancel` arm inside a spawned body never
+//! answers (it drops out of the body's own unions), and a spawned body's
+//! `mut` window over a binding outliving the nursery block refuses —
+//! permanent and drive-independent (DS3008).
 
 use ds_check::type_check;
 use ds_diag::Files;

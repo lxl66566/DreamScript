@@ -1,4 +1,4 @@
-//! The time face's timer e2e (the 2026-11-21 timer ruling): hand-
+//! The time face's timer e2e: hand-
 //! assembled programs over the std platform's time face, a VM with a
 //! reactor installed, and the clock itself as the witness — hermetic,
 //! no external network, no wall-clock assumptions beyond bounds with

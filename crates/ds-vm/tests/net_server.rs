@@ -5,12 +5,9 @@
 //! the two closes — hermetic, no external network), the parked accept
 //! under an installed reactor (the peer's late connection is the wake,
 //! the accepted stream owning the connection face in full), the parked
-//! accept holding past its old deadline for a late peer (the
-//! 2026-11-24 signal ruling: the quiet accept parks unbounded, the
-//! signal its backstop — a non-reactor host keeping the bounded poll
-//! twin), the deadline bound on a listener no peer ever dials under
-//! the blocking twin (std's listener carries no OS accept timeout,
-//! so the poll draws the line the parked twin no longer does), the
+//! accept holding past its old deadline for a late peer, the deadline bound on a listener no peer
+//! ever dials under the blocking twin (std's listener carries no OS accept timeout,
+//! so the poll draws the line the parked twin leaves unbounded), the
 //! second parked accept over one listener answering the registration's
 //! refusal span (epoll's one row per fd: the cross-token interest
 //! refuses loud rather than stranding the first waiter's wake), the
@@ -476,8 +473,8 @@ fn a_scheduled_accept_wakes_on_the_peers_connection() {
     panic!("no free loopback port answered the bind");
 }
 
-/// The parked accept holds past its old deadline for a late peer
-/// (the 2026-11-24 signal ruling): the quiet accept parks with no
+/// The parked accept holds past its old deadline for a late peer:
+/// the quiet accept parks with no
 /// wheel entry — the signal its backstop — so a peer dialing past the
 /// configured bound still wakes it, while the reactor-less twin keeps
 /// the bounded poll below. Needs a reactor driver; a host without one
@@ -623,7 +620,7 @@ fn a_second_parked_accept_over_one_listener_answers_the_refusal_span() {
 /// the quiet accept's park carries no wheel entry (the signal its
 /// backstop), so without the close wake it would stand forever — the
 /// close's wake door deregisters the interest and delivers the
-/// unknown-listener span at the parked call site (item 79), the join
+/// unknown-listener span at the parked call site, the join
 /// landing both answers.
 #[test]
 fn a_listener_closed_under_a_parked_accept_ends_the_park() {

@@ -65,7 +65,7 @@ pub fn analyze_owned(
     )
 }
 
-/// [`analyze_owned`] with import surfaces linked (G4): the resolve half
+/// [`analyze_owned`] with import surfaces linked: the resolve half
 /// runs through [`ds_check::resolve_package_linked`], so an import the
 /// graph serves validates and binds — its selected names and module
 /// aliases entering the importing file's namespace. A graph that names
@@ -86,7 +86,7 @@ pub fn analyze_owned_linked(
         package.into(),
         resolutions.into(),
         diags,
-        // the graph's artifact tables ride the bundle (H5): a bound
+        // the graph's artifact tables ride the bundle: a bound
         // extern's lowering resolves its declaration against exactly
         // this fold
         std::sync::Arc::new(imports.artifacts().clone()),
@@ -113,7 +113,7 @@ pub fn analyze_served(
     ds_check::type_of::analyze_served(files, asts, package, resolutions, served, diags)
 }
 
-/// [`analyze_served`] with import surfaces linked (G4): the served
+/// [`analyze_served`] with import surfaces linked: the served
 /// prefix serves as ever, and the link pass runs over every tree of the
 /// unit — the served trees' import-bound defs re-register at the same
 /// tail ids their served resolutions name, so the serve and the fresh

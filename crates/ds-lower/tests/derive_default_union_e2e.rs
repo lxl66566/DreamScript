@@ -1,5 +1,5 @@
-//! The `default` family's union-member annotation (the 2026-11-15
-//! ruling): a `#[default]` on one enum case names the member the
+//! The `default` family's union-member annotation: a `#[default]` on one
+//! enum case names the member the
 //! family synthesizes the union's default over — the annotated enum's
 //! own `fn default() -> Self` answers the member's construction (a
 //! bare case the case name itself, a payloaded case the call over
@@ -76,7 +76,7 @@ fn refusals(source: &str) -> Vec<String> {
 /// The annotated member answers `<union>.default()`: a bare case the
 /// case name itself, a tuple payload the call over per-part defaults,
 /// a struct payload the named-argument call — the union's own
-/// receiverless member constructed over the ruled choice.
+/// receiverless member constructed over the annotated case.
 #[test]
 fn the_annotated_member_answers_the_type_keyed_surface() {
     let full = concat!(

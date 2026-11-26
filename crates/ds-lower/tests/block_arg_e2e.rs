@@ -1,4 +1,4 @@
-//! Block-argument sugar e2e (F7's trailing lambda, last argument only):
+//! Block-argument sugar e2e (trailing lambda, last argument only):
 //! the parser attaches the trailing block as the call's zero-parameter
 //! lambda and the checker feeds it at the next open positional slot, so
 //! the lowering stages it exactly like a written trailing lambda

@@ -137,7 +137,7 @@ fn a_bare_argument_re_spans_into_the_parameter_region_at_the_call() {
 }
 
 /// A capturing closure never enters a union region: the member's Fn slot
-/// and the closure word's Ref classification disagree (F2).
+/// and the closure word's Ref classification disagree.
 #[test]
 fn a_capturing_closure_into_a_union_member_refuses() {
     let source = concat!(

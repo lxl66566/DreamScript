@@ -1,14 +1,14 @@
-//! Precise non-atomic reference counting over heap block headers (C4/C5).
+//! Precise non-atomic reference counting over heap block headers.
 //!
 //! A counted value is one heap block: an [`RcHeader`] followed by the payload.
 //! The header carries the non-atomic count, the exact block layout (so death
 //! can free or reuse-thread without external bookkeeping), the dormant
 //! collector word, and the `deinit` fn pointer. The pointer is fixed per
 //! concrete type at the allocation site - the lowering knows the type, so
-//! dispatch is static, never a runtime type inspection (C5).
+//! dispatch is static, never a runtime type inspection.
 //!
 //! Non-atomicity is sound under thread confinement: a block and its count are
-//! only ever touched by the thread owning the [`crate::Heap`], because E3's
+//! only ever touched by the thread owning the [`crate::Heap`], because
 //! fork-join transfers ownership of whole values (and whole heaps) rather than
 //! sharing them. The header itself carries no synchronization; the confinement
 //! rides the owning heap being `!Sync` (auto traits alone do not keep a plain
@@ -21,7 +21,7 @@
 
 use core::ptr::NonNull;
 
-/// The `deinit` hook (C5): receives the payload pointer of the dying instance
+/// The `deinit` hook: receives the payload pointer of the dying instance
 /// and runs exactly once, at the unique death, inside the death tail
 /// ([`crate::Heap::rc_dispose`]) - before the block pools or releases.
 pub type DeinitFn = fn(NonNull<u8>);
@@ -41,7 +41,7 @@ pub fn drop_deinit<T>() -> DeinitFn {
 
 /// Header of a reference-counted heap block. `repr(C)` because the layout is
 /// the committed format: `flags` is the two-hook collector word (cycle-candidate
-/// registration bit, weak-ref head) that H4 commits to carrying dormant - always
+/// registration bit, weak-ref head) that the header carries dormant - always
 /// zero in v0, reserved for the growth path.
 ///
 /// The field order follows the access pattern: every clone and every non-unique
@@ -53,12 +53,12 @@ pub fn drop_deinit<T>() -> DeinitFn {
 #[repr(C)]
 pub struct RcHeader {
     /// Count of live references; 1 means the instance is unique. Non-atomic;
-    /// thread confinement of the owning heap keeps it sound (C4).
+    /// thread confinement of the owning heap keeps it sound.
     pub(crate) rc: u32,
-    /// Dormant collector word. Zero now; bits are reserved for the H4 two-hook
+    /// Dormant collector word. Zero now; bits are reserved for the two-hook
     /// interface so the header format never migrates.
     pub(crate) flags: u32,
-    /// Static `deinit` dispatch (C5); `None` for types without one. When the
+    /// Static `deinit` dispatch; `None` for types without one. When the
     /// block is a pooled reuse candidate this slot holds the freelist `next`
     /// pointer instead (see `heap::Heap::thread_block`).
     pub(crate) deinit: Option<DeinitFn>,
@@ -86,7 +86,7 @@ impl RcHeader {
         self.rc
     }
 
-    /// `rc_inc` (C4): one more explicit clone owns the block.
+    /// `rc_inc`: one more explicit clone owns the block.
     pub(crate) fn inc_at(header: NonNull<Self>) {
         // SAFETY: `header` names a live block on this (owning) thread; the
         // count is non-atomic and confined, so the read-modify-write races with

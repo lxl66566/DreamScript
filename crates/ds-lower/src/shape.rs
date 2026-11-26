@@ -1,4 +1,4 @@
-//! Value shapes: the slot-level representation of solved types [BL-2].
+//! Value shapes: the slot-level representation of solved types.
 //!
 //! Every value occupies a span of frame slots — one word per scalar, a
 //! bare field span per struct, and a tag word plus a payload region per
@@ -9,10 +9,9 @@
 //! A part-less struct spans one reserved word in every value position —
 //! an unnamed I64 word whose content is never written or read (the
 //! frame's inert zero holds it), so no value spans zero words and the
-//! ABI's RETSPAN minimum holds without exception (the unit-word
-//! ruling).
+//! ABI's RETSPAN minimum holds without exception.
 //!
-//! # Union payload strategy (the M3 choice, per the golden fixtures)
+//! # Union payload strategy
 //!
 //! One payload region per union TYPE: each member's fields claim the
 //! lowest free region span whose word types match the field's span, with
@@ -34,15 +33,14 @@
 //!
 //! # Primitive atoms
 //!
-//! The corpus declares `int`/`float`/`string`/`bool`/`char` as ambient
-//! tags (conformance/README.md); the lowerer maps those names onto the
-//! slot types of the same names, with `char` riding the string Ref —
-//! one scalar per word, the pinned list-separator convention. `byte`
-//! (the F6 ruling) rides the I64 slot as its 0-255 value: its own atom
-//! in the u8 width class, outside the int conversion family — the
-//! checker keeps byte and int disjoint, lowering shares the integer
-//! word. `none` is the universe's predeclared unit atom and needs no
-//! declaration.
+//! The ambient declares `int`/`float`/`string`/`bool`/`char` as tags;
+//! the lowerer maps them onto the slot types of the same names, with
+//! `char` riding the string Ref — one scalar per word, the pinned
+//! list-separator convention. `byte` rides the I64 slot as its 0-255
+//! value: its own atom in the u8 width class, outside the int conversion
+//! family — the checker keeps byte and int disjoint, lowering shares the
+//! integer word. `none` is the universe's predeclared unit atom and needs
+//! no declaration.
 
 use std::{collections::HashMap, fmt::Write as _, rc::Rc};
 
@@ -63,7 +61,7 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 const fn scalar_slot(word: ds_check::import::ScalarWord) -> SlotType {
     use ds_check::import::ScalarWord;
     match word {
-        // `byte` [F6] and `u32` ride the integer slot: the word carries
+        // `byte` and `u32` ride the integer slot: the word carries
         // the 0-255 or 32-bit value, the checker holding each width
         // outside the int conversions
         ScalarWord::Int | ScalarWord::Byte | ScalarWord::U32 => SlotType::I64,
@@ -145,7 +143,7 @@ impl PayloadField {
     }
 }
 
-/// One member of a union span [BL-2].
+/// One member of a union span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemberShape {
     /// The member's atom.
@@ -163,7 +161,7 @@ pub(crate) struct StructShape {
     pub fields: Vec<MemberField>,
 }
 
-/// A tag+payload union span [BL-2].
+/// A tag+payload union span.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UnionShape {
     /// The span's word types, tag first.
@@ -191,7 +189,7 @@ pub(crate) enum Shape {
     Word(SlotType),
     /// A bare struct: fields at consecutive words.
     Struct(StructShape),
-    /// An anonymous tuple: one positional word per element (B3). The
+    /// An anonymous tuple: one positional word per element. The
     /// fields carry `None` names and their `word` is the element
     /// position; the shape never spans more words than elements.
     Tuple(StructShape),
@@ -606,7 +604,7 @@ impl<'a> Shapes<'a> {
         None
     }
 
-    /// A union member that declares a deinit refuses (C5): the union's
+    /// A union member that declares a deinit refuses: the union's
     /// death decs the live member's payload words through the placement
     /// and frees nested objects through the VM cascade, but neither
     /// carries the member value's own hook — storing a deinit value in
@@ -1059,7 +1057,7 @@ impl<'a> Shapes<'a> {
                 let fields = self.solved_struct_fields(&fields)?;
                 Ok(Shape::Struct(StructShape { fields }))
             },
-            // A fn value is one Fn word (the callable-word ruling, F2):
+            // A fn value is one Fn word:
             // a non-capturing lambda mints its copyable scalar FuncRef
             // into the slot; a capturing lambda's VALUE is a Ref word
             // naming the closure object, flowing through value-site
@@ -1104,12 +1102,12 @@ impl<'a> Shapes<'a> {
                 Some(slot) => Ok(vec![PayloadField::word(None, slot)]),
                 None => Ok(Vec::new()),
             },
-            // A part-less struct's payload is its one reserved word
-            // (the unit-word ruling): an unnamed I64 word holding the
+            // A part-less struct's payload is its one reserved word:
+            // an unnamed I64 word holding the
             // frame's inert zero, never written and never read, so the
             // shape's every value position spans at least one word.
             ds_check::AtomKind::Struct(fields) if fields.is_empty() => Ok(vec![reserved_word()]),
-            // Positional slots (tuple-payload enum cases [B3]) keep
+            // Positional slots (tuple-payload enum cases) keep
             // their `None` name; the span places them by word offset.
             ds_check::AtomKind::Struct(fields) => fields
                 .iter()
@@ -1144,7 +1142,7 @@ impl<'a> Shapes<'a> {
                 }
                 Ok(out)
             },
-            // A callable member's payload is the one Fn word (F2): the
+            // A callable member's payload is the one Fn word: the
             // checked read hands the element word out under the element's
             // own classification — a closure element refuses at the
             // construction guard, so the word reaching a payload slot is
@@ -1351,7 +1349,7 @@ impl<'a> Shapes<'a> {
         }
     }
 
-    /// The element type of one whole-list application [F7]: iteration
+    /// The element type of one whole-list application: iteration
     /// and membership read it. `None` for any other type — a union of
     /// lists, a non-list application, a non-application.
     pub(crate) fn list_element(&self, ty: Ty) -> Option<Ty> {
@@ -1376,7 +1374,7 @@ impl<'a> Shapes<'a> {
         self.heap_arg(ty, "arena", 0)
     }
 
-    /// The value type of one whole-map application [F7]: the map value
+    /// The value type of one whole-map application: the map value
     /// channel's staging reads it (a bare member value re-spans into the
     /// value type's whole span before the store). `None` for any other
     /// type — a union of maps, a non-map application, a non-application.
@@ -1409,7 +1407,7 @@ impl<'a> Shapes<'a> {
         args.get(position).copied()
     }
 
-    /// The builtin instance of a generic call's receiver type [H3]: the
+    /// The builtin instance of a generic call's receiver type: the
     /// statically-resolved instance reference a CALLG site stages as
     /// its evidence words. The covered vocabulary is the builtin
     /// instance set — `string`, `bytes`, the `list`/`map` container

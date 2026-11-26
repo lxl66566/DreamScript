@@ -1,4 +1,4 @@
-//! The list and map collections' structural `==`/`!=` end to end [B9]:
+//! The list and map collections' structural `==`/`!=` end to end:
 //! the operands check clean through the string's one Ref word shape, and
 //! the chain dispatches on the collection's content-compare native —
 //! equal content compares equal behind distinct objects (a nested

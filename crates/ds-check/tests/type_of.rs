@@ -1,7 +1,7 @@
-//! The `type_of` pass over focused sources [B2, B4, B7, B9, E4, F3, F4]:
-//! boundary anchoring, monotone refinement with assignment reset, the E4
-//! union-error tokens, B7 numeric table, B9 equality, method-candidate
-//! selection, and exhaustiveness by set difference.
+//! The `type_of` pass over focused sources:
+//! boundary anchoring, monotone refinement with assignment reset, the
+//! union-error tokens, the numeric table, structural equality,
+//! method-candidate selection, and exhaustiveness by set difference.
 
 use ds_check::type_check;
 use ds_diag::Files;
@@ -65,7 +65,7 @@ fn span_of(source: &str, file: ds_diag::FileId, needle: &str, nth: usize) -> ds_
 
 #[test]
 fn boundary_annotation_checks_by_containment() {
-    // The written signature anchors the algebra [B2]: the body's final
+    // The written signature anchors the algebra: the body's final
     // expression must be contained in it.
     clean("fn f(x: int) -> int { x }\n");
     assert_eq!(check("fn f(x: int) -> string { x }\n"), ["DS2001 `lambda \
@@ -78,7 +78,7 @@ fn boundary_annotation_checks_by_containment() {
 #[test]
 fn boundary_parameters_require_annotations() {
     // Inference failure is a compile error; locals infer, boundaries do
-    // not [B2, B1]. A top-level `fn` converts onto the const-declaration
+    // not. A top-level `fn` converts onto the const-declaration
     // node, so it carries the lambda's message; a trait member keeps the
     // boundary wording.
     assert_eq!(check("fn f(x) -> int { 1 }\n"), ["DS2002 parameter `x` \
@@ -101,7 +101,7 @@ fn is_narrows_the_then_branch() {
 
 #[test]
 fn and_right_operand_sees_the_left_narrowing() {
-    // The record's own condition shape: `x is int && x >= 1` [B2].
+    // The record's own condition shape: `x is int && x >= 1`.
     clean("fn f(x: int | string) -> bool {\n  if x is int && x >= 1 { true } else { false }\n}\n");
 }
 
@@ -109,7 +109,7 @@ fn and_right_operand_sees_the_left_narrowing() {
 fn and_chain_else_branch_refines_nothing() {
     // The then branch sees every conjunct's narrowing; the else branch
     // runs on ¬(a∧b) = ¬a∨¬b, which guarantees no single conjunct false,
-    // so an `&&` chain narrows nothing there [B2].
+    // so an `&&` chain narrows nothing there.
     clean(concat!(
         "fn f(x: int | string, y: int | string) -> int {\n",
         "  if x is int && y is string { x + 1 } else { 0 }\n",
@@ -148,7 +148,7 @@ fn and_chain_of_three_conjuncts_leaves_else_alone() {
 
 #[test]
 fn forward_referenced_top_level_binding_keeps_the_return_union() {
-    // Typing a later-declared top-level binding mid-body [G3] must not
+    // Typing a later-declared top-level binding mid-body must not
     // clobber the enclosing function's return union: `?` and `return`
     // after the reference still see it.
     clean(concat!(
@@ -176,7 +176,7 @@ fn none_tests_narrow_both_branches() {
 #[test]
 fn refinement_resets_at_assignment() {
     // `var` is the only rebindable binding; assignment resets refinement
-    // to the declared type [B2, C3].
+    // to the declared type.
     clean(concat!(
         "fn f(n: int | none) -> int {\n",
         "  var m: int | none = n\n",
@@ -201,8 +201,8 @@ fn refinement_resets_at_assignment() {
 
 #[test]
 fn match_arms_type_over_the_remainder() {
-    // Sequential set semantics: the second arm binds what the first left
-    // [F4]; the annotated first arm is a narrowing filter.
+    // Sequential set semantics: the second arm binds what the first left;
+    // the annotated first arm is a narrowing filter.
     clean(concat!(
         "fn f(x: int | string | bool) -> int {\n",
         "  match x {\n",
@@ -297,7 +297,7 @@ fn non_exhaustive_match_names_the_missing_set() {
 
 #[test]
 fn bare_tag_arms_are_member_tests() {
-    // A bare unit-tag arm names a member test [F9]: it credits
+    // A bare unit-tag arm names a member test: it credits
     // exhaustiveness, dispatches by value, and binds nothing.
     clean(concat!(
         "tag on\n",
@@ -400,7 +400,7 @@ fn or_patterns_of_unit_tags_form_one_member_set() {
 
 #[test]
 fn try_propagation_checks_containment() {
-    // The ok part survives, the error members must be contained [E4]:
+    // The ok part survives, the error members must be contained:
     // at an expected position the split runs by the expectation, and
     // every propagated member must be carried by the return union.
     clean("fn f(x: int | io_err) -> string | io_err { str(x?) }\n");
@@ -420,9 +420,9 @@ fn try_propagation_checks_containment() {
 
 #[test]
 fn tail_try_over_a_contained_union_is_the_return() {
-    // E4's canonical shape: the final-expression `?` splits against the
+    // The canonical shape: the final-expression `?` splits against the
     // return union, so a fully-contained operand yields itself — the
-    // expression IS the return [E4].
+    // expression IS the return.
     clean(concat!(
         "tag parse_err\n",
         "extern fn read_file (path: string) -> string | io_err\n",
@@ -467,7 +467,7 @@ fn mid_block_return_try_over_a_contained_union_is_the_return() {
     // A statement-position `return e?` types its operand against the
     // declared return, exactly like the final-expression shape: a
     // fully-contained union keeps itself instead of reporting an empty
-    // success part [E4].
+    // success part.
     clean(concat!(
         "extern fn read_file (path: string) -> config | io_err\n",
         "fn load_config(path: string) -> config | io_err {\n",
@@ -500,8 +500,7 @@ fn mid_block_return_try_over_a_contained_union_is_the_return() {
 #[test]
 fn branch_final_try_splits_against_the_expected_return() {
     // The final-expression anchor threads through if and match branch
-    // finals, so a fully-contained union keeps itself in every branch
-    // [E4].
+    // finals, so a fully-contained union keeps itself in every branch.
     clean(concat!(
         "extern fn read_file (path: string) -> config | io_err\n",
         "fn load(path: string) -> config | io_err {\n",
@@ -548,7 +547,7 @@ fn branch_final_try_splits_against_the_expected_return() {
 #[test]
 fn for_over_a_range_binds_the_element_and_gates_endpoints() {
     // The range's element type is the endpoints' shared integer width;
-    // the body's binder carries it [F7].
+    // the body's binder carries it.
     clean(concat!(
         "fn f() -> int {\n",
         "  var total: int = 0\n",
@@ -564,7 +563,7 @@ fn for_over_a_range_binds_the_element_and_gates_endpoints() {
         "  x in 0..n\n",
         "}\n",
     ));
-    // Float endpoints are rejected naming the conversion discipline [B7].
+    // Float endpoints are rejected naming the conversion discipline.
     assert_eq!(
         check("fn f() -> () { for i in 1.0..5.0 { } }\n")
             .first()
@@ -574,7 +573,7 @@ fn for_over_a_range_binds_the_element_and_gates_endpoints() {
              explicit [B7]"
         )
     );
-    // Mixed integer widths name the conversion, like arithmetic [B7].
+    // Mixed integer widths name the conversion, like arithmetic.
     assert_eq!(
         check(concat!(
             "tag u32\n",
@@ -602,7 +601,7 @@ fn for_over_a_range_binds_the_element_and_gates_endpoints() {
 
 #[test]
 fn range_membership_checks_against_the_element_type() {
-    // `x in a..b` is bool-typed against the range's element type [F7].
+    // `x in a..b` is bool-typed against the range's element type.
     clean("fn f(x: int) -> bool { x in 1..=5 }\n");
     assert_eq!(
         check("fn f(x: float) -> bool { x in 1..5 }\n")
@@ -614,7 +613,7 @@ fn range_membership_checks_against_the_element_type() {
         )
     );
     // A range itself is not a storable value: only `for`-in and `in`
-    // consume it [F7].
+    // consume it.
     assert_eq!(
         check("fn f() -> () { const r = 1..5 }\n")
             .first()
@@ -626,7 +625,7 @@ fn range_membership_checks_against_the_element_type() {
 #[test]
 fn err_handler_is_difference_typed() {
     // (config | io_err) - io_err == config, so the `==` against config is
-    // well-typed [E4, B9].
+    // well-typed.
     clean(concat!(
         "extern fn load () -> config | io_err\n",
         "extern fn default_config () -> config\n",
@@ -651,13 +650,13 @@ fn err_handler_is_difference_typed() {
 #[test]
 fn handler_parameters_take_the_handled_members() {
     // An identity handler covers nothing: no disjoint refusal fires, the
-    // first walk stands, and the operand stays whole [B2, E4].
+    // first walk stands, and the operand stays whole.
     clean(concat!(
         "extern fn load () -> config | io_err\n",
         "const cfg = load().ok((x) => x)\n",
     ));
     // The handled members are the parameter's expected type: `e` lands
-    // at io_err and the use at the handled type checks [B2, E4].
+    // at io_err and the use at the handled type checks.
     clean(concat!(
         "extern fn load () -> config | io_err\n",
         "extern fn announce (e: io_err) -> config\n",
@@ -682,7 +681,7 @@ fn the_ok_handler_defaults_to_the_present_value_arm() {
     // A body walk deriving no set over a `t | none` receiver defaults the
     // handled side to the receiver minus `none`: the un-annotated parameter
     // lands at the present type and the body re-walks there, the `none`
-    // member flowing the remainder [B2, E4].
+    // member flowing the remainder.
     clean(concat!(
         "extern fn peek () -> int | none\n",
         "const v = peek().ok((x) => x + 1)\n",
@@ -705,11 +704,11 @@ fn the_ok_handler_defaults_to_the_present_value_arm() {
 fn numeric_table_int_float_split() {
     clean("fn f(a: int, b: int) -> int { a +% b }\n");
     clean("fn f(a: float, b: float) -> float { a + b }\n");
-    // Wrapping operators are integer-only [B7].
+    // Wrapping operators are integer-only.
     assert_eq!(check("fn f(a: float, b: float) -> float { a +% b }\n"), [
         "DS2001 wrapping operators are integer-only; floats are IEEE [B7]"
     ]);
-    // Mixed int/float arithmetic suggests the explicit conversion [B7].
+    // Mixed int/float arithmetic suggests the explicit conversion.
     let diags = check("fn f(a: int, b: float) -> float { a + b }\n");
     assert_eq!(diags.as_slice(), ["DS2001 mixed numeric operands `int` \
                                    and `float`; conversions are explicit \
@@ -727,10 +726,10 @@ fn numeric_table_int_float_split() {
 
 #[test]
 fn byte_literals_type_through_a_declared_byte_atom() {
-    // The record pins `b'x'` as a single byte [F6] but names no byte
+    // The record pins `b'x'` as a single byte but names no byte
     // type, so the literal types through the declared-atom convention
-    // like any width suffix: inference never falls back [B7], and a
-    // declared `byte` is a distinct atom disjoint from `int` [B1].
+    // like any width suffix: inference never falls back, and a
+    // declared `byte` is a distinct atom disjoint from `int`.
     assert_eq!(check("fn f() -> () { const b: int = b'x' }\n"), [
         "DS2002 `byte literal` needs a declared `byte` type; inference never falls back [B1, B7]"
     ]);
@@ -744,11 +743,11 @@ fn byte_literals_type_through_a_declared_byte_atom() {
 fn structural_equality_carve_outs() {
     clean("fn f(a: int, b: int) -> bool { a == b }\n");
     clean("const same = config { host: \"h\", port: 1 } == config { host: \"h\", port: 1 }\n");
-    // Disjoint operands make `==` constant: rejected [B9].
+    // Disjoint operands make `==` constant: rejected.
     assert_eq!(check("fn f(a: int, b: string) -> bool { a == b }\n"), [
         "DS2001 `int` and `string` share no member; `==` would be constant [B9]"
     ]);
-    // Function comparison is rejected statically [B9 carve-out 1].
+    // Function comparison is rejected statically.
     assert_eq!(check("fn f(g: fn(int) -> int) -> bool { g == g }\n"), [
         "DS2001 function comparison is rejected [B9 carve-out 1]"
     ]);
@@ -756,7 +755,7 @@ fn structural_equality_carve_outs() {
 
 #[test]
 fn interpolation_holes_convert_printable_primitives() {
-    // F6: a hole is a string context; the printable primitives convert
+    // A hole is a string context; the printable primitives convert
     // through str(e) implicitly, in both hole spellings
     clean("const s = \"count: ${1}\"\n");
     clean("const s = \"${1.5} ${true} ${'x'}\"\n");
@@ -784,9 +783,8 @@ fn interpolation_rejects_unprintable_and_union_holes() {
     ]);
 }
 
-/// The refusal's help note names what to do (F6): derive or implement
-/// `show` for a single-member type, extract or impl for a union — the
-/// stale "arrives with M6" promise is gone.
+/// The refusal's help note names what to do: derive or implement
+/// `show` for a single-member type, extract or impl for a union.
 #[test]
 fn interpolation_refusal_notes_name_the_remedy() {
     let note_of = |source: &str| -> Vec<String> {
@@ -812,7 +810,7 @@ fn interpolation_refusal_notes_name_the_remedy() {
     ]);
 }
 
-/// A hole whose operand carries `show` checks clean (F6): the derived
+/// A hole whose operand carries `show` checks clean: the derived
 /// impl, the hand-written trait impl, the inherent member, a
 /// whole-union head, and a bound-variable receiver (the assumption's
 /// runtime-evidence dispatch) all answer; a boundless type variable
@@ -860,7 +858,7 @@ fn interpolation_accepts_show_carrying_operands() {
         "fn f[t: show](v: t) -> string { \"$v\" }\n",
     ));
     // a boundless type variable names no assumption and no instance
-    // serves it: the standard F6 refusal, the variable rendering under
+    // serves it: the standard refusal, the variable rendering under
     // its minted internal name
     let boundless = check(concat!(
         "trait show {\n",
@@ -890,7 +888,7 @@ fn bare_ident_hole_resolves_and_reports() {
 
 #[test]
 fn method_selection_through_instances_and_assumptions() {
-    // A concrete receiver resolves through the instance environment [B6].
+    // A concrete receiver resolves through the instance environment.
     clean(concat!(
         "trait show {\n",
         "  fn text(self) -> string\n",
@@ -912,14 +910,14 @@ fn method_selection_through_instances_and_assumptions() {
         .map(String::as_str),
         Some("DS2013 no instance of `show` for `int`")
     );
-    // A generic bound carries the assumption into the body [B6].
+    // A generic bound carries the assumption into the body.
     clean(concat!(
         "trait show {\n",
         "  fn text(self) -> string\n",
         "}\n",
         "fn shown[t: show](x: t) -> string { x.text() }\n",
     ));
-    // Two traits, both satisfied: true ambiguity [F3].
+    // Two traits, both satisfied: true ambiguity.
     assert_eq!(
         check(concat!(
             "trait show {\n",
@@ -1014,7 +1012,7 @@ fn self_as_a_type_name_is_retired() {
 #[test]
 fn the_annotated_receiver_is_the_old_spelling() {
     // The pre-adoption `(self: self, ...)` shape reports the receiver
-    // ruling once per member, not per annotation site.
+    // refusal once per member, not per annotation site.
     assert_eq!(
         check(concat!("trait t {\n", "  fn f(self: self) -> int\n", "}\n",)).as_slice(),
         [
@@ -1049,10 +1047,10 @@ fn field_access_needs_one_struct() {
 
 #[test]
 fn difference_types_erase_to_the_solved_shape() {
-    // `io_err - io_err` erases entirely [B1]: the annotation solves to
+    // `io_err - io_err` erases entirely: the annotation solves to
     // `empty`, and nothing inhabits it — no any fallback.
-    // the directed label against the erased set refuses unknown-member
-    // (F9.5), rendering the empty shape the difference solved to
+    // the directed label against the erased set refuses unknown-member,
+    // rendering the empty shape the difference solved to
     assert_eq!(check("const x: io_err - io_err = io_err\n"), [
         "DS2045 a bare `io_err` names no member of `empty` [F9.5]"
     ]);
@@ -1087,10 +1085,10 @@ fn a_binding_tail_checks_and_the_block_value_is_unit() {
     );
 }
 
-/// A destructuring declaration binds exactly one tuple [B3]: the element
+/// A destructuring declaration binds exactly one tuple: the element
 /// binders take their element types, a wrong arity is the tuple-pattern
 /// error, and a union-typed initializer is rejected outright — picking
-/// one member's types would bind without a coverage proof [F4].
+/// one member's types would bind without a coverage proof.
 #[test]
 fn destructuring_declarations_bind_one_tuple_or_reject() {
     clean("fn f(t: (int, string)) -> int { const (a, b) = t\n a }\n");
@@ -1113,7 +1111,7 @@ fn destructuring_declarations_bind_one_tuple_or_reject() {
     );
 }
 
-/// A match arm's tuple pattern types and binds each element [B3, F4].
+/// A match arm's tuple pattern types and binds each element.
 #[test]
 fn match_arm_tuple_patterns_type_each_element() {
     clean("fn f(t: (int, string)) -> int { match t { (a, b) => a, } }\n");
@@ -1144,13 +1142,13 @@ fn tuple_construction_propagates_expected_element_types() {
                                                               [B3]"]);
 }
 
-/// Generic ambient externs check their arguments [B2]: the structural
+/// Generic ambient externs check their arguments: the structural
 /// binder stays silent on a constructor mismatch, so the solved
 /// parameter has to contain the argument or the mismatch reports.
 #[test]
 fn generic_calls_check_arguments() {
-    // The R6 probe pair: a mismatched constructor binds nothing and
-    // reports against the written parameter spelling.
+    // A mismatched constructor binds nothing and reports against the
+    // written parameter spelling.
     assert_eq!(
         check(concat!(
             "extern fn list_len[t] (xs: list[t]) -> int
@@ -1191,7 +1189,7 @@ fn generic_calls_check_arguments() {
     ));
 }
 
-/// Nested generic applications construct [F9]: `list[list[string]]()` and
+/// Nested generic applications construct: `list[list[string]]()` and
 /// the map spellings apply their own bracketed type arguments.
 #[test]
 fn nested_generic_applications_construct() {
@@ -1235,8 +1233,8 @@ fn nested_generic_applications_construct() {
 
 #[test]
 fn trailing_block_arguments_feed_the_final_lambda_parameter() {
-    // the block after a call is the callee's final zero-argument lambda
-    // [F7]: it fills the open parameter slot and types against the
+    // The block after a call is the callee's final zero-argument lambda:
+    // it fills the open parameter slot and types against the
     // fn-typed parameter, identical to the parenthesized lambda
     clean(concat!(
         "fn call(x: int, f: fn() -> int) -> int { x + f() }\n",
@@ -1302,7 +1300,7 @@ fn lambda_literals_match_the_expected_fn_type_arity() {
         )),
         ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
     );
-    // An annotated binding directs its initializer (F9.5): the lambda
+    // An annotated binding directs its initializer: the lambda
     // checks its shape against the expected fn type and the arity
     // refusal is the sharper diagnostic.
     assert_eq!(
@@ -1327,7 +1325,7 @@ fn lambda_literals_match_the_expected_fn_type_arity() {
 #[test]
 fn generic_calls_enforce_their_parameter_bounds() {
     // The solved instantiation carries each parameter's declared trait
-    // bound [B6]: an argument type the instance environment (or an
+    // bound: an argument type the instance environment (or an
     // in-scope assumption) covers passes, anything else reports the
     // unsatisfied constraint once. Bound-free generic externs stay
     // clean.
@@ -1395,7 +1393,7 @@ fn generic_calls_enforce_their_parameter_bounds() {
 
 #[test]
 fn dot_call_on_a_value_binding_reports_not_callable() {
-    // The dot's free tier searches the value namespace [F9], so the
+    // The dot's free tier searches the value namespace, so the
     // callee can be a plain const or var: a call against it is a
     // call-shape error with the receiver and arguments walked, never a
     // silently empty type.
@@ -1480,7 +1478,7 @@ fn same_name_inherent_methods_select_by_owner() {
     // Two owner types share one method name: each dot-call binds its own
     // owner's signature — distinct returns prove no cross-binding — a
     // generic owner accepts its applications, and a receiver the owner
-    // does not cover reports at the dot [F3].
+    // does not cover reports at the dot.
     clean(concat!(
         "struct counter { ticks: int }\n",
         "struct timer { laps: int }\n",
@@ -1542,8 +1540,8 @@ fn same_name_inherent_methods_select_by_owner() {
 
 #[test]
 fn mut_self_member_calls_share_the_const_receiver_gate() {
-    // The D2/C3 exclusivity gate is per mut window, not per call
-    // spelling: a `mut self` member — trait or inherent — rejects a
+    // The exclusivity gate is per mut window, not per call spelling: a
+    // `mut self` member — trait or inherent — rejects a
     // `const` receiver exactly like the free-function spelling, while a
     // `var` receiver and a fresh value pass.
     assert_eq!(
@@ -1594,7 +1592,7 @@ fn mut_self_member_calls_share_the_const_receiver_gate() {
 
 #[test]
 fn only_mut_parameters_are_reassignable() {
-    // C3 has exactly two re-assignable carriers: `var` bindings and `mut`
+    // Exactly two carriers are re-assignable: `var` bindings and `mut`
     // parameter windows. `move` transfers once and `comptime` is a
     // compile-time value, so assignments to them reject like a borrow
     // parameter's — in fn and lambda position alike.
@@ -1644,7 +1642,7 @@ fn only_mut_parameters_are_reassignable() {
 #[test]
 fn top_level_destructuring_patterns_type_their_binders() {
     // A top-level tuple/struct-pun pattern declares package defs whose
-    // types memoize like any single-name binding [G3] — uses far from the
+    // types memoize like any single-name binding — uses far from the
     // declaration see the element types, not "no initializer".
     clean(concat!(
         "const (n, s) = (1, \"x\")\n",
@@ -1669,13 +1667,13 @@ fn top_level_destructuring_patterns_type_their_binders() {
     );
 }
 
-/// The inference-hole boundary of `?` [E4]: the split needs a known
+/// The inference-hole boundary of `?`: the split needs a known
 /// return union, so a lambda whose return is inferred — no annotation, or
 /// a bare type-variable expectation from a generic callee's `r` — reports
 /// honestly instead of binding the whole union; the declared-return
 /// spelling keeps the split. Deferring through a placeholder variable
 /// would mistype mid-body uses (the binding would carry the error
-/// members), so the rejection is the principled M2 answer.
+/// members), so the checker rejects.
 #[test]
 fn question_marks_need_a_known_return_union() {
     // Declared returns split cleanly, in value and argument position.
@@ -1812,7 +1810,7 @@ fn always_false_is_tests_report_only_in_value_position() {
     // The operand's flow-refined current type is what the test meets: in
     // the else branch `x` is narrowed away from int, so `is int` there is
     // still honest refinement (condition), but its value use reports the
-    // unknown-member refusal (F9.5).
+    // unknown-member refusal.
     assert_eq!(
         check(concat!(
             "fn f(x: int | string) -> bool {\n",
@@ -1840,7 +1838,7 @@ fn always_false_is_tests_report_only_in_value_position() {
     clean("fn f(x: int | string) -> int {\n  if x is int { 1 } else { 0 }\n}\n");
 }
 
-/// The universe predeclares `none` as its distinguished unit atom [B4]; a
+/// The universe predeclares `none` as its distinguished unit atom; a
 /// `tag none` (or a unit enum case `none`) restates that atom instead of
 /// minting a second — every written `none`, in type and value position,
 /// keeps solving. Before the alias the refused mint silently orphaned the
@@ -1868,7 +1866,7 @@ fn none_restatement_maps_onto_the_predeclared_atom() {
 }
 
 /// A field whose type solves to the `none` atom alone refuses at the
-/// field's own span [B4]: `none` is the optional's absent member, never a
+/// field's own span: `none` is the optional's absent member, never a
 /// standalone field type, and the silent drop used to surface later as a
 /// lowering refusal over the wrong vocabulary. Every spelling that folds
 /// to the none-only set hears the refusal — the paren, the optional of
@@ -2052,8 +2050,8 @@ fn a_top_level_initializer_is_its_own_frame() {
     ]);
 }
 
-/// A value-level arm subtracts nothing from the remainder [B2
-/// value-match remainder]: an arm carrying a literal test may fail at
+/// A value-level arm subtracts nothing from the remainder: an arm
+/// carrying a literal test may fail at
 /// run, so a later member arm checks over the full scrutinee type (it
 /// may be dead, never wrong), and so do two tested struct arms over a
 /// single-member scrutinee.
@@ -2133,7 +2131,7 @@ fn for_and_guarded_while_keep_the_unit_tail() {
 }
 
 /// A `return` in a value-consumed position refuses at the checker (the
-/// early exit is a statement [F2]): a block whose value feeds a binding,
+/// early exit is a statement): a block whose value feeds a binding,
 /// an argument, or a join arm has no answer for the consuming slot, so
 /// the seam never reaches the lowerer's dead-answer path. The statement
 /// spellings — including a narrow inside a value block's head — stay

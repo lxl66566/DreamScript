@@ -1,4 +1,4 @@
-//! The module-id space (F2 scalar FuncRef words), pinned. The format-v4
+//! The module-id space (scalar FuncRef words), pinned. The format-v4
 //! payload spells uop callees as dep-list positions, and the dsmod
 //! install resolves position → dep name → module id into the pool, so a
 //! loaded callee word carries the id its VM minted at first install
@@ -6,7 +6,7 @@
 //! only); native surfaces and directly installed host modules stay
 //! name-keyed, resolved at issue time through the name's current slot.
 //! Ids are per-VM state the format never persists, and words never
-//! legitimately cross VMs — two embedders are two independent VMs [H5];
+//! legitimately cross VMs — two embedders are two independent VMs;
 //! the one hazard, a foreign word silently aliasing another registry's
 //! module, is recorded, not hidden.
 use ds_vm::{

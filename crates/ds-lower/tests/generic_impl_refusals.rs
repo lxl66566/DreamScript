@@ -1,12 +1,12 @@
 //! The generic-impl runtime-evidence seam's honest boundaries: the shapes
-//! whose runtime dispatch or runtime word has no contract this round
-//! refuse naming exactly the seam they wait on — an overwrite
+//! whose runtime dispatch or runtime word has no contract refuse naming
+//! exactly the seam they need — an overwrite
 //! contract for a type-variable's word (a var binding, a var destructuring
 //! element, a lambda's mut parameter), a checked read whose union
 //! payload spans the variable's runtime word, and the free-generic-fn
 //! door (a mut parameter over a type variable inside a free generic fn
-//! refuses at the body's own planning, the declaration no longer
-//! inert). A receiver unioning the
+//! refuses at the body's own planning, so the declaration is not inert).
+//! A receiver unioning the
 //! variable (or concrete members) across match branches refuses earlier,
 //! at checking, through the surface's uniform coherence rule — no single
 //! instance serves a union — while the just-inside shapes (the
@@ -469,7 +469,7 @@ fn a_mut_parameter_over_the_type_variable_refuses() {
 }
 
 /// An impl member's parameter over the bare variable refuses in every
-/// mode (a concrete parameter word is the covered shape this round), so
+/// mode (a concrete parameter word is the covered shape), so
 /// the mut clause for member parameters is shadowed here — the lambda
 /// above is where the overwrite-contract refusal is reachable.
 #[test]

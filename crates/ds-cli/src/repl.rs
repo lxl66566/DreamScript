@@ -1,6 +1,5 @@
 //! The `ds repl` subcommand: an interactive read-eval-print loop over the
-//! in-process pipeline with a persistent session — the resumed frame
-//! (H6 item 4).
+//! in-process pipeline with a persistent session.
 //!
 //! # Session model
 //!
@@ -208,7 +207,7 @@ struct Session {
 
 /// The in-flight submission's deferred facts: the snapshot a pump-time
 /// failure restores the text to, the resume position its rollback
-/// re-parks at, the zone the landing report reads, and the round's
+/// re-parks at, the zone the landing report reads, and the submission's
 /// binder registrations the landing commits.
 struct InFlight {
     /// The committed-round snapshot (`decls`, `stmts`).
@@ -265,7 +264,7 @@ impl Session {
     fn new() -> Self {
         let mut db = Db::with_declared_rows(source::session_rows().clone())
             .with_world_caps(ds_stdlib::world_caps().clone());
-        // The ambient is a session package member (G3): its definitions
+        // The ambient is a session package member: its definitions
         // resolve for every submission, and its file id is never needed
         // again. The host provision rides beside it (the die split): the
         // entry session's own declaration member, rows included.
@@ -426,7 +425,7 @@ impl Session {
                 .filter(|diag| touches(diag, self.file))
                 .cloned(),
         );
-        // The pooled-body refusal [E3] rides its query like every other
+        // The pooled-body refusal rides its query like every other
         // pass: combinator element bodies refuse the members a pooled
         // drive cannot serve.
         let pooled = query(
@@ -655,7 +654,7 @@ impl Session {
     }
 
     /// The effect row of one definition, read through the `effects_of`
-    /// query (E1): `pure` or the vocabulary row.
+    /// query: `pure` or the vocabulary row.
     fn print_row(&mut self, index: u32) -> Result<()> {
         let row = query(self.db.get::<EffectsOf>(DefId::new(index)), "effects_of")?;
         println!("~ {}", row.render());
@@ -710,7 +709,7 @@ impl Session {
     /// resolve the name (the text-level death; the renamed binder's slots
     /// stay reserved, keeping every later binding's placement stable).
     /// A declaration drop removes the block: no frame words exist for
-    /// it, and the next round's own lowering decides whether the session
+    /// it, and the next submission's own lowering decides whether the session
     /// still checks.
     fn drop_binding(&mut self, name: &str) {
         let Some(pos) = self.stmts.iter().position(|s| binds_name(s, name)) else {
@@ -877,7 +876,7 @@ pub(crate) fn query<T>(result: Result<T, QueryError>, pass: &str) -> Result<T> {
     result.with_context(|| format!("{pass} query failed"))
 }
 
-/// A fresh VM with the default platform installed (H5.5): the CLI is the
+/// A fresh VM with the default platform installed: the CLI is the
 /// provider, and the install validates pool FuncRefs against it. The
 /// platform's reactor installs with it (the `ds run` precedent), so a
 /// session's world op parks on a would-block instead of blocking the
@@ -888,8 +887,8 @@ pub(crate) fn fresh_vm() -> Vm {
     registry.install_platform(Platform::std());
     let mut vm = Vm::new(registry);
     // the interactive sessions' boundary reports read the recorded
-    // error chain (H7): the switch is the VM's debug face, armed here
-    // for the session's whole life
+    // error chain: the switch is the VM's debug face, armed here for
+    // the session's whole life
     vm.set_trace_errors(true);
     if let Some(reactor) = ds_vm::reactor::platform_default() {
         vm.install_reactor(reactor);

@@ -1,6 +1,6 @@
 //! The wrap-ops round end to end: `+%`/`-%`/`*%` and unary `-%` parse,
 //! check, and lower through the wrap IntArith uops, wrapping modulo 2^64
-//! where the trapping forms trap [B7]. The probe pins the wrap edges, the
+//! where the trapping forms trap. The probe pins the wrap edges, the
 //! wrap negation of int-min, plain assignment accumulating through the
 //! wrap add (the scalar destination offer), and the contrast — the
 //! trapping `+` and unary `-` keep their cold overflow edge. Float

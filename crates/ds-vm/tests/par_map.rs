@@ -1,4 +1,4 @@
-//! The `par_map` fork-join combinator pins [E3, the parked-CALLG
+//! The `par_map` fork-join combinator pins (the parked-CALLG
 //! slice]: fork is one spawned child per element through the nursery
 //! substrate, the CALLG site parks through the interlock drive (the
 //! spawn-only body answering the park request, the seam assembling),
@@ -333,7 +333,7 @@ fn parking_doubles_def() -> FunctionDef {
 
 /// `(x: int) -> int`: x == 0 dies trapped at the division; otherwise it
 /// counts x down through a taken backward branch — the preemption point
-/// a cancelled sibling observes [E5].
+/// a cancelled sibling observes.
 fn guard_def() -> FunctionDef {
     def(
         "guard",
@@ -1830,7 +1830,7 @@ fn a_nested_par_map_failure_re_raises_at_the_outer_boundary() {
 
 #[test]
 fn nested_fork_joins_run_past_the_interlocks_own_depth_bar() {
-    // the previously-refused shape at scale: 2048 lexically nested
+    // the deep-nesting shape at scale: 2048 lexically nested
     // par_map levels, each element forking the level below — every
     // level parks its CALLG site, the drive frames stacking on the
     // interlock's heap stack (the naive unlock aborted the process

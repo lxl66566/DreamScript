@@ -1,5 +1,5 @@
-//! The ord-routed list sort end to end over a no-ambient universe
-//! (todo item 101): the `sort[t: ord]` extern's call sites route the
+//! The ord-routed list sort end to end over a no-ambient universe: the
+//! `sort[t: ord]` extern's call sites route the
 //! comparator out of the solved element type's serving ord instance —
 //! the checker's per-call bound record answers the instance, the
 //! lowering mints the instance's `compare` body as the callable word

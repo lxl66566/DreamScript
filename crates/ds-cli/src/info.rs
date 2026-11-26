@@ -1,5 +1,5 @@
 //! The `ds info` subcommand: render the `.dsi` — one package's
-//! reviewable API surface (G4). The `pub` declarations of the target's
+//! reviewable API surface. The `pub` declarations of the target's
 //! members print as their signature spellings, `pub(pkg)` and private
 //! declarations stay out, and the rendering is re-parsable DreamScript:
 //! each line is the declaration a dependent's author reads, never a

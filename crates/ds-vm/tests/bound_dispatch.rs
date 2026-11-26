@@ -1,4 +1,4 @@
-//! Bound-artifact dispatch fixtures (H5): the VM's bound tier end to end
+//! Bound-artifact dispatch fixtures: the VM's bound tier end to end
 //! over a real C-ABI cdylib the host's rustc builds at test time. The
 //! module installs under its manifest artifact name, a pool
 //! `Constant::Bound` callee addresses one export by its enumeration

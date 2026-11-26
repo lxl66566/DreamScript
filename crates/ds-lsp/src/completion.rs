@@ -154,7 +154,7 @@ pub(crate) fn members(analyzed: &Analyzed, recv: Val) -> Vec<lsp::CompletionItem
         }
         owner_names.push(owner.name.as_str());
     }
-    // Inherent impl members: owned by the target type's name (F3).
+    // Inherent impl members: owned by the target type's name.
     for method in package.methods() {
         if let MethodOwner::Inherent(owner) = &method.owner
             && owner_names.iter().any(|name| name == owner)
@@ -163,7 +163,7 @@ pub(crate) fn members(analyzed: &Analyzed, recv: Val) -> Vec<lsp::CompletionItem
         }
     }
     // Trait members through solved instances: every trait whose instance
-    // set contains the receiver's type (B6).
+    // set contains the receiver's type.
     for (raw, def) in package.defs().enumerate() {
         if def.kind != DefKind::Trait {
             continue;
@@ -279,7 +279,7 @@ impl Visit for TypePos<'_> {
     }
 }
 
-/// Whether one scope kind declares into the type namespace (F9): the
+/// Whether one scope kind declares into the type namespace: the
 /// type-position filter over the scope-index's answer.
 pub(crate) fn type_namespace(kind: ScopeKind) -> bool {
     matches!(

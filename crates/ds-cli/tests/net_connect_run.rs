@@ -33,8 +33,7 @@ fn test_cache() -> PathBuf {
 }
 
 /// The net_err match arms every fallible row of the sources below
-/// spells (a bare fallible call cannot stand as a block's own answer
-/// under the M3 contract).
+/// spells (a bare fallible call cannot stand as a block's own answer).
 const ERR_ARMS: &str = "    timeout => println(\"timeout\")\n    refused => \
                         println(\"refused\")\n    addr_in_use => println(\"addr in use\")\n    \
                         reset => println(\"reset\")\n    net_other { msg } => println(\"other\")\n";

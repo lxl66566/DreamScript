@@ -7,7 +7,7 @@
 //! words ride the entry frame the VM writes). A lambda lexically
 //! inside the spawned body stages the same word again from the child
 //! frame's slots into its capture block, so a demand crosses two child
-//! boundaries. The residual keeps its honest refusal in
+//! boundaries. The one refused case names itself in
 //! `generic_impl_refusals.rs`: a serving body whose spawned subtrees
 //! demand a different member than its own chain.
 

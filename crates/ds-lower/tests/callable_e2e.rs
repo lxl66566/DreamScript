@@ -1,4 +1,4 @@
-//! The callable-word surface completion (F2): named fn values mint the
+//! The callable-word surface completion: named fn values mint the
 //! scalar FuncRef word through the pool const channel (the same channel a
 //! non-capturing lambda mints), so a named function passes to
 //! map/filter/reduce, binds and calls, and stores in a list for a
@@ -227,7 +227,7 @@ fn main() -> int {{
 }
 
 /// A closure staged into a callable-defaulted parameter in tail position
-/// lowers in place (CALL plus flush plus return, the R13 native-tail
+/// lowers in place (CALL plus flush plus return, the native-tail
 /// shape): the borrow window's dec lands after the call, and the frame's
 /// exit drops never run before the callee reads the word.
 #[test]
@@ -393,7 +393,7 @@ fn uop_kinds(lowered: &ds_lower::Lowered, name: &str) -> Vec<String> {
 
 /// A tail call through a fn-typed binding whose word the tracking proves
 /// a count-free scalar (a const alias of a named fn) transfers through
-/// CALLT with the named function's own pool FuncRef [H2's closure ruling].
+/// CALLT with the named function's own pool FuncRef.
 #[test]
 fn a_proven_scalar_callee_word_transfers_through_callt() {
     const SOURCE: &str = "
@@ -447,7 +447,7 @@ fn main() -> int { relay(41) }
 
 /// A callable-defaulted parameter's word is maybe-Ref at runtime (a
 /// closure may inhabit it), so tracking cannot prove it count-free: the
-/// tail lowers in place, CALLS plus return, exactly as before the ruling.
+/// tail lowers in place, CALLS plus return.
 #[test]
 fn a_callable_parameter_tail_stays_in_place() {
     const SOURCE: &str = "
@@ -1242,11 +1242,11 @@ fn main() -> int {{
 
 /// A closure capturing an interpolation temporary: the capture is a
 /// migration point, so the captured StrCat result keeps its counted
-/// spelling and the construction acquires its own count — previously
-/// the capture staging ran no placement bookkeeping, the arena serving
-/// survived to finalization, and ClosureNew trapped ArenaHandoff at
-/// runtime. The spawn seam shares the same staging, so its captures
-/// migrate the same way.
+/// spelling and the construction acquires its own count: the capture
+/// staging runs the placement bookkeeping, so a pinned arena word never
+/// survives to finalization and ClosureNew never traps ArenaHandoff. The
+/// spawn seam shares the same staging, so its captures migrate the same
+/// way.
 #[test]
 fn a_closure_capturing_an_interpolation_temporary_answers_counted() {
     acceptance(

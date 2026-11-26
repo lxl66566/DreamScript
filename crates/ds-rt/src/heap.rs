@@ -1,4 +1,4 @@
-//! The per-fiber heap (C4/H4): the bump arena for non-escaping temporaries
+//! The per-fiber heap: the bump arena for non-escaping temporaries
 //! plus the counted-block store for boxed/shared values.
 //!
 //! Boxed blocks are header + payload in one system-allocator allocation; they
@@ -6,9 +6,9 @@
 //! granularity and would kill shared data. The integration with the arena half
 //! is ownership: one `Heap` per fiber owns both, so per-fiber marks and
 //! chunk-append address stability hold exactly as before, and the heap moves
-//! whole with the fiber under E3 ownership transfer.
+//! whole with the fiber under ownership transfer.
 //!
-//! Reuse threading (C4): a unique death pools the block as a reuse candidate
+//! Reuse threading: a unique death pools the block as a reuse candidate
 //! (freelist per power-of-two size class, LIFO, depth-capped), and the next
 //! compatible allocation is placed at the candidate's address - the
 //! `kk_block_alloc_at` pattern, as [`Heap::alloc_at`]. Blocks that are
@@ -113,7 +113,7 @@ fn block_layout<T>() -> (Layout, usize) {
     )
 }
 
-/// Snapshot of heap memory state, for the M4 residency accounting and tests.
+/// Snapshot of heap memory state, for the residency accounting and tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct HeapStats {
     /// The bump-arena side (temporaries).
@@ -122,7 +122,7 @@ pub struct HeapStats {
     pub pooled_blocks: usize,
 }
 
-/// The per-fiber runtime heap: bump arena + counted blocks (C4/H4).
+/// The per-fiber runtime heap: bump arena + counted blocks.
 ///
 /// `Send` (moves whole with its fiber under fork-join ownership transfer) but
 /// not `Sync`: the non-atomic counts and the freelist are confined state.
@@ -160,8 +160,8 @@ struct Inner {
 }
 
 // SAFETY: the heap uniquely owns its arena, pool, and blocks; moving it to
-// another thread moves that ownership (fibers are thread-confined (C4),
-// transferred whole under E3). `Sync` is deliberately not implemented: the
+// another thread moves that ownership (fibers are thread-confined,
+// transferred whole on fork-join). `Sync` is deliberately not implemented: the
 // counts and freelists mutate through `&self`.
 unsafe impl Send for Heap {}
 
@@ -256,7 +256,7 @@ impl Heap {
         unsafe { (*header.as_ptr()).rc() }
     }
 
-    /// Raw `rc_inc` (C4): one more owner for the block `header` names. The
+    /// Raw `rc_inc`: one more owner for the block `header` names. The
     /// compiler-inserted dup pairs with the count half of the split dec
     /// ([`Heap::rc_dec_count`]); both take the heap for surface symmetry.
     #[allow(clippy::unused_self)]
@@ -289,7 +289,7 @@ impl Heap {
 
     /// The death work of `rc_dec` for a block whose owner observed the unique
     /// death ([`Heap::rc_dec_count`] returned `true`): the block's `deinit`
-    /// hook runs exactly once (C5), then the block threads to the reuse pool
+    /// hook runs exactly once, then the block threads to the reuse pool
     /// or returns to the system allocator.
     ///
     /// # Misuse contract
@@ -353,7 +353,7 @@ impl Heap {
 
     /// Pools the dead block `header` as a reuse candidate of its size class,
     /// or returns it to the system allocator when it is not class-shaped or
-    /// the class pool is full (C4).
+    /// the class pool is full.
     fn thread_block(&self, header: NonNull<RcHeader>) {
         let inner = self.inner();
         // SAFETY: the block is allocated and dead; size/align sit at their
@@ -410,7 +410,7 @@ impl Default for Heap {
 }
 
 impl Inner {
-    /// The `alloc_at` pattern (C4): places a fresh block at the pooled
+    /// The `alloc_at` pattern: places a fresh block at the pooled
     /// candidate heading `row`'s freelist, unlinking the node first.
     fn alloc_at(&mut self, row: usize, deinit: Option<DeinitFn>) -> NonNull<RcHeader> {
         let pool = &mut self.pools[row];
@@ -464,7 +464,7 @@ impl Drop for Heap {
     }
 }
 
-/// Fresh system-allocator block; the mimalloc swap point (C4).
+/// Fresh system-allocator block; the mimalloc swap point.
 ///
 /// # Panics
 /// If the layout is invalid or the allocator returns null.

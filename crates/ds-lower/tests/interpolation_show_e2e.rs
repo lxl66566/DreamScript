@@ -1,4 +1,4 @@
-//! The show-carrying interpolation hole end to end [F6]: an operand whose
+//! The show-carrying interpolation hole end to end: an operand whose
 //! type implements `show` — a derived struct, a payloaded enum, a
 //! union-typed binding through the sibling branches, a nested dispatch
 //! inside a derive-synthesized body (the enum-binder and the

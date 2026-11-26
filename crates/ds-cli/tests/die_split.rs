@@ -1,4 +1,4 @@
-//! The die split's end-to-end pins (ruled 2026-11-17): the trap
+//! The die split's end-to-end pins: the trap
 //! primitive is a builtin native the lowerer routes by name, the `die`
 //! spelling is the CLI host's own provision for its entry sessions (a
 //! declaration member registered beside the ambient — never ambient or

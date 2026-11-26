@@ -1,4 +1,4 @@
-//! Focused affine-pass tests [C1, C5]: the move/borrow rules at each
+//! Focused affine-pass tests: the move/borrow rules at each
 //! consuming position, join and loop-back-edge semantics, deinit
 //! well-formedness, and the exact two-span golden render.
 
@@ -116,7 +116,7 @@ fn a_bare_ident_hole_is_a_consuming_use() {
 
 #[test]
 fn mut_windows_do_not_consume_the_caller_binding() {
-    // C2: borrow and `mut` are call-scoped windows; the caller keeps its
+    // Borrow and `mut` are call-scoped windows; the caller keeps its
     // value, so the same binding can window again in every iteration.
     let (_, lin) = case(concat!(
         "  const h = open_handle(p)\n",
@@ -413,7 +413,7 @@ fn last_use_positions_report_borrowed_and_consuming_final_uses() {
 #[test]
 fn consume_mode_parameter_double_consume_renders_the_two_span_golden() {
     // A `move` parameter is an initialized-affine binding of the entry
-    // state [C2]: the first consuming call moves it, the second is a
+    // state: the first consuming call moves it, the second is a
     // use-after-move with the same golden as locals.
     let source = format!(
         "{PRELUDE}fn twice(move h: handle) -> int {{\n  take_handle(h)\n  take_handle(h)\n}}\n"
@@ -483,9 +483,9 @@ fn consume_mode_parameter_left_live_drops_at_the_body_end() {
 
 #[test]
 fn borrow_mode_parameter_escaping_a_consuming_call_rejects() {
-    // C2: a borrow-mode parameter is a caller-retained window, so a
-    // consuming call-argument use would hand out an ownership the window
-    // does not hold — a double deinit at runtime. Each consuming call
+    // A borrow-mode parameter is a caller-retained window, so a consuming
+    // call-argument use would hand out an ownership the window does not
+    // hold — a double deinit at runtime. Each consuming call
     // reports the escape; the binding itself never moves and owes no
     // drop, the window's end is not its death.
     let (_, lin) = case(concat!(
@@ -516,7 +516,7 @@ fn borrow_mode_parameter_escaping_a_consuming_call_rejects() {
 fn a_borrowed_linear_parameter_cannot_escape_by_return() {
     // The window's value is the caller's; returning it hands the caller
     // a second ownership of one `~Copyable` value — a double deinit at
-    // runtime — so the escape rejects at the return [C2].
+    // runtime — so the escape rejects at the return.
     let source = format!("{PRELUDE}fn id(h: handle) -> handle {{ h }}\n");
     let (checked, lin) = check(&source);
     assert!(checked.diags.is_empty(), "{:#?}", checked.diags);
@@ -553,7 +553,7 @@ fn a_borrowed_linear_parameter_capture_stays_clean_at_the_checker() {
 #[test]
 fn a_borrowed_linear_parameter_cannot_escape_into_a_literal() {
     // A struct-literal field (here through punning) consumes its value:
-    // storing the window's value out is the same transfer [C1, C2].
+    // storing the window's value out is the same transfer.
     let source = format!(
         "{PRELUDE}struct holder {{\n  h: handle\n}}\nfn boxed(h: handle) -> holder {{\n  holder \
          {{ h }}\n}}\n"
@@ -567,7 +567,7 @@ fn a_borrowed_linear_parameter_cannot_escape_into_a_literal() {
 #[test]
 fn a_mut_window_parameter_cannot_escape_either() {
     // The `mut` window is as call-scoped as the borrow: its value cannot
-    // leave the call [C2].
+    // leave the call.
     let (_, lin) = case(concat!(
         "  const use = (h: mut handle) -> int {\n",
         "    take_handle(h)\n",
@@ -614,7 +614,7 @@ fn a_borrow_use_after_a_consume_of_a_parameter_fires() {
 
 #[test]
 fn a_parameter_captured_by_a_lambda_is_moved_before_its_body_use() {
-    // The capture at the lambda's use of the parameter is the move [C1];
+    // The capture at the lambda's use of the parameter is the move;
     // the body's later consuming use reads the dead binding.
     let (_, lin) = case(concat!(
         "  const twice = (move h: handle) -> int {\n",
@@ -846,7 +846,7 @@ fn cross_file_top_level_consumption_is_order_independent() {
     // A body in file A consuming file B's top-level binding: every
     // file's top-levels come live before any body walks, so the move
     // and the use-after-move fire with the consuming file processed
-    // first [G3] — a per-file interleave would silently skip them.
+    // first — a per-file interleave would silently skip them.
     let mut files = Files::new();
     let a = files.add_source(
         "a.ds",
@@ -871,15 +871,12 @@ fn cross_file_top_level_consumption_is_order_independent() {
     assert_eq!(diag.message, "value `shared` is no longer usable");
 }
 
-/// The grammar-based generator round found the loop audit compounding: a
-/// loop's audit round re-walks its body, and a nested loop ran its own
-/// round inside the outer audit, doubling the walk per nesting level —
-/// checking a 26-deep nested loop took ~8s, a 30-deep generated source
-/// ~80s, and depth 40 would take days. The audit walk mutates nothing
-/// (binds, reads, and drops all no-op or dedup), so a nested round inside
-/// an outer audit is a pure duplicate re-check; it is skipped, and the
-/// walk stays linear in program size. This pins boundedness by
-/// completion: before the fix this depth did not finish.
+/// The loop audit compounds: a loop's audit re-walks its body, and a
+/// nested loop runs its own audit inside the outer one, doubling the walk
+/// per nesting level. The audit walk mutates nothing (binds, reads, and
+/// drops all no-op or dedup), so a nested audit inside an outer one is a
+/// pure duplicate re-check; it is skipped, and the walk stays linear in
+/// program size. This pins boundedness by completion.
 #[test]
 fn deeply_nested_loops_finish() {
     for kind in [Kind::For, Kind::While] {
@@ -919,7 +916,7 @@ enum Kind {
 }
 
 /// A type-keyed static member call walks its arguments per the member's
-/// own signature, exactly like the free spelling (C2): the check
+/// own signature, exactly like the free spelling: the check
 /// converged to one member, so a `move` parameter consumes — before, the
 /// walk borrowed the argument unconditionally, the use-after-move behind
 /// it stayed live, and the scope exit recorded a second drop beside the
@@ -1101,8 +1098,8 @@ fn the_served_prefix_walk_answers_the_one_walk_per_compile() {
     );
 }
 
-// The affine-closure kill (the 2026-11-25 ruling): a lambda capturing a
-// `var` binding moves it into the capture block, so the binding is dead
+// The affine-closure kill: a lambda capturing a `var` binding moves it
+// into the capture block, so the binding is dead
 // in the enclosing scope from the construction on — every later use the
 // two-span MovedThenUsed refusal, and a spawn's captures keep the spawn
 // seam's acquire discipline (no kill fires for them).

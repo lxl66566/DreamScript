@@ -15,8 +15,10 @@ pub struct Heaps<'a> {
     pub(crate) owner: FiberId,
     /// Whether `current` really is the running fiber's store: true under
     /// a live execution context, false when the drive is parked and the
-    /// context store is the scratch — then every store is reached through
-    /// the pool (the death walk's form).
+    /// context store is the scratch — then reads and decs route through the
+    /// pool (the death walk's form), but allocation still lands in `current`,
+    /// so a word a seam hands a parked fiber belongs in that fiber's own store
+    /// swap and never through this router.
     pub(crate) live: bool,
     pub(crate) current: &'a mut Objects,
     pub(crate) pool: &'a mut [Fiber],
@@ -231,7 +233,7 @@ impl<'a> Heaps<'a> {
     /// Releases the running fiber's frame claim on `word` without
     /// touching the count: a fresh word's birth count (or a retained
     /// copy's count) becomes the adopting container's edge, so the frame
-    /// no longer owns it and the container's free cascade will drop it.
+    /// stopped owning it and the container's free cascade will drop it.
     pub(crate) fn release_claim(&mut self, word: RefId) {
         self.ledger(self.owner).release(word);
     }
@@ -451,8 +453,8 @@ impl<'a> Heaps<'a> {
     }
 
     /// Allocates a fresh bounded channel of capacity `cap` on the
-    /// running fiber's store — the creating fiber is the ruling's one
-    /// owning heap — the birth count claimed for the caller's frame.
+    /// running fiber's store — the creating fiber is its one owning heap —
+    /// the birth count claimed for the caller's frame.
     pub(crate) fn alloc_chan(&mut self, cap: usize) -> Value {
         let id = self.current.alloc_chan(cap);
         self.claimed_alloc(id)
@@ -837,7 +839,7 @@ impl<'a> Heaps<'a> {
     }
 
     /// The structural content compare over the objects behind two
-    /// reference words [B9]: strings compare text, bytes payloads, lists
+    /// reference words: strings compare text, bytes payloads, lists
     /// their element words pairwise, maps row by row through the same
     /// lookup face `map_get` serves (string keys by content, every other
     /// word by identity), and every nested reference pair compares the

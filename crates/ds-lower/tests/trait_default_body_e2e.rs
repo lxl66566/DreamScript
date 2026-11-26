@@ -1,4 +1,4 @@
-//! The omitted-defaulted dispatch end to end [B6, H3]: a trait member
+//! The omitted-defaulted dispatch end to end: a trait member
 //! declaring a default body makes the impl's member omittable, and the
 //! dispatch resolves into the trait's declared default body — the same
 //! CALLG staging an impl body enters (the evidence words the default
@@ -240,7 +240,7 @@ fn the_sibling_call_dispatches_through_the_default_bodys_evidence_slot() {
 /// The dispatch resolves into the declared default body itself: the
 /// CALLG callee FuncRef names the trait's planned default body, not an
 /// impl member — the omitted-member shape the completeness pass keeps
-/// clean and the lowering previously refused at its backstop seam.
+/// clean and the lowering's backstop seam admits.
 #[test]
 fn the_dispatch_targets_the_planned_default_body() {
     let lowered = lower_probe();

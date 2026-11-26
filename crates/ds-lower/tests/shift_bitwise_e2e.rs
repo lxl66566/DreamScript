@@ -1,7 +1,7 @@
 //! The shift and bitwise round end to end: `<<`/`>>`/`&`/`^`/`|` parse,
 //! check, and lower through the five IntArith uops (SHLI64, SHRI64 the
 //! arithmetic right shift, and the total bitwise trio), the oversized shift
-//! trapping beside overflow and division by zero [B7]. The probe pins the
+//! trapping beside overflow and division by zero. The probe pins the
 //! value answers, the sign-propagating right shift, the frozen precedence
 //! rows, the compound `<<=`/`>>=` stores, and the trap edges at shift 64
 //! and shift -1. Float operands refuse at the checker's own seam, and the
@@ -84,7 +84,7 @@ fn oversized_shifts_trap_in_both_directions() {
     );
 }
 
-/// A float operand refuses at the checker's own [B7] seam: the integer
+/// A float operand refuses at the checker's own seam: the integer
 /// table admits no float shift or bitwise operand, the diagnostic naming
 /// the operator.
 #[test]

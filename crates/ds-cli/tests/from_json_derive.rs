@@ -45,8 +45,8 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// scalars target's width readers (byte/u32 as numbers with their
 /// range edges, char as a one-character string, bytes as a number
 /// array, every wrong shape or out-of-range value answering
-/// parse_err), and the enum target's shapes — the ruled string/object
-/// walk plus the discriminator ruling's rows (2026-11-21): two
+/// parse_err), and the enum target's shapes — the string/object
+/// walk plus the discriminator rows: two
 /// payloaded cases decoding from their own member keys, the sole tuple
 /// payload from its bare array, and a mixed enum's wrapped payloaded
 /// cases, each wrong key or wrong shape answering parse_err — plus

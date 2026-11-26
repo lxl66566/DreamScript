@@ -1,4 +1,4 @@
-//! The 32-bit fixed encoding (BL-1): `encode`/`decode` with typed errors.
+//! The 32-bit fixed encoding: `encode`/`decode` with typed errors.
 //!
 //! Field packing per the module-doc bit layout: opcode byte \[31:24] =
 //! `major << 4 | minor`, slot/`a` \[23:16], then either two u8 operands

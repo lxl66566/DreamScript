@@ -8,7 +8,7 @@
 //! and the fresh-object join.
 //!
 //! Layout conventions (the contract ds-lower targets): `list_get` is the
-//! fallible shape — a two-word tag+payload span [BL-2] on the caller's
+//! fallible shape — a two-word tag+payload span on the caller's
 //! argument slots 0 and 1, word 0 the discriminant (`PLATFORM_IO_OK`
 //! with the element, `PLATFORM_NONE` with the rejected index) — so a
 //! caller sizes its overlay area to two; the other list natives overlay

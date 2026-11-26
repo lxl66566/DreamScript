@@ -493,7 +493,7 @@ fn a_dropped_bytes_and_its_list_free_their_blocks() {
     assert_eq!(vm.objects().len(), before, "both blocks freed at the decs");
 }
 
-/// `bytes_eq` answers the structural content compare [B9]: equal
+/// `bytes_eq` answers the structural content compare: equal
 /// payloads compare equal whatever their object identity, a different
 /// length or a single differing byte unequal.
 #[test]

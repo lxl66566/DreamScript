@@ -55,7 +55,7 @@ fn parse_ok(name: &str, src: &str) -> Ast {
 /// round-trip through the formatter.
 #[allow(clippy::too_many_lines)]
 pub const POSITIVE: &[&str] = &[
-    // F1: braces, newline termination, trailing commas
+    // braces, newline termination, trailing commas
     "",
     "  \n\n\t\n",
     "const a = 1\r\nconst b = 2\r\n",
@@ -69,7 +69,7 @@ pub const POSITIVE: &[&str] = &[
     "tag a\n## section: types\ntag b\n",
     "tag a\n##\n",
     "##\n##\ntag a\n",
-    // F2: bindings, const-arrow functions, annotations, returns
+    // bindings, const-arrow functions, annotations, returns
     "const one = 1\n",
     "var n: int = 0\n",
     "fn parse_age(s: string) -> int | parse_error { s.len() }\n",
@@ -87,14 +87,14 @@ pub const POSITIVE: &[&str] = &[
     "fn f() { with_file(p, f) { body(f) }\n}\n",
     "fn f() { g() { 42 }\n}\n",
     "fn with_file(p: string, body: fn(mut file) -> int) -> int { body }\n",
-    // F3: UFCS and paths
+    // UFCS and paths
     "fn f() { ord::compare(a, b)\n}\n",
     "fn f() { xs.push(1)\n}\n",
     "fn f() { s.trim().parse_int().unwrap()\n}\n",
     "fn f() { p.x + p.y\n}\n",
     "fn f() { xs[0]\n}\n",
     "fn f() { read(path)?\n g(read(path)?)?\n}\n",
-    // F4: pattern matching
+    // pattern matching
     "fn f() {\nmatch x { a | b if g(x) => 1, _ => 2, }\n}\n",
     "fn f() {\nmatch (a, b.first()) { (_, e) => 1, (0, _) => 2, (t, _) => t, }\n}\n",
     "fn f() {\nmatch e { b: badport => g(b.got), _ => 0, }\n}\n",
@@ -103,7 +103,7 @@ pub const POSITIVE: &[&str] = &[
     "fn f() {\nmatch x { 1 => 1, -2 => 2, 1.5 => 3, 'c' => 4, b'x' => 5, true => 6, \"s\" => 7, _ \
      => 0, }\n}\n",
     "fn f() {\nmatch x { a => { g(a) }, _ => { 0 }, }\n}\n",
-    // F5: frozen operator set
+    // the frozen operator set
     "fn f() { a + b +% c - d -% e * f *% g / h % i\n}\n",
     "fn f() { a << 2 >> 3\n}\n",
     "fn f() { a == b != c < d <= e > f >= g\n}\n",
@@ -113,7 +113,7 @@ pub const POSITIVE: &[&str] = &[
     "fn f() { pv is int && pv is not_a_keyword\n}\n",
     "fn f() { x in 0..10\n y in xs\n}\n",
     "fn f() { g(0..n)\n g(0..=n)\n}\n",
-    // F6: strings, chars, numbers
+    // strings, chars, numbers
     "const s = \"a ${1 + 2} $name b\"\n",
     "const s = \"a ${ \"inner ${deep}\" } b\"\n",
     "fn f() { println(\"user ${u.name} total $t\")\n}\n",
@@ -128,7 +128,7 @@ pub const POSITIVE: &[&str] = &[
      = 0o777i32\nconst f = 0i64\n",
     "const a = 2.0f32\nconst b = 1e5\nconst c = 1.0e-5f64\nconst d = 2.5\n",
     "fn f() { g(1..5)\n}\n",
-    // B4/B7: optionals and type expressions
+    // optionals and type expressions
     "fn f(a: int?, b: list<int>?, c: (a | b)?) -> t? { a }\n",
     "type t = a | b & c - d\n",
     "struct f: ~Copyable { fd: int }\ntype t = circle & ~shadowed\n",
@@ -164,8 +164,8 @@ pub const POSITIVE: &[&str] = &[
     "pub fn f(x: int) -> int { x }\npub(pkg) fn g(x: int) -> int { x }\npub const c = 1\n",
     "fn f() {\nnursery {\n  for u in us {\n    spawn { g(u) }\n  }\n}\ndefer { cleanup()\n}\n}\n",
     "fn f() { g(x.type)\n}\n",
-    // F7 named arguments, signature defaults, and 6.1 newline arm/member
-    // separation (added on main after this corpus was seeded)
+    // named arguments, signature defaults, and newline arm/member
+    // separation
     "fn f() { g(x: a + b, y: h(c))\n}\n",
     "fn f() { g(x: 1,)\n}\n",
     "fn f(a: int = 0, b: string = \"s\", c: float = -1.5) -> int { a }\n",
@@ -178,9 +178,9 @@ pub const POSITIVE: &[&str] = &[
     // pattern shape regression corpus (parse_suite tail)
     "const one = 1\nconst (a, b) = pair\nfn f(x) -> () {\n  match x {\n    p | q => p,\n    (c, \
      d) => c,\n    _ => x,\n  }\n}\n",
-    // G3 doc runs, attached and loose
+    // doc runs, attached and loose
     "/// parses one row\nfn parse(s: string) -> int { 0 }\n/// loose\n\nfn other() -> int { 1 }\n",
-    // G3 doc runs in declaration bodies (member/field slots) and the `////`
+    // doc runs in declaration bodies (member/field slots) and the `////`
     // separator-comment form
     "//// helpers\n/// the trait\ntrait animal {\n/// speaks\nfn speak(self) -> string\n}\nenum \
      shape {\npoint {\n/// radius\nr: int\n}\n}\nstruct spot {\n/// x\nx: int\n}\nimpl animal for \

@@ -1,8 +1,7 @@
-//! The pooled-body static refusal [E3, the 2026-11-15 per-fiber
-//! sendability ruling]: a `par_map`/`par_reduce` element body runs on a
-//! worker that owns whole fibers but no siblings — the fiber pool, the
-//! nurseries, and the platform tables stay host-side — so two member
-//! classes diverge worker-side and refuse here, inside the callable
+//! The pooled-body static refusal: a `par_map`/`par_reduce` element body
+//! runs on a worker that owns whole fibers but no siblings — the fiber
+//! pool, the nurseries, and the platform tables stay host-side — so two
+//! member classes diverge worker-side and refuse here, inside the callable
 //! bodies the fork special-cases as combinator children:
 //!
 //! * the sibling-addressing fiber control natives `fiber_resume` and `nursery_join`: a worker holds
@@ -12,10 +11,9 @@
 //!   unresolved.
 //!
 //! The refusal is unconditional — language legality never depends on a
-//! runtime host flag (`Vm::enable_fork_pool`), so a pooled body refusing
-//! under the sequential drive too is the ruling's reading, the pool
-//! being an execution detail of one drive rather than a second
-//! semantics. A pooled site is recognized by resolved identity, never
+//! runtime host flag (`Vm::enable_fork_pool`), so a pooled body refuses
+//! under the sequential drive too: the pool is an execution detail of
+//! one drive, not a second semantics. A pooled site is recognized by resolved identity, never
 //! by the user-facing spelling: the @std library fns (`par_map`/
 //! `par_reduce`) are bodied members whose own bodies enter the private
 //! fork-join engine seams, so a call is pooled exactly when its callee
@@ -33,8 +31,7 @@
 //! carried row (their bodies live outside this package's trees). The
 //! site scan covers every tree position a body can sit at, a struct's
 //! `deinit` block included. A fn value this pass cannot pin — a
-//! parameter or a computed callable — stays clean; flow-sensitive
-//! attribution is the later effect-attribution round.
+//! parameter or a computed callable — stays clean.
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{

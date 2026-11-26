@@ -112,7 +112,7 @@ error_codes! {
     InvalidImplMember => "DS1010", Parse,
     /// One call passes two values for the same named argument.
     DuplicateArgument => "DS1011", Parse,
-    /// A default argument value is not a literal (F7).
+    /// A default argument value is not a literal.
     NonLiteralDefault => "DS1012", Parse,
     /// A top-level named const-arrow lambda; `fn` is the only named-function declaration.
     NamedConstLambda => "DS1013", Parse,
@@ -159,7 +159,7 @@ error_codes! {
     LowercaseSelfType => "DS2015", Type,
     /// The receiver parameter carries an annotation; spell it `self` or `mut self`.
     AnnotatedReceiver => "DS2016", Type,
-    /// `in` right-hand side is not a range; collection membership is not ruled yet.
+    /// `in` right-hand side is neither a range nor a list; membership over other collections refuses.
     NonRangeIn => "DS2017", Type,
     /// An impl member's signature disagrees with its trait member's arity, parameter modes, parameter types, or return.
     ImplMemberSignatureMismatch => "DS2018", Type,
@@ -173,25 +173,25 @@ error_codes! {
     NonePayloadCase => "DS2022", Type,
     /// A trait impl provides no body for a trait member that declares no default body; dispatch would have no body to plan.
     ImplMemberWithoutBody => "DS2023", Type,
-    /// A ruled derive family this round has not implemented yet; the message names the family and the ruled set (G1).
+    /// A derive family in the vocabulary with no expansion; the message names the family.
     DeriveUnimplemented => "DS2024", Type,
-    /// A derive name outside the ruled set; the message names the ruled set (G1).
+    /// A derive name outside the vocabulary; the message names the vocabulary.
     DeriveUnknown => "DS2025", Type,
-    /// A derive part refuses structural derivation (a function-typed or ~Copyable part); the message names the part (G1, B9).
+    /// A derive part refuses structural derivation (a function-typed or ~Copyable part); the message names the part.
     DerivePartRefused => "DS2026", Type,
-    /// `==` in a derive list; equality is B9's universal structural operator and is never derived.
+    /// `==` in a derive list; equality is a universal structural operator and is never derived.
     DeriveEqRefused => "DS2027", Type,
-    /// A derive attribute on a declaration that is not a struct, enum, or tag (G1).
+    /// A derive attribute on a declaration that is not a struct, enum, or tag.
     DeriveNonDataItem => "DS2028", Type,
     /// A derive on a declaration carrying its own type parameters; the synthesized member reads its parts through those variables, which the one-body-per-impl runtime seam cannot carry (per-instantiation frames are the JIT tier's).
     DeriveGenericRefused => "DS2029", Type,
-    /// A parameter annotated `type` without the `comptime` mode; type values exist only inside comptime evaluation (G1, G2).
+    /// A parameter annotated `type` without the `comptime` mode; type values exist only inside comptime evaluation.
     TypeParamNotComptime => "DS2030", Type,
     /// A `comptime` parameter outside the round-one shape: every parameter comptime and `type`-annotated, on a free fn (the message names the broken clause).
     ComptimeParamShape => "DS2031", Type,
-    /// A type name used as a value, or a reflection builtin called, outside a comptime evaluation context (G2).
+    /// A type name used as a value, or a reflection builtin called, outside a comptime evaluation context.
     ComptimeValueOutside => "DS2032", Type,
-    /// A world-touching call inside a comptime function: the evaluation's fence refuses it as a compile error (G1).
+    /// A world-touching call inside a comptime function: the evaluation's fence refuses it as a compile error.
     ComptimeFenceRefusal => "DS2033", Type,
     /// The comptime evaluator's honest refusals: an argument shape it does not stage, a result it cannot embed, or a trap the fenced run raised.
     ComptimeEvalRefusal => "DS2034", Type,
@@ -199,25 +199,25 @@ error_codes! {
     PooledControlNative => "DS2035", Type,
     /// A pooled fork-join child's body reaches the world surface.
     PooledWorldCall => "DS2036", Type,
-    /// The comptime fence's callee admission refuses a runtime callee: an impure effect row, a generic body's evidence seam, or a member call the slice plans no body for (G1).
+    /// The comptime fence's callee admission refuses a runtime callee: an impure effect row, a generic body's evidence seam, or a member call with no planned body.
     ComptimeCalleeRefusal => "DS2037", Type,
-    /// The `#[default]` union-member annotation's refusals: a second annotated member of one union, an annotation no default derivation reads, or one outside an enum case (G1).
+    /// The `#[default]` union-member annotation's refusals: a second annotated member of one union, an annotation no default derivation reads, or one outside an enum case.
     DeriveMemberAnnotation => "DS2038", Type,
-    /// A `return` in a value-consumed position: an early exit is a statement, so a block whose value feeds a binding, an argument, or a join arm refuses it (F2).
+    /// A `return` in a value-consumed position: an early exit is a statement, so a block whose value feeds a binding, an argument, or a join arm refuses it.
     ReturnInValuePosition => "DS2039", Type,
     /// A written type application disagrees with its head declaration: a generic applied with the wrong number of type arguments, or a head that takes none (a tag, a case, a value-namespace name, a non-generic declaration).
     TypeApplicationMismatch => "DS2040", Type,
-    /// A tag declared with a tuple payload; a tag's payload spells named fields (B1).
+    /// A tag declared with a tuple payload; a tag's payload spells named fields.
     TagPayloadTuple => "DS2041", Type,
-    /// A struct field whose type solves to `none` alone; `none` is the optional's absent member (B4), a member of `t?` spellings, never a standalone field type.
+    /// A struct field whose type solves to `none` alone; `none` is the optional's absent member, a member of `t?` spellings, never a standalone field type.
     NoneTypedField => "DS2042", Type,
     /// A linked package's exported `const` whose initializer the producer-side evaluation cannot answer: a reach the fence refuses, a trap or runaway the fenced run raised, or an answer outside the const fact's vocabulary.
     LinkedConstEvalRefusal => "DS2043", Type,
     /// A linked package's exported trait member whose declared default body cannot cross the link seam: the body did not plan, demands runtime evidence, or carries an effect row the consumer cannot replay.
     LinkedDefaultBodyRefusal => "DS2044", Type,
-    /// A bare tag label matches no member of the expected type (F9.5): the directed positions (match arms, `is` tests, annotated bindings, parameters, fields, returns) resolve a label against the expected union's members, and no member carries it.
+    /// A bare tag label matches no member of the expected type: the directed positions (match arms, `is` tests, annotated bindings, parameters, fields, returns) resolve a label against the expected union's members, and no member carries it.
     UnknownTagMember => "DS2045", Type,
-    /// A bare tag label matches several members of one expected union (F9.5): two declarations sharing a label both sit in the expected set, and the qualified spelling `type::label` is the escape hatch.
+    /// A bare tag label matches several members of one expected union: two declarations sharing a label both sit in the expected set, and the qualified spelling `type::label` is the escape hatch.
     AmbiguousTagMember => "DS2046", Type,
     /// A linked impl shadows another impl of one trait over one head, or is shadowed: the link resolved the pair by package identity (the root package's own impls over every dependency's, an origin impl over a third party's), and the warning names the winner, the loser, and the action.
     LinkShadowedImpl => "DS2047", Type,
@@ -253,9 +253,9 @@ error_codes! {
     BorrowEscapes => "DS3005", Linearity,
     /// A `mut` window parameter receives a `const` binding; spell the binder `var`.
     MutWindowConstReceiver => "DS3006", Linearity,
-    /// A for-in body opens a `mut` window over its own iterated binding; the loop's element count froze at entry, so the mutation never joins this loop's walk (D3).
+    /// A for-in body opens a `mut` window over its own iterated binding; the loop's element count froze at entry, so the mutation never joins this loop's walk.
     ForIterMutWindow => "DS3007", Linearity,
-    /// A spawned body opens a `mut` window over a binding outliving its nursery block; the refusal is permanent and drive-independent (E2).
+    /// A spawned body opens a `mut` window over a binding outliving its nursery block; the refusal is permanent and drive-independent.
     SpawnOutlivedMutWindow => "DS3008", Linearity,
 
     /// Stored source hash does not match the module's source.
@@ -276,31 +276,31 @@ error_codes! {
     ModuleSectionMalformed => "DS4008", Module,
     /// A checked construct the lowering contract does not cover.
     LowerUnsupported => "DS4009", Module,
-    /// A package declares two platform declarations (H5).
+    /// A package declares two platform declarations.
     PlatformDuplicate => "DS4010", Module,
-    /// A platform declaration names a capability outside the world vocabulary (H5).
+    /// A platform declaration names a capability outside the world vocabulary.
     PlatformUnknownCapability => "DS4011", Module,
-    /// A definition's world usage needs a capability its platform does not provide (H5, E1).
+    /// A definition's world usage needs a capability its platform does not provide.
     PlatformNotProvided => "DS4012", Module,
-    /// World-touching code with no platform declaration (H5, E1).
+    /// World-touching code with no platform declaration.
     PlatformMissing => "DS4013", Module,
-    /// ds.pkg manifest syntax or structure error: unknown key or section, duplicate key, malformed value, or a non-canonical spelling (H6).
+    /// ds.pkg manifest syntax or structure error: unknown key or section, duplicate key, malformed value, or a non-canonical spelling.
     PackageManifestMalformed => "DS4014", Module,
-    /// A declared dependency minimum names a version the provider does not offer of a name it knows (H6).
+    /// A declared dependency minimum names a version the provider does not offer of a name it knows.
     UnsatisfiableVersionBound => "DS4015", Module,
-    /// A package's content disagrees with a recorded or pinned blake3 hash (H6).
+    /// A package's content disagrees with a recorded or pinned blake3 hash.
     PackageHashMismatch => "DS4016", Module,
-    /// A private definition used from outside its defining file (G4).
+    /// A private definition used from outside its defining file.
     PrivateUse => "DS4017", Module,
-    /// An import selects a name its target does not export to dependents (G4).
+    /// An import selects a name its target does not export to dependents.
     ImportNotExported => "DS4018", Module,
-    /// An import selects a name no member of the compile unit declares (G4).
+    /// An import selects a name no member of the compile unit declares.
     ImportNameMissing => "DS4019", Module,
-    /// A visibility modifier on an item that declares no package name, or a re-export whose semantics land with cross-package linking (G4).
+    /// A visibility modifier on an item that declares no package name, or a `pub import` that re-exports nothing.
     VisNoTarget => "DS4020", Module,
-    /// An import selects an exported name whose shape cannot bind across packages this round: a generic fn, a defaulted parameter, a computed or mutable binding, a type whose layout the surface vocabulary cannot spell (or whose name a local declaration or another linked package owns), or a linked member a module alias serves neither at a call site nor in value position (a function value, a type name) (G4).
+    /// An import selects an exported name whose shape cannot bind across packages: a generic fn, a defaulted parameter, a computed or mutable binding, a type whose layout the surface vocabulary cannot spell (or whose name a local declaration or another linked package owns), or a linked member a module alias serves neither at a call site nor in value position (a function value, a type name).
     ImportUnsupportedShape => "DS4021", Module,
-    /// Two imports of one file bind the same name (G4).
+    /// Two imports of one file bind the same name.
     ImportDuplicate => "DS4022", Module,
     /// A file's `##` block index exceeds the checker's DefId block-key budget (256); the block is skipped.
     DefIdBlockOverflow => "DS4023", Module,

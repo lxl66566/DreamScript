@@ -1,8 +1,8 @@
 //! Randomized renderer property, the render-side companion of the parse
 //! and checker mirrors: `human` and `to_json` never panic on any
 //! diagnostic shape over any registered files — spans in bounds, stale
-//! offsets past the end of their file (the R20 clamp), labels crossing
-//! files in any order (the R25 per-label `-->` naming), empty spans, and
+//! offsets past the end of their file (clamped to the file's span), labels crossing
+//! files in any order (each label naming its own file), empty spans, and
 //! every registered error code. Rendering is data out, never an abort.
 
 use ds_diag::{Diagnostic, ErrorCode, Files, LabeledSpan, Severity, Span, Suggestion, render};

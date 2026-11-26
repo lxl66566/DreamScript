@@ -1,4 +1,4 @@
-//! The trapped-drive interrupt release [H6 item 5's trapped clause]: a
+//! The trapped-drive interrupt release: a
 //! host drive that ends in a Trap leaves its fiber interrupted — Running
 //! with no resume point, frames kept for the backtrace — and those kept
 //! frames pin the executing version's table row past the two-slot bound

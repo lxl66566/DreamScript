@@ -6,7 +6,7 @@ use crate::error::QueryError;
 
 /// Placeholder identifier of one definition, to be replaced by the real id
 /// type when the definition table lands. Carried by the [`QueryKey`]
-/// def-keyed variants in two spellings: the M2 `type_of` and
+/// def-keyed variants in two spellings: the `type_of` and
 /// `linearity_check` computes read it as the packed pair
 /// `(file << 8) | block` — a definition is its `##` block until real
 /// identity arrives, and the pair must be built by [`DefId::from_block`],
@@ -47,7 +47,7 @@ impl DefId {
 }
 
 /// Placeholder identifier of one package: the key grain of the `resolve`
-/// query (a later milestone) and the package-grain invalidation input (M7).
+/// query and the package-grain invalidation input.
 /// Replaced by the real manifest identity when `ds.pkg` loading lands.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PackageId(u32);
@@ -66,7 +66,7 @@ impl PackageId {
     }
 }
 
-/// Identifies one `##`-separated block of one file (G3). A file without
+/// Identifies one `##`-separated block of one file. A file without
 /// separators is one block.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BlockId {
@@ -76,12 +76,12 @@ pub struct BlockId {
     pub index: u32,
 }
 
-/// Key of one memoized compiler query (H6 item 1).
+/// Key of one memoized compiler query.
 ///
 /// The enum is `non_exhaustive`: `Lower` is the remaining placeholder,
-/// documented as such; asking the engine to compute it before its
-/// milestone yields [`QueryError::Unavailable`](crate::QueryError::Unavailable).
-/// Every other variant is a real M2 query: the package-grain passes
+/// documented as such; asking the engine to compute it yields
+/// [`QueryError::Unavailable`](crate::QueryError::Unavailable).
+/// Every other variant is a real query: the package-grain passes
 /// (`Expanded`, `Resolve`, `CheckedPackage`, `Analyzed`,
 /// `PackageLinearity`, `PackageEffects`, `PlatformCheck`) and the
 /// per-definition slices of them.
@@ -103,53 +103,53 @@ pub enum QueryKey {
     /// per request. Package-level declarations need no frames: they are
     /// the [`QueryKey::Resolve`] value's own table.
     ScopeIndex(FileId),
-    /// The derive-expanded trees of one package (G1): every parseable
+    /// The derive-expanded trees of one package: every parseable
     /// file's tree through the ds-check expansion, the substrate the
     /// package-grain passes below compute over — `Resolve`, the check
     /// family, the effects and platform passes, and `Analyzed`. The
     /// `PackageId` is the package grain, like [`QueryKey::Resolve`].
     Expanded(PackageId),
-    /// Name resolution for one package (G3): collection and resolution
+    /// Name resolution for one package: collection and resolution
     /// over the [`QueryKey::Expanded`] value's derive-expanded trees, so
     /// a derive-synthesized member resolves like a hand-written one. The
-    /// `PackageId` is the package grain; M2 has one package — every
-    /// registered file — so the id is always 0 until M7's package
-    /// loading mints real package identity.
+    /// `PackageId` is the package grain: one package holds every registered
+    /// file, so the id is always 0 until package loading mints real package
+    /// identity.
     Resolve(PackageId),
-    /// The type story of one definition (M2): a slice of the package's
+    /// The type story of one definition: a slice of the package's
     /// [`QueryKey::CheckedPackage`] value into the definition's block — the
     /// declaration and body diagnostics whose primary labels address it,
     /// plus the solved type of each binding it holds. `DefId` packs
     /// `(file << 8) | block` like [`QueryKey::LinearityCheck`].
     TypeOf(DefId),
-    /// Effect row of one definition (E1): the definition's row out of the
+    /// Effect row of one definition: the definition's row out of the
     /// package's [`QueryKey::PackageEffects`] value.
     EffectsOf(DefId),
-    /// The linearity check of one definition (M2): a slice of its
+    /// The linearity check of one definition: a slice of its
     /// package's [`QueryKey::PackageLinearity`] facts into the
-    /// definition's block (C1, C5), with the slice taken by the same
+    /// definition's block, with the slice taken by the same
     /// `DefId` packing as [`QueryKey::TypeOf`].
     LinearityCheck(DefId),
-    /// The platform check of one package (H5, E1): the package's
+    /// The platform check of one package: the package's
     /// declarations collected against its platform declaration, the rows of
     /// [`QueryKey::PackageEffects`] verified inside what the platform
     /// provides. The `PackageId` is the package grain, like
     /// [`QueryKey::Resolve`].
     PlatformCheck(PackageId),
-    /// The pooled-body check of one package (E3): every pooled call's
+    /// The pooled-body check of one package: every pooled call's
     /// (the @std `par_map`/`par_reduce` library fns, recognized by
     /// resolved member identity) callable hunted for the worker-diverging
     /// members over the [`QueryKey::Analyzed`] value's own bundle. The
     /// `PackageId` is the package grain, like [`QueryKey::Resolve`].
     PooledCheck(PackageId),
-    /// The whole-package bidirectional check (B2): collection and
+    /// The whole-package bidirectional check: collection and
     /// resolution, then the declaration and body pass over the
     /// [`QueryKey::Expanded`] value's trees. The substrate every
     /// [`QueryKey::TypeOf`] slices, so the pass runs once per package
     /// instead of once per definition. The `PackageId` is the package
     /// grain, like [`QueryKey::Resolve`].
     CheckedPackage(PackageId),
-    /// The analyzed package (B2): the full check bundle — the
+    /// The analyzed package: the full check bundle — the
     /// derive-expanded trees, namespace, per-file resolutions,
     /// declaration tables, and typed result — the analyzer's check half
     /// over the [`QueryKey::Expanded`] and [`QueryKey::Resolve`] values,
@@ -158,7 +158,7 @@ pub enum QueryKey {
     /// The `PackageId` is the package grain, like
     /// [`QueryKey::Resolve`].
     Analyzed(PackageId),
-    /// The M2 affine pass (C1, C5) over the package's derive-expanded trees
+    /// The affine pass over the package's derive-expanded trees
     /// through the [`QueryKey::Analyzed`] bundle — the same trees the
     /// check family checked — so a derive-synthesized impl body answers
     /// linearity facts like a hand-written one. The substrate every
@@ -166,12 +166,12 @@ pub enum QueryKey {
     /// package instead of once per definition. The `PackageId` is the
     /// package grain, like [`QueryKey::Resolve`].
     PackageLinearity(PackageId),
-    /// The effect rows (E1) of one package: every value-producing
+    /// The effect rows of one package: every value-producing
     /// definition's row over the registered files. The substrate
     /// [`QueryKey::EffectsOf`] and [`QueryKey::PlatformCheck`] both read,
     /// so the pass runs once per package.
     PackageEffects(PackageId),
-    /// Placeholder: lowering of one block (M3). Until it lands, consumers
+    /// Placeholder: lowering of one block. Until it lands, consumers
     /// lower from the [`QueryKey::Analyzed`] value's own trees
     /// (`ds_lower::lower` over `Analyzed::asts`): the module's
     /// consumer-specific name and source hash and its consumed-by-install
@@ -245,7 +245,7 @@ pub enum QueryKind {
 
 /// Key of one engine input.
 ///
-/// M7 seam: package-grain invalidation adds a `PackageConfig(PackageId)`
+/// Package-grain invalidation adds a `PackageConfig(PackageId)`
 /// variant here plus package-keyed queries reading it. The enum is
 /// `non_exhaustive` so that addition breaks no consumer; the revision and
 /// dependency machinery below is already per-input and needs no change.

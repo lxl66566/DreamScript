@@ -1,4 +1,4 @@
-//! Call-site instance resolution over declared heads (B6): the modus-ponens
+//! Call-site instance resolution over declared heads: the modus-ponens
 //! step [`InstanceEnv::resolve`] does not cover. The environment's exact
 //! lookup asks which declared head *contains* the queried type; a generic
 //! impl (`impl [t: shows] shows for list[t]`) declares one instance whose
@@ -373,7 +373,7 @@ pub(crate) fn var_param_name(universe: &Universe, atom: TypeId) -> Option<String
 }
 
 /// The declared bounds of an inherent impl's head pattern against one
-/// receiver (F3): the pattern's variables bound by unifying it with the
+/// receiver: the pattern's variables bound by unifying it with the
 /// receiver's members under the shared substitution, then every condition's
 /// variable rewritten through it — the inherent mirror of
 /// [`evidence_bounds`]'s per-condition loop. Each entry names the
@@ -403,8 +403,8 @@ pub fn inherent_bound_targets(
     out
 }
 
-/// The runtime evidence one call site into a generic impl's body needs
-/// (H3): for every declared bound of the solved instance, the unique
+/// The runtime evidence one call site into a generic impl's body needs:
+/// for every declared bound of the solved instance, the unique
 /// instance serving that bound's trait for the variable's substituted
 /// type at this call site — the checker records it beside the solved
 /// instance so the lowering side never re-derives types. A `None` entry
@@ -440,7 +440,7 @@ pub fn evidence_bounds(
     out
 }
 
-/// The trait's declared generics substituted at one receiver (B6): the
+/// The trait's declared generics substituted at one receiver: the
 /// impl behind the solved instance spells the substitution in its trait
 /// reference, and unifying the instance's head pattern with the
 /// receiver's members binds the impl's own variables — each argument
@@ -514,7 +514,7 @@ fn rewrite_set(
     Some(out)
 }
 
-/// One step of a call site's transitive evidence chain (H3), over a
+/// One step of a call site's transitive evidence chain, over a
 /// declared trait instance: for the instance serving one of a generic
 /// body's demands, the substituted member set its matching declared bound
 /// demands at this receiver, plus the unique instance serving that bound
@@ -537,7 +537,7 @@ pub fn evidence_step(
     bound_evidence_step(universe, env, head, conditions, recv, var, trait_id)
 }
 
-/// The same step over an inherent impl's declared head and bounds (F3):
+/// The same step over an inherent impl's declared head and bounds:
 /// the inherent mirror never names an instance of its own, so the chain
 /// starts from the impl's record directly.
 #[must_use]
@@ -803,7 +803,7 @@ fn trait_holds(
     false
 }
 
-/// The instantiation probe's verdict on one same-trait head pair (B6):
+/// The instantiation probe's verdict on one same-trait head pair:
 /// whether two heads the set algebra reads disjoint (a generic head is one
 /// opaque atom, so `list[int]` and `list[$t#1]` never intersect there)
 /// still cover one common instantiation.
@@ -1204,7 +1204,7 @@ fn bind_ground(subst: &mut Vec<(TypeId, Vec<Ground>)>, var: TypeId, value: Vec<G
     true
 }
 
-/// Materializes a probe grounding as a type (B6): the error path alone
+/// Materializes a probe grounding as a type: the error path alone
 /// mints — once an overlap is certain — so the probe itself never writes
 /// the universe. Applications intern structurally, so the witness lands
 /// on the atom a declaration solving the same shape would mint.

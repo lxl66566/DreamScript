@@ -115,7 +115,10 @@ fn an_absent_map_key_halts_at_the_read() {
 "#,
     );
     assert!(!status.success(), "the absent key stops the run");
-    assert_eq!(stdout, "1\n", "the present key's read answers before the halt");
+    assert_eq!(
+        stdout, "1\n",
+        "the present key's read answers before the halt"
+    );
     assert!(
         stderr.contains(
             "trap: die: the map holds no value under the key; a subscript read must resolve, it \

@@ -1,13 +1,13 @@
-//! The `ds check` subcommand: the M2 static story over one package. The
+//! The `ds check` subcommand: the static checks over one package. The
 //! given sources register in a query database and every check runs as a
 //! memoized query — parse (syntax errors are data), resolve, the
-//! bidirectional type check with refinement (B2), the affine pass
-//! (C1, C5), and the effect rows (E1) (computed, informational until the
-//! M7 platform check decides what they forbid). Diagnostics print through
+//! bidirectional type check with refinement, the affine pass, and the
+//! effect rows (computed, informational: the platform check decides what
+//! they forbid). Diagnostics print through
 //! the ds-diag renderers; the exit code is 0 when nothing fatal was
 //! reported.
 //!
-//! The package is the stdlib ambient plus the files given (G3): the
+//! The package is the stdlib ambient plus the files given: the
 //! session composition (ds-stdlib) registers as a package member before
 //! the user's files, so the @std faces resolve bare exactly as an entry
 //! script session of `ds run` resolves them (the implicit-resolution
@@ -38,7 +38,7 @@ use ds_query::{
 /// rendering.
 #[derive(Debug, Args)]
 pub struct CheckArgs {
-    /// One .ds source file of the package; the files share one namespace (G3)
+    /// One .ds source file of the package; the files share one namespace
     files: Vec<PathBuf>,
     /// Check the files alone, without the stdlib ambient package member
     #[arg(long)]
@@ -62,21 +62,21 @@ struct Report {
     fatal: bool,
 }
 
-/// Checks one package: registers the sources, runs every M2 query over
+/// Checks one package: registers the sources, runs every check query over
 /// them, prints the diagnostics, and reports fatality as the exit code.
 pub fn check(args: &CheckArgs) -> Result<ExitCode> {
     let mut db = if args.no_ambient {
         Db::new()
     } else {
-        // The ambient's effect rows [E1] and world-capability
-        // attributions [H5] ride the database's tables; a package
+        // The ambient's effect rows and world-capability
+        // attributions ride the database's tables; a package
         // without the ambient gets the pure defaults.
         Db::with_declared_rows(ds_stdlib::declared_rows().clone())
             .with_world_caps(ds_stdlib::world_caps().clone())
     };
     let mut files = Vec::with_capacity(args.files.len() + 1);
     if !args.no_ambient {
-        // The ambient is the package's first member: one namespace [G3],
+        // The ambient is the package's first member: one namespace,
         // its declarations before the user's in collection order. The
         // registration is the session composition — the run path's
         // implicit-resolution shape — so a bare use of a migrated @std
@@ -144,7 +144,7 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
         }
     }
 
-    // Effect rows [E1]: computed for information. Value-kind definitions
+    // Effect rows: computed for information. Value-kind definitions
     // only — type-level declarations carry no row.
     for def in 0..resolved.package.len() {
         let raw = u32::try_from(def).expect("definition count fits u32");
@@ -156,7 +156,7 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
         }
     }
 
-    // The platform check [H5]: world usage verified inside what the
+    // The platform check: world usage verified inside what the
     // package's platform declaration provides.
     let platform = query(db.get::<PlatformCheck>(PackageId::new(0)), "platform_check")?;
     for diag in &*platform.diags {
@@ -166,7 +166,7 @@ pub fn check(args: &CheckArgs) -> Result<ExitCode> {
         });
     }
 
-    // The pooled-body refusal [E3]: fork-join combinator element bodies
+    // The pooled-body refusal: fork-join combinator element bodies
     // refuse the members a pooled drive cannot serve, never gated by
     // the host's pool opt-in.
     let analyzed = query(db.get::<Analyzed>(PackageId::new(0)), "analyzed")?;
@@ -211,7 +211,7 @@ fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
 /// item that owns the rejection; secondary labels are evidence the
 /// rejection carries (a naming label may point at another file's
 /// declaration, the ambient's included, which stages nothing), so they
-/// never gate the exemption. Only `typecheck` items gate M2 checking;
+/// never gate the exemption. Only `typecheck` items gate the check;
 /// a file with no `// items:` header stages nothing, so its diagnostics
 /// are never exempt; a diagnostic with no primary label keeps today's
 /// exempt reading.

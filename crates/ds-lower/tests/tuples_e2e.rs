@@ -1,4 +1,4 @@
-//! The anonymous-tuple surface end to end (B3): construction, destructuring
+//! The anonymous-tuple surface end to end: construction, destructuring
 //! in bindings and match arms, tuple params, returns, and tail calls — every
 //! tuple is consecutive frame words (one plain word per element: strings and
 //! lists ride their Ref, `()` rides the I64 unit word), and destructuring is
@@ -107,7 +107,7 @@ fn lower_inline(source: &str) -> Result<(), LowerError> {
 fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
     let cases = [
         (
-            // a union-typed element distributed the product [B3]
+            // a union-typed element distributed the product
             "fn pick() -> int | none { 1 }\nfn main() -> int { const t = (\"x\", pick())\n 0 }",
             "the product distributed into several tuple atoms",
         ),

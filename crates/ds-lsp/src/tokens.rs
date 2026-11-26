@@ -391,7 +391,7 @@ impl Walker<'_> {
             },
             Res::Dot(DotRes::Free { .. } | DotRes::Module { .. }) => (Tok::Function, 0),
             // The `.err`/`.ok` handler forms are surface syntax, and a
-            // bare module alias is not a value this round.
+            // bare module alias is not a value.
             Res::Handler | Res::Module(_) => (Tok::Keyword, 0),
         };
         self.push(ident.span, tok, mods);

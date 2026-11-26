@@ -1,4 +1,4 @@
-//! The process face of the CLI process surface (ruled 2026-11-21, H5):
+//! The process face of the CLI process surface:
 //! the `proc` capability's ops — string argv, environment-variable
 //! read, process spawn, and the deliberate-status `exit(code)` row —
 //! served by the platform handler the host installs. Every op is total
@@ -17,7 +17,7 @@
 //! its captured diagnostics the same way, and `proc_wait` answers the
 //! exit status idempotently (`proc_try_wait` the non-blocking poll
 //! over the same reaped word). The blocking rows park on Linux under
-//! an installed reactor (the 2026-11-23 ruling): a child's pipe IS an
+//! an installed reactor: a child's pipe IS an
 //! fd, so `proc_read`/`proc_read_err` watch its readability, and the
 //! exit rides a pidfd (`pidfd_open`, readable once the child exits) —
 //! the net face's own parked-twin discipline, the wake performing the
@@ -135,10 +135,9 @@ pub(crate) fn proc_run_fn(
 /// The `exit(code)` deliberate-status row: the process status rides the
 /// trap out to the drive, the installing host's exit-code policy above
 /// it — the engine decides none (the die split's own rule). A
-/// negative status traps (ruled 2026-11-22, the trapping-arithmetic
-/// precedent: a deliberate failure never reads as clean success), the
-/// message riding the Die trap out like the u32 range failure's own
-/// note; a wider status wraps to its low byte, POSIX process
+/// negative status traps, the message riding the Die trap out like the u32
+/// range failure's own note (a deliberate failure never reads as clean
+/// success); a wider status wraps to its low byte, POSIX process
 /// semantics. Never answers.
 pub(crate) fn exit_fn(
     _heaps: &mut Heaps,
@@ -175,7 +174,7 @@ pub const PROC_PARK_TIMEOUT: Duration = Duration::from_hours(24);
 /// cost a reactor-less embedder's blocking fallback pays.
 const PROC_WAIT_POLL: Duration = Duration::from_millis(10);
 
-/// The process face's raw OS binding (the 2026-11-23 ruling):
+/// The process face's raw OS binding:
 /// `pidfd_open` for the exit interest and `fcntl(O_NONBLOCK)` for the
 /// pipes — libc's own symbols over no crate, the epoll driver's
 /// OS-own-symbols precedent (`crate::net`'s raw_sock the same
@@ -277,8 +276,7 @@ pub(crate) struct Procs {
     /// default), the blocking twin's own unbounded wait restated as
     /// the wheel's far backstop.
     timeout: Duration,
-    /// The host's blocking-drive stop flag (the 2026-11-24 signal
-    /// ruling's non-reactor twin): the blocking wait twin observes it
+    /// The host's blocking-drive stop flag: the blocking wait twin observes it
     /// between its poll rounds and answers the `Interrupted` marker
     /// the caller maps to the shutdown trap. A host that installs
     /// none keeps today's behavior — the flag stands false forever.
@@ -920,7 +918,7 @@ pub(crate) fn proc_try_wait_fn(
 /// the handle. Total and idempotent: an unknown handle is a no-op
 /// (mirroring `close_raw`, so a deinit firing on an already-closed
 /// handle stays clean). The close notes the handle for the wake door:
-/// a parked read or wait on it wakes now (item 79).
+/// a parked read or wait on it wakes now.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn proc_close_fn(
     _heaps: &mut Heaps,

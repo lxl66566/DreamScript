@@ -4,21 +4,21 @@
 //! generous headroom (a concurrent lane shares the box). What the fixtures
 //! pin:
 //!
-//! - the at-once letter: a past deadline answers the failure span in place, no
-//!   park, while a servable channel answers the ok span under the same past
-//!   deadline (the deadline bounds only the wait).
-//! - the ok answer spans: the send's unit word under the ok discriminant, the
-//!   recv's element word under it, both at the parked call site.
-//! - the wheel's deadline door: a parked recv on the empty channel and a parked
-//!   send on the full one answer the `timed_out` class span at their deadline.
-//! - the win door: a deadline waiter woken before its deadline answers the ok
-//!   span (the win drops the wheel row, so no stale door can meet the fiber).
-//! - the loser's deregistration: a timed-out recv leaves the next parked
-//!   receiver the wake; a timed-out send's staged payload never crosses, the
-//!   survivor's refills in park order; a timed-out sender re-parking deposits
-//!   exactly one payload (the loser's first answer never staged twice).
-//! - the middle-loser ordering: three parked receivers, the middle one timed
-//!   out, the two wakes still pair in park order.
+//! - the at-once letter: a past deadline answers the failure span in place, no park, while a
+//!   servable channel answers the ok span under the same past deadline (the deadline bounds only
+//!   the wait).
+//! - the ok answer spans: the send's unit word under the ok discriminant, the recv's element word
+//!   under it, both at the parked call site.
+//! - the wheel's deadline door: a parked recv on the empty channel and a parked send on the full
+//!   one answer the `timed_out` class span at their deadline.
+//! - the win door: a deadline waiter woken before its deadline answers the ok span (the win drops
+//!   the wheel row, so no stale door can meet the fiber).
+//! - the loser's deregistration: a timed-out recv leaves the next parked receiver the wake; a
+//!   timed-out send's staged payload never crosses, the survivor's refills in park order; a
+//!   timed-out sender re-parking deposits exactly one payload (the loser's first answer never
+//!   staged twice).
+//! - the middle-loser ordering: three parked receivers, the middle one timed out, the two wakes
+//!   still pair in park order.
 
 use std::time::{Duration, Instant};
 
@@ -54,18 +54,18 @@ fn builtin(index: u32) -> Const {
 /// the payloads.
 fn pool() -> Vec<Const> {
     vec![
-        builtin(BUILTIN_CHAN_NEW),          // k0
-        builtin(BUILTIN_CHAN_SEND),         // k1
-        builtin(BUILTIN_CHAN_RECV),         // k2
-        builtin(BUILTIN_CHAN_SEND_DEADLINE),// k3
-        builtin(BUILTIN_CHAN_RECV_DEADLINE),// k4
+        builtin(BUILTIN_CHAN_NEW),           // k0
+        builtin(BUILTIN_CHAN_SEND),          // k1
+        builtin(BUILTIN_CHAN_RECV),          // k2
+        builtin(BUILTIN_CHAN_SEND_DEADLINE), // k3
+        builtin(BUILTIN_CHAN_RECV_DEADLINE), // k4
         Const::FuncRef(ConstFuncRef::Named {
             module: STD_NAME.into(),
             func: OP_SLEEP,
-        }),                                 // k5
-        Const::I64(SOON),                   // k6: the short deadline
+        }), // k5
+        Const::I64(SOON),                    // k6: the short deadline
         Const::I64(SPARE),                   // k7: the generous deadline
-        Const::I64(MARGIN),                 // k8: the sequencing sleep
+        Const::I64(MARGIN),                  // k8: the sequencing sleep
         Const::I64(77),                      // k9
         Const::I64(5),                       // k10: the filler element
         Const::I64(11),                      // k11: the loser's payload
@@ -213,7 +213,10 @@ fn senddl_twice_def() -> FunctionDef {
         Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::Kimm { dst: 4, kidx: k(6) },
-        Uop::Kimm { dst: 5, kidx: k(11) },
+        Uop::Kimm {
+            dst: 5,
+            kidx: k(11),
+        },
         Uop::Call {
             callee: k(3),
             nargs: 3,
@@ -221,7 +224,10 @@ fn senddl_twice_def() -> FunctionDef {
         Uop::Mov { dst: 1, src: 3 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::Kimm { dst: 4, kidx: k(7) },
-        Uop::Kimm { dst: 5, kidx: k(12) },
+        Uop::Kimm {
+            dst: 5,
+            kidx: k(12),
+        },
         Uop::Call {
             callee: k(3),
             nargs: 3,
@@ -231,8 +237,8 @@ fn senddl_twice_def() -> FunctionDef {
 }
 
 /// `sleepy_send(ch, x)`: sleeps the sequencing margin past the loser's
-/// short deadline, then plain-sends — the waker the loser no longer
-/// serves.
+/// short deadline, then plain-sends — the loser's waker has expired by
+/// then.
 fn sleepy_send_def() -> FunctionDef {
     def("sleepy_send", &[Ref, I64, Raw, Raw], 2, 2, &[
         Uop::Funcf { frame_slots: 4 },
@@ -299,7 +305,10 @@ fn sleepy_drain2_def() -> FunctionDef {
             callee: k(2),
             nargs: 1,
         },
-        Uop::Kimm { dst: 2, kidx: k(14) },
+        Uop::Kimm {
+            dst: 2,
+            kidx: k(14),
+        },
         Uop::MulI64 {
             dst: 1,
             lhs: 1,
@@ -338,7 +347,11 @@ fn a_past_deadline_answers_the_failure_span_at_once() {
     // the full channel's send: the failure answers in place
     for nanos in [0, -7] {
         assert_eq!(
-            vm.run("dl", "senddl_disc", &[full, Value::I64(nanos), Value::I64(99)]),
+            vm.run("dl", "senddl_disc", &[
+                full,
+                Value::I64(nanos),
+                Value::I64(99)
+            ]),
             Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_TIMED_OUT))),
             "{nanos}: the past deadline answers the send's failure span"
         );
@@ -377,7 +390,11 @@ fn the_ok_answer_spans_carry_the_unit_and_the_element_word() {
     ]));
     let ch = channel_of(&mut vm, 1);
     assert_eq!(
-        vm.run("dl", "senddl_disc", &[ch, Value::I64(SPARE), Value::I64(77)]),
+        vm.run("dl", "senddl_disc", &[
+            ch,
+            Value::I64(SPARE),
+            Value::I64(77)
+        ]),
         Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_OK))),
         "the send's ok span answers the unit word under the ok discriminant"
     );
@@ -412,11 +429,7 @@ fn the_wheel_answers_the_parked_send_loser() {
     if !parks() {
         return;
     }
-    let mut vm = scheduled_vm(vec![
-        make_def(),
-        send_plain_def(),
-        senddl_disc_def(),
-    ]);
+    let mut vm = scheduled_vm(vec![make_def(), send_plain_def(), senddl_disc_def()]);
     let ch = channel_of(&mut vm, 1);
     vm.run("dl", "send_plain", &[ch, Value::I64(5)])
         .expect("the fill deposits");
@@ -458,7 +471,11 @@ fn the_win_door_wakes_a_deadline_waiter_before_its_deadline() {
                 FrameAnswer::one(Value::I64(77)),
                 "the deadline recv woke with the element word, not the failure span"
             );
-            assert_eq!(spans[1], FrameAnswer::one(Value::I64(0)), "the sender's unit");
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(0)),
+                "the sender's unit"
+            );
         },
         other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
@@ -467,12 +484,11 @@ fn the_win_door_wakes_a_deadline_waiter_before_its_deadline() {
     vm.run("dl", "send_plain", &[full, Value::I64(5)])
         .expect("the fill deposits");
     let nursery = vm.open_root_nursery();
-    vm.spawn_fiber_in(
-        nursery,
-        "dl",
-        "senddl_disc",
-        &[full, Value::I64(SPARE), Value::I64(11)],
-    )
+    vm.spawn_fiber_in(nursery, "dl", "senddl_disc", &[
+        full,
+        Value::I64(SPARE),
+        Value::I64(11),
+    ])
     .expect("spawn the deadline sender");
     vm.spawn_fiber_in(nursery, "dl", "recv_plain", &[full])
         .expect("spawn the drainer");
@@ -483,7 +499,11 @@ fn the_win_door_wakes_a_deadline_waiter_before_its_deadline() {
                 FrameAnswer::one(Value::Tag(PLATFORM_IO_OK)),
                 "the deadline send woke with the ok span, not the failure span"
             );
-            assert_eq!(spans[1], FrameAnswer::one(Value::I64(5)), "the drained word");
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(5)),
+                "the drained word"
+            );
         },
         other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
@@ -525,7 +545,11 @@ fn the_timed_out_recv_leaves_the_next_waiter_the_wake() {
                 FrameAnswer::one(Value::I64(77)),
                 "the next waiter took the wake the loser left"
             );
-            assert_eq!(spans[2], FrameAnswer::one(Value::I64(0)), "the waker's unit");
+            assert_eq!(
+                spans[2],
+                FrameAnswer::one(Value::I64(0)),
+                "the waker's unit"
+            );
         },
         other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }
@@ -550,8 +574,12 @@ fn the_timed_out_senders_payload_never_crosses() {
     vm.run("dl", "send_plain", &[ch, Value::I64(5)])
         .expect("the fill deposits");
     let nursery = vm.open_root_nursery();
-    vm.spawn_fiber_in(nursery, "dl", "senddl_disc", &[ch, Value::I64(SOON), Value::I64(11)])
-        .expect("spawn the deadline loser");
+    vm.spawn_fiber_in(nursery, "dl", "senddl_disc", &[
+        ch,
+        Value::I64(SOON),
+        Value::I64(11),
+    ])
+    .expect("spawn the deadline loser");
     vm.spawn_fiber_in(nursery, "dl", "send_plain", &[ch, Value::I64(22)])
         .expect("spawn the plain survivor");
     vm.spawn_fiber_in(nursery, "dl", "sleepy_drain2", &[ch])
@@ -563,7 +591,11 @@ fn the_timed_out_senders_payload_never_crosses() {
                 FrameAnswer::one(Value::Tag(PLATFORM_IO_TIMED_OUT)),
                 "the deadline loser answered the failure span"
             );
-            assert_eq!(spans[1], FrameAnswer::one(Value::I64(0)), "the survivor's unit");
+            assert_eq!(
+                spans[1],
+                FrameAnswer::one(Value::I64(0)),
+                "the survivor's unit"
+            );
             assert_eq!(
                 spans[2],
                 FrameAnswer::one(Value::I64(522)),
@@ -638,18 +670,34 @@ fn the_middle_loser_keeps_the_wakes_paired_in_park_order() {
         .expect("spawn the middle loser");
     vm.spawn_fiber_in(nursery, "dl", "recv_plain", &[ch])
         .expect("spawn the third receiver");
-    vm.spawn_fiber_in(nursery, "dl", "sleepy_sends2", &[ch, Value::I64(41), Value::I64(77)])
-        .expect("spawn the delayed pair sender");
+    vm.spawn_fiber_in(nursery, "dl", "sleepy_sends2", &[
+        ch,
+        Value::I64(41),
+        Value::I64(77),
+    ])
+    .expect("spawn the delayed pair sender");
     match vm.join_nursery(nursery).expect("the drive consumes") {
         JoinOutcome::Joined(spans) => {
-            assert_eq!(spans[0], FrameAnswer::one(Value::I64(41)), "the first took 41");
+            assert_eq!(
+                spans[0],
+                FrameAnswer::one(Value::I64(41)),
+                "the first took 41"
+            );
             assert_eq!(
                 spans[1],
                 FrameAnswer::one(Value::Tag(PLATFORM_IO_TIMED_OUT)),
                 "the middle loser answered the failure span"
             );
-            assert_eq!(spans[2], FrameAnswer::one(Value::I64(77)), "the third took 77");
-            assert_eq!(spans[3], FrameAnswer::one(Value::I64(0)), "the sender's unit");
+            assert_eq!(
+                spans[2],
+                FrameAnswer::one(Value::I64(77)),
+                "the third took 77"
+            );
+            assert_eq!(
+                spans[3],
+                FrameAnswer::one(Value::I64(0)),
+                "the sender's unit"
+            );
         },
         other @ JoinOutcome::Failed(_) => panic!("a clean join: {other:?}"),
     }

@@ -1,0 +1,14 @@
+# Tier-2 budget for tools/check_comment_refs.py: "rule count" per line.
+#
+# These words carry a correct code meaning beside the project-phase one
+# (placement-verb "landed", runtime slot/row "retired", "per the" and "the
+# record" as data, the executor's poll rounds), so the guard budgets them
+# instead of denying them. A count may fall but never rise: a pass that
+# removes the words lowers its line in the same change.
+
+landed 70
+retired 153
+per-the 52
+the-record 37
+the-contract 24
+round 269

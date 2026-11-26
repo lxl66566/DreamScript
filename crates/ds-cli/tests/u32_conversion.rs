@@ -1,14 +1,13 @@
-//! The u32 width's trapping construction (ruled 2026-11-19, todo item
-//! 75): an ambient library member over the checked `u32_of` native and
-//! the bare `trap` primitive — in range it answers the width's word,
+//! The u32 width's trapping construction: an ambient library member over the checked `u32_of`
+//! native and the bare `trap` primitive — in range it answers the width's word,
 //! out of range it traps naming the value and the range, the message
 //! riding the Die trap so the CLI's trap report prints it exactly like
 //! `die` (a failed exit, nothing running past the trap). The compiler
 //! is untouched: the member rides the u32 type's receiverless static
 //! tier (`u32.of(x)`, the `int.default()` precedent), because the
-//! ruling's bare `u32(x)` call form cannot coexist with the width's
+//! bare `u32(x)` call form cannot coexist with the width's
 //! type atom — no value-namespace `u32` means the callee resolves the
-//! tag, and a fn beside the tag would be F9's ruled ambiguity error —
+//! tag, and a fn beside the tag would be the DS2014 ambiguity error —
 //! and the checked `u32_of` stays the fallible form.
 
 use std::{
@@ -141,10 +140,10 @@ fn the_negative_edge_traps_and_the_fresh_path_agrees() {
     }
 }
 
-/// The ruling's bare `u32(x)` call form cannot land beside the width's
+/// The bare `u32(x)` call form cannot land beside the width's
 /// type atom: with no value-namespace `u32` the callee resolves the tag
 /// and refuses as a type called as a function, and a value-namespace fn
-/// beside the tag would be F9's DS2014 ambiguity (a call-form name in
+/// beside the tag would be the DS2014 ambiguity (a call-form name in
 /// both namespaces is an error, never a priority search) — so the bare
 /// form stays refused and the receiverless member above is the
 /// construction surface.

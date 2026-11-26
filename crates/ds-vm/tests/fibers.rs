@@ -1,4 +1,4 @@
-//! Fiber substrate fixtures [E2, H2]: hand-assembled programs over the
+//! Fiber substrate fixtures: hand-assembled programs over the
 //! debug control switch (`fiber_resume`, builtin index 25), the host
 //! face (`spawn_fiber`/`resume_fiber`), and the host's suspension
 //! request (`request_suspend`, the dev host's capability face). What the

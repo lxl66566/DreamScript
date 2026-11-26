@@ -1,5 +1,5 @@
-//! The F9.5 phase-1 re-key: tag atom identity is its declaring
-//! declaration plus label, tag names left the value namespace, and the
+//! The tag re-key: tag atom identity is its declaring declaration plus
+//! label, tag names left the value namespace, and the
 //! directed positions resolve a bare label against the expected union's
 //! members. The ambient/user pair drives the cross-file shadow a single
 //! file cannot spell.

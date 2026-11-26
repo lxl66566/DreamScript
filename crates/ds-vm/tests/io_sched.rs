@@ -1,4 +1,4 @@
-//! The IO scheduler e2e (the 2026-11-21 scheduler rulings): hand-
+//! The IO scheduler e2e: hand-
 //! assembled programs over the std platform's net face, a VM with a
 //! reactor installed, and local listeners — hermetic, no external
 //! network. What the fixtures pin:
@@ -14,9 +14,9 @@
 //! - parked-IO cancellation: a sibling's trap raises the flag and the drive's next sweep cuts the
 //!   world-parked child at the resume-shaped point — its reactor interest deregistered, the
 //!   boundary reporting `Cancelled` beside the failing `Trapped`.
-//! - the close wake (item 79): a connection closed while a recv parks on it wakes the waiter now —
-//!   the close deregisters the interest and delivers the closed handle's own error span at the
-//!   parked call site, the deadline never the line.
+//! - the close wake: a connection closed while a recv parks on it wakes the waiter now — the close
+//!   deregisters the interest and delivers the closed handle's own error span at the parked call
+//!   site, the deadline never the line.
 //! - tail-position parks: a helper whose tail call is the recv parks through the frame pop and
 //!   lands its answer on the caller, and the entry frame's own tail park delivers the completed
 //!   answer as the run's own result.
@@ -25,11 +25,11 @@
 //! - the eager start: a spawned-but-unentered nursery child runs while its joiner parks on a world
 //!   op — the in-language nursery block's child feeds the parked recv's wake, its own send the
 //!   signal the joiner's peer writes behind, the sockets ordering the handshake with no clock.
-//! - the parked DNS twin (item 79, the 2026-11-24 ruling): a resolving connect parks its fiber on
-//!   the resolver helper's posted eventfd — a sibling runs across the resolution, socket-ordered
-//!   behind the resolving child's own transport — the failed lookup answers its own net_err, the
-//!   deadline the same bound every parked wait keeps, and a resolving fetch rides the same staged
-//!   machine. The shapes early-return on a host with no reactor driver.
+//! - the parked DNS twin: a resolving connect parks its fiber on the resolver helper's posted
+//!   eventfd — a sibling runs across the resolution, socket-ordered behind the resolving child's
+//!   own transport — the failed lookup answers its own net_err, the deadline the same bound every
+//!   parked wait keeps, and a resolving fetch rides the same staged machine. The shapes
+//!   early-return on a host with no reactor driver.
 //! - no reactor installed: the identical program keeps the blocking semantics (the embedder's
 //!   platform choice, never a language fact).
 //! - the REPL drive's parked submission (the host executor seam): a spliced session main whose one
@@ -37,13 +37,13 @@
 //!   its own waits answers the peer's late write exactly `ds run`'s executor would, and the landing
 //!   parks at the splice with the answer staged — while a pump ahead of the wake idles with the
 //!   wait standing.
-//! - the bounced resume's orphaned foreign (item 79): a drive's child resuming a detached fiber
-//!   whose recv then world-parks is bounced with the bare tag (the sweep's preemption-shaped
-//!   bound), the join answers with the foreign still parked and its interest satisfiable — no drive
-//!   waits a foreigner — and the wake lands exactly under the next host executor loop: a pump
-//!   enters no fiber and drains to spent, while an in-flight run or host resume continues on the
-//!   foreign's step and ends at its death by the leftover pattern, the parked fiber a leftover the
-//!   next pump still serves.
+//! - the bounced resume's orphaned foreign: a drive's child resuming a detached fiber whose recv
+//!   then world-parks is bounced with the bare tag (the sweep's preemption-shaped bound), the join
+//!   answers with the foreign still parked and its interest satisfiable — no drive waits a
+//!   foreigner — and the wake lands exactly under the next host executor loop: a pump enters no
+//!   fiber and drains to spent, while an in-flight run or host resume continues on the foreign's
+//!   step and ends at its death by the leftover pattern, the parked fiber a leftover the next pump
+//!   still serves.
 
 use std::{
     io::{Read, Write},
@@ -857,7 +857,7 @@ fn an_eagerly_started_child_feeds_the_parked_joiners_wake() {
     feeder.join().expect("feeder lands");
 }
 
-/// The parked DNS twin's overlap (item 79, ruled 2026-11-24): a
+/// The parked DNS twin's overlap: a
 /// resolving connect parks the calling fiber — the drive never blocks
 /// in getaddrinfo — and the sibling runs across the resolution, its
 /// own recv parked until the resolving child's transport exists: the
@@ -1227,7 +1227,7 @@ fn orphan_main_def(child: u32) -> FunctionDef {
     )
 }
 
-/// The bounced resume's orphaned foreign (item 79): the child's
+/// The bounced resume's orphaned foreign: the child's
 /// `fiber_resume` parks it over the foreign's recv, the join drive's
 /// preemption-shaped bounce answers the call with the bare tag, and the
 /// join answers with the foreign still world-parked — its wake bytes
@@ -1308,7 +1308,7 @@ fn a_bounced_resume_wakes_the_orphaned_foreign_only_at_the_host_pump() {
     assert_eq!(&done, b"done", "the foreign completed under the pump");
 }
 
-/// The orphaned foreign's wake under an in-flight run (item 79): the
+/// The orphaned foreign's wake under an in-flight run: the
 /// main parks on its own recv after the join, the executor hands the
 /// woken foreign's step to the host drive, and the run ends at the
 /// foreign's death answering its value — the leftover pattern the
@@ -1390,7 +1390,7 @@ fn an_orphaned_foreigns_wake_ends_the_run_by_the_leftover_pattern() {
     feeder.join().expect("the feeder lands");
 }
 
-/// The orphaned foreign's wake under a host-resumed drive (item 79):
+/// The orphaned foreign's wake under a host-resumed drive:
 /// the same orphaning main driven by `resume_fiber` — the executor hands
 /// the woken foreign's step to the blocking drive's continuation, the
 /// drive ends at the foreign's death by the same leftover pattern, and
@@ -1513,7 +1513,7 @@ fn sleep_child_def() -> FunctionDef {
     )
 }
 
-/// The pump that drains the scheduler (item 79): a sleep-parked orphan
+/// The pump that drains the scheduler: a sleep-parked orphan
 /// — no net rows anywhere, the wheel its only wake — is bounced out of
 /// the join the same way, completes under the pump's executor loop,
 /// and the seam that drained the last wait answers spent instead of

@@ -16,10 +16,10 @@
 //!    splice; the caller picks the position.
 //! 2. [`Vm::repl_start`] pushes the entry frame and drives to the park: the fiber parks with the
 //!    host as resumer, the frame alive.
-//! 3. [`Vm::repl_resume`] runs after the caller installs the next round's module (the two-slot swap
-//!    retires the prior version; the parked frame pins it until the re-point), re-points the parked
-//!    fiber's resume into the new version at the position where the new submission's code begins,
-//!    grows the frame to the new layout (append-only statements grow monotonically, and
+//! 3. [`Vm::repl_resume`] runs after the caller installs the next submission's module (the two-slot
+//!    swap retires the prior version; the parked frame pins it until the re-point), re-points the
+//!    parked fiber's resume into the new version at the position where the new submission's code
+//!    begins, grows the frame to the new layout (append-only statements grow monotonically, and
 //!    chunk-append growth keeps every live word's address), and drives to the next park. The prior
 //!    statements' code is skipped by the resume point: side effects never repeat.
 //! 4. [`Vm::repl_rollback`] restores a trapped submission's frame: the partial run's own deinit
@@ -32,8 +32,7 @@
 //!    line's own open nursery tears down beside the same pre-step nursery reading (never-entered
 //!    children release cold, the slot recycles — the trapped-drive release's discipline, the root
 //!    surviving its own rollback being the reason the dead-owner door never catches it), and the
-//!    fiber re-parks at the same resume position — the ruled behavior that a trapping line never
-//!    commits.
+//!    fiber re-parks at the same resume position — a trapping line never commits.
 //! 5. [`Vm::repl_drop_binding`] fires one live binding's deinit exactly once at `:drop`, and
 //!    [`Vm::repl_teardown`] is the session-end scope exit: every surviving deinit claim fires, then
 //!    the claims drain.
@@ -129,7 +128,7 @@ struct AnswerSpan {
 /// Rewrites `module`'s `func` so the frame parks instead of exiting: the
 /// answer staging `RET` would perform is emitted at `at`, then the
 /// `repl_park` call; the ordinary exit sequence stays past the park as
-/// dead code no resume ever reaches (the next round's resume points at
+/// dead code no resume ever reaches (the next resume points at
 /// its own spliced position). The layout's outgoing-argument area widens
 /// to the answer's width when the body's own calls never needed it, and
 /// `FUNCF` follows. Every other function and section rides unchanged.
@@ -412,9 +411,8 @@ impl Vm {
     /// the counts it acquired, tear down the line's own open nursery under
     /// the pre-step nursery reading (never-entered children release cold,
     /// the slot recycles), restore the parked resume at the position
-    /// the failed step entered. The ruled behavior — a trapping line never
-    /// commits, the frame does not advance, and its own deinit-carrying
-    /// bindings die their one death here: effects that already ran stand,
+    /// the failed step entered. A trapping line never commits, the frame does not advance, and its
+    /// own deinit-carrying bindings die their one death here: effects that already ran stand,
     /// nothing fires twice.
     ///
     /// # Errors

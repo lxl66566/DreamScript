@@ -1,5 +1,5 @@
-//! The derive-boundary honesty probes: a derive attribute the ruled set
-//! has not implemented (or never admits) refuses at the CHECKER with a
+//! The derive-boundary honesty probes: a derive attribute the admitted set
+//! has not implemented refuses at the CHECKER with a
 //! structured diagnostic naming it — never a silent drop — so lowering
 //! is never reached with an unconsumed attribute (`NotChecked`). A
 //! derive attribute reaching lowering unconsumed means the trees were
@@ -34,7 +34,7 @@ fn refusals(source: &str) -> Vec<String> {
 
 /// A refused derive argument keeps the attribute unconsumed, so
 /// lowering is blocked by the checker's diagnostics, not by the uop
-/// contract: the refused family rides `==` (the B9 refusal every list
+/// contract: the refused family rides `==` (the refusal every list
 /// carries whatever else it names).
 #[test]
 fn a_refused_family_blocks_lowering_through_the_diagnostics() {
@@ -88,7 +88,7 @@ fn a_refused_family_blocks_lowering_through_the_diagnostics() {
     );
 }
 
-/// `==` in a derive list is the B9 refusal, whatever else the list
+/// `==` in a derive list is the refusal, whatever else the list
 /// carries.
 #[test]
 fn equality_is_never_derived() {
@@ -107,7 +107,7 @@ fn equality_is_never_derived() {
     );
 }
 
-/// A name outside the ruled set refuses naming the ruled set.
+/// A name outside the admitted set refuses naming the admitted set.
 #[test]
 fn an_unknown_name_refuses_naming_the_ruled_set() {
     let rendered = refusals(concat!(
@@ -436,7 +436,7 @@ fn a_unit_only_generic_enum_derive_meets_the_lowering_door() {
 }
 
 /// One lift probe through the whole pipeline: the source checks clean
-/// and lowering refuses, asserting the refusal text names the M3
+/// and lowering refuses, asserting the refusal text names the
 /// contract — the boundary the lifted families' products meet.
 fn lift_mirror_refuses_at_lowering(source: &str) {
     let mut files = Files::new();
@@ -467,11 +467,10 @@ fn lift_mirror_refuses_at_lowering(source: &str) {
     );
 }
 
-/// The struct-application door the receiver frames ride since the
-/// per-shape instantiation landed: the mirror checks clean and lowers —
-/// the ONE body's receiver lays out over the application's solved field
-/// signature, a part still naming the impl's variable riding its Raw
-/// word with the dispatch's runtime evidence.
+/// The struct-application door the receiver frames ride: the mirror checks
+/// clean and lowers, the ONE body's receiver laying out over the
+/// application's solved field signature — a part still naming the impl's
+/// variable rides its Raw word with the dispatch's runtime evidence.
 fn lift_mirror_lowers(source: &str) {
     let mut files = Files::new();
     let id = files.add_source("mirror.ds", source);
@@ -1073,12 +1072,12 @@ fn an_impl_carrying_application_field_lowers_through_the_instantiated_call() {
 /// (the json members are type-keyed, never bound), a tag (no members
 /// to walk), and a tuple field (a shape spelling no read over the
 /// typed readers). The attribute-level refusals need no json face: the
-/// family refuses before any name resolves. The optional list field — once the
-/// family's own refusal — now expands clean: the decode walk mirrors
+/// family refuses before any name resolves. The optional list field
+/// expands clean: the decode walk mirrors
 /// to_json's statement-position member row, the presence narrow's
 /// catchall arm carrying the array walk. So do the tuple payload and
-/// several payloaded cases (the 2026-11-21 discriminator ruling), so
-/// their rows live in the json-faced e2e suites alone; an empty enum
+/// several payloaded cases, which name each case by its discriminant
+/// tag, so their rows live in the json-faced e2e suites alone; an empty enum
 /// hosts its member over the name-solved head
 /// (`the_json_families_host_an_empty_enum`).
 #[test]
@@ -1597,8 +1596,8 @@ fn an_encode_walk_past_the_frame_cap_refuses_at_lowering() {
 /// presence narrow carries the array walk the value-position else
 /// could not (the checked pin rides the conformance gate's json-faced
 /// ambient). A tuple case (lone or beside siblings) and several
-/// payloaded cases encode under the 2026-11-21 discriminator ruling,
-/// so their rows live in the json-faced e2e suites alone; an empty
+/// payloaded cases name each case by its discriminant tag, so their
+/// rows live in the json-faced e2e suites alone; an empty
 /// enum hosts its member over the name-solved head
 /// (`the_json_families_host_an_empty_enum`).
 #[test]

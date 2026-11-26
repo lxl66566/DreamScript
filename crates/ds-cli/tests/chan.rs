@@ -1,5 +1,4 @@
-//! The bounded channel through `ds run` (the 2026-11-21 shared-state
-//! ruling): the source surface — `chan_new(cap)`, the `.send`/`.recv`
+//! The bounded channel through `ds run`: the source surface — `chan_new(cap)`, the `.send`/`.recv`
 //! member spellings, payloads crossing child heaps into the
 //! parent-owned buffer — under the CLI's own drive. What the fixtures
 //! pin:
@@ -279,11 +278,10 @@ fn a_rendezvous_send_with_no_receiver_traps_the_stall_guard() {
 
 #[test]
 fn the_empty_race_parks_the_rendezvous_answers_channel_into_the_deadlock() {
-    // firstof's empty race builds a zero-bound answers channel: with
-    // the rendezvous bound the construction no longer traps, so the one
+    // firstof's empty race builds a zero-bound answers channel: the
+    // rendezvous bound keeps the construction from trapping, so the one
     // receive parks with no fiber to serve it and the stall guard
-    // answers the honest deadlock (the shared-state ruling's own
-    // degenerate)
+    // answers the honest deadlock (the degenerate race)
     let (status, _stdout, stderr) = run_source(
         r"fn main() -> int {
   const x = firstof(list[fn() -> int]())

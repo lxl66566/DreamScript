@@ -413,7 +413,7 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             ..
         } => {
             write_expr_min(ctx, out, base, callee, 15);
-            // Trailing-block sugar [F7]: a call whose written argument list
+            // Trailing-block sugar: a call whose written argument list
             // is empty renders no parenthesis pair — the canonical
             // spelling of the no-parens source form `f { ... }`.
             let sugar = args.is_empty()

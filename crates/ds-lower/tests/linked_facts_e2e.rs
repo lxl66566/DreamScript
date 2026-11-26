@@ -1,5 +1,5 @@
 //! The widened link-fact vocabulary end to end: a consumer over a linked
-//! member surface carrying the artifact round's shapes — a
+//! member surface carrying the widened shapes — a
 //! list-literal const, a map-field and optional-field struct, a map
 //! alias, the Named-word chain, a partial case-subset union field, a
 //! tuple field destructured in place, the richer alias bodies (a
@@ -141,7 +141,7 @@ fn build_vm() -> (Vm, Lowered) {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             const_entry(
                 "pages",

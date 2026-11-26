@@ -1,7 +1,5 @@
-//! Ruling-evidence pins for the stage-two per-fiber-heap tables (the
-//! memory endgame arc contract). Each test
-//! documents substrate behavior the arc's gates demand — the landed
-//! rulings' pins, not proposals.
+//! Evidence pins for the stage-two per-fiber-heap tables: each test
+//! documents substrate behavior — pins, not proposals.
 
 use core::mem::size_of;
 
@@ -37,7 +35,7 @@ fn the_frame_word_holds_a_widened_ref_payload() {
 
 /// The intern map rides each fiber's store: two drives of the same
 /// constant on the SAME fiber share one object (the second load's intern
-/// hit — the per-fiber interning ruling keeps this within one heap), and
+/// hit — per-fiber interning keeps this within one heap), and
 /// each host-held delivered word keeps its own count — the load acquires,
 /// the RET crossing mutates nothing, and the host never releases. A
 /// different fiber's drive interns its own copy (the KSTR pin below).
@@ -744,7 +742,7 @@ fn a_completed_child_drains_via_its_own_exit_decs() {
 /// live versions' pools times the loading fibers instead of growing with
 /// every version ever installed. Every load still serves: a reclaimed row
 /// costs its next load one intern hit on the store's own content map (the
-/// per-fiber ruling's duplicate cost, paid once per recycle).
+/// per-fiber intern map's duplicate cost, paid once per recycle).
 #[test]
 fn dead_pool_kstr_rows_reclaim_across_swap_and_slot_cycles() {
     fn loader_module() -> ModuleVersion {

@@ -1,4 +1,4 @@
-//! The CLI host's shutdown door (the 2026-11-24 signal ruling): the
+//! The CLI host's shutdown door: the
 //! process's SIGINT/SIGTERM translate into one shutdown event handed to
 //! the run, and the language never sees a Unix signal. The signals are
 //! blocked on the main thread before anything else runs — mask
@@ -6,10 +6,9 @@
 //! (the fork-join workers, the resolver helper), so the default
 //! disposition dies nowhere inside the process.
 //!
-//! The Linux shape is a signalfd over the OS's own C symbols (the
-//! raw-socket round's precedent, no signal crate): the fd registers as
-//! the reactor's own interest, its wake IS the shutdown event, and the
-//! drive's cut answers [`ds_vm::Trap::Shutdown`] — parked fibers observe
+//! The Linux shape is a signalfd over the OS's own C symbols (no
+//! signal crate): the fd registers as the reactor's own interest, its wake IS the shutdown event,
+//! and the drive's cut answers [`ds_vm::Trap::Shutdown`] — parked fibers observe
 //! the cancel sentinel at their resume-shaped points with their deinit
 //! hooks fired, the engine deciding nothing. Every other host keeps the
 //! blocking twins, so its shape is a minimal helper flipping the stop
@@ -40,8 +39,8 @@ mod imp {
         // register (current glibc's flags, musl's ignored sizemask) —
         // zero answering the blocking fd the reactor's poll wants
         fn signalfd(fd: c_int, mask: *const SigSet, flags: c_int) -> c_int;
-        // the non-blocking flip over the fd the raw-socket round's own
-        // fcntl precedent — the post-run signum read must answer
+        // the non-blocking flip over the fd (the fcntl precedent):
+        // the post-run signum read must answer
         // EAGAIN when no signal stands, never park the exiting host
         fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
     }

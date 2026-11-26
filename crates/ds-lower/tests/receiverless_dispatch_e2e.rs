@@ -1,4 +1,4 @@
-//! The receiverless-member surface end to end (the 2026-11-15 ruling):
+//! The receiverless-member surface end to end:
 //! an inherent impl member without a receiver parameter is callable
 //! through its bare type name, the checker resolving the member at check
 //! time keyed by the type alone. The call site dispatches as a plain
@@ -134,7 +134,7 @@ fn the_static_call_dispatches_as_a_plain_local_call() {
 
 /// A tail-position static call transfers through the frame-reuse CALLT —
 /// the solved static site is a plain local callee, so the tail contract
-/// [H2] covers it like every monomorphic inherent call.
+///  covers it like every monomorphic inherent call.
 #[test]
 fn a_tail_static_call_transfers_through_callt() {
     let lowered = lower_probe();

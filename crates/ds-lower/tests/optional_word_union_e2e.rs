@@ -126,7 +126,7 @@ fn the_optional_payload_field_narrows_over_the_binder() {
 }
 
 /// A struct field spelled `t | none` enters the universe atom exactly
-/// like the `t?` spelling (B4: one optional, two spellings), so it
+/// like the `t?` spelling (one optional, two spellings), so it
 /// constructs and narrows both sides — before the conversion carried
 /// the predeclared member, the field silently missed its atom and the
 /// construction refused at lowering over the wrong vocabulary.

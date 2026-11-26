@@ -2,10 +2,10 @@
 //! expression walk.
 //!
 //! The walk consumes the checked tables: every expression's solved type
-//! (flow-refined inside branches [B2]) comes from `expr_types`, every
+//! (flow-refined inside branches) comes from `expr_types`, every
 //! binder's declared type from `binders`, and every name use from the
 //! file's resolutions. Tail positions lower to RET/RETSPAN/CALLT
-//! directly [H2]; every other position lowers to a place — a span of body
+//! directly; every other position lowers to a place — a span of body
 //! slots — that callers read or widen into their own spans.
 
 use std::{
@@ -224,12 +224,12 @@ pub(crate) enum Op {
         dst: Slot,
         src: Slot,
     },
-    /// `rc_inc` on the reference in a body word (the placed dup, C4).
+    /// `rc_inc` on the reference in a body word (the placed dup).
     RcInc {
         src: Slot,
     },
-    /// `rc_dec` (the placed drop, C4); a unique death runs the deinit hook
-    /// (C5) and pools the block for reuse inside the `ds-vm/src/object.rs` store.
+    /// `rc_dec` (the placed drop); a unique death runs the deinit hook
+    /// and pools the block for reuse inside the `ds-vm/src/object.rs` store.
     RcDec {
         src: Slot,
     },
@@ -261,7 +261,7 @@ pub(crate) enum Op {
         callee: u16,
         nargs: u8,
     },
-    /// A generic call site's dispatch [H3]: the callee is the generic's
+    /// A generic call site's dispatch: the callee is the generic's
     /// ONE body and the staged words end in the evidence words; `nargs`
     /// names the real arguments only.
     Callg {
@@ -270,19 +270,19 @@ pub(crate) enum Op {
     },
     /// The dispatch tail call (CALLTG, the CALLG tail form): the same
     /// dispatch resolution and staged shape as `Callg`, transferring
-    /// through the CALLT frame-reuse slide [H2's guarantee closure].
+    /// through the CALLT frame-reuse slide.
     Calltg {
         callee: u16,
         nargs: u8,
     },
-    /// CALLS (the callable-word call form, F2): the callee operand is a
+    /// CALLS (the callable-word call form): the callee operand is a
     /// frame slot holding the fn word; `nargs` arguments are staged on
     /// the overlay like every call form.
     Calls {
         callee_slot: u8,
         nargs: u8,
     },
-    /// CLOSURE_NEW (F2): the header is the Fn word at `func`, the capture
+    /// CLOSURE_NEW: the header is the Fn word at `func`, the capture
     /// block the `n` words staged on the overlay; the fresh closure Ref
     /// lands in `dst`.
     ClosureNew {
@@ -290,7 +290,7 @@ pub(crate) enum Op {
         func: u8,
         n: u8,
     },
-    /// CAPTURE_STORE (F2, C3): `src` is the incoming word, `obj` the
+    /// CAPTURE_STORE: `src` is the incoming word, `obj` the
     /// closure word CALLS wrote into this frame, `idx` the capture
     /// block's word offset — the mut window over the closure's own
     /// uniquely-held capture slot. The op owns the count traffic
@@ -329,7 +329,7 @@ enum PlaceShape {
 }
 
 /// Where one value lives: the base slot of its words plus their shape. A
-/// use's static type (possibly refined [B2]) rides separately, from
+/// use's static type (possibly refined) rides separately, from
 /// `expr_types`.
 #[derive(Clone, Debug)]
 struct Place {
@@ -434,7 +434,7 @@ pub(crate) struct PlannedFn {
     /// `None` for every other planned function.
     pub(crate) deinit: Option<Span>,
     /// The enclosing bindings a synthesized lambda captures, in
-    /// first-use order: binder span plus declared type (F2). Always empty
+    /// first-use order: binder span plus declared type. Always empty
     /// for named functions — a named body resolves its own names.
     pub(crate) captures: Rc<Vec<(Span, Ty)>>,
     /// A declared impl-member body, when this entry is one: the walk
@@ -458,12 +458,12 @@ pub(crate) struct PlannedFn {
     /// lexically inside the body inherits them, so its own demands
     /// collect at its construction or spawn site.
     pub(crate) bounds: Rc<HashMap<String, HashSet<TraitId>>>,
-    /// Whether this entry is a `spawn` expression's child [E2]: the
+    /// Whether this entry is a `spawn` expression's child: the
     /// capture block is the entry's own argument area — the spawned
     /// fiber's entry frame writes it exactly where a run entry writes
     /// its parameters, evidence words trailing the captures.
     pub(crate) spawn_child: bool,
-    /// Whether this entry is a free generic fn's ONE body [H3]: its
+    /// Whether this entry is a free generic fn's ONE body: its
     /// declared parameters may sit over the fn's own type variables
     /// (one Raw word each — the runtime kind is the caller's fact), and
     /// every call site entering it stages the body's runtime-evidence
@@ -590,14 +590,14 @@ enum EvidenceSrc {
     Dead,
 }
 
-/// A solved trait-method call site's dispatch [B6, H3].
+/// A solved trait-method call site's dispatch.
 pub(crate) enum TraitDispatch {
     /// The impl body the checker's solved instance names: the body's
     /// function-table index plus the checker-recorded call (the declared
     /// instance id rides as the final staged word, the per-bound evidence
     /// words the body's runtime pairs demand stage ahead of it).
     Static { index: u32, call: TraitCall },
-    /// The linked body the checker's solved instance names (G4): the
+    /// The linked body the checker's solved instance names: the
     /// body lives in a linked package's module, so the FuncRef
     /// addresses the dep position and the linked module's own table —
     /// the same transfer a linked free fn's call takes, with the solved
@@ -680,7 +680,7 @@ pub(crate) struct Plan {
     /// their own body's list here, and the lambda/spawn walks at
     /// lowering time read callee bodies' lists through it.
     demands: Demands,
-    /// The module's evidence-chain objects [H3], built during lowering
+    /// The module's evidence-chain objects, built during lowering
     /// as the entering sites walk their chains: entry `i` is what a
     /// staged word carrying `i` names.
     chains: Vec<ds_mod::EvidenceChain>,
@@ -986,7 +986,7 @@ impl Plan {
         self.generics.get(&def).cloned()
     }
 
-    /// Registers one free generic fn's ONE body [H3] under its own name
+    /// Registers one free generic fn's ONE body under its own name
     /// (a package def is unique, and the impl members' `#` mangles sit
     /// outside the identifier charset) and returns its table index: the
     /// fn lowers once over its variables' single Raw words, the form a
@@ -1026,7 +1026,7 @@ impl Plan {
     /// and returns its index. The mangle `<trait>#<target>#<member>` is
     /// deterministic, and `#` sits outside the identifier charset, so a
     /// user-declared name can never collide; two impls of one trait over
-    /// intersecting heads cannot both check clean (B6), so the mangle is
+    /// intersecting heads cannot both check clean, so the mangle is
     /// unique per body.
     pub(crate) fn push_declared(
         &mut self,
@@ -1232,7 +1232,7 @@ impl Plan {
 }
 
 /// The enclosing bindings one lambda body captures, in first-use order
-/// (F2): every single-segment path or interpolation name inside the
+/// every single-segment path or interpolation name inside the
 /// subtree that resolves to a binder whose bind span starts strictly
 /// before the lambda — the resolver binds in flow order, so every binder
 /// of the subtree itself (the lambda's params, its body's locals, a
@@ -1255,7 +1255,7 @@ fn collect_captures(
 }
 
 /// The earliest `return` or `?` sitting directly inside a block's
-/// statements [E2]: never one nested inside a lambda or a spawned block —
+/// statements: never one nested inside a lambda or a spawned block —
 /// their bodies are separate frames with their own exits. The nursery
 /// emission refuses strays (the block's scope exit must join), and the
 /// spawn emission refuses them (a spawned body completes with its own
@@ -1267,7 +1267,7 @@ fn stray_exit(block: &BlockExpr) -> Option<Span> {
     })
 }
 
-/// Every `cancel` call's operand span inside one block's statements [E2]:
+/// Every `cancel` call's operand span inside one block's statements:
 /// the payload sites a spawned body hands the boundary, collected for the
 /// spawn site's containment proof. Lambdas and nested spawned blocks are
 /// separate frames and stay skipped (their own sites answer their own
@@ -2188,7 +2188,7 @@ impl PairWalk<'_> {
     }
 
     /// One interpolation hole whose implicit `show` dispatch resolves
-    /// through this frame's runtime evidence [F6, H3]: the checker's
+    /// through this frame's runtime evidence: the checker's
     /// hole record names the trait member and the operand's checked
     /// type peels the frame variable the dispatch's slot lookup reads —
     /// the same demand a written bound dot-call collects. A solved
@@ -2543,16 +2543,16 @@ enum Callee {
     Builtin(&'static Native),
     /// A generic builtin's ONE body: the call routes through CALLG with
     /// the instantiated-type evidence words staged after the real
-    /// arguments [H3].
+    /// arguments.
     Generic(&'static GenericNative),
     /// This module's function-table index.
     Local(u32),
-    /// A linked package's function (G4): the def carries the import
+    /// A linked package's function: the def carries the import
     /// surface entry — its checked fn type serves the parameter reads
     /// exactly like a planned def's — and the FuncRef addresses the
     /// linked dep position and the linked module's function index. The
     /// call stages like a local's and a tail site takes the same CALLT
-    /// frame-reuse transfer (H2: the module boundary rides the pool
+    /// frame-reuse transfer: the module boundary rides the pool
     /// constant alone, the slide a pure fact of the two layouts). The
     /// def sits absent for a linked trait impl's member body — a method
     /// owns no package def, so the member's own declared signature
@@ -2570,7 +2570,7 @@ enum Callee {
     /// frame's evidence slot whose word names the serving member body in
     /// the enclosing module (the sentinel FuncRef the CALLG carries).
     Evidence(u8),
-    /// A bound extern's C symbol (H5): the def carries the declaration's
+    /// A bound extern's C symbol: the def carries the declaration's
     /// bind target and written signature, the index the symbol's
     /// position in the artifact's enumeration-ordered table — the same
     /// table the run installs as the artifact's native module under its
@@ -2639,7 +2639,7 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     overlay_len: usize,
     /// The scalar destination offer live for one expression evaluation.
     scalar_dst: Option<ScalarDst>,
-    /// The Perceus dup/drop placement over this function's walk (C4).
+    /// The Perceus dup/drop placement over this function's walk.
     rc: Placement,
     /// This body's runtime-evidence pairs to their frame slots: a nested
     /// trait-method call on a bound type variable dispatches through the
@@ -2657,7 +2657,7 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// enclosing designated arena temporaries. Positions shift with the
     /// epilogue splices, like labels.
     loop_spans: Vec<LoopSpan>,
-    /// The innermost open nurseries' id words [E2], innermost last: the
+    /// The innermost open nurseries' id words, innermost last: the
     /// `spawn` sites of one `nursery` block stage the top word.
     nurseries: Vec<u8>,
     /// The closure word of this lambda frame's own running closure (the
@@ -2672,7 +2672,7 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// non-capturing lambda runs as a scalar FuncRef, never a frame with
     /// a closure word).
     capture_index: HashMap<Span, usize>,
-    /// Whether this frame is a spawned child [E2]: the child's own
+    /// Whether this frame is a spawned child: the child's own
     /// return is its answer type, not the enclosing function's union,
     /// so the cancel-containment proof belongs to the parent's spawn
     /// site instead of this frame.
@@ -2690,7 +2690,7 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// span) pairs, innermost last; the copy's field name reads from the
     /// loop's projected fields through the path depth.
     comptime_stack: Vec<(Span, Span)>,
-    /// Whether this frame is a `spawn` expression's child [E2]: the
+    /// Whether this frame is a `spawn` expression's child: the
     /// parent's spawn site owns the `cancel`-payload containment checks
     /// against the nursery-owning function's return union, so the child's
     /// own lowering skips them.
@@ -2750,8 +2750,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // parameter or return over the impl's own type variable has no
         // word kind statically (the runtime word is the caller's fact),
         // and the pool-call slide checks words against the callee's
-        // typed parameters — so those members refuse here, honestly,
-        // until the representation ruling that names their word shape.
+        // typed parameters — so those members refuse here: no static
+        // word shape exists for them.
         // A generic body is the exception — the ONE body of a free
         // generic fn or any of its instances: the ONE body's parameters
         // and returns over the fn's own type variables are the Raw-word
@@ -3171,7 +3171,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// while a solved answer's type reaches the chain start through the
     /// lens at the staging itself.
     fn written_generic_call_bounds(&self, span: Span) -> Option<GenericCallBounds> {
-        if let Some(bounds) = self.copy_record(span).and_then(|rec| rec.generic_bounds.clone())
+        if let Some(bounds) = self
+            .copy_record(span)
+            .and_then(|rec| rec.generic_bounds.clone())
         {
             return Some(bounds);
         }
@@ -3506,7 +3508,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// (the place's own classification leads, so a closure word behind a
     /// fn-typed binding is owned by its binder — its dec fires at the
     /// checker-recorded last use, and a never-consumed word drops at its
-    /// scope's end) plus the deinit claim its concrete type carries (C5)
+    /// scope's end) plus the deinit claim its concrete type carries
     /// — the value's base word anchors the hook, and the frame's overlay
     /// grows to hold the hook's staging.
     fn rc_bind(&mut self, binder: Span, place: &Place, ty: Ty) -> Result<(), LowerError> {
@@ -3553,7 +3555,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(Some(DeinitClaim { hook, staged }))
     }
 
-    /// The deinit hook of a value's concrete type (C5): a single struct
+    /// The deinit hook of a value's concrete type: a single struct
     /// atom whose declaration carries a `deinit` member names its
     /// synthesized function through the pool — the struct's application
     /// resolving its constructor's own. A declared deinit with no plan
@@ -3670,7 +3672,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.binders.insert(param.name.span, place.clone());
             // every parameter owns its incoming reference: the caller
             // handed a count (dup or forward at its staging) and this
-            // frame's drops balance it (C2/C4)
+            // frame's drops balance it
             for word in self.count_words(base, fact.ty)? {
                 self.rc.produced(word);
             }
@@ -3767,8 +3769,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// Binds one synthesized lambda's capture block right after the
     /// params — exactly where the VM's CALLS writes it — one binder per
-    /// captured enclosing binding, in the construction's capture order
-    /// (F2). Each Ref word is a count the call acquired at its copy-in;
+    /// captured enclosing binding, in the construction's capture order.
+    /// Each Ref word is a count the call acquired at its copy-in;
     /// the frame owns it for the call's duration and its exit drops
     /// balance the acquire. A `mutation` frame (a capturing lambda's own
     /// body) additionally records each captured binder's base offset:
@@ -3861,7 +3863,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 slot: place.base,
                 // the place's own classification leads when the two
                 // disagree: a closure word is Ref-classified behind a
-                // fn-typed use (F2), and the staged word's kind must tell
+                // fn-typed use, and the staged word's kind must tell
                 // the truth for the call slide and the borrow placement
                 slot_ty: if *slot == SlotType::Fn && *classified == SlotType::Ref {
                     SlotType::Ref
@@ -4124,7 +4126,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The unit type `()`: the solved member set is exactly the arity-0
-    /// tuple atom [B3] — distinct from the unit tags (`none`, `io_err`),
+    /// tuple atom — distinct from the unit tags (`none`, `io_err`),
     /// which are Tag words, and from `int`, which shares the I64 slot.
     fn is_unit_ty(&self, ty: Ty) -> bool {
         let [atom] = self.members(ty) else {
@@ -4180,13 +4182,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// One `const`/`var` binding statement.
     ///
     /// A `const` binder aliases its initializer's place (immutable, every
-    /// use reads live slots). A `var` binder [C3] owns a dedicated span
+    /// use reads live slots). A `var` binder owns a dedicated span
     /// sized by its declared type; the initializer widens into it and every
     /// later assignment re-stores the same slots — the rebindable local
-    /// keeps its slot span for the function's whole body, so the M4
+    /// keeps its slot span for the function's whole body, so the
     /// placement pass will see one stable storage per var.
-    /// A deinit value stored in a union payload refuses at its own span
-    /// (C5): the union's death decs the member's payload words and frees
+    /// A deinit value stored in a union payload refuses at its own span:
+    /// the union's death decs the member's payload words and frees
     /// nested objects, but dispatches no user deinit — the member
     /// value's hook would never run.
     fn guard_deinit_union_member(
@@ -4447,7 +4449,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// One assignment `x = e` / `x op= e` [C3]: the place is a single-segment
+    /// One assignment `x = e` / `x op= e`: the place is a single-segment
     /// path to a `var` local (the checker rejects every other place), the
     /// right side evaluates first, then re-stores the binder's slots. A
     /// reassignment kills the old value: the replacement drop threads right
@@ -4565,7 +4567,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // the replaced reference dies before the store overwrites its word
         // (compound stores re-store arithmetic results or the string
         // concat's fresh Ref word, never a borrowed operand). A deinit
-        // value's claim fires first (C5): the hook runs while the old
+        // value's claim fires first: the hook runs while the old
         // content's counts are still live, and the span claim's drop decs
         // every `Ref` word of the value — the folded words carry no entry
         // of their own
@@ -4605,7 +4607,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // incoming claim's transfer spent its own, so without this the
         // teardown doors read the slot dead and the value the frame still
         // holds never fires its hook — the same re-registration a binder
-        // performs over a moved-in claim (C5).
+        // performs over a moved-in claim.
         if let Some(claim) = self.deinit_claim(declared, e.span())?
             && self.rc.has_claim(place.base)
             && self.rc.anchors_claim(place.base)
@@ -4683,7 +4685,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// One `while cond { body }`: a backward jump over the re-tested
-    /// condition [F1]. The body lowers as statements (its value is unit);
+    /// condition. The body lowers as statements (its value is unit);
     /// every body slot is frame-static, so an iteration re-writes the same
     /// words. Refinements harvested inside an iteration never escape it
     /// (the checker restores its snapshot at loop exit; the lowerer reads
@@ -4743,7 +4745,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// One `for x in it { body }`: the iterable is an int range or one
-    /// list [F7]; every other iterable refuses.
+    /// list; every other iterable refuses.
     /// The `for comptime` expansion loop: one straight-line copy per
     /// projected field, the record binder recognized by span and every
     /// checked record read keyed by the copy path. No loop machinery
@@ -4800,13 +4802,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// expansion — the ONE body lowering over its variables — refuses:
     /// its fields are a fact of each concrete entering shape, and a
     /// variable's shape names none.
-    fn comptime_loop_info(&self, span: Span) -> Result<ds_check::type_of::ComptimeLoop, LowerError> {
+    fn comptime_loop_info(
+        &self,
+        span: Span,
+    ) -> Result<ds_check::type_of::ComptimeLoop, LowerError> {
         if let Some(scope) = &self.comptime_instance
-            && let Some(info) = self
-                .analyzed
-                .checked
-                .comptime_instance_loops
-                .get(&(scope.0, Rc::clone(&scope.1), span))
+            && let Some(info) = self.analyzed.checked.comptime_instance_loops.get(&(
+                scope.0,
+                Rc::clone(&scope.1),
+                span,
+            ))
         {
             return Ok(info.clone());
         }
@@ -4816,8 +4821,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 return Err(LowerError::unsupported(
                     span,
                     "a `for comptime` loop over the fn's own type variable",
-                    "this body lowers over its variables; only a concrete entering shape \
-                     projects the loop's fields",
+                    "this body lowers over its variables; only a concrete entering shape projects \
+                     the loop's fields",
                 ));
             }
             return Err(LowerError::unsupported(
@@ -4921,7 +4926,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// edge parked at i64::MAX exits instead of stepping (the add has
     /// no successor word). The pattern binder
     /// names the induction word, so every body read sees the current
-    /// step [F7].
+    /// step.
     fn for_range_value(
         &mut self,
         pat: &Pattern,
@@ -5063,7 +5068,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(self.unit_value(span)?.place)
     }
 
-    /// A `for x in xs` over one list [F7]: the iterable evaluates once
+    /// A `for x in xs` over one list: the iterable evaluates once
     /// and its element count freezes at loop entry (one `list_len` call
     /// into a hidden count word) — elements the body appends are not
     /// visited this loop — then an index-counted fetch loop: one hidden
@@ -5283,7 +5288,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Placement::emit_drops(&mut self.code, &dying);
     }
 
-    /// Stages one `list_len` call through CALLG [H3]: the list word as
+    /// Stages one `list_len` call through CALLG: the list word as
     /// the single real argument, the list instance as the one evidence
     /// word behind it, the total i64 result moved into the caller's
     /// word. The list word stages as the native's transient borrow
@@ -5317,7 +5322,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// Stages one `list_get` fetch through CALLG [H3]: the list word and
+    /// Stages one `list_get` fetch through CALLG: the list word and
     /// the index as the real arguments, the list instance as the one
     /// evidence word behind them, and the ok/none span answering on the
     /// overlay — word 0 the discriminant, then one payload word per
@@ -5652,7 +5657,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 })
             },
             Literal::Byte(b) => {
-                // A byte stages as its 0-255 integer value [F6]: the atom
+                // A byte stages as its 0-255 integer value: the atom
                 // is its own u8 width class, but the word rides the
                 // integer slot encoding — the checker keeps byte outside
                 // the int conversion family, so no arithmetic reaches here
@@ -5778,7 +5783,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// A lambda value (F2): the synthesized module function plus its word.
+    /// A lambda value: the synthesized module function plus its word.
     /// A non-capturing lambda mints the copyable scalar FuncRef into a Fn
     /// slot (KCONST over the pool's same-module FuncRef, resolved through
     /// the registry id space at issue time). A capturing lambda builds a
@@ -5825,7 +5830,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The callable word for a synthesized block function (a lambda value
-    /// or a spawned child [E2]): a scalar `Fn` word when nothing
+    /// or a spawned child): a scalar `Fn` word when nothing
     /// captures, a closure object's `Ref` staging the captures otherwise.
     /// The capture refusals are the lambda construction's own — a spawned
     /// child is the same shape.
@@ -5955,7 +5960,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok((dst, SlotType::Ref))
     }
 
-    /// One internal seam call to a builtin control native [E2]: the
+    /// One internal seam call to a builtin control native: the
     /// staged words are body slots with their word kinds, the result
     /// words land on the overlay for the caller to read. No seam site is
     /// ever in tail position — the emissions below keep them inside their
@@ -5993,7 +5998,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// A `nursery` block [E2]: the seam opens a fresh nursery, the body
+    /// A `nursery` block: the seam opens a fresh nursery, the body
     /// runs with its `spawn` sites bound to the id word, and scope exit
     /// joins — the boundary answers a clean join or the first failure's
     /// error payload, and the payload re-spans into the enclosing
@@ -6215,7 +6220,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(answer)
     }
 
-    /// The join channel's clean-join value [E2]: the boundary seam
+    /// The join channel's clean-join value: the boundary seam
     /// collects the children's answer spans into one list in spawn
     /// order and delivers its `Ref` at overlay word 1, beside the
     /// discriminant. The move alone emits here; the word's ownership
@@ -6233,7 +6238,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(word)
     }
 
-    /// The join's containment mask [E2]: one bit per bare member of the
+    /// The join's containment mask: one bit per bare member of the
     /// function's return union plus one per payloaded member a spawned
     /// body can cancel — exactly the members a `cancel` payload can be
     /// through this boundary. A non-union return keeps the zero mask
@@ -6288,7 +6293,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(mask)
     }
 
-    /// A `spawn` expression [E2]: the block becomes a synthesized child
+    /// A `spawn` expression: the block becomes a synthesized child
     /// function (the lambda construction's own capture list) and the seam
     /// spawns it into the innermost open nursery as a ready fiber — the
     /// block's join drives it. The expression's value is the unit word.
@@ -6312,8 +6317,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                  `return` and `?` through the enclosing function",
             ));
         }
-        // The child function's return is its body's answer [E2, the
-        // join channel]: the checker recorded the body's value at its
+        // The child function's return is its body's answer (the
+        // join channel): the checker recorded the body's value at its
         // own span, and the frame's exit carries the answer span the
         // boundary collects in spawn order. A body that only cancels
         // keeps the unit return — its exit code is unreachable, and the
@@ -6379,8 +6384,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Whether a place holds a capturing lambda's closure word: a
-    /// fn-typed value in a Ref-classified word (F2's classification —
-    /// every fn-typed slot reads the scalar FuncRef directly).
+    /// fn-typed value in a Ref-classified word, where every fn-typed slot
+    /// reads the scalar FuncRef directly.
     fn is_closure_word(&mut self, place: &Place, ty: Ty) -> Result<bool, LowerError> {
         Ok(matches!(place.shape, PlaceShape::Word(SlotType::Ref))
             && matches!(&*self.shapes.shape(ty)?, Shape::Word(SlotType::Fn)))
@@ -6415,7 +6420,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Callee::Builtin(_) | Callee::Evidence(_) | Callee::Foreign { def: None, .. } => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
             // a bound extern's staged words are its written signature's
-            // (H5): the scalar slice validated at resolution, the same
+            // the scalar slice validated at resolution, the same
             // derivation the linked arm takes
             Callee::Bound { def, .. } | Callee::Foreign { def: Some(def), .. } => self
                 .def_type(def)
@@ -6617,7 +6622,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// A capturing closure never enters a widened union region: the
     /// member's Fn slot and the closure word's Ref classification
-    /// disagree (F2), and no payload read-back contract covers that
+    /// disagree, and no payload read-back contract covers that
     /// pairing yet.
     fn refuse_closure_init(&mut self, val: &TypedPlace, span: Span) -> Result<(), LowerError> {
         if self.is_closure_word(&val.place, val.ty)? {
@@ -6648,7 +6653,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// One interpolating string: a STRCAT chain over its parts; a hole
-    /// is `str(e)` [F6] — printable primitives route through their str
+    /// is `str(e)` — printable primitives route through their str
     /// natives, a string or char passes its Ref word through, and an
     /// operand whose `show` the checker solved at the hole's own span
     /// dispatches through the ordinary member-call machinery.
@@ -6740,7 +6745,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// `str(e)` of one hole [F6]: the operand's checked type routes the
+    /// `str(e)` of one hole: the operand's checked type routes the
     /// conversion. Anything the checker did not prove printable lands as
     /// a lowering error (a `show`-carrying operand never reaches here —
     /// the checker's hole record routed it through the dispatch above).
@@ -6774,7 +6779,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     )),
                 }
             },
-            // a byte prints its 0-255 value [F6]: the word IS the integer
+            // a byte prints its 0-255 value: the word IS the integer
             // slot staging, so the int native renders it; interpolation
             // holes stay checker-gated to the five printable primitives,
             // so only an explicit `str(b)` reaches this arm
@@ -6790,7 +6795,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// Whether the checker solved one hole's `show` at its own span [F6]:
+    /// Whether the checker solved one hole's `show` at its own span:
     /// the hole's dispatch record (the trait-dispatch or inherent table
     /// beside the solved instance, the runtime-evidence table alone for
     /// an assumption-answered hole) the synthetic member call below
@@ -6801,7 +6806,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             || self.analyzed.checked.inherent_calls.contains_key(&span)
     }
 
-    /// One hole's `show` dispatch [F6]: the receiver wrapped as the
+    /// One hole's `show` dispatch: the receiver wrapped as the
     /// written `recv.show()` call — no surface name exists, so the
     /// checker's span-keyed record is the resolution — staging through
     /// the ordinary member-call machinery (receiver argument, evidence
@@ -6894,7 +6899,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     )
             )
         {
-            // The qualified `type::label` use (F9.5): the head's member
+            // The qualified `type::label` use: the head's member
             // the checker picked is the value's atom, recorded at the
             // label's span.
             let dst = self.temp_word(SlotType::Tag)?;
@@ -6929,7 +6934,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let kind = self.analyzed.package.def(*def).kind;
                 match kind {
                     ds_check::DefKind::Tag | ds_check::DefKind::Case => {
-                        // The directed probe (F9.5) may resolve a bare
+                        // The directed probe may resolve a bare
                         // label to another declaration's atom than the one
                         // name resolution bound; the checker's record is
                         // the value's truth.
@@ -6953,7 +6958,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         })
                     },
                     _ => {
-                        // A linked const's value fact (G4): the literal is
+                        // A linked const's value fact: the literal is
                         // the whole fact, so the use embeds it exactly as
                         // the literal a user would have written — the same
                         // word shapes and RC treatment the owning module's
@@ -6976,7 +6981,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                                  their callee directly",
                             ));
                         }
-                        // A named fn used as a value (F2, functions are
+                        // A named fn used as a value (functions are
                         // values): the same pool FuncRef const channel a
                         // non-capturing lambda mints — one copyable scalar
                         // word, resolved through the two-slot module table
@@ -7080,7 +7085,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn is_value(&mut self, expr: &Expr, ty: &Type, span: Span) -> Result<Place, LowerError> {
         let operand = self.value(expr)?;
         let operand_ty = self.val(expr.span())?.ty;
-        // The checker's solved test is the site's truth (F9.5: a
+        // The checker's solved test is the site's truth: a
         // type-position label resolves per file, so the first namespace
         // holder the nominal spelling finds may be another declaration's
         // atom); the nominal path spelling covers only the shapes the
@@ -7210,7 +7215,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn path_atom(&self, name: &str) -> Option<TypeId> {
-        // `none` is the universe's predeclared unit atom [B4], never a
+        // `none` is the universe's predeclared unit atom, never a
         // package declaration
         if name == "none" {
             return Some(TypeId::NONE);
@@ -7232,7 +7237,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // written access (the fixed offset the seam guarantees).
         let (recv, field_name) = match e {
             Expr::Field { recv, name, .. } => {
-                // A module alias's qualified const (G4): the checker bound the
+                // A module alias's qualified const: the checker bound the
                 // linked binding's def at the member's span, so the value embeds
                 // through the same literal fact the selection spelling lowers
                 // — no receiver word exists.
@@ -7273,7 +7278,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
         let recv_val = self.value(recv)?;
         // the receiver's recorded type carries the refinement: a member
-        // name inside an `is`/match arm [B2]
+        // name inside an `is`/match arm
         let recv_ty = self.val(recv.span())?.ty;
         let PlaceShape::Span(underlying) = recv_val.place.shape else {
             return Err(mismatch("a field access on a scalar"));
@@ -7315,7 +7320,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// A struct literal: a fresh span, fields written by name [B3].
+    /// A struct literal: a fresh span, fields written by name.
     fn struct_literal(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {
         let Expr::Struct { fields, .. } = e else {
             return Err(mismatch("a struct literal"));
@@ -7409,7 +7414,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.store_field_span(target.base, field, &addrs);
         }
         // the constructed value's deinit claim anchors its base word
-        // (C5); the value dies unnamed unless a binder aliases it
+        // the value dies unnamed unless a binder aliases it
         if let Some(claim) = self.deinit_claim(static_ty, e.span())? {
             self.overlay_site(&claim.staged, &[SlotType::I64]);
             let words = self.ref_words(target.base, static_ty)?;
@@ -7486,7 +7491,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// One anonymous tuple `(e0, e1, ...)`: a fresh frame span, one word
-    /// per element, moved in evaluation order (B3). Each element lowers
+    /// per element, moved in evaluation order. Each element lowers
     /// as a single word (the shape's one-word-per-element rule); a
     /// union-typed element distributed the product into several tuple
     /// atoms, which the boundary rejects — narrow the element first.
@@ -7540,8 +7545,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Binary operators: typed uops for scalars, short-circuit chains for
-    /// `&&`/`||`, memberwise chains for structural `==` [B9], and the
-    /// concat call for string `+` [B8].
+    /// `&&`/`||`, memberwise chains for structural `==`, and the
+    /// concat call for string `+`.
     fn binary_value(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {
         let Expr::Binary {
             op,
@@ -7800,7 +7805,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Both operands solve to the string atom: `+` is the concat
-    /// call's spelling [B8]. The checked-type-only probe answers before
+    /// call's spelling. The checked-type-only probe answers before
     /// operand evaluation, so the call's borrow window opens in time to
     /// pin the words the CALL reads.
     fn is_string_add_ty(&self, lhs: Ty, rhs: Ty) -> bool {
@@ -7842,7 +7847,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Float remainder is a boundary, not a trap: the numeric table admits
-    /// float rem [B7], but the locked uop set carries ModI64 only — both
+    /// float rem, but the locked uop set carries ModI64 only — both
     /// Rem sites (the binary operator and the compound assignment) check
     /// the left operand's word and reject F64 at compile time.
     fn reject_float_operand(
@@ -7870,7 +7875,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         )
     }
 
-    /// The defensive float refusal behind the checker's own [B7] rule: the
+    /// The defensive float refusal behind the checker's own rule: the
     /// wrap uops are i64-only, so a float operand that slips the check
     /// refuses here instead of mis-lowering as an i64 word.
     fn reject_float_wrap(&mut self, lhs: &TypedPlace, span: Span) -> Result<(), LowerError> {
@@ -7882,7 +7887,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         )
     }
 
-    /// The defensive float refusal behind the checker's own [B7] rule for
+    /// The defensive float refusal behind the checker's own rule for
     /// the shift and bitwise operators: no f64 variant of any of them
     /// exists, so a float operand that slips the check refuses here
     /// instead of mis-lowering as an i64 word.
@@ -8062,7 +8067,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// `x in a..b` / `x in a..=b` [F7]: the operand and both bounds
+    /// `x in a..b` / `x in a..=b`: the operand and both bounds
     /// evaluate once; two comparisons join by jumps (the uop set has no
     /// boolean arithmetic).
     fn in_range_value(
@@ -8127,7 +8132,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// `x in xs` over one list [F7]: a scan over once-evaluated
+    /// `x in xs` over one list: a scan over once-evaluated
     /// operands — one hidden induction word, `list_get` per iteration
     /// over its ok/none span (the none span answers false), one
     /// comparison per element (a wider element compares through the
@@ -8309,7 +8314,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Structural `==`: one uop per scalar, a fail-fast chain per struct,
-    /// a tag dispatch plus payload compare per union [B9].
+    /// a tag dispatch plus payload compare per union.
     fn eq_chain(
         &mut self,
         lhs: &TypedPlace,
@@ -8342,7 +8347,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let dst = match &*shape {
             Shape::Word(slot) => {
                 // the heap collections share the string's one Ref word
-                // shape but the EqStr uop reads string objects [B9]: each
+                // shape but the EqStr uop reads string objects: each
                 // collection's content-compare native serves the chain's
                 // word
                 if *slot == SlotType::Ref {
@@ -8445,7 +8450,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(dst)
     }
 
-    /// The collection `==`/`!=` seam [B9]: structural content equality
+    /// The collection `==`/`!=` seam: structural content equality
     /// through the builtin core's content-compare native the word's
     /// collection names — one CALL in the chain's word, the operands
     /// staged as borrows exactly the concat call shape's (a staged word's
@@ -8511,7 +8516,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The per-word compare plan of one type's flattened value span
-    /// [B9]: the chain compares fields by their declared type, never by
+    /// the chain compares fields by their declared type, never by
     /// their slot kind alone, so the plan pairs with `word_addrs` word
     /// for word. A collection-typed Ref word plans that collection's
     /// content compare (`builtin_instance` names the collection the way
@@ -8576,7 +8581,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// The content-compare word one solved collection type plans [B9]:
+    /// The content-compare word one solved collection type plans:
     /// the native its builtin instance names — the by-type entry the
     /// direct operand pair, a membership's element, and the flattened
     /// plan's word arm share.
@@ -8773,7 +8778,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Union equality: per-member tag tests, then the member's payload
-    /// compare; distinct members never compare equal [B9].
+    /// compare; distinct members never compare equal.
     fn union_eq(&mut self, lhs: &TypedPlace, rhs: &TypedPlace, ty: Ty) -> Result<u8, LowerError> {
         let shape = self.shapes.shape(ty)?;
         let Shape::Union(u) = &*shape else {
@@ -8930,7 +8935,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             UnaryOp::WrapNeg if only.slot_ty == SlotType::I64 => {
                 // `-%a` lowers as `0 -% a`: the KIMM zero mirrors int
                 // negation and the wrapping sub never traps, so negating
-                // int-min wraps to int-min (B7's wrap set)
+                // int-min wraps to int-min (never traps)
                 let zero = self.temp_word(SlotType::I64)?;
                 let kidx = self.pool(Constant::I64(0));
                 self.emit(Op::Kimm {
@@ -9318,7 +9323,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 // zero loads for the dead payload words of a constructed member: a
 // union span's every word carries a value of its declared kind, so
 // whole-span moves and typed callee parameters never see a foreign kind
-// (the live member's words are the only ones ever read [BL-2])
+// (the live member's words are the only ones ever read)
 impl FnLower<'_, '_, '_> {
     /// The native-by-name key a native surface's pool FuncRef addresses:
     /// the builtin core's reserved name, or the platform declaration's
@@ -9347,7 +9352,7 @@ impl FnLower<'_, '_, '_> {
             },
             Callee::Bound { def, index } => {
                 // the pool constant carries the return's marshaling word
-                // (H5): the parameters marshal per the staged words' own
+                // the parameters marshal per the staged words' own
                 // kinds, so the return alone needs a payload — the scalar
                 // word read off the signature the resolution already
                 // validated, an absent return the unit word
@@ -9380,7 +9385,7 @@ impl FnLower<'_, '_, '_> {
             },
             Callee::Foreign { position, func, .. } => Constant::FuncRef {
                 // position 0 is the enclosing module, so the dep entry's
-                // list position shifts by one (G3.5's position key)
+                // list position shifts by one.
                 key: FuncRefKey::Dep(position + 1),
                 func,
             },
@@ -9521,7 +9526,7 @@ fn map_refusal() -> LowerError {
     )
 }
 
-/// How one word of a structural `==` chain compares [B9]: the word's
+/// How one word of a structural `==` chain compares: the word's
 /// own scalar uop, or — when the word's field type is a heap collection
 /// — that collection's content-compare native, because the EqStr uop
 /// reads string objects alone. The chain selects per field type, never

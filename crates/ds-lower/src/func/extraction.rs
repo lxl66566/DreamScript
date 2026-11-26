@@ -1,4 +1,4 @@
-//! The extraction family [E4]: monadic extraction over optional/result
+//! The extraction family: monadic extraction over optional/result
 //! unions, the ambient `str`/`cancel` conversions, and `?` in value and
 //! tail position.
 
@@ -10,20 +10,20 @@ use super::*;
 /// through [`ambient_extern`](FnLower::ambient_extern).
 #[derive(Clone, Copy)]
 pub(super) enum AmbientExtern {
-    /// The ambient `str[t]` conversion extern [F6]: one generic over the
+    /// The ambient `str[t]` conversion extern: one generic over the
     /// converted value, one parameter. The lowering routes the call by
     /// the operand's checked type, mirroring the interpolation hole.
     Str,
-    /// The ambient `cancel` extern [E1, E2]: the generic one-parameter
+    /// The ambient `cancel` extern: the generic one-parameter
     /// declaration the checker rows with the `cancel` effect — the
     /// internal effect the nursery boundary dispatches.
     Cancel,
-    /// A `die` spelling's declaration (the 2026-11-17 split): the
-    /// generic one-parameter extern — the return generic the call
-    /// site's own type answers — wherever the merged reading serves it
-    /// (the host member a CLI entry session registers, or a file-owned
-    /// extern). The declaration is the provider's own code; the
-    /// primitive it routes to is the builtin core's `trap`.
+    /// A `die` spelling's declaration: the generic one-parameter extern —
+    /// the return generic the call site's own type answers — wherever the
+    /// merged reading serves it (the host member a CLI entry session
+    /// registers, or a file-owned extern). The declaration is the
+    /// provider's own code; the primitive it routes to is the builtin core's
+    /// `trap`.
     Die,
     /// The ambient `panic` extern: the policy-free abort over the same
     /// `trap` primitive, the same generic one-parameter shape, served to
@@ -35,7 +35,7 @@ pub(super) enum AmbientExtern {
     /// the platform FuncRef the install validates against the host's
     /// served capabilities.
     Exit,
-    /// The ambient `sort[t: ord]` extern (todo item 101): the generic
+    /// The ambient `sort[t: ord]` extern: the generic
     /// one-parameter declaration whose declared ord bound routes the
     /// comparator — the call site stages the solved instance's compare
     /// callable beside the list and dispatches the native's stable
@@ -59,9 +59,9 @@ impl AmbientExtern {
 }
 
 impl FnLower<'_, '_, '_> {
-    // ---- the extraction family [E4] ------------------------------------------
+    // ---- the extraction family ------------------------------------------------
 
-    /// One extraction-family call [E4]: every member inlines at the call
+    /// One extraction-family call: every member inlines at the call
     /// site over the checked receiver's own union shape — a tag test
     /// picks the arm, the chosen side writes the result. No callee
     /// exists, so a tail position lowers the produced place through the
@@ -139,7 +139,7 @@ impl FnLower<'_, '_, '_> {
         self.word_addrs(src, elem)
     }
 
-    /// `x.unwrap_or(y)` [E4]: the eager fallback — both operands evaluate,
+    /// `x.unwrap_or(y)`: the eager fallback — both operands evaluate,
     /// the receiver's tag picks the payload word or the fallback's.
     fn unwrap_or_value(
         &mut self,
@@ -215,7 +215,7 @@ impl FnLower<'_, '_, '_> {
         Ok(result)
     }
 
-    /// `x.unwrap_or_else(fn)` [E4]: the fallback lambda inlines on the
+    /// `x.unwrap_or_else(fn)`: the fallback lambda inlines on the
     /// none side only — lazy by construction; the ok side moves the
     /// payload.
     fn unwrap_or_else_value(
@@ -296,7 +296,7 @@ impl FnLower<'_, '_, '_> {
         Ok(result)
     }
 
-    /// `x.ok_or(e)` [E4]: the tag test picks the constructed member of
+    /// `x.ok_or(e)`: the tag test picks the constructed member of
     /// the call's own `t | e` union — the error value on the none side,
     /// the payload on the ok side — which `?` then propagates.
     fn ok_or_value(
@@ -409,7 +409,7 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// `e?`: every propagated member re-spans into the enclosing return
-    /// union via RETSPAN [E4]; the kept set extracts in place. Each exit
+    /// union via RETSPAN; the kept set extracts in place. Each exit
     /// forks the ownership map — the exit's own drops fire from its
     /// snapshot, and the continuation keeps the kept set's counts (the
     /// exits diverge, so they constrain nothing after the `?`).
@@ -563,7 +563,7 @@ impl FnLower<'_, '_, '_> {
                 .is_some_and(|sig| sig.generics.len() == 1 && sig.params.len() == 1)
     }
 
-    /// The `cancel(e)` call [E1, E2]: the operand is one bare enum member
+    /// The `cancel(e)` call: the operand is one bare enum member
     /// value — the failing fiber's error payload — contained in the
     /// enclosing function's return union, where the nursery boundary
     /// unions it out at the join. The seam traps the running fiber, so
@@ -820,7 +820,7 @@ impl FnLower<'_, '_, '_> {
         self.temp_span(ty)
     }
 
-    /// The ambient `str[t]` conversion as an explicit call [F6]: the
+    /// The ambient `str[t]` conversion as an explicit call: the
     /// operand's checked type routes the same conversion the
     /// interpolation holes use — printable primitives pass their Ref
     /// word through or convert through the str natives, anything else
@@ -852,7 +852,7 @@ impl FnLower<'_, '_, '_> {
     /// ambient's own shape carries it: a non-local function of a family
     /// name, generic with two parameters — the same name-routing the
     /// native table performs, gated to match the checker's rule so the
-    /// two passes never disagree [E4].
+    /// two passes never disagree.
     pub(super) fn extraction_def(&self, def: DefId) -> Option<Extraction> {
         if !self.std_recognized(def) {
             return None;

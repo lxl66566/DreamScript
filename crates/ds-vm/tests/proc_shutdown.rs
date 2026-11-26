@@ -1,6 +1,5 @@
-//! The process face's blocking wait twin under the host's stop flag
-//! (the 2026-11-24 signal ruling's non-reactor half, item 96's
-//! recorded gap): a waitpid owns no portable interrupt shape, so a
+//! The process face's blocking wait twin under the host's stop flag:
+//! a waitpid owns no portable interrupt shape, so a
 //! reactor-less host's `proc_wait` polls the child non-blockingly on a
 //! bounded sleep loop — a flipped stop flag cutting a blocked wait
 //! within one interval, the reaped-status answers identical to the

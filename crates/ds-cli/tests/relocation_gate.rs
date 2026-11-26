@@ -7,9 +7,8 @@
 //! run path's cold composition) and once through the fully fresh path,
 //! and byte-compares the finished modules. A positional seam answers a
 //! regenerated-but-relocated composition with silently wrong ids — the
-//! miscompile class the pitfalls entry records (unrelated call sites
-//! trapping at the ABI over wrong slot layouts) — so this gate holds
-//! the serve name-addressed.
+//! miscompile class (unrelated call sites trapping at the ABI over wrong
+//! slot layouts), so this gate holds the serve name-addressed.
 
 use std::sync::Arc;
 
@@ -53,7 +52,7 @@ fn relocated_json() -> String {
 }
 
 /// The private collection externs, relocated to the composed text's
-/// tail: the four declarations the pitfalls entry pins (they mint no
+/// tail: the four declarations pinned here (they mint no
 /// atoms, so the move exercises every def-keyed seam alone).
 fn relocated_externs() -> String {
     relocate(

@@ -1,4 +1,4 @@
-//! The process face's parked e2e (the 2026-11-23 ruling): hand-
+//! The process face's parked e2e: hand-
 //! assembled programs over the std platform's process face, a VM with
 //! the platform's reactor installed, and `sh` children — hermetic, no
 //! external network. Linux alone: the parked twins are the epoll
@@ -13,10 +13,10 @@
 //!   orderly end.
 //! - a parked `proc_wait` wakes on the child's exit: the pidfd readable, the wake reaping the
 //!   status non-blockingly and answering it, a second wait the reaped word again.
-//! - the close wake (item 79): a handle closed while a read or wait parks on it wakes the waiter
-//!   now — the read as the pipe's orderly end (the empty string, the HUP wake's own answer over the
-//!   killed child), the wait as the closed handle's io floor (the blocking twin's post-close
-//!   answer), the deadline never the line.
+//! - the close wake: a handle closed while a read or wait parks on it wakes the waiter now — the
+//!   read as the pipe's orderly end (the empty string, the HUP wake's own answer over the killed
+//!   child), the wait as the closed handle's io floor (the blocking twin's post-close answer), the
+//!   deadline never the line.
 //! - the deadline: a parked row with no wake answers the timeout io span at its configured bound —
 //!   the bounded-wait discipline over the wheel, the process face's own member shape.
 //! - parked-IO cancellation: a sibling's trap cuts the world-parked child, its interest gone with
@@ -337,7 +337,7 @@ fn a_parked_wait_wakes_on_the_childs_exit() {
 
 /// A handle closed while a read parks on its pipe wakes as the
 /// orderly end: the close kills the child holding the write end, and
-/// the wake door answers the HUP ruling's empty string at the parked
+/// the wake door answers HUP's empty string at the parked
 /// call site — never the closed table's io floor, and never the
 /// deadline's timeout span (the bound set far past the close, so only
 /// the wake can end the park).

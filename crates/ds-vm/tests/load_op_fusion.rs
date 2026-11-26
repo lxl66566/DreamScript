@@ -1,4 +1,4 @@
-//! The peek-next load-op fusion (BL-4's census-ranked first slice): a
+//! The peek-next load-op fusion (the census' first-ranked slice): a
 //! KIMM/KCONST followed by its measured census arith consuming the loaded
 //! slot runs both uops in the load's dispatch arm. The fused arm must be
 //! indistinguishable from the unfused run: results equal, the loaded slot

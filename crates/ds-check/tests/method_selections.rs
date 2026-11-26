@@ -1,4 +1,4 @@
-//! The type-directed member selection of every dot-call [F3]: the callee
+//! The type-directed member selection of every dot-call: the callee
 //! name occurrence records the one member the checker settled on — a
 //! trait member a solved instance or an in-scope assumption answers, an
 //! inherent fn whose owner covers the receiver, and the type-keyed tier's

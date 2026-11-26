@@ -1,4 +1,4 @@
-//! Nursery fixtures [E2, E5]: hand-assembled programs over the host face
+//! Nursery fixtures: hand-assembled programs over the host face
 //! (`open_root_nursery`/`spawn_fiber_in`/`join_nursery`/`teardown_nursery`)
 //! and the debug join native (`nursery_join`, builtin 26). What the
 //! fixtures pin:
@@ -545,7 +545,7 @@ fn teardown_cuts_a_parked_child_at_its_resume_under_the_flag() {
     assert_eq!(vm.fiber_state(half), Some(FiberState::Preempted));
     // teardown: the flag goes up first, then each child in spawn order —
     // the parked one is cut at its next resume (never resuming: its
-    // straight-line tail no longer lands), the looper stops at its first
+    // straight-line tail never lands), the looper stops at its first
     // back-edge
     assert_eq!(
         vm.teardown_nursery(n),
@@ -703,7 +703,7 @@ fn absent_nurseries_name_themselves_in_the_trap() {
     );
 }
 
-// ---- the in-language control seams [E2] --------------------------------
+// ---- the in-language control seams --------------------------------
 //
 // The lowerer synthesizes every call site, so these fixtures pin the
 // dispatcher-intercepted seams directly: the open and spawn pair stages a

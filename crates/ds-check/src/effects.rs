@@ -1,11 +1,11 @@
 //! The `effects_of` pass: per-definition effect rows over the parsed and
-//! resolved surface (B5, B7, E1, E2, E4), plus the per-expression table
-//! beside them — every walked expression's own row, keyed by its span
-//! ([`Effects::expr_row`], the grain the REPL's answer print and the
-//! LSP's hover read), collected in the same walk the fixpoint graph is
-//! built by and finalized against its solution.
+//! resolved surface, plus the per-expression table beside them — every
+//! walked expression's own row, keyed by its span ([`Effects::expr_row`],
+//! the grain the REPL's answer print and the LSP's hover read), collected
+//! in the same walk the fixpoint graph is built by and finalized against
+//! its solution.
 //!
-//! v1 has no effect syntax (E1) — rows are computed, never written. The
+//! v1 has no effect syntax — rows are computed, never written. The
 //! computation is a pure walk over the package's trees and the resolution
 //! side table [`crate::resolve`]: it emits no diagnostics, and unresolved
 //! names contribute nothing. World-touching ambient functions enter
@@ -13,37 +13,36 @@
 //! attribution beside it ([`crate::WorldCaps`], the platform declaration's
 //! provides list its licenser); the package's platform declaration is
 //! checked against the computed rows by [`crate::check_platform`]. Rows
-//! carry the record's five-effect vocabulary ([`Effect`]).
+//! carry the five-effect vocabulary ([`Effect`]).
 //!
 //! # Composition
 //!
 //! A row is the union of the definition's declared row, its body's
 //! intrinsic contributions, and one edge per resolved call or value use,
-//! unioning the callee's row. `?` and `or return` contribute `error`
-//! (E4); trapping integer defaults contribute `trap` (B7); a `nursery`
-//! block contributes `cancel | discontinue` (E1, E2) — the internal
-//! effects its boundary dispatches evidence for. The E4 consuming forms
-//! mask their operand's `error`: a plain `or` extracts the wanted member
-//! and `.err(h)`/`.ok(h)` handle the failure set, so their operand's call
-//! edges carry `error` subtracted; `or return` additionally contributes
-//! `error` because the early exit hands the failure out. Lambda bodies
-//! contribute in place — combinators and spawn blocks run them inside the
-//! enclosing definition's dynamic extent (D3, E2). Rows grow monotonically
-//! over the call graph to a least fixpoint, so recursion and
-//! intra-package cycles terminate by construction (G3).
+//! unioning the callee's row. `?` and `or return` contribute `error`;
+//! trapping integer defaults contribute `trap`; a `nursery` block
+//! contributes `cancel | discontinue` — the internal effects its boundary
+//! dispatches evidence for. The consuming forms mask their operand's
+//! `error`: a plain `or` extracts the wanted member and `.err(h)`/`.ok(h)`
+//! handle the failure set, so their operand's call edges carry `error`
+//! subtracted; `or return` additionally contributes `error` because the
+//! early exit hands the failure out. Lambda bodies contribute in place —
+//! combinators and spawn blocks run them inside the enclosing definition's
+//! dynamic extent. Rows grow monotonically over the call graph to a least
+//! fixpoint, so recursion and intra-package cycles terminate by
+//! construction.
 //!
 //! # Over-approximation, deliberate
 //!
 //! Rows never miss an effect but may carry more: trapping operators
-//! contribute `trap` without solved operand types (floats never trap
-//! (B7) — the checker's per-expression types are not exposed to this
-//! pass); a method call unions every registered candidate and a trait
-//! member's row unions every impl body (F3); a match scrutinee keeps its
-//! operand's `error` since arms may hand it on; `deinit` blocks (C5) are
-//! walked by no definition — their effects ride with the value's owning
-//! function once the affine pass places deaths (M4). Supersets fail
-//! closed: M7's platform subset check may over-reject, never silently
-//! accept.
+//! contribute `trap` without solved operand types (floats never trap —
+//! the checker's per-expression types are not exposed to this pass); a
+//! method call unions every registered candidate and a trait member's row
+//! unions every impl body; a match scrutinee keeps its operand's `error`
+//! since arms may hand it on; `deinit` blocks are walked by no
+//! definition — their effects ride with the value's owning function once
+//! the affine pass places deaths. Supersets fail closed: the platform
+//! subset check may over-reject, never silently accept.
 //!
 //! # Example
 //!
@@ -67,7 +66,7 @@
 //! );
 //! let effects = effects_of(&[ast], &declared, &WorldCaps::new());
 //!
-//! // `body` unions the declared ambient row with its own `?` [E4].
+//! // `body` unions the declared ambient row with its own `?`.
 //! let body = effects.of_name("body").expect("row-bearing definition");
 //! assert!(body.contains(Effect::World));
 //! assert_eq!(body.render(), "error | world");
@@ -88,24 +87,24 @@ use crate::{
     type_of::HoleShowDispatches,
 };
 
-/// One named effect. The vocabulary is the record's set: `error` (B5, E4)
-/// — union-member failure a definition can hand to its caller; `trap`
-/// (B7, E4) — the unhandleable bug boundary of panics and trapping
-/// integer defaults; `world` (E1) — the world-touching capability surface,
-/// entering through [`DeclaredRows`] until M7's platform declaration
-/// supplies it; `cancel` and `discontinue` (E1) — the two internal effects
-/// a `nursery` boundary dispatches evidence for.
+/// One named effect. The vocabulary is closed: `error` — union-member
+/// failure a definition can hand to its caller; `trap` — the unhandleable
+/// bug boundary of panics and trapping integer defaults; `world` — the
+/// world-touching capability surface, entering through [`DeclaredRows`]
+/// until the platform declaration supplies it; `cancel` and `discontinue`
+/// — the two internal effects a `nursery` boundary dispatches evidence
+/// for.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Effect {
-    /// Union-member failure handed to a caller (B5, E4).
+    /// Union-member failure handed to a caller.
     Error,
-    /// The unhandleable bug boundary (B7, E4).
+    /// The unhandleable bug boundary.
     Trap,
-    /// The world-touching capability surface (E1).
+    /// The world-touching capability surface.
     World,
-    /// The nursery cancellation internal effect (E1, E2).
+    /// The nursery cancellation internal effect.
     Cancel,
-    /// The nursery discontinue internal effect (E1).
+    /// The nursery discontinue internal effect.
     Discontinue,
 }
 
@@ -219,7 +218,7 @@ impl std::ops::BitOrAssign for EffectRow {
 }
 
 /// Rows the embedding surface declares for ambient functions — externs,
-/// the stdlib, platform capabilities (E1, H5). v1 has no effect syntax, so
+/// the stdlib, platform capabilities. v1 has no effect syntax, so
 /// this table is the only row input the surface cannot express. Applied by
 /// name; a declared row is a lower bound on the computed row. Absent names
 /// carry [`EffectRow::PURE`]. World rows pair with their capability
@@ -270,7 +269,7 @@ pub struct DefEffects {
     /// The computed row.
     pub row: EffectRow,
     /// The world capabilities the definition's world usage needs (the
-    /// platform subset check's finer grain, H5): a bitmask over the
+    /// platform subset check's finer grain): a bitmask over the
     /// capability vocabulary, zero when the row is world-free.
     pub caps: u8,
 }
@@ -280,9 +279,9 @@ pub struct DefEffects {
 /// park), built once per process by the first served compile's
 /// assemble and installed by every later one. The entries name the
 /// serve's own definition ids — identities every serve mints the same
-/// way, never minted atoms — so the park holds G3.5's rule the way
-/// every served table's park does: process memory, never an artifact
-/// row, rebuilt by whatever process runs the compile.
+/// way, never minted atoms — so the park holds the rule every served
+/// table's park does: process memory, never an artifact row, rebuilt by
+/// whatever process runs the compile.
 pub type ServedEffectNames = Arc<HashMap<String, DefId>>;
 
 /// The computed rows of one package: every value-producing definition
@@ -407,8 +406,8 @@ enum Node {
 struct Edge {
     /// The callee.
     callee: Node,
-    /// Effects consumed before the value flows on (the E4 forms mask
-    /// `error`).
+    /// Effects consumed before the value flows on (the consuming forms
+    /// mask `error`).
     mask: EffectRow,
 }
 
@@ -445,7 +444,7 @@ impl ExprAcc {
     }
 }
 
-/// B7's trapping defaults: integer add/sub/mul, div/rem, and shifts trap
+/// Trapping defaults: integer add/sub/mul, div/rem, and shifts trap
 /// (the wrapping forms never do; unary `-` traps on int-min).
 const fn traps_binary(op: BinaryOp) -> bool {
     matches!(
@@ -460,12 +459,12 @@ const fn traps_binary(op: BinaryOp) -> bool {
     )
 }
 
-/// B7's trapping unary: `-` traps on int-min, `-%` wraps, `!` is pure.
+/// Trapping unary: `-` traps on int-min, `-%` wraps, `!` is pure.
 const fn traps_unary(op: UnaryOp) -> bool {
     matches!(op, UnaryOp::Neg)
 }
 
-/// B7's trapping compound assignments: every arithmetic form; `=` is
+/// Trapping compound assignments: every arithmetic form; `=` is
 /// pure.
 const fn traps_assign(op: AssignOp) -> bool {
     !matches!(op, AssignOp::Plain)
@@ -479,7 +478,7 @@ const fn traps_assign(op: AssignOp) -> bool {
 /// Pure by contract: no diagnostics are emitted or consumed — a
 /// resolution failure leaves the failing name contributing nothing, and
 /// rows are computed whatever the file's items check like. The package is
-/// every tree passed here, in order (G3). `T: Borrow<Ast>` lets callers
+/// every tree passed here, in order. `T: Borrow<Ast>` lets callers
 /// pass owned trees or shared arcs (Borrow is the reflexive bound). No
 /// check ran, so no implicit hole dispatch record exists: a hole over a
 /// `show`-carrying operand contributes only its operand's own row here;
@@ -679,7 +678,7 @@ where
     T: std::borrow::Borrow<Ast>,
 {
     let count = u32::try_from(package.len()).expect("definition count fits u32");
-    // nodes up front, so edges are order-independent across files [G3]
+    // nodes up front, so edges are order-independent across files
     for raw in 0..count {
         let def = DefId::from_raw(raw);
         if matches!(
@@ -689,7 +688,7 @@ where
             graph.entry(Node::Def(def)).or_default();
         }
     }
-    // An import-bound function's own row rides its link surface (G4): its
+    // An import-bound function's own row rides its link surface: its
     // body lives in the linked module, never in this package's trees, so
     // the surface's carried row and capabilities are its base — the same
     // seeding shape the checked-ambient serve gives the ambient's rows,
@@ -871,7 +870,7 @@ struct Walker<'a, 'g> {
     declared: &'a DeclaredRows,
     world: &'a WorldCaps,
     res: &'a Resolutions,
-    /// The checker's implicit hole dispatch records (F6): one entry per
+    /// The checker's implicit hole dispatch records: one entry per
     /// interpolation hole that staged a `show` dispatch, naming the
     /// dispatched member whose row the hole unions — no resolved name
     /// sits behind the implicit call, so this record is the edge's only
@@ -1056,7 +1055,7 @@ impl Walker<'_, '_> {
     /// One impl block: inherent functions register as methods; a
     /// trait-impl function is an anonymous node flowing into the trait
     /// member it implements, so a call through the trait unions every
-    /// impl body (F3).
+    /// impl body.
     fn impl_decl(&mut self, imp: &ImplDecl) {
         let trait_def = imp
             .trait_ref
@@ -1128,7 +1127,7 @@ impl Walker<'_, '_> {
     /// any expression's row (the definition grain stays the fixpoint's).
     ///
     /// `mask` is the set of effects consumed before this expression's
-    /// value flows on (the E4 consuming forms mask `error`): call edges
+    /// value flows on (the consuming forms mask `error`): call edges
     /// subtract it from their callee's row, while intrinsic `error`
     /// contributions — the `?` and `or return` early exits — are control
     /// flow and never masked.
@@ -1177,8 +1176,8 @@ impl Walker<'_, '_> {
                 self.expr(recv, mask);
                 self.expr(index, mask);
             },
-            // The map application's bracketed arguments are type spellings
-            // [F9]; they carry no value effects, and the head is a type
+            // The map application's bracketed arguments are type spellings;
+            // they carry no value effects, and the head is a type
             // name — the list application's walk treats its own head the
             // same way.
             Expr::MapApply { key, value, .. } => {
@@ -1321,7 +1320,7 @@ impl Walker<'_, '_> {
     }
 
     /// A dot use: the `.err`/`.ok` handler forms consume the receiver's
-    /// failure members (E4); every other dot names a callee (a free
+    /// failure members; every other dot names a callee (a free
     /// function the receiver feeds, or the method candidates).
     fn field(&mut self, recv: &Expr, name: &Ident, mask: EffectRow) {
         let handled = matches!(self.res.get(name.span), Some(Res::Handler));

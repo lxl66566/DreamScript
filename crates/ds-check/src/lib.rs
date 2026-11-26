@@ -1,13 +1,13 @@
-//! Set-theoretic type core over nominal and structural atoms (B1, B3).
+//! Set-theoretic type core over nominal and structural atoms.
 //!
 //! Declarations are nominal — every tag, struct, and enum gets one
 //! [`TypeId`] — and distinct atoms denote disjoint value sets. Anonymous
-//! tuples `(t0, t1, ...)` are the structural exception (B3): the universe
+//! tuples `(t0, t1, ...)` are the structural exception: the universe
 //! mints one atom per distinct element-atom list, hash-consed so tuple
 //! equality is structural. The type language above the atoms is
 //! set-theoretic: unions `|`, intersections `&`, differences `-`, and
 //! negated marker-trait constraints `~T` are ordinary type expressions
-//! ([`TypeExpr`]). `none` is a distinguished unit atom (B4), so `T?` is
+//! ([`TypeExpr`]). `none` is a distinguished unit atom, so `T?` is
 //! exactly `T | none` ([`Universe::optional`]) and optionals, error unions,
 //! and enums share one mechanism.
 //!
@@ -16,17 +16,17 @@
 //! Every type expression is *solved* against the current state of a
 //! [`Universe`] into one canonical form: the sorted, deduplicated set of the
 //! atoms it denotes, hash-consed so [`Ty`] handle equality is set equality.
-//! This is the entire normal form — the decision recorded here for (B1)
-//! ("difference types are compile-time only and erase entirely"):
+//! This is the entire normal form — difference types are compile-time only
+//! and erase entirely:
 //!
 //! * difference nodes never survive solving: `a - b` lowers to the solved shape of `a` minus `b`'s
 //!   members ([`Universe::diff`]);
 //! * negated constraints never survive either: `~T` solves to the complement of `T`'s members over
 //!   the universe's atoms;
-//! * tuple products distribute over unions element-wise (B3): `(a | b, c)` solves to `(a, c) | (b,
-//!   c)`, one structural atom per combination, so every minted tuple atom is a product of single
-//!   atoms and distinct atoms stay disjoint — the `()` of the surface is the arity-0 atom, a
-//!   sibling of `none`, never its alias;
+//! * tuple products distribute over unions element-wise: `(a | b, c)` solves to `(a, c) | (b, c)`,
+//!   one structural atom per combination, so every minted tuple atom is a product of single atoms
+//!   and distinct atoms stay disjoint — the `()` of the surface is the arity-0 atom, a sibling of
+//!   `none`, never its alias;
 //! * structural equality of two types is equality of their solved forms, which handle equality
 //!   gives for free.
 //!
@@ -36,7 +36,7 @@
 //! query layer owns that invalidation). Minted handles stay valid and
 //! immutable forever.
 //!
-//! # Decision procedures (B1, B6, section 10 item 7)
+//! # Decision procedures
 //!
 //! * [`Universe::is_empty`]: empty iff the solved member set is empty. An intersection of distinct
 //!   nominal atoms is empty, an atom minus itself is empty, `t & ~t` is empty, and a union is empty
@@ -47,12 +47,12 @@
 //!   is disjoint, because then no combination mints the same atom; arity mismatch is trivially
 //!   disjoint.
 //! * [`Universe::contains`]: `contains(sup, sub)` is the subset check `sub <= sup`; `?` propagation
-//!   checks containment against the written return union (B2). For tuples this is exact
-//!   element-wise containment after distribution: `(a, b) <= (a | a', b)` because the superset's
-//!   combinations cover the subset's.
+//!   checks containment against the written return union. For tuples this is exact element-wise
+//!   containment after distribution: `(a, b) <= (a | a', b)` because the superset's combinations
+//!   cover the subset's.
 //! * [`Universe::witness`]: for a non-empty overlap, a concrete witness value type — an atom plus
-//!   one level of field/case shape, and recursively for tuple elements (B3) — which B6 overlap
-//!   errors must name alongside both heads.
+//!   one level of field/case shape, and recursively for tuple elements — which overlap errors must
+//!   name alongside both heads.
 //!
 //! Termination: every procedure is grounded in a finite atom universe. Each
 //! type denotes a subset of the universe's atoms; solving is a single
@@ -64,13 +64,12 @@
 //! are linear scans over sorted sets, and tuple witnesses recurse into
 //! strictly earlier-minted element atoms. No fixpoint iteration exists
 //! anywhere, so the procedures decide in time linear in expression size and
-//! set size. B6's link-time check re-runs the same procedures over the final
-//! closed instance environment, which satisfies section 10 item 7's fixed
-//! requirements; [`instance`] assembles that environment (union-head
-//! decomposition, conditional instances, the structural cycle check over
-//! self-satisfying instances).
+//! set size. The link-time check re-runs the same procedures over the final
+//! closed instance environment; [`instance`] assembles that environment
+//! (union-head decomposition, conditional instances, the structural cycle
+//! check over self-satisfying instances).
 //!
-//! # Union lowering contract [BL-2]
+//! # Union lowering contract
 //!
 //! A solved union of atoms lowers to the unboxed tag+payload layout: every
 //! member is an atom with a distinct identity (nominal or a minted tuple),
@@ -80,9 +79,9 @@
 //!
 //! # Scope
 //!
-//! M2 type core (nominal atoms and anonymous tuples), traits environment,
-//! and package-level name resolution over the parsed surface ([`resolve`],
-//! G3/F3). Bidirectional checking and refinement are later work; the type
+//! The type core (nominal atoms and anonymous tuples), traits environment,
+//! and package-level name resolution over the parsed surface ([`resolve`]).
+//! Bidirectional checking and refinement are later work; the type
 //! core models declarations as data and exposes the algebra as a library
 //! with no I/O. Container types of the corpus (`list[json]`,
 //! `map[string, json]`) are not tuples and stay unmodeled.
@@ -109,7 +108,7 @@
 //!         .union(bad_port.into())),
 //! )?;
 //!
-//! // get_port's return union contains each of its members [B2]; it carries
+//! // get_port's return union contains each of its members; it carries
 //! // missing | bad_port from cfg_err but not io_err.
 //! let ret = u.solve(
 //!     &TypeExpr::atom(int)
@@ -123,13 +122,13 @@
 //! let int_only = u.atom_ty(int)?;
 //! assert!(u.is_disjoint(cfg_err, int_only));
 //!
-//! // difference erases: (config | cfg_err) - cfg_err is exactly config [B1].
+//! // difference erases: (config | cfg_err) - cfg_err is exactly config.
 //! let config = u.declare_struct("config")?;
 //! let config_ty = u.atom_ty(config)?;
 //! let widened = u.union(config_ty, cfg_err);
 //! assert_eq!(u.diff(widened, cfg_err), config_ty);
 //!
-//! // witness names a concrete value type for overlap errors [B6].
+//! // witness names a concrete value type for overlap errors.
 //! let w = u.witness(cfg_err)?;
 //! assert_eq!(u.render_witness(&w), "io_err");
 //! # Ok(())

@@ -1,5 +1,5 @@
-//! The CLI process surface end to end through the `ds` binary (the
-//! 2026-11-21 ruling): the program reads the verbatim string arguments
+//! The CLI process surface end to end through the `ds` binary: the
+//! program reads the verbatim string arguments
 //! through `args()`, reads the environment through `env(name)`, writes
 //! stderr through `eprint`/`eprintln`, reads stdin through `read_line`,
 //! spawns children through `proc_run`, and the host owns the exit code

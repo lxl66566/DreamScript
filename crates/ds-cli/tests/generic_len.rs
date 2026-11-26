@@ -1,4 +1,4 @@
-//! End-to-end generic calls through the `ds` binary [H3, phase 1]: the
+//! End-to-end generic calls through the `ds` binary: the
 //! ambient `len[t]` runs in source mode over both receiver shapes with
 //! distinct outputs, and the `ds build` round trip reproduces the source
 //! run's output byte for byte.

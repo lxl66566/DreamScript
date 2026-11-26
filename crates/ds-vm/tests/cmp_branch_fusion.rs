@@ -1,4 +1,4 @@
-//! The peek-next compare-branch fusion (BL-4's census-ranked second
+//! The peek-next compare-branch fusion (the census' second-ranked
 //! family): an LTI64/EQI64/GTF64 followed by the measured census branch
 //! spelling — JMPIF_NOT testing the compare's own dst — takes its branch
 //! decision inside the compare's dispatch. The fused arm must be

@@ -1,17 +1,16 @@
-//! DreamScript runtime core: the M4 memory machinery.
+//! DreamScript runtime core: the memory machinery.
 //!
 //! Two halves over one per-fiber [`Heap`] owner:
 //!
 //! - Bump arenas for non-escaping temporaries ([`Arena`]): mark/save at entry, bump alloc, restore
 //!   on every pop path; chunk-append growth keeps captured frame addresses stable; marks are
-//!   per-fiber so fiber switching needs no arena action. The arena module's docs carry the full
-//!   contract mapping from the design record (`[C4]`, `[H4]` in `docs/en/design-decisions.md`).
+//!   per-fiber so fiber switching needs no arena action.
 //! - Precise non-atomic reference counting for boxed/shared values ([`RcHeader`]): `rc_inc` at each
 //!   explicit clone, `rc_dec` at each owner drop; the dying block becomes a reuse candidate
 //!   threaded to the next compatible allocation (the `alloc_at` pattern), with the system allocator
-//!   as fallback; `deinit` runs exactly once at the unique death (`[C5]`). The counts are
-//!   non-atomic and sound because values are thread-confined; E3's fork-join transfers ownership of
-//!   whole heaps, never shares them.
+//!   as fallback; `deinit` runs exactly once at the unique death. The counts are non-atomic and
+//!   sound because values are thread-confined; fork-join transfers ownership of whole heaps, never
+//!   shares them.
 //!
 //! The `diag` feature (default off) adds the debugging instrument for the
 //! whole memory story: rc underflow/overflow tripwires, the underflow

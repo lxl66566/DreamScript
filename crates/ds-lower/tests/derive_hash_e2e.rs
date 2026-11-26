@@ -1,4 +1,4 @@
-//! The derive-hash acceptance [G1]: `#[derive(hash)]` on a struct, an
+//! The derive-hash acceptance: `#[derive(hash)]` on a struct, an
 //! enum, and a tag expands into ordinary `impl hash` items after parse,
 //! and the derived member is callable through the same trait-dispatch
 //! path as a hand-written impl — the direct dot call, the qualified
@@ -7,7 +7,7 @@
 //! field-order content fold over the wrap arithmetic, every enum case
 //! folding its index then its payload parts, a float part hashing
 //! through the fold native (`+0.0` with `-0.0`, the NaNs agreeing, the
-//! equality printed, never the raw values [B9]; the payloaded NaN pair
+//! equality printed, never the raw values; the payloaded NaN pair
 //! rides main's entry args from the host, since ds-source arithmetic
 //! only spells the one platform NaN pattern), a string, char, or
 //! byte part through its own impl, and a union-typed binding

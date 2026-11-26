@@ -4,7 +4,7 @@
 //! Canonical-form decisions taken here (see also the crate docs):
 //! - named functions render as `fn name(params) -> ret { ... }`: trait/impl members are FnDecls,
 //!   and a top-level `fn` converts onto the const-declaration node, whose converted shape (one
-//!   immutable name bound to one block-bodied lambda) renders back as the fn spelling (F2).
+//!   immutable name bound to one block-bodied lambda) renders back as the fn spelling.
 //! - generic application renders with square brackets (`list[int]`), never the angle form the
 //!   parser tolerates.
 //! - block-bodied members (struct/enum/trait/impl) render newline-separated without commas when
@@ -46,7 +46,7 @@ pub(crate) fn write_item(ctx: &Ctx, out: &mut String, base: usize, item: &Item) 
         ItemKind::Fn(f) | ItemKind::ExternFn(f) => {
             if matches!(item.kind, ItemKind::ExternFn(_)) {
                 out.push_str("extern ");
-                // the bind target's literal is re-quoted (H5), the
+                // the bind target's literal is re-quoted, the
                 // platform declaration's own re-quote discipline
                 if let Some(bind) = &f.bind {
                     out.push('"');
@@ -93,7 +93,7 @@ fn write_vis(out: &mut String, vis: Vis) {
 
 /// A top-level binding: the converted `fn` shape — one immutable name,
 /// no binding annotation, one block-bodied lambda — renders back as the
-/// fn declaration it spells (F2); every other binding keeps its
+/// fn declaration it spells; every other binding keeps its
 /// const/var form.
 fn write_top_local(ctx: &Ctx, out: &mut String, base: usize, l: &LocalDecl) {
     if let (

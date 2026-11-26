@@ -1,5 +1,5 @@
 //! Gungraun instruction-count pin over the interpreter's hot scalar
-//! dispatch (the dispatch-layout round's gate): one 5M-iteration Lehmer
+//! dispatch: one 5M-iteration Lehmer
 //! loop — mul, mod, a parity branch, an add — the byte-table dispatch's
 //! absolute instruction count is the regression pin for the layout
 //! (the pre-layout double-match baseline for this kernel shape retired

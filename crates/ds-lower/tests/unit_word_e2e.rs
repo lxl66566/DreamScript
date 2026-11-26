@@ -1,4 +1,4 @@
-//! The unit-word acceptance (the 2026-11-15 ruling): a part-less
+//! The unit-word acceptance: a part-less
 //! struct occupies one reserved word in every value position — an
 //! opaque placeholder whose content is never read — so the one-word
 //! minimum holds without exception. The e2e proves the shape flows
@@ -98,8 +98,8 @@ fn the_partless_struct_flows_through_every_value_position() {
 
 /// The one-word return pin: a plain fn returning a part-less struct
 /// answers through the bare one-word RET — the ABI's one-word return
-/// form — and no lowered body carries a zero-width RETSPAN (the
-/// encode's RetSpanEmpty refusal is a dead guard this round).
+/// form — and no lowered body carries a zero-width RETSPAN, which
+/// leaves the encode's RetSpanEmpty refusal a dead guard.
 #[test]
 fn a_plain_fn_returning_a_partless_struct_answers_one_word() {
     let lowered = lower_probe();

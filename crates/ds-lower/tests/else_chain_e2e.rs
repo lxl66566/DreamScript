@@ -1,6 +1,6 @@
 //! `else if` chain e2e: a real generated decoder's dispatch (80
 //! branches, 79 `else`s — deeper chains meet the lowerer's 256-slot
-//! frame cap [BL-5] before any parser limit) parses, checks, lowers,
+//! frame cap before any parser limit) parses, checks, lowers,
 //! round-trips, installs, and runs clean — pinning that the scanner's
 //! else budget (DS1018, refusing at 500 live `else`s) sits far above
 //! legal use while the pipeline never sees the unbracketed recursion

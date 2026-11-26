@@ -1,4 +1,4 @@
-//! The E5 teardown deinit pass: a fiber dying at a drain door (the
+//! The teardown deinit pass: a fiber dying at a drain door (the
 //! cancel-cut preemption, the nursery walk's interrupt marking, the root
 //! reset) fires its kept frames' deinit hooks exactly once, in a
 //! deterministic order, through the hosted live drive — and a teardown
@@ -1454,7 +1454,7 @@ fn two_kept_deinits_fire_in_directory_order_across_repeated_runs() {
     }
 }
 
-// ---- the establishment band (the exactness residual of todo 25) --------------
+// ---- the establishment band ------------------------------------------------
 
 /// The cut-door frame shared by the band pins: the flag raiser and the
 /// cut child spawn into one nursery (spawn order decides the drive

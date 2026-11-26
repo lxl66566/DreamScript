@@ -436,7 +436,7 @@ fn foreign_callee_reports_the_missing_module() {
 #[test]
 fn platform_tags_in_run_results_decode_by_name() {
     // main halts on the parse_err tag: a failed run naming the failure,
-    // where the decode previously printed the raw id.
+    // where the decode names the platform tag.
     let path = temp_module(
         "parse-err",
         &write(&platform_tag_module("parse_err", PLATFORM_PARSE_ERR)),

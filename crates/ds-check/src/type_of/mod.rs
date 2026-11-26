@@ -1,12 +1,11 @@
-//! The `type_of` pass: bidirectional checking with monotone flow refinement
-//! (B2).
+//! The `type_of` pass: bidirectional checking with monotone flow refinement.
 //!
 //! # Engine shape
 //!
-//! Boundary anchoring per (B2): top-level signatures are REQUIRED and the
+//! Boundary anchoring: top-level signatures are REQUIRED and the
 //! set algebra checks against them by containment; locals, lambdas, and
 //! match arms infer. Inference failure is a compile error — there is no
-//! `any` fallback anywhere (B1). Every type is a solved [`Ty`] from the
+//! `any` fallback anywhere. Every type is a solved [`Ty`] from the
 //! package universe; nothing unsolved ever enters an environment.
 //!
 //! The engine is one expression walk `expr(e, expected) -> Val`. The
@@ -22,12 +21,12 @@
 //! Refinement is a per-binder overlay `refined: binder span -> Ty` over
 //! declared types, narrowed monotonically by intersection: `is` tests,
 //! none-comparisons, and match-arm patterns (through the scrutinee binder
-//! and the arm's pattern coverage) (B2). The overlay resets at assignment
+//! and the arm's pattern coverage). The overlay resets at assignment
 //! and at loop entry (sound: refined is always contained in declared, so
-//! the declared type is a legal widening). Known limit, from the record:
-//! no narrowing through mutable fields of union-typed values.
+//! the declared type is a legal widening). Known limit: no narrowing
+//! through mutable fields of union-typed values.
 //!
-//! # E4 union errors
+//! # Union errors
 //!
 //! `?` splits its operand against the success context: at an expected type
 //! the members outside it propagate, elsewhere the members INSIDE the
@@ -42,8 +41,8 @@
 //! # Out of scope here
 //!
 //! Effect rows; the affine/move pass (assumption bounds like `[t: json]`
-//! feed method selection, `~Copyable` is M4); ranges, indexing, and
-//! `in`-containment (they need the M3 stdlib's type vocabulary).
+//! feed method selection, `~Copyable` belongs to it); ranges, indexing, and
+//! `in`-containment (they need the ambient stdlib's type vocabulary).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -87,7 +86,7 @@ pub struct Val {
     pub poisoned: bool,
 }
 
-/// One local binding: declared type plus assignability (C3).
+/// One local binding: declared type plus assignability.
 #[derive(Clone, Copy, Debug)]
 struct Binding {
     ty: Ty,
@@ -96,8 +95,7 @@ struct Binding {
 
 /// One enclosing for-in's iterated binding: its resolved identity plus
 /// the iterable's own use in the loop head. The loop froze its element
-/// count at entry, so a body `mut` window over the same binding refuses
-/// [D3].
+/// count at entry, so a body `mut` window over the same binding refuses.
 #[derive(Clone, Copy)]
 struct IterWindow {
     bind: IterBind,
@@ -145,9 +143,9 @@ struct Narrow {
     ty: Ty,
 }
 
-/// The outcome of one interpolation hole's `show` proof (F6): dispatched
+/// The outcome of one interpolation hole's `show` proof: dispatched
 /// (the solved instance records at the hole's own span), refused (no
-/// candidate serves, the F6 diagnostic answers), or reported (an
+/// candidate serves, the diagnostic answers), or reported (an
 /// ambiguity or bound seam already answered in its own words).
 enum HoleShow {
     Dispatched,
@@ -178,8 +176,8 @@ pub type HoleShowDispatches = FxHashMap<Span, MethodId>;
 /// form's receiver fact).
 pub type GenericCallBounds = Vec<(TypeId, TraitId, Option<InstanceId>, Ty)>;
 
-/// One step of a place-store chain (the assignment sugar, ruled
-/// 2026-11-25): a field projection or an index over the ambient
+/// One step of a place-store chain (the assignment sugar): a field
+/// projection or an index over the ambient
 /// collections. The step carries its solved type so the lowering walks
 /// the chain without re-deriving sub-place types no span records.
 #[derive(Clone, Debug)]
@@ -328,7 +326,7 @@ pub struct PlaceStore {
 }
 
 /// The result of one package check: diagnostics in walk order plus the
-/// memoized type of every top-level binding (G3).
+/// memoized type of every top-level binding.
 #[derive(Clone, Default)]
 pub struct Checked {
     /// All diagnostics of collection, resolution, declaration, and bodies.
@@ -336,28 +334,28 @@ pub struct Checked {
     /// The solved type of every top-level const/var binding.
     pub def_types: FxHashMap<DefId, Ty>,
     /// Affine facts of every local binder, keyed by binder span: the
-    /// copyability its type had at the binding site (C1). The linearity
+    /// copyability its type had at the binding site. The linearity
     /// pass consumes this; top-level bindings derive theirs from
     /// `def_types` directly.
     pub binders: HashMap<Span, crate::linearity::BinderFact>,
     /// The checked `Val` of every expression, keyed by its span: the solved
-    /// type AT THAT USE SITE (flow-refined inside `is` tests and match arms
-    /// (B2)) plus the early-exit flag. The lowering pass (M3) consumes this
+    /// type AT THAT USE SITE (flow-refined inside `is` tests and match arms)
+    /// plus the early-exit flag. The lowering pass consumes this
     /// side table instead of re-deriving types; entries are recorded in
     /// walk order and a re-walk overwrites them.
     pub expr_types: FxHashMap<Span, Val>,
     /// The instantiation of every generic call, keyed by the call's span:
-    /// the solved type of each generic parameter, in declaration order
-    /// (H3). Recorded only when every parameter solves (no `any` fallback
-    /// (B1)); the lowering pass (M3) mints the CALLG evidence words from
+    /// the solved type of each generic parameter, in declaration order.
+    /// Recorded only when every parameter solves (no `any` fallback); the
+    /// lowering pass mints the CALLG evidence words from
     /// it.
     pub generic_calls: FxHashMap<Span, Vec<Ty>>,
     /// The solved dispatch of every trait-method call whose instance the
-    /// environment statically resolved, keyed by the call's span (B6).
+    /// environment statically resolved, keyed by the call's span.
     /// The lowering pass mints the CALLG evidence word from it.
     pub trait_calls: FxHashMap<Span, TraitCall>,
     /// Every interpolation hole that staged an implicit `show` dispatch,
-    /// keyed by the hole's own span (F6): the dispatched member (the
+    /// keyed by the hole's own span: the dispatched member (the
     /// solved trait member, the inherent method, or the trait member an
     /// in-scope assumption answers — the runtime-evidence form). The
     /// affine pass reads the receiver mode here and the effects pass
@@ -366,13 +364,13 @@ pub struct Checked {
     /// it.
     pub hole_show_dispatches: HoleShowDispatches,
     /// The selected inherent method of every inherent-impl dot-call whose
-    /// owner covers the receiver, keyed by the call's own span (F3). The
+    /// owner covers the receiver, keyed by the call's own span. The
     /// lowering pass resolves the impl item through the declaration
     /// tables' method-to-impl-item map; no instance exists for an
     /// inherent impl, so nothing else records at the site.
     pub inherent_calls: FxHashMap<Span, MethodId>,
     /// The runtime evidence a call into a generic inherent impl's body
-    /// needs (H3): one entry per declared bound — the bound's variable
+    /// needs: one entry per declared bound — the bound's variable
     /// atom, its trait, and the unique instance serving the substituted
     /// type at this call site (`None` when none serves it uniquely, the
     /// shape the lowerer's staging refusal owns). Keyed by the call's own
@@ -380,8 +378,8 @@ pub struct Checked {
     /// inherent impl never has. Recorded only at sites entering a generic
     /// body; monomorphic inherent calls need no evidence.
     pub inherent_call_bounds: FxHashMap<Span, InherentCallBounds>,
-    /// The runtime evidence a call into a free generic fn's body needs
-    /// (H3): one entry per trait-bound generic parameter whose
+    /// The runtime evidence a call into a free generic fn's body needs:
+    /// one entry per trait-bound generic parameter whose
     /// substitution solved, mirroring [`InherentCallBounds`] plus the
     /// solved type the substitution names. Keyed by the call's own span;
     /// recorded only when the fn declares trait bounds, and read by the
@@ -392,7 +390,7 @@ pub struct Checked {
     /// atom from it when the written type is not a nominal single-segment
     /// path (a written fn type is the read-back call-through spelling).
     pub is_tests: FxHashMap<Span, Ty>,
-    /// Every label use the directed probe (F9.5) resolved to an expected
+    /// Every label use the directed probe resolved to an expected
     /// member's atom, keyed by the label's own span: a bare label in a
     /// directed position names the member of the expected union, which
     /// may be another declaration's atom than the one name resolution
@@ -406,7 +404,7 @@ pub struct Checked {
     /// the tag tests from this record and never re-derives.
     pub handler_handled: FxHashMap<Span, Ty>,
     /// The member one dot-call's type-directed selection settled on,
-    /// keyed by the callee name's own span (F3): the single survivor of
+    /// keyed by the callee name's own span: the single survivor of
     /// the value-receiver tier — a trait member a solved instance or an
     /// in-scope assumption answers, or an inherent fn whose owner covers
     /// the receiver — or the member the type-keyed tier claimed. The
@@ -447,15 +445,14 @@ pub struct Checked {
     /// walk a loop over the fn's own type variable; each entering
     /// site's re-walk of the fn body under its own substitution lands
     /// its copies' facts here.
-    pub comptime_instance_records:
-        FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    pub comptime_instance_records: FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
     /// The projected fields of every per-instance expansion, keyed by
     /// the walked fn's definition, the solved arguments, and the loop's
     /// own span.
     pub comptime_instance_loops: FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
 }
 
-/// One trait-method call's solved dispatch (B6): the selected trait member
+/// One trait-method call's solved dispatch: the selected trait member
 /// plus the unique instance whose head contains the receiver's type,
 /// recorded at the call's own span. A site satisfied only through an
 /// in-scope assumption (the receiver's type is a bound type variable)
@@ -474,7 +471,7 @@ pub struct TraitCall {
     pub impl_site: Option<Span>,
     /// The receiver's solved type at the call site.
     pub recv: Ty,
-    /// The runtime evidence a call into a generic impl's body needs (H3):
+    /// The runtime evidence a call into a generic impl's body needs:
     /// one entry per declared bound of the solved instance — the bound's
     /// trait, the type variable it constrains, and the unique instance
     /// serving the substituted type at this call site (`None` when none
@@ -505,7 +502,7 @@ pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
 /// the typed result. Every `Ty` inside `Checked` was minted by
 /// `decls.universe`, so consumers must pass the bundle along unchanged —
 /// a second pass over the same sources mints an unrelated universe. The
-/// affine pass (C1) and the lowering pass (M3) consume exactly these.
+/// affine pass and the lowering pass consume exactly these.
 ///
 /// Every field of the bundle is a shared handle, so cloning it clones
 /// pointers — the query layer hands the bundle out of a memo without
@@ -516,11 +513,11 @@ pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
 /// serves the ambient's resident tree to every compile without cloning
 /// it, and a compile's teardown drops a refcount, never the tree itself.
 ///
-/// The check runs over the derive-expanded trees (G1): the trees the
+/// The check runs over the derive-expanded trees: the trees the
 /// caller hands in are the ones every table is built over, and
 /// [`Analyzed::asts`] carries them back, so the lowering pass consumes
 /// those, never the caller's originals. Expansion precedes resolution
-/// (the landed ruling) and belongs to the meta layer: a caller with
+/// and belongs to the meta layer: a caller with
 /// raw trees expands through the derive engine's analyze entries
 /// (`ds_meta::analyze`, over shared trees) and hands the expanded trees
 /// in. A caller that already resolved through a memo hands that memo's
@@ -651,7 +648,7 @@ pub fn analyze_served(
     )
 }
 
-/// [`analyze_served`] with import surfaces linked (G4): the link pass
+/// [`analyze_served`] with import surfaces linked: the link pass
 /// runs over every tree of the unit between collection and resolution,
 /// so an import the graph serves validates and binds exactly as the
 /// fresh path's does.
@@ -896,7 +893,7 @@ where
         bodies.file(ast);
         diags.append(&mut bodies.diags);
     }
-    // The import-bound functions' checked types (G4): a foreign def has
+    // The import-bound functions' checked types: a foreign def has
     // no tree to walk, so its fn type mints here from the surface's
     // written signature — the same fn typing every later consumer reads
     // (the lowerer's parameter-word reads, a value use's fn typing). The
@@ -1036,7 +1033,10 @@ const MAX_INSTANCE_EXPANSIONS: usize = 256;
 /// Whether `ty` names no minted type variable anywhere in its shape: a
 /// solved argument the expansion worklist can walk.
 fn names_no_variable(universe: &crate::Universe, ty: Ty) -> bool {
-    universe.members(ty).iter().all(|&atom| atom_is_concrete(universe, atom))
+    universe
+        .members(ty)
+        .iter()
+        .all(|&atom| atom_is_concrete(universe, atom))
 }
 
 fn atom_is_concrete(universe: &crate::Universe, atom: TypeId) -> bool {
@@ -1048,9 +1048,9 @@ fn atom_is_concrete(universe: &crate::Universe, atom: TypeId) -> bool {
     }
     match &decl.kind {
         AtomKind::Apply(_, args) => args.iter().all(|&ty| names_no_variable(universe, ty)),
-        AtomKind::Tuple(elements) => {
-            elements.iter().all(|&atom| atom_is_concrete(universe, atom))
-        },
+        AtomKind::Tuple(elements) => elements
+            .iter()
+            .all(|&atom| atom_is_concrete(universe, atom)),
         AtomKind::FnSig(params, ret) => {
             params.iter().all(|&ty| names_no_variable(universe, ty))
                 && names_no_variable(universe, *ret)
@@ -1133,7 +1133,9 @@ fn expand_comptime_instances(
     for span in seeded {
         let (def, args) = &sites[&span];
         if seen.insert((*def, args.clone()))
-            && args.iter().all(|&ty| names_no_variable(&decls.universe, ty))
+            && args
+                .iter()
+                .all(|&ty| names_no_variable(&decls.universe, ty))
         {
             queue.push((*def, Rc::new(args.clone())));
         }
@@ -1152,7 +1154,9 @@ fn expand_comptime_instances(
         let body_span = lambda.span();
         // Only fns whose own body holds a per-instance loop expand.
         if !per_instance.iter().any(|&span| {
-            span.file == body_span.file && span.start >= body_span.start && span.end <= body_span.end
+            span.file == body_span.file
+                && span.start >= body_span.start
+                && span.end <= body_span.end
         }) {
             continue;
         }
@@ -1161,8 +1165,8 @@ fn expand_comptime_instances(
             diags.push(
                 Diagnostic::error(
                     ErrorCode::InferenceFailed,
-                    "a generic fn instantiates itself without end: its per-instance `fields` \
-                     loop keeps entering new shapes"
+                    "a generic fn instantiates itself without end: its per-instance `fields` loop \
+                     keeps entering new shapes"
                         .to_owned(),
                 )
                 .with_primary(body_span, "the expansion never reaches a fixed point"),
@@ -1269,7 +1273,9 @@ fn expand_comptime_instances(
         for span in fresh {
             let (callee, callee_args) = &sites[&span];
             if seen.insert((*callee, callee_args.clone()))
-                && callee_args.iter().all(|&ty| names_no_variable(&decls.universe, ty))
+                && callee_args
+                    .iter()
+                    .all(|&ty| names_no_variable(&decls.universe, ty))
             {
                 queue.push((*callee, Rc::new(callee_args.clone())));
             }
@@ -1284,7 +1290,7 @@ fn expand_comptime_instances(
     diags
 }
 
-/// The resolved graph's bound artifacts (H5): artifact name to its
+/// The resolved graph's bound artifacts: artifact name to its
 /// installed library's exported C symbols, in enumeration order.
 pub type ArtifactSymbols = std::collections::BTreeMap<String, Arc<Vec<String>>>;
 
@@ -1303,7 +1309,7 @@ fn span_files_of(files: &Files) -> Arc<[ds_diag::FileSpans]> {
 #[must_use]
 #[derive(Clone)]
 pub struct Analyzed {
-    /// The derive-expanded trees the tables were built over (G1):
+    /// The derive-expanded trees the tables were built over:
     /// consumed derive attributes became ordinary impl items here. The
     /// lowering pass consumes these trees, never the caller's originals.
     /// Shared handles one apiece, so a process's resident ambient tree
@@ -1319,7 +1325,7 @@ pub struct Analyzed {
     /// `Ty`. Shared without atomics: the tables hold `Rc` sets (see
     /// `Universe`), so the bundle is not `Send` however it is shared.
     pub decls: Rc<Decls>,
-    /// The resolved graph's bound artifacts (H5): each `[artifacts]`
+    /// The resolved graph's bound artifacts: each `[artifacts]`
     /// name the run's manifest graph resolved mapped to its installed
     /// library's exported C symbols, in enumeration order — the fold a
     /// bound extern's declaration resolves through and the table the
@@ -1393,7 +1399,7 @@ impl FilePositions {
     }
 }
 
-/// One bare label's directed outcome against an expected union (F9.5).
+/// One bare label's directed outcome against an expected union.
 enum DirectedLabel {
     /// Exactly one expected member carries the label: its atom.
     Directed(TypeId),
@@ -1407,12 +1413,12 @@ struct Bodies<'a> {
     package: &'a Package,
     res: &'a Resolutions,
     /// Every file's resolutions, aligned with the trees by position; a
-    /// lazily typed top-level binding walks under its OWN file's table
-    /// (G3), no matter which file's body triggered the memo fill.
+    /// lazily typed top-level binding walks under its OWN file's table,
+    /// no matter which file's body triggered the memo fill.
     resolutions: &'a [Resolutions],
     res_by_file: &'a FilePositions,
     /// The file whose bodies this walk checks: a tag label resolves
-    /// through the declaring file's shadow entry first (F9.5), `None`
+    /// through the declaring file's shadow entry first, `None`
     /// in the foreign-defs pass where only linked names answer.
     file: Option<FileId>,
     decls: &'a mut Decls,
@@ -1429,14 +1435,14 @@ struct Bodies<'a> {
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
-    /// The member atom the directed probe (F9.5) resolved each directed
+    /// The member atom the directed probe resolved each directed
     /// label use to, keyed by the label's own span; exported through
     /// [`Checked::directed_tags`] for the lowering pass, which never
     /// re-derives the redirection.
     directed_tags: &'a mut FxHashMap<Span, TypeId>,
     handler_handled: &'a mut FxHashMap<Span, Ty>,
-    /// Whether a qualified pattern label already reported its refusal
-    /// (F9.5), so the caller's unknown-pattern word stays quiet.
+    /// Whether a qualified pattern label already reported its refusal,
+    /// so the caller's unknown-pattern word stays quiet.
     pattern_label_reported: bool,
     hole_show_dispatches: &'a mut FxHashMap<Span, MethodId>,
     comptime_records: &'a mut FxHashMap<(Vec<u32>, Span), CopyRecords>,
@@ -1454,21 +1460,20 @@ struct Bodies<'a> {
     instance: Option<InstanceRun>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
-    /// copyability constraint (`[t: ~Copyable]`) (C1); the binder facts
+    /// copyability constraint (`[t: ~Copyable]`); the binder facts
     /// consult them while recording.
     linear_vars: FxHashMap<TypeId, bool>,
     /// Declared types of locals, keyed by binder span; snapshot/restore
     /// at scope boundaries runs through its undo log, never a clone.
     locals: ScopedMap<Binding>,
     /// The enclosing for-ins' iterated bindings, innermost last: the
-    /// body's `mut` window over one of them refuses [D3]. Pushed and
+    /// body's `mut` window over one of them refuses. Pushed and
     /// popped around each body walk, so the stack is empty at every
     /// frame boundary.
     for_iters: Vec<IterWindow>,
     /// The enclosing nursery blocks' scope entries, innermost last: the
     /// locals live at each block's entry are the bindings that outlive
-    /// it, so a spawned body's `mut` window over one of them refuses
-    /// [E2].
+    /// it, so a spawned body's `mut` window over one of them refuses.
     nursery_scopes: Vec<NurseryScope>,
     /// Each enclosing nursery block's spawned-body answers, innermost
     /// last: the block's value is the collected answers' list, so every
@@ -1488,7 +1493,7 @@ struct Bodies<'a> {
     /// loop's projected fields and binder span read from
     /// `comptime_loops` through it.
     comptime_stack: Vec<Span>,
-    /// The refinement overlay, keyed by binder span (B2).
+    /// The refinement overlay, keyed by binder span.
     refined: ScopedMap<Ty>,
     /// Type-variable scopes, innermost last (generic parameters, `Self`).
     type_vars: Vec<FxHashMap<String, Ty>>,
@@ -1513,7 +1518,7 @@ struct Bodies<'a> {
     /// test narrows a branch to empty, which is sound dead code — so the
     /// always-false diagnostic fires only at value/assert depth.
     cond_depth: usize,
-    /// Cycle guard for order-independent top-level typing (G3).
+    /// Cycle guard for order-independent top-level typing.
     visiting: Vec<DefId>,
     /// Whether the failed solve just below already reported the tuple
     /// distribution cap precisely; the generic fallbacks around
@@ -1522,7 +1527,7 @@ struct Bodies<'a> {
     /// Whether the expression currently being checked has its value
     /// consumed (a binding's initializer, an argument, an operand, an
     /// if/match arm's answer). A `return` there is refused: the early
-    /// exit is a statement [F2], and the lowerer would emit the exit's
+    /// exit is a statement, and the lowerer would emit the exit's
     /// dead answer into the consuming slot.
     value_pos: bool,
     /// Where the expectation currently fed to an expression was written,
@@ -1531,7 +1536,7 @@ struct Bodies<'a> {
     /// expected fn type's site; set immediately around the one `expr`
     /// call that carries the expectation, cleared after.
     expected_ty_span: Option<Span>,
-    /// The comptime evaluation context flags (G1, G2), kept as one field
+    /// The comptime evaluation context flags, kept as one field
     /// so the walk's snapshot discipline treats them as a unit.
     comptime: ComptimeCtx,
 }
@@ -1544,7 +1549,7 @@ struct Bodies<'a> {
 /// of a comptime call (`schema(point)`), which open the same type-value
 /// reading outside a comptime body. `declaring_fn` marks a top-level fn
 /// declaration's initializer — the only surface a `comptime` parameter
-/// takes this round — consumed by the first lambda the walk enters.
+/// takes here — consumed by the first lambda the walk enters.
 #[derive(Clone, Copy, Default)]
 struct ComptimeCtx {
     ctx: bool,
@@ -1553,7 +1558,7 @@ struct ComptimeCtx {
 }
 
 impl Bodies<'_> {
-    /// Binds one local and records its affine facts (C1): copyability of
+    /// Binds one local and records its affine facts: copyability of
     /// the solved type under the in-scope generic bounds, and the
     /// binding's own mutability — a `var` local's capture by a lambda
     /// moves it, so the affine pass reads the flag at the capture kill.
@@ -1625,7 +1630,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// Type-checks every declared `deinit` body (C5): `self` is the
+    /// Type-checks every declared `deinit` body: `self` is the
     /// dying instance, borrowed, typed the struct's own atom; the body
     /// types as a unit-returning function body. The recorded facts —
     /// the `self` binder at the member's span, the body's expression
@@ -1697,7 +1702,7 @@ impl Bodies<'_> {
         let member_names: Option<Vec<String>> =
             trait_def.and_then(|def| self.decls.trait_members.get(&def).cloned());
         // `Self` resolves to the impl's target while the written member
-        // signatures compare (B6).
+        // signatures compare.
         self.type_vars
             .push(FxHashMap::from_iter([("Self".to_owned(), target)]));
         let subst = self.trait_arg_subst(imp, trait_def);
@@ -1744,7 +1749,7 @@ impl Bodies<'_> {
     }
 
     /// The trait's generic parameters substituted by the impl's trait
-    /// reference, positionally (B6): every name the trait declares maps
+    /// reference, positionally: every name the trait declares maps
     /// to the argument the reference spells. A trait declaring generics
     /// the reference does not spell reports once — its member signatures
     /// could not be spelled in the impl's scope at all.
@@ -1779,7 +1784,7 @@ impl Bodies<'_> {
     }
 
     /// A top-level binding: its initializer is typed (memoized for
-    /// order-independent uses (G3)); a written annotation anchors the check.
+    /// order-independent uses); a written annotation anchors the check.
     /// A destructuring pattern declares many defs — the memo and the cycle
     /// guard cover them all, so tuple/or/struct binders receive types like
     /// any other top-level name.
@@ -1810,7 +1815,7 @@ impl Bodies<'_> {
         self.frame_depth = 0;
         // A use in another file's body can trigger this lazy fill; the
         // initializer's spans resolve under the binding's OWN file table,
-        // never the triggering file's [G3].
+        // never the triggering file's.
         let home_res = self.res;
         let home_file = self.file;
         if let Some(index) = self.res_by_file.get(self.package.def(defs[0]).span.file)
@@ -1822,11 +1827,11 @@ impl Bodies<'_> {
 
         // A top-level fn declaration's initializer is its lambda: mark it
         // so the lambda's own check knows a `comptime` parameter sits on
-        // the round-one surface (a free fn), never on a nested lambda.
+        // a free fn, never on a nested lambda.
         let was = self.comptime;
         self.comptime.declaring_fn = matches!(local.init, Expr::Lambda { .. });
         self.value_pos = true;
-        // the annotation directs the initializer (F9.5): a bare label
+        // the annotation directs the initializer: a bare label
         // in it resolves against the expected members, so the written
         // type solves BEFORE the walk
         let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
@@ -1863,13 +1868,13 @@ impl Bodies<'_> {
         self.visiting.truncate(visiting);
     }
 
-    /// One named function declaration: boundary-anchored (B2). `self_ty`
+    /// One named function declaration: boundary-anchored. `self_ty`
     /// binds `Self` inside trait/impl scopes, where the first parameter
     /// named `self` is the receiver — exempt from annotation and typed
-    /// `Self` [record 6.1]. A trait member must spell the receiver
+    /// `Self`. A trait member must spell the receiver
     /// (dynamic dispatch is receiver-carried, so DS2021 fires there);
     /// an inherent impl member may omit it — the receiverless member is
-    /// the type-keyed static surface (the 2026-11-15 ruling). Returns
+    /// the type-keyed static surface. Returns
     /// the member's solved return — the written return, or the body's
     /// checked tail type when inferred — for the impl-member agreement
     /// checks.
@@ -1881,7 +1886,7 @@ impl Bodies<'_> {
                 .push(FxHashMap::from_iter([("Self".to_owned(), target)]));
         }
         // A trait member's signature declares its receiver as its first
-        // parameter [F3]: both call forms feed the receiver first and
+        // parameter: both call forms feed the receiver first and
         // the trait dispatch keys on its type, so a trait signature
         // with no `self` has no reachable call form. An inherent impl
         // member without one is the type-keyed static surface instead.
@@ -2001,7 +2006,7 @@ impl Bodies<'_> {
     /// A block whose final expression carries an expected type — the
     /// function-body anchor: a tail `?` splits its operand against the
     /// return union there, so a fully-contained operand yields itself
-    /// instead of propagating everything (E4).
+    /// instead of propagating everything.
     fn block_expected(&mut self, block: &BlockExpr, expected: Option<Ty>) -> Val {
         // The tail expression occupies the block's own position (a frame
         // body's tail is a statement slot, a consumed block's tail feeds
@@ -2023,7 +2028,7 @@ impl Bodies<'_> {
         match last {
             // Only an expression tail carries the expected type (the
             // function-body anchor); a binding tail still checks, its
-            // block value stays unit [F2].
+            // block value stays unit.
             Some(Stmt {
                 kind: ds_parse::StmtKind::Expr(expr),
                 ..
@@ -2055,10 +2060,10 @@ impl Bodies<'_> {
         }
     }
 
-    /// A statement-level binding: locals infer (B2).
+    /// A statement-level binding: locals infer.
     fn local_stmt(&mut self, local: &LocalDecl) {
         self.value_pos = true;
-        // the annotation directs the initializer (F9.5), the same
+        // the annotation directs the initializer, the same
         // solve-before-walk the top-level binding takes
         let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
         let mut val = self.expr(&local.init, expected);
@@ -2558,7 +2563,7 @@ impl Bodies<'_> {
                 comptime,
             } => self.for_expr(pat, iter, body, *span, *comptime),
             Expr::Return { expr, span } => {
-                // The early exit is a statement [F2]: a block whose value
+                // The early exit is a statement: a block whose value
                 // feeds a binding, an argument, or a join arm has no
                 // lowering for it — the exit's answer is dead at the point
                 // the consuming slot reads — so the position refuses
@@ -2580,8 +2585,7 @@ impl Bodies<'_> {
                 }
                 // The returned expression carries the declared return as
                 // its expected type, matching the final-expression anchor:
-                // a `?` operand splits against the return union here too
-                // [E4].
+                // a `?` operand splits against the return union here too.
                 let value = match expr {
                     Some(expr) => self.expr(expr, self.ret),
                     None => Val {
@@ -2818,7 +2822,8 @@ impl Bodies<'_> {
     }
 
     /// The atom a literal names, by name, through the package universe
-    /// (B7): the numeric vocabulary is declared data, never builtin
+    /// The atom a literal names, by name, through the package universe:
+    /// the numeric vocabulary is declared data, never builtin
     /// identity — inference never falls back.
     fn named_ty(&mut self, span: Span, name: &str, what: &str) -> Val {
         if let Some(ty) = self
@@ -2849,8 +2854,8 @@ impl Bodies<'_> {
         }
     }
 
-    /// Interpolated strings: every hole is an explicit string context
-    /// (F6) — a printable primitive (bool, char, float, int, string)
+    /// Interpolated strings: every hole is an explicit string context —
+    /// a printable primitive (bool, char, float, int, string)
     /// converts through `str(e)` implicitly; every other operand is
     /// legal exactly when its type carries `show`, the same
     /// solved-instance proof a written `.show()` runs, the dispatch
@@ -2867,8 +2872,8 @@ impl Bodies<'_> {
         for part in parts {
             let (hole_span, hole_val) = match part {
                 StrPart::Text { .. } => continue,
-                // The hole is a conversion context, never a directed one
-                // (F9.5): no expected type threads in, so a bare label
+                // The hole is a conversion context, never a directed one:
+                // no expected type threads in, so a bare label
                 // keeps its declaring atom and the `show` proof below
                 // owns the operand.
                 StrPart::Expr { span, expr } => (*span, self.expr(expr, None)),
@@ -2921,7 +2926,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One hole's `show` proof (F6): the candidate selection a written
+    /// One hole's `show` proof: the candidate selection a written
     /// `.show()` runs — trait owners through the solved-instance
     /// environment (a union receiver through its covering sibling group),
     /// inherent owners by coverage, an in-scope assumption through the
@@ -3018,7 +3023,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One hole operand under the printable rule (F6): the string
+    /// One hole operand under the printable rule: the string
     /// context itself, or exactly one printable primitive atom.
     fn printable_hole(&self, ty: Ty) -> bool {
         let [atom] = self.decls.universe.members(ty) else {
@@ -3034,7 +3039,7 @@ impl Bodies<'_> {
 
     /// The value type of a bare `$name` hole: the single-segment path
     /// resolution, recorded at the name's own span so the lowerer reads
-    /// it there (F6).
+    /// it there.
     fn ident_hole_value(&mut self, name: &Ident) -> Val {
         if let Some(res) = self.res.get(name.span) {
             match res {
@@ -3101,7 +3106,7 @@ impl Bodies<'_> {
                     },
                     Res::Def(def) => {
                         // A type name where a `type` value is expected is
-                        // the type-value reading (G1, G2): legal only in a
+                        // the type-value reading: legal only in a
                         // comptime evaluation context — inside a comptime
                         // function's body, or feeding a comptime call's
                         // argument. A struct, enum, tag, or alias names a
@@ -3146,7 +3151,7 @@ impl Bodies<'_> {
                     },
                     Res::Module(module) => {
                         // A module alias alone is not a value: only the
-                        // qualified call behind it lowers [G4].
+                        // qualified call behind it lowers.
                         let alias = self.package.module_ref(*module).alias().to_owned();
                         self.error(
                             ErrorCode::InferenceFailed,
@@ -3184,7 +3189,7 @@ impl Bodies<'_> {
                 }
             }
         } else if let [head, tail] = path.segments.as_slice() {
-            // The qualified `type::label` use (F9.5): a tag-family label
+            // The qualified `type::label` use: a tag-family label
             // behind a type head resolves against the head's own members,
             // never the expected type — the escape hatch the bare label's
             // refusals point at.
@@ -3234,7 +3239,7 @@ impl Bodies<'_> {
     }
 
     /// The value type of a package-level definition used as a value.
-    /// One expected union's members carrying a bare label (F9.5). No
+    /// One expected union's members carrying a bare label. No
     /// probe runs without an expected type (`None` = undirected).
     fn probe_label(
         &mut self,
@@ -3264,7 +3269,7 @@ impl Bodies<'_> {
             [] => {
                 // the label names a declaration whose atom sits outside
                 // the expected union: unknown-member, never an
-                // inference (F9.5)
+                // inference
                 if own.is_some() {
                     self.error(
                         ErrorCode::UnknownTagMember,
@@ -3305,13 +3310,12 @@ impl Bodies<'_> {
     }
 
     /// A resolved tag-family def's value atom, type-directed when the
-    /// position carries an expected type (F9.5): the expected union's
+    /// position carries an expected type: the expected union's
     /// members carrying the label pick the atom — one member wins even
     /// over the use's own declaration, none refuses unknown-member,
     /// several refuse ambiguous naming both candidates. Without an
-    /// expected type the declaration's own atom stands, exactly the
-    /// undirected spellings of today.
-    /// The solved set of a qualified label's head (F9.5): the head's
+    /// expected type the declaration's own atom stands.
+    /// The solved set of a qualified label's head: the head's
     /// own type, solved under the walking file's namespace so an alias
     /// expands under its declaring file.
     fn head_type_of(&mut self, head: &Ident) -> Option<Ty> {
@@ -3329,7 +3333,7 @@ impl Bodies<'_> {
     }
 
     /// The members of one solved set whose declaration carries `label`
-    /// (F9.5) — the atoms a bare label's directed probe and a qualified
+    /// — the atoms a bare label's directed probe and a qualified
     /// label's head scan both read.
     fn members_labeled(&self, set: Ty, label: &str) -> Vec<TypeId> {
         self.decls
@@ -3346,7 +3350,7 @@ impl Bodies<'_> {
             .collect()
     }
 
-    /// The value of one qualified `type::label` use (F9.5): the head's
+    /// The value of one qualified `type::label` use: the head's
     /// own members carrying the label pick the atom — one answers the
     /// member's type, none refuses unknown-member, several refuse
     /// ambiguous naming both declarations. The qualified spelling is
@@ -3500,7 +3504,7 @@ impl Bodies<'_> {
             },
             DefKind::Case => {
                 // A bare case is the unit form, like a tag; a payload
-                // case constructs by call form only [B3], so a bare use
+                // case constructs by call form only, so a bare use
                 // is the cross-spelling.
                 let payload = self
                     .decls
@@ -3548,7 +3552,7 @@ impl Bodies<'_> {
     }
 
     /// The memoized type of a top-level binding, typed lazily so
-    /// order-independent uses work (G3). A linked const has no tree here:
+    /// order-independent uses work. A linked const has no tree here:
     /// its literal fact is the whole type story — the fact's own mint in
     /// this universe (a scalar's atom, a list's applied constructor),
     /// memoized like a solved initializer.
@@ -3677,8 +3681,8 @@ impl Bodies<'_> {
         // The body is a fresh expression world: a stale citation from
         // this lambda's own feeding site must not reach a nested lambda.
         self.expected_ty_span = None;
-        // The comptime parameter surface (G1): round two admits it on a
-        // free fn only, with every parameter comptime and annotated
+        // The comptime parameter surface: a free fn only, with every
+        // parameter comptime and annotated
         // `type` (the evaluator stages one reflection index per
         // parameter) or one of the four scalar atoms — the evaluator
         // stages a plain literal of the annotation — so any other shape
@@ -3760,7 +3764,7 @@ impl Bodies<'_> {
             param_tys.push(solved);
             // A `type`-annotated parameter without the comptime mode has
             // no runtime spelling: nothing constructs the builtin atom's
-            // values outside comptime evaluation (G2), so the annotation
+            // values outside comptime evaluation, so the annotation
             // refuses here rather than at every call.
             if self.is_type_atom(solved) && !matches!(param.mode, ds_parse::ParamMode::Comptime(_))
             {
@@ -3794,8 +3798,8 @@ impl Bodies<'_> {
         // keeps the file walk's depth; its stray exits have no loop, and
         // the boundary message would name a lambda the user never wrote.
         let frame = (span.start != span.end).then(|| self.enter_frame());
-        // A comptime function's body checks under the comptime context
-        // (G1): type names are values of the builtin atom there and the
+        // A comptime function's body checks under the comptime context:
+        // type names are values of the builtin atom there and the
         // reflection builtins answer. Nested lambdas inside the body keep
         // the context — they evaluate inside the same compile-time run.
         let outer_ctx = self.comptime;
@@ -3880,7 +3884,7 @@ impl Bodies<'_> {
                 poisoned: false,
             }; // resolver reported
         };
-        // An enum case constructs by call form only [B3]; the brace form
+        // An enum case constructs by call form only; the brace form
         // is the struct construction, so this is the cross-spelling. A
         // payloaded tag keeps the same discipline.
         if self.decls.cases.contains_key(&def)
@@ -3922,7 +3926,7 @@ impl Bodies<'_> {
         // Substitute the constructor's parameters: from an expected
         // application of the same constructor, else from in-scope variables
         // named like the parameters (generic construction inside its own
-        // scope) [B2].
+        // scope).
         let mut subst = FxHashMap::default();
         if !shape.params.is_empty() {
             if let Some(expected) = expected
@@ -4054,7 +4058,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One list literal `[a, b, c]` (F7, B3). Bidirectional: an expected
+    /// One list literal `[a, b, c]`. Bidirectional: an expected
     /// `list[t]` fixes the element type and every item checks against it;
     /// without one, the first item fixes the type and a later item
     /// outside it is the mixed-element error. The empty literal has no
@@ -4145,7 +4149,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One generic-application constructor call `list[page]()` (F9, B3):
+    /// One generic-application constructor call `list[page]()`:
     /// the head resolved in the type namespace, so the bracketed form is
     /// a type application, never an index. Returns `None` when the head
     /// names no type — the ordinary index error reports instead.
@@ -4173,8 +4177,8 @@ impl Bodies<'_> {
                 .get(&def)
                 .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
         };
-        // the channel's construction (the 2026-11-21 shared-state
-        // ruling): the one type application that carries a value
+        // the channel's construction: the one type application that
+        // carries a value
         // argument — the bound, `chan[int](4)` — because the payload
         // type never reaches the code (every channel one Ref word) while
         // the bound does
@@ -4187,7 +4191,7 @@ impl Bodies<'_> {
                     .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
         };
         if !is_list(self) && !is_chan(self) {
-            // Construction is fixed per declaration [B3]; every type
+            // Construction is fixed per declaration; every type
             // application besides the collection surface is the
             // cross-spelling error.
             self.error(
@@ -4309,11 +4313,11 @@ impl Bodies<'_> {
         })
     }
 
-    /// The map constructor call `map[k, v]()` (F9, B3): the mirror of the
+    /// The map constructor call `map[k, v]()`: the mirror of the
     /// list constructor over the two-argument application of the map
     /// struct. Construction takes no value arguments — the builder call
-    /// (`map_set`) fills the map, the interim the record pins while the
-    /// map literal rides the anonymous-record-literal reservation.
+    /// (`map_set`) fills the map; the map literal spelling rides the
+    /// anonymous-record-literal reservation.
     fn map_ctor_call(
         &mut self,
         head: &Ident,
@@ -4342,7 +4346,7 @@ impl Bodies<'_> {
             .get(&def)
             .is_some_and(|shape| shape.params.len() == 2 && shape.fields.is_empty());
         if !is_map {
-            // Construction is fixed per declaration [B3]; the map
+            // Construction is fixed per declaration; the map
             // constructs by type application, any other head is the
             // cross-spelling error.
             self.error(
@@ -4424,7 +4428,7 @@ impl Bodies<'_> {
     }
 
     /// The bracketed argument of a type application: a type spelled in
-    /// expression position (F9) — a path, a parenthesized form, a tuple of
+    /// expression position — a path, a parenthesized form, a tuple of
     /// the same, a fn type (`fn(int) -> int`), or a nested generic
     /// application (`list[string]`, `map[string, int]`) whose own bracketed
     /// arguments recurse.
@@ -4569,7 +4573,7 @@ impl Bodies<'_> {
         if let Expr::Field { recv, name, .. } = callee {
             return self.dot_call(recv, name, args, trailing.as_deref(), *span, selection);
         }
-        // A generic-application constructor `list[t]()` [F9]: the callee
+        // A generic-application constructor `list[t]()`: the callee
         // head resolves in the type namespace.
         if let Expr::Index { recv, index, .. } = callee
             && let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span)
@@ -4583,7 +4587,7 @@ impl Bodies<'_> {
             }
             return val;
         }
-        // The map constructor `map[k, v]()` [F9, B3]: the head resolved
+        // The map constructor `map[k, v]()`: the head resolved
         // in the type namespace.
         if let Expr::MapApply {
             head, key, value, ..
@@ -4614,7 +4618,7 @@ impl Bodies<'_> {
                             let val = self.call_def(def, None, args, trailing.as_deref(), *span);
                             return self.spawn_cancel_refines(def, val);
                         }
-                        // A minted case constructs by call form [B3]; a
+                        // A minted case constructs by call form; a
                         // bare case falls through to the tag error below.
                         if let Some(case) = self.decls.cases.get(&def)
                             && !matches!(case.payload, EnumPayload::None)
@@ -4664,7 +4668,7 @@ impl Bodies<'_> {
                             selection,
                         );
                     }
-                    // The qualified label's call form (F9.5): a payloaded
+                    // The qualified label's call form: a payloaded
                     // tag or case constructs through the same case-call
                     // door as the bare spelling; a unit label keeps the
                     // bare-case refusal there.
@@ -4802,7 +4806,7 @@ impl Bodies<'_> {
         ))
     }
 
-    /// Constructs one minted enum case by call form (B3): positional
+    /// Constructs one minted enum case by call form: positional
     /// arguments fill tuple-payload slots and named arguments fill
     /// named-payload fields; the result is the case's own atom set.
     fn case_call(
@@ -4943,8 +4947,8 @@ impl Bodies<'_> {
                 }
             }
         }
-        // A minted case constructs into its own atom [B3]. `none` is the
-        // predeclared unit atom [B4], so a payloaded case named `none`
+        // A minted case constructs into its own atom. `none` is the
+        // predeclared unit atom, so a payloaded case named `none`
         // claims no atom of its own and the construction refuses at this
         // seam instead of typing the binding empty.
         let Some(ty) = self
@@ -5025,12 +5029,9 @@ impl Bodies<'_> {
     }
 
     /// Calls one package function by definition: instantiates generics by
-    /// structural argument matching (the M2 half of one-body generics
-    /// (H3)).
-    /// Calls one package function by definition: instantiates generics by
-    /// structural argument matching (the M2 half of one-body generics
-    /// (H3)); named arguments fill their parameter's slot and literal-only
-    /// defaults cover omissions (F7).
+    /// structural argument matching (one-body generics); named arguments
+    /// fill their parameter's slot and literal-only defaults cover
+    /// omissions.
     fn call_def(
         &mut self,
         def: DefId,
@@ -5040,7 +5041,7 @@ impl Bodies<'_> {
         span: Span,
     ) -> Val {
         let Some(sig) = self.decls.fns.get(&def).cloned() else {
-            // The callee resolved in the value namespace [F9], so it can
+            // The callee resolved in the value namespace, so it can
             // be a plain const or var binding (a dot-call's free tier); a
             // call against it is a call-shape error with the receiver and
             // every argument walked, never a silently empty type.
@@ -5063,17 +5064,17 @@ impl Bodies<'_> {
                 poisoned: false,
             };
         };
-        // The E4 extraction family types by rule against the checked
+        // The extraction family types by rule against the checked
         // receiver, never through generic inference: an inferred `t?`
         // parameter would bind a plain `t` receiver, and the fallback's
         // width meeting must be diagnosed, not assumed.
         if let Some(kind) = self.extraction_kind(def, &sig) {
             return self.extraction_call(kind, fed, args, trailing, span);
         }
-        // The reflection builtins are comptime-context-only (G2): their
+        // The reflection builtins are comptime-context-only: their
         // answers read the compile-time reflection tables, so a call
         // outside a comptime function's body refuses here — the wiring
-        // is by name, the builtin admission criterion (H5.5).
+        // is by name, the builtin admission criterion.
         let callee_name = self.package.def(def).name.clone();
         if matches!(callee_name.as_str(), "fields" | "type_name") && !self.comptime.ctx {
             self.error(
@@ -5106,7 +5107,7 @@ impl Bodies<'_> {
             };
         };
         self.check_mut_window_args(&slots, &sig.params);
-        // A comptime call's arguments name types (G1): the type-value
+        // A comptime call's arguments name types: the type-value
         // reading opens for exactly these argument positions.
         let outer = self.comptime;
         self.comptime.args = sig
@@ -5180,7 +5181,7 @@ impl Bodies<'_> {
             }
         }
         // Pass one: non-lambda arguments bind variables structurally,
-        // then check against the solved parameter type [B2]: a
+        // then check against the solved parameter type: a
         // constructor mismatch binds nothing silently otherwise.
         for (slot, param) in slots.iter().zip(sig.params.iter()) {
             let (Some(arg), Some(param_ty)) = (slot, param.ty.as_ref()) else {
@@ -5199,7 +5200,7 @@ impl Bodies<'_> {
         // Pass two: lambda arguments check against the fn-typed parameter,
         // and their result type binds the parameter's return variables. A
         // written return still carrying an unsolved variable is the
-        // instantiation's inference hole (B2): the lambda takes no return
+        // instantiation's inference hole: the lambda takes no return
         // expectation, its body infers its own answer, and the written
         // return unifies against that answer by first-order pattern match
         // — an application strips to its arguments and a variable binds
@@ -5283,8 +5284,8 @@ impl Bodies<'_> {
                 .unwrap_or_else(|| self.empty()),
             None => self.unit(),
         };
-        // Record the instantiation when every generic parameter solved
-        // [H3]: the lowering pass mints the CALLG evidence words from it.
+        // Record the instantiation when every generic parameter solved:
+        // the lowering pass mints the CALLG evidence words from it.
         // A partially-solved call is an inference failure below and the
         // lowerer rejects the missing record, never a silent `any`.
         let mut solved = Vec::with_capacity(sig.generics.len());
@@ -5300,7 +5301,7 @@ impl Bodies<'_> {
         if unsolved {
             solved.clear();
         }
-        // A solved instantiation answers for its declared bounds [B6]:
+        // A solved instantiation answers for its declared bounds:
         // every bound must hold for the solved type, through the
         // instance environment or an in-scope assumption (a caller
         // bound propagates that way). An empty solved type rides a
@@ -5309,7 +5310,7 @@ impl Bodies<'_> {
         // solved type (`None` when only an in-scope assumption covers
         // it — the runtime-resolved evidence form) plus the solved type
         // itself, the record the lowering pass stages the body's
-        // evidence demands from (H3).
+        // evidence demands from.
         let mut call_bounds: GenericCallBounds = Vec::new();
         for ((index, param), &ty) in sig.generics.iter().enumerate().zip(solved.iter()) {
             let mut arms = Vec::new();
@@ -5335,7 +5336,7 @@ impl Bodies<'_> {
             self.record_generic_call(def, span, solved);
         }
         // Unbound variables leaking into the result are inference
-        // failures: no any fallback [B1]. The member set is read by index:
+        // failures: no any fallback. The member set is read by index:
         // reporting mutates the checker, so no borrow of it stays open.
         let ret_len = self.decls.universe.members(ret).len();
         for index in 0..ret_len {
@@ -5363,7 +5364,7 @@ impl Bodies<'_> {
     /// One lambda argument that took no return expectation, judged once
     /// every argument had its binding turn: the written return unified
     /// against the lambda's answer by first-order pattern match, and the
-    /// solved parameter type is the contract (B2). A concrete answer under
+    /// solved parameter type is the contract. A concrete answer under
     /// a written return still holding an unsolved variable is the match
     /// failing on shape; otherwise a variable the parameter mentions that
     /// stayed unsolved names what no argument fixed. Answers whether this
@@ -5453,7 +5454,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// Maps call arguments onto signature parameter slots (F7): positional
+    /// Maps call arguments onto signature parameter slots: positional
     /// arguments in order, named arguments by parameter name, the trailing
     /// lambda at the next open position; omissions must carry a literal
     /// default. `None` returns after diagnosing.
@@ -5469,7 +5470,7 @@ impl Bodies<'_> {
         let mut slots: Vec<Option<&'x Expr>> = vec![None; params.len()];
         let mut next_positional = skip;
         let mut ok = true;
-        // The UFCS-fed receiver occupies the first positional slot [F3].
+        // The UFCS-fed receiver occupies the first positional slot.
         if let Some(fed) = fed {
             if slots.is_empty() {
                 self.error(
@@ -5571,7 +5572,7 @@ impl Bodies<'_> {
     }
 
     /// Checks filled slots against their parameter types and omitted ones
-    /// against their written literal defaults (F7).
+    /// against their written literal defaults.
     fn check_slots(
         &mut self,
         slots: &[Option<&Expr>],
@@ -5606,8 +5607,8 @@ impl Bodies<'_> {
         }
     }
 
-    /// The iterated iterable's binding identity when it is a bare name
-    /// [D3]: only a mutable binding (a local `var` or a top-level `var`)
+    /// The iterated iterable's binding identity when it is a bare name:
+    /// only a mutable binding (a local `var` or a top-level `var`)
     /// can open a `mut` window over it later, so a const or computed
     /// iterable records nothing and every body read stays free.
     fn iter_window(&self, iter: &Expr) -> Option<IterWindow> {
@@ -5644,7 +5645,7 @@ impl Bodies<'_> {
             .map(|window| window.iter_at)
     }
 
-    /// The spawn-scoped `cancel` refinement [E2]: inside a spawned body
+    /// The spawn-scoped `cancel` refinement: inside a spawned body
     /// a `cancel` call is the child's deliberate failure — the fiber
     /// dies at the call, so it never answers, and the staging
     /// signature's unit drops out of the body's own unions (a match's
@@ -5662,7 +5663,7 @@ impl Bodies<'_> {
     }
 
     /// A `mut` window parameter over a copyable binding takes only a
-    /// `var` receiver (D2, C3): copyable Ref words alias with no
+    /// `var` receiver: copyable Ref words alias with no
     /// checker-visible trace, so exclusivity is proven by spelling the
     /// binder `var`. `~Copyable` receivers keep their linearity proof and
     /// fresh rvalues are uniquely owned by construction, so only a const
@@ -5685,7 +5686,7 @@ impl Bodies<'_> {
                 continue;
             };
             // A `mut` window over an enclosing for-in's iterated binding
-            // refuses [D3]: the loop's element count froze at entry, so
+            // refuses: the loop's element count froze at entry, so
             // the mid-loop mutation never joins this loop's walk — a
             // diagnostic refinement over the frozen-count semantics,
             // which stay the runtime guarantee. Only a mutable binding
@@ -5715,10 +5716,9 @@ impl Bodies<'_> {
                 continue;
             }
             // A `mut` window over a binding outliving the enclosing
-            // nursery block refuses inside a spawned body [E2, the
-            // 2026-11-21 scheduler ruling]: once a child can park on a
-            // world op the drive interleaves siblings, so a mutation of
-            // a binding that survives the join has no sequenced
+            // nursery block refuses inside a spawned body: once a child
+            // can park on a world op the drive interleaves siblings, so a
+            // mutation of a binding that survives the join has no sequenced
             // observer — the refusal permanent and drive-independent.
             // Bindings the block itself introduced die with it after
             // the join, so a window over one of those stays legal, and
@@ -5770,7 +5770,7 @@ impl Bodies<'_> {
                 _ => continue,
             };
             // An empty type is an inference failure the walk already
-            // reported; the ruling is about copyable shared-heap words.
+            // reported; a non-copyable receiver keeps its linearity proof.
             if mutable
                 || self.decls.universe.is_empty(ty)
                 || !crate::linearity::ty_copyable(self.decls, ty, &self.linear_vars)
@@ -5982,12 +5982,12 @@ impl Bodies<'_> {
                 self.err_ok(recv, &name.name, args, span)
             },
             Res::Dot(DotRes::Free { func, fed_param }) => {
-                // The receiver feeds the recorded parameter [F3]; only
-                // parameter 0 exists today (capability parameters have no
-                // syntax yet). The free tier keeps F3's preference, but a
+                // The receiver feeds the recorded parameter; only
+                // parameter 0 exists (capability parameters have no
+                // syntax yet). The free tier keeps the preference, but a
                 // free fn whose first parameter cannot contain the
-                // receiver's type never claims the call (the 2026-11-22
-                // amendment): the registered method candidates serve it
+                // receiver's type never claims the call: the registered
+                // method candidates serve it
                 // instead, so a member and a same-named free fn coexist
                 // over disjoint receivers.
                 if fed_param == 0 {
@@ -6028,7 +6028,7 @@ impl Bodies<'_> {
                 self.call_def(func, fed, args, trailing, span)
             },
             Res::Dot(DotRes::Module { func }) => {
-                // A module-qualified call (G4): the linked function takes
+                // A module-qualified call: the linked function takes
                 // the written arguments alone — no receiver word stages —
                 // and types exactly like the bare call of the bound name.
                 if let Some(selection) = selection {
@@ -6198,7 +6198,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// The type-keyed static member call (the 2026-11-15 ruling): the
+    /// The type-keyed static member call: the
     /// receiver names a type, the member lives in that type's own impl,
     /// and the call carries no instance — resolution is a check-time
     /// fact keyed by the type alone. The resolver registered the
@@ -6317,7 +6317,7 @@ impl Bodies<'_> {
         // span, the same table a solved inherent dot-call records into —
         // the lowerer resolves the member's body through it and stages no
         // receiver word. A generic impl's body dispatches on runtime
-        // evidence (H3): the instantiated receiver records the serving
+        // evidence: the instantiated receiver records the serving
         // instance per declared bound under the application's
         // substitution, the value-receiver record's own mirror.
         self.record_inherent_call(span, method);
@@ -6333,7 +6333,7 @@ impl Bodies<'_> {
         self.member_call(method, &sig, owner_ty, None, args, trailing, span, None)
     }
 
-    /// Method-candidate selection (F3, B6): candidates narrow by receiver
+    /// Method-candidate selection: candidates narrow by receiver
     /// type — trait members through the instance environment (or an
     /// in-scope assumption), inherent members by owner type; survivors
     /// beyond one are true ambiguity, never a priority order.
@@ -6565,8 +6565,8 @@ impl Bodies<'_> {
         )
     }
 
-    /// Whether a dot-call's free tier can take the receiver (the F3
-    /// amendment, 2026-11-22): the free fn keeps the preference when its
+    /// Whether a dot-call's free tier can take the receiver: the free fn
+    /// keeps the preference when its
     /// first parameter's solved type contains the receiver's type. A
     /// missing signature or parameter, an unsolvable parameter type, or
     /// an already-failed receiver keeps the free reading — the fallback
@@ -6590,7 +6590,7 @@ impl Bodies<'_> {
         self.decls.universe.contains(expected, recv)
     }
 
-    /// Whether an inherent impl's owner accepts the receiver (F3): every
+    /// Whether an inherent impl's owner accepts the receiver: every
     /// member of the receiver's type must be the owner's atom or an
     /// application of it (a generic impl's constructor). The receiver is
     /// contained in what the owner covers — the instance check's inherent
@@ -6621,7 +6621,7 @@ impl Bodies<'_> {
     /// Records one selected method's solved dispatch at the call's own
     /// span. A trait survivor records the instance the environment
     /// resolved for the receiver's type — a containing head, a generic
-    /// head that unifies under provable bounds (B6), or a covering
+    /// head that unifies under provable bounds, or a covering
     /// group of sibling branches whose representative names the shared
     /// impl item — where the solved instance is the declared one and
     /// the recorded receiver type carries the substitution. An inherent survivor records its
@@ -6639,7 +6639,7 @@ impl Bodies<'_> {
         if matches!(&self.package.method(method).owner, MethodOwner::Inherent(_)) {
             self.record_inherent_call(span, method);
             // A generic inherent impl's body dispatches on runtime
-            // evidence (H3): the site records the serving instance per
+            // evidence: the site records the serving instance per
             // declared bound under the receiver's substitution — the
             // trait arm's per-bound record minus the instance word an
             // inherent impl never has.
@@ -6700,7 +6700,7 @@ impl Bodies<'_> {
     /// solving instance's written head when that head is closed and
     /// contains the receiver — the dispatched member body was checked
     /// over the written head, so its `Self`-typed parameters accept the
-    /// head's whole member set and a case-narrowed receiver no longer
+    /// head's whole member set and a case-narrowed receiver does not
     /// pins them to its own case. A generic written head keeps the
     /// receiver, which carries the call's substitution. The dot-call's
     /// selected resolution arrives from selection; the other call
@@ -6740,9 +6740,9 @@ impl Bodies<'_> {
     /// reference rewritten against the receiver), so arguments check
     /// against the site's substitution — a generic parameter left free
     /// bound itself to any argument, accepting types the substitution
-    /// does not cover [record 6.1]. A value receiver passes through the
-    /// same mut-window exclusivity gate as a free call's fed argument
-    /// (D2, C3). The dot-call's selected resolution arrives from
+    /// does not cover. A value receiver passes through the
+    /// same mut-window exclusivity gate as a free call's fed argument.
+    /// The dot-call's selected resolution arrives from
     /// selection (the pair solved once there); the other call spellings
     /// pass `None` and solve here.
     #[allow(clippy::too_many_arguments)]
@@ -6807,7 +6807,7 @@ impl Bodies<'_> {
             }
         }
         self.type_vars.push(vars);
-        // The receiver already filled the `self` parameter [record 6.1];
+        // The receiver already filled the `self` parameter;
         // the remaining arguments feed the rest. A receiverless member
         // (the type-keyed surface) has no filled slot, so the written
         // arguments feed the whole signature. The receiver's own slot
@@ -6833,7 +6833,7 @@ impl Bodies<'_> {
         }
         // The receiver expression fills the `self` slot, so a `mut self`
         // member checks its exclusivity exactly like a free call's fed
-        // `mut` argument [D2, C3] — a dot-call on a `const` binding of a
+        // `mut` argument: a dot-call on a `const` binding of a
         // copyable type rejects identically to the free-function
         // spelling. The static tier passes no receiver, so it skips.
         if skip == 1
@@ -6857,7 +6857,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// `.err(h)`/`.ok(h)`: difference-typed handlers (E4). The handled set
+    /// `.err(h)`/`.ok(h)`: difference-typed handlers. The handled set
     /// is the handler's annotated parameter, or — unannotated — everything
     /// except what the handler's own result keeps of the operand; that set
     /// is the parameter's expected type.
@@ -7033,7 +7033,7 @@ impl Bodies<'_> {
         (!sig.generics.is_empty() && sig.params.len() == 2).then_some(kind)
     }
 
-    /// One extraction-family call (E4): the receiver and one argument,
+    /// One extraction-family call: the receiver and one argument,
     /// typed locally against the checked receiver's members. The eager
     /// `unwrap_or` binds its fallback to the extracted type, the lazy
     /// `unwrap_or_else` checks a zero-parameter lambda against it, `ok_or`
@@ -7271,11 +7271,11 @@ impl Bodies<'_> {
         }
     }
 
-    /// Bare field access `x.f`: struct-owned, type-directed (F3); on a
+    /// Bare field access `x.f`: struct-owned, type-directed; on a
     /// generic application through the constructor's shape and the
     /// application's argument substitution.
     fn field_access(&mut self, recv: &Expr, name: &Ident) -> Val {
-        // A module alias's qualified member in value position (G4): the
+        // A module alias's qualified member in value position: the
         // resolver bound a linked const's def at the member's span —
         // the same res its selection spelling carries at its own use —
         // so the use types as the bound name's value and the receiver
@@ -7323,9 +7323,9 @@ impl Bodies<'_> {
             }
             self.error(
                 ErrorCode::InferenceFailed,
-                "the comptime record projects its `name` and `tag` members as string constants \
-                 in runtime code; its `type` member is a comptime fact no runtime word \
-                 carries yet".to_owned(),
+                "the comptime record projects its `name` and `tag` members as string constants in \
+                 runtime code; its `type` member is a comptime fact no runtime word carries yet"
+                    .to_owned(),
                 name.span,
                 "not a record string member",
             );
@@ -7456,7 +7456,7 @@ impl Bodies<'_> {
     }
 
     /// `e?` propagation: the success part survives, every propagated member
-    /// must be contained in the written return union (B2, E4).
+    /// must be contained in the written return union.
     fn try_expr(&mut self, operand: &Expr, expected: Option<Ty>, span: Span) -> Val {
         let val = self.expr(operand, None);
         let total = val.ty;
@@ -7553,7 +7553,7 @@ impl Bodies<'_> {
     }
 
     /// One assignment whose place is a field/subscript chain (the
-    /// assignment sugar, ruled 2026-11-25): the root binding must be an
+    /// assignment sugar): the root binding must be an
     /// owned `var` — a const receiver refuses as the mut-window
     /// spelling DS3006, the same gate a `mut` member call's receiver
     /// passes — every field step descends one single-member struct, and
@@ -7592,7 +7592,7 @@ impl Bodies<'_> {
         };
         // The root is a local binding alone: a place chain rooted at a
         // top-level binding keeps the plain assignment's own lowering
-        // door (module-level storage waits on cross-module state).
+        // door.
         let Res::Local { bind } = res else {
             self.error(
                 ErrorCode::InferenceFailed,
@@ -7841,7 +7841,7 @@ impl Bodies<'_> {
             );
             self.expect_contains(result, declared, span, "compound assignment");
         }
-        // Refinement resets at assignment [B2].
+        // Refinement resets at assignment.
         if let Some(bind_span) = bind_span {
             self.refined.remove(bind_span);
         }
@@ -7989,8 +7989,7 @@ impl Bodies<'_> {
 
     /// One index step's collection and element type: the receiver must
     /// name the ambient `list[t]` (element `t`) or `map[k, v]` (value
-    /// `v`) — the subscript store desugars to their `set` members, and a
-    /// user member's own desugar waits on its seam.
+    /// `v`) — the subscript store desugars to their `set` members alone.
     fn index_step_ty(&mut self, recv_ty: Ty) -> Option<(StoreIndex, Ty)> {
         let members = self.decls.universe.members(recv_ty);
         let single = members.first().filter(|_| members.len() == 1).copied();
@@ -8024,7 +8023,7 @@ impl Bodies<'_> {
     /// The mut-window receiver gates a place chain's root shares with a
     /// `mut` member call's receiver: the for-in iterated binding (its
     /// element count froze at loop entry, DS3007), the nursery-outlived
-    /// binding inside a spawned body (E2), then the const-binding
+    /// binding inside a spawned body, then the const-binding
     /// refusal itself (DS3006) — the place store is a `mut` window
     /// spelled as an assignment. Returns whether the site refused.
     fn gate_mut_window_root(&mut self, root: &Ident, res: &Res) -> bool {
@@ -8116,7 +8115,7 @@ impl Bodies<'_> {
     }
 
     /// `?` in a branch-final position splits against the expected type
-    /// when one flows in (E4): a branch-final expression is the enclosing
+    /// when one flows in: a branch-final expression is the enclosing
     /// function's final expression when the if/match itself is last.
     fn if_expr(
         &mut self,
@@ -8207,7 +8206,7 @@ impl Bodies<'_> {
         let mut arm_vals = Vec::with_capacity(arms.len());
         // Arms type and cover sequentially: each arm sees the members
         // earlier arms left, so `s: string, i => ...` binds `i` the
-        // remainder [F4 set semantics].
+        // remainder.
         let mut remaining = scrut_ty;
         for arm in arms {
             let saved = self.snapshot();
@@ -8253,7 +8252,7 @@ impl Bodies<'_> {
                 }
             }
         }
-        // Exhaustiveness by set difference [F4]; guards prove nothing,
+        // Exhaustiveness by set difference; guards prove nothing,
         // conservatively, and neither do literal patterns. An applied
         // enum head stays opaque to the algebra, so its case atoms
         // exhaust it case-wise: a catchall that covered the application
@@ -8315,9 +8314,8 @@ impl Bodies<'_> {
         }
         let unit = self.unit();
         // A range is the surface's one pinned iterable: integer
-        // endpoints, the pattern binds the element [F7]. A storable
-        // range value is not in the record; the value-position stub
-        // below stands.
+        // endpoints, the pattern binds the element; a range in value
+        // position refuses instead.
         if let Expr::Range { start, end, .. } = peel_paren(iter) {
             if let Some(element_ty) = self.range_element(start, end, span) {
                 let saved = self.snapshot();
@@ -8369,7 +8367,7 @@ impl Bodies<'_> {
         };
         // A bare-name iterable of a mutable binding records its window:
         // the body's own `mut` window over it refuses below, since the
-        // entry count froze [D3]. A range head or a computed iterable
+        // entry count froze. A range head or a computed iterable
         // records nothing.
         let iter_window = self.iter_window(peel_paren(iter));
         if let Some(window) = iter_window {
@@ -8736,10 +8734,9 @@ impl Bodies<'_> {
             return String::new();
         };
         match decl.kind {
-            AtomKind::Apply(..)
-            | AtomKind::Tuple(_)
-            | AtomKind::FnSig(_, _)
-            | AtomKind::Reserved => String::new(),
+            AtomKind::Apply(..) | AtomKind::Tuple(_) | AtomKind::FnSig(..) | AtomKind::Reserved => {
+                String::new()
+            },
             AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Enum(_) => decl.name.clone(),
         }
     }
@@ -8774,7 +8771,8 @@ impl Bodies<'_> {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the comptime loop walks a written struct's fields; an enum's cases, a builtin, \
-                 and a generic application's per-instance fields name none here".to_owned(),
+                 and a generic application's per-instance fields name none here"
+                    .to_owned(),
                 span,
                 "not a written struct",
             );
@@ -8914,7 +8912,7 @@ impl Bodies<'_> {
     // ---- refinement ---------------------------------------------------------
 
     /// Narrows harvested from a condition: `is` tests and none-comparisons
-    /// over local paths (B2).
+    /// over local paths.
     fn harvest(&mut self, cond: &Expr) -> Vec<Narrow> {
         let mut out = Vec::new();
         self.harvest_into(peel_paren(cond), &mut out);
@@ -9033,7 +9031,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// One generic call's argument against its solved parameter type (B2):
+    /// One generic call's argument against its solved parameter type:
     /// the structural binder stays silent on a constructor mismatch (it
     /// binds nothing for `list_len("words")`), so the solved parameter has
     /// to contain the argument or the mismatch reports. A parameter that
@@ -9182,7 +9180,7 @@ impl Bodies<'_> {
         std::mem::take(&mut self.solve_reported)
     }
 
-    /// The type def a name carries for the walked file (F9.5): the
+    /// The type def a name carries for the walked file: the
     /// file's own shadowing tag declaration beats the first declaration
     /// per label; the foreign-defs pass reads the shared namespace.
     fn type_def_of(&self, name: &str) -> Option<DefId> {
@@ -9192,21 +9190,21 @@ impl Bodies<'_> {
         }
     }
 
-    /// The directed test label (F9.5): a single-segment written test
+    /// The directed test label: a single-segment written test
     /// type naming no declaration probes the operand's own members by
     /// label. One member carrying it answers the test's set; none keeps
     /// the solve refusal; several report the ambiguity.
     /// The `is` test against a written type: the operand's value plus
-    /// the tested set the solve (or the directed label probe, F9.5)
+    /// the tested set the solve (or the directed label probe)
     /// answers. A declared tag label disjoint from the operand's union
     /// in value position is the unknown-member refusal, not the
     /// constant-false story; every other provably-disjoint test keeps
-    /// the constant-`==` ruling (a value/assert-position compile error,
+    /// the constant-`==` rule (a value/assert-position compile error,
     /// a condition-position refinement).
     fn is_expr(&mut self, expr: &Expr, ty: &Type, span: Span) -> Val {
         let operand = self.expr(expr, None);
         let Some(solved) = self.solve_here(ty).or_else(|| {
-            // the directed test label (F9.5): an undeclared
+            // the directed test label: an undeclared
             // single-segment label probes the operand's own
             // members before the solve refusal
             self.is_test_label_probe(ty, operand.ty)
@@ -9254,7 +9252,7 @@ impl Bodies<'_> {
         self.record_is_test(span, solved);
         // A provably-disjoint test computes a constant false, so in
         // value/assert position it is a compile error — the same
-        // ruling as the constant `==` [B9 carve-out 2]. In
+        // treatment as a constant `==`. In
         // condition position (if/match guard/while, any depth) the
         // test refines legitimately: the kept branch narrows to
         // empty, which is sound dead code, and a match arm covering
@@ -9341,7 +9339,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// Whether the written test type is a bare tag-family label (F9.5):
+    /// Whether the written test type is a bare tag-family label:
     /// its disjointness against the operand reports unknown-member, not
     /// the constant-false story a set-level test keeps.
     fn is_tagged_test_label(&self, ty: &Type) -> bool {
@@ -9358,7 +9356,7 @@ impl Bodies<'_> {
             .is_some_and(|def| matches!(self.package.def(def).kind, DefKind::Tag | DefKind::Case))
     }
 
-    /// The qualified `type::label` solved as a type (F9.5): the head's
+    /// The qualified `type::label` solved as a type: the head's
     /// own members carrying the label name the member's type. None
     /// reports unknown-member naming the head; several report the
     /// ambiguity naming both declarations; a head that does not solve
@@ -9437,7 +9435,7 @@ impl Bodies<'_> {
                 span, path, args, ..
             } => {
                 let [only] = path.segments.as_slice() else {
-                    // The qualified `type::label` (F9.5): the head's own
+                    // The qualified `type::label`: the head's own
                     // members carrying the label name the member's type;
                     // none reports unknown-member and several the
                     // ambiguity, both keyed to the qualified spelling.
@@ -9468,8 +9466,8 @@ impl Bodies<'_> {
                     return Some(self.none_ty());
                 }
                 if only.name == "self" && !self.package.declares("self") {
-                    // `self` as a type name retired [record 6.1]; resolve
-                    // reported DS2015, so suppress the generic fallbacks.
+                    // `self` is no type name: resolve reports DS2015, so
+                    // suppress the generic fallbacks.
                     self.solve_reported = true;
                     return None;
                 }
@@ -9505,7 +9503,7 @@ impl Bodies<'_> {
                     DefKind::Enum => {
                         // A generic enum keeps its opaque atom; a
                         // non-generic one names the union of its minted
-                        // case atoms [B3] — a linked enum's case defs
+                        // case atoms — a linked enum's case defs
                         // answer through the name index the linked
                         // install filled. A zero-case enum names the
                         // empty set: uninhabited, still its own type, so
@@ -9520,7 +9518,7 @@ impl Bodies<'_> {
                         // the case labels are the enum's own written
                         // members: they resolve under the enum's
                         // declaring file, never the use site's shadow
-                        // map (F9.5)
+                        // map
                         let decl_file = self.file;
                         self.file = Some(self.package.def(def).span.file);
                         let mut union: Option<Ty> = None;
@@ -9545,7 +9543,7 @@ impl Bodies<'_> {
                         if params.is_empty() {
                             // the body is the alias declaration's own
                             // text: its tag labels resolve under the
-                            // alias's declaring file (F9.5), never the
+                            // alias's declaring file, never the
                             // use site's shadow map
                             let decl_file = self.file;
                             self.file = Some(self.package.def(def).span.file);
@@ -9643,7 +9641,7 @@ impl Bodies<'_> {
                 self.decls.universe.atom_ty(atom).ok()
             },
             // The `type` keyword solves to the builtin comptime type-value
-            // atom (G1, G2): the comptime evaluator's staged reflection
+            // atom: the comptime evaluator's staged reflection
             // indices carry it, and nothing constructs its values at
             // runtime.
             Type::TypeKw(_) => self.decls.universe.atom_ty(TypeId::TYPE).ok(),
@@ -9778,9 +9776,9 @@ impl Bodies<'_> {
     }
 
     /// The runtime evidence one inherent call site must stage for the
-    /// impl's declared bounds (H3): the head pattern substitutes against
+    /// impl's declared bounds: the head pattern substitutes against
     /// the receiver, and every bound must hold for the substituted type
-    /// exactly as the trait form's instance bounds do [B6] — an in-scope
+    /// exactly as the trait form's instance bounds do — an in-scope
     /// assumption satisfies the checker while the record keeps `None`
     /// (the lowerer refuses that site naming the staging seam). A head
     /// that does not unify (a union receiver solving the variables
@@ -9816,7 +9814,7 @@ impl Bodies<'_> {
     /// Whether a trait holds for a type: an in-scope assumption covers
     /// it, or the environment resolves an instance — a containing head
     /// for concrete receivers, or a generic head that unifies with the
-    /// receiver under provable bounds (B6). Diagnoses on failure.
+    /// receiver under provable bounds. Diagnoses on failure.
     fn trait_satisfied(&mut self, trait_id: TraitId, ty: Ty, span: Span) -> bool {
         if self.assumption_covers(trait_id, ty) {
             return true;
@@ -9880,7 +9878,7 @@ impl Bodies<'_> {
             .any(|(t, assumed)| *t == trait_id && self.decls.universe.contains(*assumed, ty))
     }
 
-    /// The environment's call-site resolution (B6): the instance whose
+    /// The environment's call-site resolution: the instance whose
     /// head contains the receiver, or — for a generic impl's head — the
     /// one whose pattern unifies with it under provable bounds. The
     /// solved instance is the declared instance; a per-substitution
@@ -9906,7 +9904,7 @@ impl Bodies<'_> {
         )
     }
 
-    /// Several impls serve one call site (B6): declared heads are
+    /// Several impls serve one call site: declared heads are
     /// pairwise disjoint, but a generic head is opaque to the set
     /// algebra, so two generic impls of one trait can both serve one
     /// receiver. A compile error, never a priority order.
@@ -9999,7 +9997,7 @@ impl Bodies<'_> {
             .unwrap_or_else(|_| self.empty())
     }
 
-    /// A nursery block [E2]: the body checks in a fresh scope over the
+    /// A nursery block: the body checks in a fresh scope over the
     /// block's own nursery scope entry, every `spawn` inside it records
     /// its body's answer, and the block's value is the collected
     /// answers' list — the join channel's checker face. The element
@@ -10045,7 +10043,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// A spawned body [E2]: its own frame, its tail checked as the
+    /// A spawned body: its own frame, its tail checked as the
     /// child's answer, and the spawn-scoped `cancel` refinement — a
     /// `cancel` arm inside a spawned body never answers, so it drops
     /// out of the body's own unions instead of polluting the answer
@@ -10116,8 +10114,8 @@ impl Bodies<'_> {
             .or_else(|| self.locals.get(bind).map(|b| b.ty))
     }
 
-    /// Whether a solved type is exactly the builtin `type` atom (G1,
-    /// G2): the comptime type-value type.
+    /// Whether a solved type is exactly the builtin `type` atom: the
+    /// comptime type-value type.
     fn is_type_atom(&self, ty: Ty) -> bool {
         matches!(self.decls.universe.members(ty), [atom] if *atom == TypeId::TYPE)
     }
@@ -10496,7 +10494,7 @@ fn generic_of(param: &TypeParam) -> GenericParam {
     }
 }
 
-/// Whether a parameter binds a re-assignable place (C3): only the `mut`
+/// Whether a parameter binds a re-assignable place: only the `mut`
 /// window re-binds — `move` transfers once, `comptime` is a compile-time
 /// value, and a plain borrow is immutable — so assignment accepts a
 /// `mut` parameter alone, exactly like a `var` local.
@@ -10504,7 +10502,7 @@ fn param_is_mut(param: &Param) -> bool {
     matches!(param.mode, ds_parse::ParamMode::Mut(_))
 }
 
-/// One comptime parameter's annotation inside the round's shape: the
+/// One comptime parameter's annotation: the
 /// builtin `type` atom (the evaluator stages a reflection index) or one
 /// of the four scalar atoms by name (it stages a plain literal word).
 /// Anything else has no comptime staging and refuses at the declaration.

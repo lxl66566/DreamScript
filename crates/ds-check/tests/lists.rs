@@ -1,4 +1,4 @@
-//! The list-literal and `list[t]()` constructor surface [B3, F7, F9]:
+//! The list-literal and `list[t]()` constructor surface:
 //! bidirectional element typing against an expected `list[t]`, the
 //! mixed-element rejection, the empty literal's expected-type requirement,
 //! the constructor's spelling rules, and the cross-spelling rejections.
@@ -119,7 +119,7 @@ fn cross_spellings_reject_per_the_declaration() {
 
 #[test]
 fn list_push_rejects_const_receivers() {
-    // the mut window is exclusive by spelling [D2]: a const binding may
+    // the mut window is exclusive by spelling: a const binding may
     // alias its shared heap word, so both call spellings reject it
     const REJECTED: &str =
         "DS3006 `xs` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]";
@@ -141,7 +141,7 @@ fn list_push_rejects_const_receivers() {
 #[test]
 fn var_and_fresh_receivers_type_the_window() {
     // a var binding and a mut-window parameter carry the spelling's
-    // exclusivity; a fresh rvalue is uniquely owned by construction [D2]
+    // exclusivity; a fresh rvalue is uniquely owned by construction
     for source in [
         "pub fn f() -> int {\n  var xs = [1]\n  xs.list_push(2)\n  list_len(xs)\n}\n",
         "pub fn f() -> int {\n  var xs = [1]\n  list_push(xs, 2)\n  list_len(xs)\n}\n",
@@ -155,7 +155,7 @@ fn var_and_fresh_receivers_type_the_window() {
 #[test]
 fn for_in_rejects_mut_windows_over_the_iterated_binding() {
     // the frozen entry count makes the body's own `mut` window over the
-    // iterated binding misleading [D3]: every call spelling refuses, an
+    // iterated binding misleading: every call spelling refuses, an
     // enclosing loop's iterable included
     const REJECTED: &str = "DS3007 `xs` is this loop's iterated binding; its element count froze \
                             at loop entry, so a `mut` window over it inside the body never joins \
@@ -201,7 +201,7 @@ fn for_in_rejects_mut_windows_over_the_iterated_binding() {
           so a `mut` window over it inside the body never joins this loop's walk [D3]"],
     );
     // a const iterable keeps its own receiver refusal: the window never
-    // records, so DS3006 stands alone [D2, C3]
+    // records, so DS3006 stands alone
     assert_eq!(
         check(
             "fn f() -> int {\n  const xs = [1]\n  for x in xs {\n    xs.list_push(2)\n  }\n  \
@@ -216,7 +216,7 @@ fn for_in_keeps_reads_and_foreign_windows_free() {
     // the refusal names the iterated binding alone: reads over it, mut
     // windows over other bindings (an aliased var included — the frozen
     // count is the runtime guarantee), and windows past the loop stay
-    // free [D3]
+    // free
     for source in [
         "pub fn f() -> int {\n  var xs = [1]\n  var n = 0\n  for x in xs {\n    n += \
          list_len(xs)\n  }\n  n\n}\n",
@@ -234,7 +234,7 @@ fn for_in_keeps_reads_and_foreign_windows_free() {
 #[test]
 fn linear_const_receivers_keep_their_linearity_proof() {
     // a `~Copyable` receiver cannot alias (copying is rejected), so a
-    // const binding still feeds the mut window [D2, C1]
+    // const binding still feeds the mut window
     assert_eq!(
         check("const l = link { slot: 1 }\nfn f() -> () {\n  tweak(l)\n}\n"),
         Vec::<String>::new(),

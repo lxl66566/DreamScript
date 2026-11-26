@@ -1,4 +1,4 @@
-//! The M1 acceptance gates over the corpus:
+//! The acceptance gates over the corpus:
 //! `fmt(fmt(x)) == fmt(x)` and re-parsing the formatted output yields the
 //! same AST, for every `conformance/*.ds` and every positive fixture of the
 //! ds-parse surface.

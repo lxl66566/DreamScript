@@ -1,4 +1,4 @@
-//! Trait defaults x staged evidence riders (F7 x H3): a static dispatch
+//! Trait defaults x staged evidence riders (x): a static dispatch
 //! into a generic impl body stages the trait's declared default among
 //! its real arguments (the omitted-parameter spellings) with the pair's
 //! rider area and the instance word trailing, and the transitive chain

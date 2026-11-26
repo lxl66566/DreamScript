@@ -372,7 +372,7 @@ pub const BUILTIN_MAP_REMOVE: u32 = 95;
 /// member tier's `map[k, v].contains` routes here.
 pub const BUILTIN_MAP_CONTAINS: u32 = 96;
 /// `map_entries (m: map) -> list` — the entry-order pair list: one key word then its value span per
-/// row, one count per `Ref` word acquired for the fresh list's edge (the map keeps its own, C4).
+/// row, one count per `Ref` word acquired for the fresh list's edge (the map keeps its own).
 /// The member tier's `map[k, v].entries` routes here.
 pub const BUILTIN_MAP_ENTRIES: u32 = 97;
 /// `arena_new -> arena[t]` — the read-side aliasing container's construction seam: a fresh empty

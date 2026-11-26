@@ -1,12 +1,12 @@
 //! The dsmod loader: install a `ds-mod` module into the two-slot registry
-//! and execute it [BL-7, H6 item 5].
+//! and execute it.
 //!
 //! Mapping decisions:
 //!
 //! - Pools. The dsmod blocks payload carries one constant pool per function ("uop ConstIdx operands
 //!   index it"), and this VM's [`FunctionDef`] matches that granularity. ds-abi's uop module doc
-//!   says "one pool per module [BL-7]" — the two locked contracts disagree, and the executable
-//!   model follows the payload that files actually carry.
+//!   says "one pool per module" — the two locked contracts disagree, and the executable model
+//!   follows the payload that files actually carry.
 //! - Callees. A payload [`ds_mod::Constant::FuncRef`] carries a selector-led key (the format-v4
 //!   spelling): a uop dependency's position in the header's dep list (position 0 the enclosing
 //!   module, position `n` the `n-1`-th entry) or a native surface's reserved name, plus the
@@ -17,7 +17,7 @@
 //!   dep-position key becomes the target's registry module id (position → dep name → id, one vector
 //!   index per minted fn word, never serialized), a native key keeps its name for issue-time
 //!   resolution through the native tables. Calls re-resolve through the target's current slot at
-//!   issue time, which is what the two-slot retirement semantics require [H6 item 5].
+//!   issue time, which is what the two-slot retirement semantics require.
 //! - Strings. A `Str` entry is a genuine string constant; KSTR loads it as an interned heap string
 //!   reference (the pool-kind check admits it for KSTR only).
 //! - Natives. A payload FuncRef may name a reserved native module: the `builtin` core (every VM
@@ -32,8 +32,8 @@
 //!
 //! - Entry descriptors. The blocks payload stores a two-word zero placeholder per function; the
 //!   in-memory `ds_mod::Function` record does not carry it. Word 0 (the tier-1 prologue pointer,
-//!   the function's table index by the M3 convention) is minted once by `ModuleVersion::new` when
-//!   it assigns table indices, and the tier-2 word stays null until the JIT compiles the body [H2].
+//!   the function's table index) is minted once by `ModuleVersion::new` when it assigns table
+//!   indices, and the tier-2 word stays null until the JIT compiles the body.
 
 use ds_mod::Hash128;
 
@@ -280,7 +280,7 @@ fn key_name(key: &ds_mod::FuncRefKey, own_module: &str, deps: &[ds_mod::Dep]) ->
     }
 }
 
-/// Resolves one bound extern's pool constant (H5): the artifact's bound
+/// Resolves one bound extern's pool constant: the artifact's bound
 /// module must be installed under its manifest name and the symbol's
 /// index inside the export enumeration — the return's marshaling word
 /// is the format's own closed vocabulary (the absent word or a scalar
@@ -366,7 +366,7 @@ fn map_function(
 /// function record, fills the entry-descriptor word-0 placeholders at
 /// install, and answers the installed version's table row — the row's
 /// `Arc` is the version's single home. A re-install of the same module
-/// name swaps the slots [H6 item 5].
+/// name swaps the slots.
 ///
 /// The module is consumed: each record's body words reach the installed
 /// table without a copy, and a failed install drops the record (rebuild
@@ -403,8 +403,8 @@ pub fn build(
 ) -> Result<ModuleVersion, LoadError> {
     let name = module.name().to_owned();
     let deps = module.deps().to_vec();
-    // the version's content identity: this round a module's content hash
-    // is its source hash, stamped so the load protocol can validate
+    // the version's content identity: a module's content hash is its
+    // source hash, stamped so the load protocol can validate
     // later links against the installed slot
     let content_hash = module.source_hash();
     // the enclosing module's own id: an installed name's own, or the fresh

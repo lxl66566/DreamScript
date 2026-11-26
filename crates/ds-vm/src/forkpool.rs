@@ -1,4 +1,4 @@
-//! The fork-join worker pool [E3, the 2026-11-15 sendability ruling]:
+//! The fork-join worker pool:
 //! a worker thread owns whole fibers and never shares them. The host
 //! drive extracts a fork child from its pool — the fiber (segment,
 //! arena, heap store, call chain) with its claim ledger beside it — and
@@ -9,14 +9,14 @@
 //! write, or delivery runs — all of those fire on the host exactly as
 //! the sequential interlock drive runs them. The transfer is ownership
 //! only: the host pool slot stands vacated for the drive's duration, so
-//! the non-atomic counts and block headers stay confined [C4] — the
+//! the non-atomic counts and block headers stay confined — the
 //! same contract ds-rt's `Heap`/`Arena` and `Objects` carry their
 //! `unsafe impl Send` under.
 //!
-//! What is per-worker by ruling: the CALL-site inline caches, the KSTR
+//! What is per-worker: the CALL-site inline caches, the KSTR
 //! intern rows, and the deinit-hook directories of the worker VM (each
 //! derived from immutable code, correctness never depending on cache
-//! state [H3]), and the nurseries (a fresh ledger stub per cargo, real
+//! state), and the nurseries (a fresh ledger stub per cargo, real
 //! worker-local nurseries for a nested combinator). What is refused:
 //! the world surface never reaches a worker (the snapshot strips the
 //! platform tables, so a world call refuses with the standard
@@ -189,7 +189,7 @@ fn run_on_worker(vm: &mut Vm, cargo: ForkCargo) -> ForkReturn {
 mod tests {
     use super::*;
 
-    /// The ruling's mechanical face: everything that moves is `Send`
+    /// The mechanical face: everything that moves is `Send`
     /// where the compiler can prove it — the cargo over the `Objects`
     /// `Send` substrate, and the homecoming with the outcome.
     #[test]

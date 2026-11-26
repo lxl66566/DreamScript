@@ -1,4 +1,4 @@
-//! Nurseries [E2, E5]: the join, cancellation, and boundary-error machinery
+//! Nurseries: the join, cancellation, and boundary-error machinery
 //! over the fiber pool. A nursery is interpreter data like a fiber — a pool
 //! slot holding its children (in spawn order), a per-child outcome ledger,
 //! and a cancel flag. Nothing here schedules: the pool is single-threaded,
@@ -11,7 +11,7 @@
 //!   enters them in spawn order (sequential: each child is driven to death before the next is
 //!   entered), and outcomes are reported in spawn order.
 //! - First failure is spawn-drive order: the first child that dies trapped raises the cancel flag;
-//!   children driven later observe it at their next taken backward branch and stop there [E5].
+//!   children driven later observe it at their next taken backward branch and stop there.
 //! - A child that parks at a host-visible yield during a join/teardown drive is re-entered with the
 //!   bare `PLATFORM_NONE` bounce tag — the same convention a `run` entry follows — unless the
 //!   nursery's cancel flag is raised: the re-entry then delivers the cut (the resume-shaped
@@ -23,7 +23,7 @@
 //!   `Trapped`, the parked child is bounced back in and lands (or reports `Cancelled` if the
 //!   boundary cut it down mid-park).
 //!
-//! # Cancellation [E5]
+//! # Cancellation
 //!
 //! Cooperative and nursery-scoped: the flag is observed at taken
 //! backward branches (the dispatch loop's preemption points) and at the
@@ -85,7 +85,7 @@ pub enum ChildOutcome {
 }
 
 /// The join result at a nursery boundary: every child joined, or the
-/// first-failure cancellation record [E2].
+/// first-failure cancellation record.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JoinOutcome {
     /// Every child completed; the answer spans in spawn order.

@@ -1,4 +1,4 @@
-//! The checked-read branch join balances its counts (C4): `list_get` and
+//! The checked-read branch join balances its counts: `list_get` and
 //! `map_get` answer the ok/none platform span, the placement pass re-spans
 //! it into the call's own `t | none` union over a path-forked branch
 //! join, and the miss side's interned zero-init claim dies inside its

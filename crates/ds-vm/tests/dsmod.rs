@@ -1,7 +1,7 @@
 //! End-to-end: build a dsmod module with the mutual even/odd pair plus a
 //! main, serialize with the ds-mod writer, read it back (the round-trip
 //! path — the mmap loader hands the same `&Module` to the same install),
-//! install into the two-slot registry, and execute [BL-7, H6 item 5].
+//! install into the two-slot registry, and execute.
 
 use ds_mod::{
     Constant, FuncRefKey, Function, Hash128, Module, TargetClass, read, read_checked, write,
@@ -220,7 +220,7 @@ fn loader_reports_unresolved_funcrefs() {
 
 /// Cross-module FuncRefs: the caller's pool addresses a dependency entry;
 /// the call resolves through the target's current slot, so installing a new
-/// version of the target redirects the next call [H6 item 5].
+/// version of the target redirects the next call.
 #[test]
 fn cross_module_funcref_resolves_through_the_current_slot() {
     // std v1: double(n) = n + n; std v2: triple(n) = n + n + n. The

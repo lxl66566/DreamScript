@@ -1,4 +1,4 @@
-//! Pattern typing (F4): coverage as atom sets for exhaustive matching and
+//! Pattern typing: coverage as atom sets for exhaustive matching and
 //! arm remainder typing, binder collection through the same walk, and the
 //! case/enum pattern tables.
 
@@ -341,11 +341,11 @@ impl Bodies<'_> {
         arm: bool,
     ) {
         // A bare identifier in a test position names a member test
-        // when the type namespace carries it [F9]: bare tags are
+        // when the type namespace carries it: bare tags are
         // constructor values, so the type entry wins over any
         // same-named local and nothing binds.
         //
-        // The remaining scrutinee directs the label first (F9.5): one
+        // The remaining scrutinee directs the label first: one
         // expected member carrying the label is the atom, an expected
         // union without it refuses unknown-member when the label is a
         // declaration of this compile, and several refuse ambiguous.
@@ -356,7 +356,7 @@ impl Bodies<'_> {
             return;
         }
         if arm && let Some(atom) = self.unit_pattern_atom(&name.name) {
-            // the applied-head escape keeps today's member reading: a
+            // the applied-head escape keeps the member reading: a
             // unit case over an applied generic enum head tests over
             // every application, though the head is opaque to the label
             // probe
@@ -399,9 +399,8 @@ impl Bodies<'_> {
                         );
                     }
                     // An annotated binding is a narrowing filter:
-                    // it covers only its intersection, the way the
-                    // record's `.err` handler arms split the union
-                    // [E4, F4].
+                    // it covers only its intersection, the way a `.err`
+                    // handler arm splits the union.
                     covered.extend_from_slice(self.decls.universe.members(refined));
                     refined
                 },
@@ -552,11 +551,10 @@ impl Bodies<'_> {
                     .or_else(|| self.decls.foreign_type(&head.name))?;
                 if self.package.def(def).kind == DefKind::Enum {
                     // A qualified case path tests the CASE's own minted
-                    // atom [B3], never the enum's name. A linked enum and
+                    // atom, never the enum's name. A linked enum and
                     // its cases answer through the name index the linked
                     // install filled; the cases are the enum's own written
-                    // members, so they resolve under its declaring file
-                    // (F9.5).
+                    // members, so they resolve under its declaring file.
                     let shape = self.decls.enums.get(&def)?;
                     let (case_name, ..) =
                         shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
@@ -581,7 +579,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// The qualified `type::label` in a pattern (F9.5): the head's own
+    /// The qualified `type::label` in a pattern: the head's own
     /// members carrying the label pick the atom, recorded at the
     /// label's span for the lowering. None reports unknown-member
     /// naming the head and several the ambiguity naming both
@@ -659,8 +657,7 @@ impl Bodies<'_> {
     /// The member atom a bare identifier names in a pattern: the
     /// predeclared `none`, or a type-namespace constructor's atom —
     /// aliases and traits carry none, so those names bind instead. The
-    /// declaring file's own shadowing tag declaration answers first
-    /// (F9.5).
+    /// declaring file's own shadowing tag declaration answers first.
     fn unit_pattern_atom(&self, name: &str) -> Option<TypeId> {
         if name == "none" && !self.package.declares("none") {
             return Some(TypeId::NONE);
@@ -671,7 +668,7 @@ impl Bodies<'_> {
         self.decls.atoms.get(&def).copied()
     }
 
-    /// The directed pattern label (F9.5): the remaining scrutinee's
+    /// The directed pattern label: the remaining scrutinee's
     /// members carrying the bare label pick the atom. One member wins —
     /// even when the label names no declaration of this compile; none
     /// or several report and leave the arm uncovered.

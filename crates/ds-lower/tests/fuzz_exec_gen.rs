@@ -34,8 +34,8 @@
 //! shapes (the map alias annotating a keyed map value, the optional-field
 //! record constructing and reading through the presence-tag word, the
 //! list const embedding its elements over the list seam) and the drawn
-//! refusal variant whose `response` value use keeps the M3 contract
-//! refusal at lowering) — and the parser-budget episode: long type
+//! refusal variant whose `response` value use still refuses at
+//! lowering) — and the parser-budget episode: long type
 //! chains (a `?` postfix run, an `|`/`&` chain) in a helper's
 //! parameter, return, and binding annotations beside near-budget typed
 //! lambda chains and paren nesting (checking clean, erasing at

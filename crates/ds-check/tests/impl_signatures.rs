@@ -1,4 +1,4 @@
-//! Impl-member signature agreement (B6): every member of a trait impl
+//! Impl-member signature agreement: every member of a trait impl
 //! must declare what its trait member declares — arity, receiver
 //! spelling, passing modes, parameter types, return, and no parameter
 //! defaults of its own — because the trait member's registered signature
@@ -379,7 +379,7 @@ fn a_dispatch_call_stages_nothing_for_an_impl_only_default() {
 }
 
 /// A trait member's signature declares its receiver as its first
-/// parameter (F3): dynamic dispatch is receiver-carried, so a trait
+/// parameter: dynamic dispatch is receiver-carried, so a trait
 /// signature with no `self` has no reachable call form and refuses at
 /// its own site (DS2021 narrows to trait members — an impl member
 /// without a receiver is the type-keyed static surface instead).
@@ -444,9 +444,9 @@ fn a_zero_parameter_member_call_checks_through_the_refused_signature() {
     );
 }
 
-/// An inherent impl member may omit the receiver (the 2026-11-15
-/// ruling): the member is the type-keyed static surface, callable as
-/// `<type>.<member>()`, and its declaration checks clean.
+/// An inherent impl member may omit the receiver: the member is the
+/// type-keyed static surface, callable as `<type>.<member>()`, and its
+/// declaration checks clean.
 #[test]
 fn an_inherent_member_without_a_receiver_checks_clean() {
     let source = concat!(

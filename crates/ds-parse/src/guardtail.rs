@@ -12,8 +12,8 @@
 //! and a file with two collisions or another syntax error alongside keeps
 //! the generic error. Shapes that stay on the generic error with it: the
 //! paren-parameter family (`x if x > (m) => ...`) and a one-name guard
-//! (`if m => ...`, whose `(m)` repair is itself a paren-parameter lambda)
-//! per the recorded quirk ruling, and a guard whose tail is reached across
+//! (`if m => ...`, whose `(m)` repair is itself a paren-parameter lambda),
+//! and a guard whose tail is reached across
 //! a newline continuation or through a comment before the arrow.
 
 // Offsets come from the token walk and are u32 by the Files contract, so

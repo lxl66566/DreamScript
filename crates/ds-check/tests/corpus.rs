@@ -1,6 +1,6 @@
 //! Focused tests over the shapes of `conformance/types_hybrid.ds`: set-typed
 //! errors, json unions, `is`-style containment, difference erasure, `T?`
-//! equivalence, negated markers, and witnesses [B1, B4, B6].
+//! equivalence, negated markers, and witnesses.
 
 use ds_check::{
     Case, Error, Field, TraitId, Ty, TypeExpr, TypeId, Universe, Witness, WitnessField,
@@ -189,7 +189,7 @@ fn get_port_propagation_containment() {
     );
     // load's return: config | cfg_err. `?` propagates only get_port's error
     // members — (int | missing | bad_port) - int — into that union; the
-    // success member int is consumed by the binding, not propagated [B2, E4].
+    // success member int is consumed by the binding, not propagated.
     let config = c.ty(c.config);
     let cfg_err = c.cfg_err();
     let load_ret = c.universe.union(config, cfg_err);
@@ -203,7 +203,7 @@ fn difference_erases_when_disjoint() {
     let mut c = corpus();
     let config = c.ty(c.config);
     let cfg_err = c.cfg_err();
-    // `const ok: config - read_err` where read_err == cfg_err [B1]
+    // `const ok: config - read_err` where read_err == cfg_err
     let erased = c.universe.diff(config, cfg_err);
     assert_eq!(
         erased, config,
@@ -248,7 +248,7 @@ fn optional_sugar_is_union_none() {
     let int = c.ty(c.int);
     let missing = c.ty(c.missing);
     let none = c.ty(TypeId::NONE);
-    // (int | missing)? == int | missing | none [B4]
+    // (int | missing)? == int | missing | none
     let inner = c.universe.union(int, missing);
     let opt = c.universe.optional(inner);
     let written = c
@@ -292,7 +292,7 @@ fn negated_marker_complement() {
         expected = c.universe.union(expected, member);
     }
     assert_eq!(not_copyable, expected);
-    // json is entirely non-Copyable: json & ~Copyable == json [C1 composition]
+    // json is entirely non-Copyable: json & ~Copyable == json
     let json = c.json();
     let json_noncopyable = c.universe.inter(json, not_copyable);
     assert_eq!(json_noncopyable, json);
@@ -366,7 +366,7 @@ fn b6_overlap_witnesses_struct_head() {
     });
     let text = c.universe.render_witness(&witness);
     assert_eq!(text, "bad_port{got: int}");
-    // negation carving exclusivity [B6]: circle & ~Shadowed removes the overlap
+    // negation carving exclusivity: circle & ~Shadowed removes the overlap
     let shadowed = c.universe.declare_trait("Shadowed").unwrap();
     let circle = c.universe.declare_tag("circle").unwrap();
     c.universe.impl_trait(shadowed, circle).unwrap();

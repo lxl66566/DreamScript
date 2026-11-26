@@ -1,4 +1,4 @@
-//! Byte-stable write-then-read round trips `[G3.5 acceptance]`.
+//! Byte-stable write-then-read round trips.
 
 use ds_abi::{
     FrameLayout, Inst, SlotType,
@@ -188,20 +188,20 @@ fn collector_hooks_round_trip_dormant() {
     assert!(hooks.is_dormant(), "hooks must stay dormant");
     assert_eq!(hooks.slots(), [0, 0]);
     assert!(!hooks.hooks_active());
-    // The dormant collector block plus the pending BL-7 scalars are exactly
+    // The dormant collector block plus the pending module-level scalars are exactly
     // the reserved bytes 7..32.
     assert_eq!(&bytes[7..32], &[0u8; 25]);
 }
 
 #[test]
 fn bl7_fields_default_pending_and_round_trip() {
-    // New modules carry pending values: both BL-7 scalars zero.
+    // New modules carry pending values: both module-level scalars zero.
     let bytes = write(&sample_module());
     let module = read(&bytes).expect("valid module");
     assert_eq!(module.max_call_depth(), 0);
     assert_eq!(module.ir_checksum(), 0);
     // A file with non-zero committed values is accepted and round-tripped
-    // byte-identically (values are preserved, not validated, until M3).
+    // byte-identically (the values are preserved, not validated).
     let mut patched = bytes.clone();
     patched[24..28].copy_from_slice(&1_000u32.to_le_bytes());
     patched[28..32].copy_from_slice(&0xdead_beefu32.to_le_bytes());
@@ -284,7 +284,7 @@ fn mmap_loader_round_trips_from_disk() {
     assert_eq!(mapped.bytes(), &write(&sample_module())[..]);
 }
 
-// The mutual `even`/`odd` of H2's example, a local
+// The mutual `even`/`odd` of the tail-call example, a local
 // copy of ds-abi's locked fixture encodings (its test module is not
 // public). Slots: r0 = n, r1 = compare bool, r2 = constant scratch, r3 =
 // the outgoing argument (the slide source the ABI derives as the arg-area

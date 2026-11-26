@@ -132,7 +132,7 @@ fn a_local_shadows_outer_locals_and_package_values() {
     let (_, asts, package) = fixture([("a.ds", "tag int\n"), ("m.ds", source)]);
     let frames = scope_frames(&asts[1], &package);
     // Inside `f`'s body: the parameter shadows the package `const same`,
-    // while the type-namespace `struct same` stays visible (F9).
+    // while the type-namespace `struct same` stays visible.
     let entries = visible_at(
         &frames,
         &package,
@@ -290,7 +290,7 @@ fn spans_carry_the_declaring_file() {
 }
 
 /// A bare arm identifier naming a constructor type is a member test that
-/// binds nothing (F9): it answers only as the type declaration; an
+/// binds nothing: it answers only as the type declaration; an
 /// identifier naming no constructor binds, and the predeclared `none`
 /// binds nothing either.
 #[test]

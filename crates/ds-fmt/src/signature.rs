@@ -1,4 +1,4 @@
-//! The `.dsi` signature spellings (G4): a package's reviewable API
+//! The `.dsi` signature spellings: a package's reviewable API
 //! surface — every `pub` item of a parse tree rendered as its
 //! re-parsable declaration line, never a body. Three consumers share the
 //! renderer: `ds info` prints a whole package's surface, the LSP hover
@@ -16,7 +16,7 @@ use ds_parse::{
 use crate::{ctx::Ctx, expr, ty};
 
 /// One member's public surface: every `pub` item's signature, in source
-/// order (G4). The `src` is the member's own source text — a binding's
+/// order. The `src` is the member's own source text — a binding's
 /// pattern and initializer render through the expression renderer, which
 /// reads string literals verbatim.
 pub fn member(out: &mut String, src: &str, ast: &Ast) {
@@ -48,7 +48,7 @@ pub fn item(out: &mut String, src: &str, item: &Item) {
 fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
     match &item.kind {
         ItemKind::Fn(f) => fn_signature(out, ctx, f, "pub fn"),
-        // the bind target rides between `extern` and `fn` (H5), the
+        // the bind target rides between `extern` and `fn`, the
         // declaration's own re-quote discipline
         ItemKind::ExternFn(f) => {
             let prefix = match &f.bind {
@@ -59,7 +59,7 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
         },
         ItemKind::Local(local) => {
             // A bodied top-level fn is the converted const-arrow binding
-            // of one lambda (F2), so the .dsi renders its fn signature;
+            // of one lambda, so the .dsi renders its fn signature;
             // a plain binding renders its names and annotation alone.
             if let (
                 Pattern::Binding { name, .. },
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(again, out, "the surface is a fixed point");
     }
 
-    /// A bodied generic fn is the converted const-arrow binding (F2),
+    /// A bodied generic fn is the converted const-arrow binding,
     /// so its surface line renders through the lambda's own parts —
     /// the generic parameters included, a line missing them failing
     /// DS2004 at the re-parse (the type variables unknown).

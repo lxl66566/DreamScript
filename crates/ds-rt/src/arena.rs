@@ -1,4 +1,4 @@
-//! Per-frame bump arena over an append-only chunk list (C4/H4).
+//! Per-frame bump arena over an append-only chunk list.
 
 use core::{
     alloc::Layout,
@@ -66,7 +66,7 @@ impl Mark {
     }
 }
 
-/// A bump arena for non-escaping temporaries (C4/H4).
+/// A bump arena for non-escaping temporaries.
 ///
 /// Allocation is pointer addition in the current chunk. Growth appends a new
 /// chunk; existing chunks are never reallocated, so every address handed out
@@ -145,8 +145,8 @@ fn ladder_at_least(size: usize) -> usize {
     cap
 }
 
-/// Snapshot of arena memory state, for the residency accounting M4's acceptance
-/// requires and for tests.
+/// Snapshot of arena memory state, for the residency accounting the
+/// runtime keeps and for tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ArenaStats {
     /// Number of chunks currently in the bump list.
@@ -161,7 +161,7 @@ pub struct ArenaStats {
 }
 
 // SAFETY: the arena uniquely owns its chunks; moving it to another thread moves
-// that ownership (fibers are thread-confined [C4], transferred whole under E3).
+// that ownership (fibers are thread-confined, transferred whole on fork-join).
 // `Sync` is deliberately not implemented: allocation mutates through `&self`.
 unsafe impl Send for Arena {}
 
@@ -257,7 +257,7 @@ impl Arena {
             }
         }
         // Slow path: append a new chunk (never realloc an existing one, so
-        // addresses already handed out stay stable [C4/H4]).
+        // addresses already handed out stay stable).
         let (cap, chunk_align) = if dedicated || fit > MAX_CHUNK {
             (fit, align.max(MIN_ALIGN))
         } else {
@@ -360,7 +360,7 @@ impl Arena {
     }
 
     /// Frees everything allocated after `mark` by resetting the bump cursor
-    /// (C4: "reclamation a restore on frame pop").
+    /// (reclamation is a restore on frame pop).
     ///
     /// Chunks appended after the mark's chunk are canonical ladder-sized ones
     /// (kept in the per-arena free list for reuse, which bounds the memory of

@@ -1,4 +1,4 @@
-//! Opcode census over the benchmark kernels: the BL-4 evidence tool.
+//! Opcode census over the benchmark kernels: the superinstruction evidence tool.
 //!
 //! Every `benchmarks/kernels/*.ds` goes through the chain `ds run` uses — the
 //! `ds-stdlib` ambient, script-mode parse, `ds_check::analyze`, the platform
@@ -135,7 +135,7 @@ struct PairRow {
     family: Option<&'static str>,
 }
 
-/// The BL-4 candidate families, in the column order the report prints them.
+/// The superinstruction candidate families, in the column order the report prints them.
 const FAMILIES: [&str; 4] = ["compare-branch", "tag-branch", "load-compare", "load-op"];
 
 fn stem(path: &Path) -> String {
@@ -539,7 +539,7 @@ fn block_weights(blocks: &[Block], loops: &[LoopRow]) -> Vec<u128> {
     weights
 }
 
-/// The BL-4 candidate family an adjacent pair falls in, if any.
+/// The superinstruction candidate family an adjacent pair falls in, if any.
 fn family(first: Uop, second: Uop) -> Option<&'static str> {
     // the comparison majors, tested against one uop at a time: the
     // compare-branch arm reads `first`, the load-compare arm `second`

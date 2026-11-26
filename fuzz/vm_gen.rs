@@ -45,7 +45,7 @@
 //! staging site), the trait-defaults pair (a concrete pad leaf whose
 //! signature carries the defaulted member's word, and a generic pad
 //! serving body whose nested `$evidence` site stages the trait's
-//! declared default among the real arguments — the F7 discipline — the
+//! declared default among the real arguments, the
 //! entry's two spellings staging the same count, an occasional drift
 //! leg answering the structured arity trap), and the deinit-claim child
 //! (a claimed string word with its establishment band, a countdown loop
@@ -1709,7 +1709,7 @@ fn emit_defaults_leaf(index: usize) -> Function {
 /// member's word, and the pair area's three words as trailing
 /// parameters; the body re-stages the receiver plus the trait's declared
 /// default at its nested `$evidence` sentinel site — the omitted default
-/// stages inside the real arguments (F7), the riders trailing — and the
+/// stages inside the real arguments, the riders trailing — and the
 /// evidence word it copies verbatim from its own frame names the
 /// concrete leaf.
 fn emit_defaults_serving(index: usize) -> Function {

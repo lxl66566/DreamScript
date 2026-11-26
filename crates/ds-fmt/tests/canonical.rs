@@ -1,4 +1,4 @@
-//! Canonical-form suite: the zero-option rulings of the record (addendum 6.1)
+//! Canonical-form suite: the zero-option form as observable behavior — square-bracket generics,
 //! as observable behavior — square-bracket generics, no angle form, no
 //! trailing commas, 2-space indent, no wrapping, one trailing newline, string
 //! literals verbatim.
@@ -149,7 +149,7 @@ fn string_literals_verbatim() {
 #[test]
 fn numeric_separators_are_canonicalized_away() {
     // The AST stores separator-free digit text; the canonical form is the
-    // compact spelling (B7: separators are input laxity).
+    // compact spelling (separators are input laxity).
     assert_eq!(
         fmt_once("t.ds", "const a = 1_000_000i64\n"),
         "const a = 1000000i64\n"
@@ -181,7 +181,7 @@ fn inline_containers_stay_inline_multiline_open_up() {
 fn converted_fns_render_as_fn() {
     // A top-level `fn` converts onto the const-declaration node (one
     // binding of one lambda); the formatter renders that shape back as
-    // the fn spelling — the one named-function form [F2].
+    // the fn spelling — the one named-function form.
     assert_eq!(
         fmt_once("t.ds", "fn  speak ( self ) ->  string { \"\" }\n"),
         "fn speak(self) -> string { \"\" }\n"

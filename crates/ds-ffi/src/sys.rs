@@ -1,4 +1,4 @@
-//! The OS loader primitives, raw and cfg-split (H5): dlopen/dlsym/dlclose
+//! The OS loader primitives, raw and cfg-split: dlopen/dlsym/dlclose
 //! over the platform libc on Unix, LoadLibraryW/GetProcAddress/FreeLibrary
 //! over kernel32 on Windows — no loader crate between the binding and the
 //! system, so nothing unvetted enters the dependency policy's queue. The

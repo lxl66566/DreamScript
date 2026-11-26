@@ -1,10 +1,10 @@
-//! The comptime declaration surface through the checker (G1, G2): a
+//! The comptime declaration surface through the checker: a
 //! free fn whose parameters are all `comptime name: type` checks clean
 //! with type names as argument values, the reflection builtins answer
-//! inside its body, a scalar-annotated comptime parameter (round two's
-//! literal staging) checks clean beside them, and every other shape
-//! refuses at its own door — a `type` annotation without the comptime
-//! mode (DS2030), a comptime parameter off the round's shape (DS2031),
+//! inside its body, a scalar-annotated comptime parameter checks clean
+//! beside them, and every other shape refuses at its own door — a `type`
+//! annotation without the comptime mode (DS2030), a comptime parameter
+//! outside that shape (DS2031),
 //! and a reflection builtin outside a comptime evaluation context
 //! (DS2032).
 
@@ -172,7 +172,7 @@ fn main() -> () {{
     let analyzed = analyze_source("runtime_type_value.ds", &source);
     let rendered = messages(&analyzed);
     // the declaration carries DS2030, the call's type-value argument adds
-    // the G2 refusal outside any comptime context
+    // the refusal outside any comptime context
     assert!(
         rendered.iter().any(|m| m.starts_with("DS2032")),
         "the type-value argument refuses outside comptime: {rendered:?}"

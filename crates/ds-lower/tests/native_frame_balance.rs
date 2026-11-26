@@ -1,4 +1,4 @@
-//! The staged-native borrow window in non-root frames (C4): a plain
+//! The staged-native borrow window in non-root frames: a plain
 //! native tail-called from a `fn` frame lowers in place (CALL + RET), so
 //! the post-call flush drops the staged borrows and the return's exit
 //! drops the rest — the CALLT-to-native path pops the frame inside the

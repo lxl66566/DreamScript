@@ -1,4 +1,4 @@
-//! The G4 visibility tiers and import surface over one package:
+//! The visibility tiers and import surface over one package:
 //! private is the defining file's alone, `pub(pkg)` opens the package,
 //! `pub` opens dependents (the `.dsi` gate), an `@`-sigil import's
 //! selections validate against the exported surface, a bare-path import
@@ -126,8 +126,7 @@ fn the_private_tier_covers_types_and_enum_cases() {
 /// An `@`-sigil import's selection validates against the exported
 /// surface: a `pub` name selects clean, a `pub(pkg)` or private name
 /// refuses as not exported, and a name no member declares refuses as
-/// missing. The compile unit's merged namespace serves the `@std`
-/// member this round.
+/// missing. The compile unit's merged namespace serves the `@std` member.
 #[test]
 fn import_selections_validate_against_the_exported_surface() {
     let sources = vec![

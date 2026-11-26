@@ -16,7 +16,7 @@ const BLOCK0: &str = "const a = 1";
 const BLOCK1: &str = "\nconst b = 2";
 
 /// Test marker for the real TypeOf key, overridden with a compute that
-/// models an M2-style downstream query keyed by block, reading that
+/// models a downstream query keyed by block, reading that
 /// block's source. Also proves consumers can implement `Query` for their
 /// own markers outside the crate and replace registered computes.
 struct TypeOf;
@@ -385,7 +385,7 @@ fn conformance_file_parses_and_edits_block_grain() {
     let mut db = db_with_downstream_queries();
     let file = db.add_file("types_hybrid.ds", TYPES);
 
-    // The corpus file parses clean and is one block [G3: no separators].
+    // The corpus file parses clean and is one block.
     let parse = db.get::<ParseFile>(file).unwrap();
     assert!(parse.ast.is_some());
     assert!(parse.diagnostics.is_empty());
@@ -510,8 +510,8 @@ fn cycle_recovery_after_fixing_the_compute() {
     assert_eq!(&*parse.source, TWO_BLOCKS);
 }
 
-/// Test marker for the placeholder Lower key: unregistered until its
-/// milestone, so asking for it is [`QueryError::Unavailable`].
+/// Test marker for the placeholder Lower key: unregistered, so asking for
+/// it is [`QueryError::Unavailable`].
 struct Lower;
 
 impl Query for Lower {

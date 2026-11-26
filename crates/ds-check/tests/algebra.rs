@@ -1,4 +1,4 @@
-//! Exhaustive algebra-law checks over a fixed 7-atom, 2-trait universe [B1].
+//! Exhaustive algebra-law checks over a fixed 7-atom, 2-trait universe.
 //!
 //! The semantic space of the fixture universe is 2^7 = 128 solved types, so
 //! the laws run over all of them: every ordered pair (128x128) and, where the
@@ -37,7 +37,7 @@ fn fixture() -> Fixture {
     Fixture {
         universe,
         // [none, type, io, ...]: the builtin `type` atom rides beside none
-        // in every universe (G1, G2), a member of no trait.
+        // in every universe, a member of no trait.
         atoms: vec![none, TypeId::TYPE, io, missing, bad_port, config, txt],
         traits: [sendable, hashable],
         membership: [(1 << 2) | (1 << 3), (1 << 3) | (1 << 4)],

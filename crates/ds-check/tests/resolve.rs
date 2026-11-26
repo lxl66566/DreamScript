@@ -1,4 +1,4 @@
-//! Name resolution over the parsed surface [G3, F3, F9]: collection into
+//! Name resolution over the parsed surface: collection into
 //! the package's type and value namespaces, local scoping and shadowing,
 //! UFCS tier order, trait-path qualification, whole-package cycles,
 //! duplicate and unknown diagnostics, the call-form ambiguity between the
@@ -11,11 +11,10 @@ use ds_parse::{Ast, parse};
 const SOURCE: &str = include_str!("../../../conformance/types_hybrid.ds");
 
 /// Ambient stdlib stubs for the corpus file, mirroring the shared
-/// ambient's ownership of the failure taxonomy plus the types_hybrid
-/// list (`read_file`, `parse_json`, the `map`/`list` types); the M3
-/// stdlib owns their real spellings. The config type and the
-/// `log`/`default_config`/`get` externs are the corpus file's own (the
-/// ambient shed its dead declarations and its demo residue).
+/// ambient's ownership of the failure taxonomy plus the types_hybrid list
+/// (`read_file`, `parse_json`, the `map`/`list` types); the stdlib owns
+/// their real spellings. The config type and the
+/// `log`/`default_config`/`get` externs are the corpus file's own.
 const AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag float\n",
@@ -189,10 +188,10 @@ fn collects_every_declaration_kind() {
 
 #[test]
 fn duplicate_definitions_name_both_spans() {
-    // A cross-file tag shadow declares clean since F9.5: the shadowing
-    // file resolves its own declaration, the shared namespace keeps the
-    // first. The same-file redeclaration and every other family keep
-    // the two-span refusal.
+    // A cross-file tag shadow declares clean: the shadowing file resolves
+    // its own declaration, the shared namespace keeps the first. The
+    // same-file redeclaration and every other family keep the two-span
+    // refusal.
     let mut files = Files::new();
     let a = files.add_source("a.ds", "tag dup\nconst one = ()\n");
     let b = files.add_source("b.ds", "tag dup\n");
@@ -259,7 +258,7 @@ fn locals_shadow_and_nest() {
     let param_use = span_of(src, file, "x", 1);
     let param_bind = span_of(src, file, "x", 0);
     assert_eq!(uses.get(param_use), Some(&Res::Local { bind: param_bind }));
-    // Recursion: the defined name is in scope in its own body [F2].
+    // Recursion: the defined name is in scope in its own body.
     let rec_use = span_in(src, file, "rec(n)", 0, "rec");
     assert_eq!(
         *uses.get(rec_use).unwrap(),
@@ -434,9 +433,9 @@ fn trait_path_qualification_resolves_directly() {
 
 #[test]
 fn two_file_mutual_references_resolve() {
-    // Intra-package cycles are legal [G3]: resolution is name lookup over
+    // Intra-package cycles are legal: resolution is name lookup over
     // the complete tables, not dependency ordering. The cross-file names
-    // are `pub` — a private name is its defining file's alone [G4].
+    // are `pub` — a private name is its defining file's alone.
     let f = fixture(&[
         ("a.ds", "pub tag t\npub fn even(n: t) -> t { odd(n) }\n"),
         ("b.ds", "pub fn odd(n: t) -> t { even(n) }\n"),
@@ -566,7 +565,7 @@ fn patterns_bind_scopes_and_flag_duplicates() {
     assert_eq!(f.collect, Vec::new());
     let (_, diags) = f.resolve(0);
     // Exactly one error: the tuple pattern binds `c` twice in one scope.
-    // The or-pattern rebind is one binding [F4]; the block-local `b`
+    // The or-pattern rebind is one binding; the block-local `b`
     // shadows the arm binder (nested, allowed); `stop` is a case path.
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0].code, ErrorCode::DuplicateDefinition);
@@ -673,7 +672,7 @@ fn conformance_types_hybrid_resolves_fully() {
     );
 }
 
-/// The namespace split [F9]: a same-named struct and function coexist —
+/// The namespace split: a same-named struct and function coexist —
 /// collection accepts both, the brace form resolves the struct, a bare
 /// use resolves the function, and the UFCS dot position (a function
 /// position) resolves the function. Calling the shared name is the
@@ -704,17 +703,17 @@ fn same_named_struct_and_function_coexist() {
         },
         other => panic!(".page should hit the free tier: {other:?}"),
     }
-    // A bare use of a same-named pair is value-first [F9].
+    // A bare use of a same-named pair is value-first.
     assert_eq!(
         uses.get(span_in(src, file, "const bare = page", 0, "page")),
         Some(&Res::Def(f.package.lookup_value("page").unwrap()))
     );
 }
 
-/// Tag names left the value namespace (F9.5): a tag and a fn share a
+/// Tag names left the value namespace: a tag and a fn share a
 /// label without ambiguity — the call form always means the fn, and a
-/// bare use stays value-first. The constructor families keep F9's
-/// residual class: a struct beside the fn is still the DS2014 call-form
+/// bare use stays value-first. The constructor families keep the
+/// DS2014 class: a struct beside the fn is still the call-form
 /// collision naming both declarations.
 #[test]
 fn call_form_of_a_tag_label_means_the_value() {
@@ -765,7 +764,7 @@ fn call_form_collision_with_a_constructor_is_an_ambiguity_error() {
     let _ = uses;
 }
 
-/// Constructor positions resolve against the type namespace only [F9]:
+/// Constructor positions resolve against the type namespace only:
 /// the generic-application head and its bracketed argument are type uses,
 /// and a struct pattern's head is a constructor reference.
 #[test]
@@ -839,7 +838,7 @@ fn inherent_methods_key_by_owner_type() {
     // its impl's target type, like a trait member keys by its trait: two
     // owners may share one method name. Registration needs no lookup —
     // the owner travels as its name — so an impl may sit in a file added
-    // before the target type's own file [G3].
+    // before the target type's own file.
     let f = resolve_one(concat!(
         "pub tag unit_one\n",
         "pub struct a { v: unit_one }\n",
@@ -1058,7 +1057,7 @@ fn a_duplicate_module_alias_keeps_the_first_binding_usable() {
     assert_eq!(resolutions.len(), 1, "the use still resolved");
 }
 
-/// A linked const binds through its literal fact (G4): the value is the
+/// A linked const binds through its literal fact: the value is the
 /// fact, so a selection registers a const def the file's uses reach with
 /// no linked-module machinery, the alias-qualified spelling binds the
 /// same def in value position, while the alias's call form, a computed
@@ -1114,7 +1113,7 @@ fn a_linked_const_binds_through_its_literal_fact() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             entry(
                 "limit",
@@ -1202,7 +1201,7 @@ fn a_linked_const_binds_through_its_literal_fact() {
     );
 }
 
-/// A linked type binds through its structural fact (G4): the fact
+/// A linked type binds through its structural fact: the fact
 /// registers the type from the member's surface — before any selection
 /// validates, so a signature's type head never depends on the file's
 /// import order — the selection binds a struct def the file's type
@@ -1300,7 +1299,7 @@ fn a_linked_type_registers_before_selections_validate() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             fn_entry("make", "n", "int", "cell"),
             fn_entry("area", "c", "cell", "int"),
@@ -1354,14 +1353,14 @@ fn a_linked_type_registers_before_selections_validate() {
     );
 }
 
-/// A linked zero-field struct binds through its empty word layout (G4):
+/// A linked zero-field struct binds through its empty word layout:
 /// an `pub struct x { }` fact carries no fields yet mints the def an
 /// annotation, a return position, and an empty construction answer
 /// exactly like a local declaration. The un-merge's first migrants' own
 /// wider shapes — the alias, the optional-field struct, the opaque
-/// bodiless struct, the list-initialized const — bind through the
-/// artifact round's widened vocabulary, the next test's rows; the e2e
-/// pins them end to end over the real surface.
+/// bodiless struct, the list-initialized const — bind through the wider
+/// vocabulary the next test's rows pin; the e2e pins them end to end
+/// over the real surface.
 #[test]
 fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
     let mut files = Files::new();
@@ -1382,7 +1381,7 @@ fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![ds_check::ForeignEntry {
             name: "response".to_owned(),
             origin: None,
@@ -1447,7 +1446,7 @@ fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
     );
 }
 
-/// The artifact round's first widened shapes bind at the same walk (G4):
+/// The widened shapes bind at the same walk:
 /// an alias registers as the alias def its use sites expand, an
 /// optional-field struct registers like any flat struct, the bodiless
 /// struct registers its opaque identity, and a list-literal const
@@ -1509,7 +1508,7 @@ fn the_widened_link_shapes_bind_at_the_walk() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             entry(
                 "row",
@@ -1647,7 +1646,7 @@ fn the_widened_link_shapes_bind_at_the_walk() {
     );
 }
 
-/// A linked enum case named `none` registers beside its enum (G4): the
+/// A linked enum case named `none` registers beside its enum: the
 /// reserved-atom mapping owns both sides — the mint maps the colliding
 /// unit case onto the predeclared none atom exactly like a local case's
 /// mint, so the case's values are this compile's own `none` words and a
@@ -1702,7 +1701,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             ty_entry(
                 "presence",
@@ -1803,7 +1802,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![struct_named_none],
     };
     let mut imports = ds_check::ImportGraph::new();
@@ -1827,7 +1826,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
 }
 
 /// Resolves one source over a linked member surface whose only entry is
-/// the fact-carrying struct `cell` (G4): the fixture the linked tier's
+/// the fact-carrying struct `cell`: the fixture the linked tier's
 /// receiver and impl seams share.
 fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
     let mut files = Files::new();
@@ -1837,7 +1836,7 @@ fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![ds_check::ForeignEntry {
             name: "cell".to_owned(),
             vis: ds_check::Vis::Pub,
@@ -1878,8 +1877,8 @@ fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
     diags
 }
 
-/// A linked type name as a dot-call receiver enters the type-keyed tier
-/// (G4): the receiver walk consults the file's import bindings after the
+/// A linked type name as a dot-call receiver enters the type-keyed tier:
+/// the receiver walk consults the file's import bindings after the
 /// package namespace, so a member the linked type does not carry refuses
 /// at the check with the same DS2004 the local spelling answers — not
 /// the value tiers' acceptance the lowering must catch.
@@ -1902,7 +1901,7 @@ fn a_linked_type_receiver_refuses_its_members_at_the_check() {
     );
 }
 
-/// An inherent impl over a linked type binds at the declaration (G4):
+/// An inherent impl over a linked type binds at the declaration:
 /// the minted def answers the layout seams, so the consumer's own impl
 /// members register under the linked name and dispatch against the
 /// minted atom exactly like a local impl — the body compiles in this
@@ -1923,7 +1922,7 @@ fn an_impl_over_a_linked_type_binds_at_the_declaration() {
     assert!(diags.is_empty(), "the impl resolves clean: {diags:?}");
 }
 
-/// A linked enum registers exactly like a local declaration (G4): the
+/// A linked enum registers exactly like a local declaration: the
 /// enum's fact registers the enum def and each case's fact its own case
 /// def beside it — one name owner per type-namespace name — the
 /// selections bind all of them into the file, and the declaration pass
@@ -2027,7 +2026,7 @@ fn a_linked_enum_registers_its_cases_beside_it() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             fn_entry("make", "n", "int", "tone"),
             ty_entry(
@@ -2196,7 +2195,7 @@ fn resolve_pub_import(source: &str) -> (Package, Vec<Diagnostic>) {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
-            inherent: Vec::new(),
+        inherent: Vec::new(),
         entries: vec![
             entry("helper", ds_check::ForeignKind::Fn, Some(3)),
             entry("limit", ds_check::ForeignKind::Fn, Some(4)),
@@ -2228,7 +2227,7 @@ fn resolve_pub_import(source: &str) -> (Package, Vec<Diagnostic>) {
     (package, diags)
 }
 
-/// A `pub import` row's bound selections record as re-exports (G4's
+/// A `pub import` row's bound selections record as re-exports (the
 /// transitive surface closure): each binding carries the foreign def,
 /// the bound name (an alias's spelling included), and the row's own
 /// span, while a private row's binding of the same surface records
@@ -2270,9 +2269,9 @@ fn a_pub_import_records_its_bindings_as_reexports() {
     );
 }
 
-/// The `pub import` rows that bind nothing refuse at their own seams
-/// (G4): a selectionless row re-exports nothing, `pub(pkg)` on an
-/// import names nothing (imports are already package-wide), and a `pub
+/// The `pub import` rows that bind nothing refuse at their own seams:
+/// a selectionless row re-exports nothing, `pub(pkg)` on an import
+/// names nothing (imports are already package-wide), and a `pub
 /// import` of `@std` re-exports nothing under the merged-ambient
 /// reading — each a VisNoTarget naming the empty target.
 #[test]

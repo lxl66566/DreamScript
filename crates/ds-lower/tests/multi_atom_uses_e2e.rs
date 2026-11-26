@@ -1,4 +1,4 @@
-//! The multi-atom use matrix, end to end (todo item 18): a union value
+//! The multi-atom use matrix, end to end: a union value
 //! used whole binds, copies, passes, returns, and compares against
 //! another union or a unit tag from either side — and every use that
 //! needs one member (arithmetic, a narrowed call argument, interpolation,

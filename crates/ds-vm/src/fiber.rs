@@ -1,18 +1,18 @@
-//! Fibers as interpreter data [E2]: the VM pool, per-fiber segments, and
+//! Fibers as interpreter data: the VM pool, per-fiber segments, and
 //! the switching vocabulary. A fiber is not an OS thread — the pool is
 //! single-threaded, spawn allocates a pool entry with a fresh segment, and
 //! a switch swaps segment, call-chain, and heap-store ownership between
 //! the running fiber's pool slot and the VM's execution context: three
-//! buffer swaps, no word or object ever copied [E2: switch is O(1)].
+//! buffer swaps, no word or object ever copied (a constant-time switch).
 //!
-//! # Segments: chunk-append growth [H2]
+//! # Segments: chunk-append growth
 //!
 //! A fiber's value-stack segment is a list of fixed-capacity chunks. Growth
 //! appends a chunk and never reallocates the ones before it, so a word's
 //! address (chunk base + offset) survives any later growth — the stability
 //! guarantee deep non-tail recursion and captured frame addresses rely on.
 //! This is the same chunk-append discipline the runtime's per-fiber arenas
-//! use [H4]: arena marks are per-fiber and fiber switching needs no arena
+//! use: arena marks are per-fiber and fiber switching needs no arena
 //! action; here the segment is per-fiber and switching needs no segment
 //! action beyond the ownership swap.
 //!
@@ -81,7 +81,7 @@ pub enum FiberState {
     /// branch decides the same; no call site stands, so a resume drops
     /// its payload instead of writing an overlay word.
     Preempted,
-    /// Parked on a world op (the 2026-11-21 scheduler ruling): the op
+    /// Parked on a world op: the op
     /// would block, so the fiber parks with a resume point shaped like
     /// `Suspended`'s (after the op for a plain call, the pending
     /// return's continuation for a tail call), but only the scheduler
@@ -114,7 +114,7 @@ pub(crate) struct ResumePoint {
 /// holds scratch; every other time they live here.
 #[derive(Debug)]
 pub(crate) struct Fiber {
-    /// The fiber's value-stack segment [H2: chunk-append growth].
+    /// The fiber's value-stack segment (chunk-append growth).
     pub(crate) segment: Segment,
     /// The fiber's frame arena: the bytes behind its designated
     /// concatenation temporaries. It lives in the pool slot and never
@@ -125,7 +125,7 @@ pub(crate) struct Fiber {
     /// The fiber's heap object store: the id table, the free list, the
     /// intern map, and ds-rt's block pools — one store per fiber, so a
     /// block and its count are only ever touched by the thread driving
-    /// that fiber [C4]. The slot's store persists across pool reuse: a
+    /// that fiber. The slot's store persists across pool reuse: a
     /// foreign-held object outlives its dead owner, and the next spawn
     /// continues the id space.
     pub(crate) objects: Objects,
@@ -139,7 +139,7 @@ pub(crate) struct Fiber {
     pub(crate) state: FiberState,
     /// The fiber that resumed this one; `None` = the host.
     pub(crate) resumer: Option<FiberId>,
-    /// The nursery this fiber was spawned into (the child-of link [E2]);
+    /// The nursery this fiber was spawned into (the child-of link);
     /// `None` = the root fiber or a detached spawn (no live root nursery —
     /// the host is the supervisor).
     pub(crate) nursery: Option<NurseryId>,
@@ -148,7 +148,7 @@ pub(crate) struct Fiber {
     /// (open, a race, this owner), so a value left behind by an ended
     /// race names nothing.
     pub(crate) race: Option<NurseryId>,
-    /// The fiber's private error-trace ring [H7]: the failing frame's
+    /// The fiber's private error-trace ring: the failing frame's
     /// position per `?` error leg the fiber took, innermost first,
     /// bounded (the oldest hop drops past the cap). Nothing an error
     /// value carries — the trace is the trap layer's diagnostic alone.
@@ -204,7 +204,7 @@ impl Fiber {
 
 /// A per-fiber value-stack segment: fixed-capacity chunks appended on
 /// growth, never reallocated, so existing words keep their addresses across
-/// any later growth [H2]. Frames may straddle chunk boundaries — indexing
+/// any later growth. Frames may straddle chunk boundaries — indexing
 /// maps each word to its own chunk. Each chunk is one fixed-length array
 /// behind its own box, so a slot access is one chunk-base load and the
 /// offset add: the shift-and-mask split proves the in-chunk index in

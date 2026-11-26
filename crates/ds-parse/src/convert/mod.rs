@@ -46,7 +46,7 @@ pub(crate) struct Ctx {
 }
 
 /// Converts the `file` pair into an [`Ast`]; `script` folds the entry file's
-/// top-level statements into one synthesized `main` binding (G3's script
+/// top-level statements into one synthesized `main` binding (the script
 /// entry), while library mode rejects them as diagnostics.
 pub(crate) fn convert(
     file: FileId,
@@ -72,7 +72,7 @@ pub(crate) fn convert(
     if ctx.diags.is_empty() { Ok(ast) } else { Err(ctx.diags) }
 }
 
-/// Attaches `///` doc runs (G3): every item's [`Item::doc`] becomes the
+/// Attaches `///` doc runs: every item's [`Item::doc`] becomes the
 /// maximal `///` run immediately preceding the item, and the same rule
 /// fills the member and field slots inside it (trait/impl member `fn`s,
 /// struct fields, enum-case payload fields). A post-pass over the finished
@@ -260,8 +260,8 @@ fn script_stmt_of(item: Item) -> Result<Stmt, Box<Item>> {
 }
 
 /// A top-level expression statement: script mode collects it for the
-/// synthesized `main`; library mode rejects it (G3's pure-declaration
-/// rule holds everywhere but the entry file).
+/// synthesized `main`; library mode rejects it (the pure-declaration rule
+/// holds everywhere but the entry file).
 fn script_stmt_expr(ctx: &mut Ctx, c: Pair<'_, Rule>, pending: &mut Vec<Trivia>) -> Option<Stmt> {
     let span = ctx.span(&c);
     if !ctx.script {
@@ -650,8 +650,8 @@ impl Ctx {
                             } else if a.as_str() == "==" {
                                 // The one non-path derive spelling: a
                                 // one-segment path named `==`, so the
-                                // derive engine refuses it with B9's
-                                // diagnostic instead of a syntax error.
+                                // derive engine refuses it with the equality
+                                // refusal instead of a syntax error.
                                 let span = self.span(&a);
                                 args.push(Path {
                                     span,
@@ -682,7 +682,7 @@ impl Ctx {
         if p.as_str().contains('(') { Vis::PubPkg(span) } else { Vis::Pub(span) }
     }
 
-    /// One platform declaration (H5): a plain string literal's text names
+    /// One platform declaration: a plain string literal's text names
     /// the platform, and the optional provides list names its world
     /// capabilities. The name carries no escapes or interpolation holes —
     /// an interpolating or escaped literal is a parse error (DS1003).
@@ -843,7 +843,7 @@ impl Ctx {
         }
     }
 
-    /// A top-level `const`/`var` binding (F2): the const-declaration node
+    /// A top-level `const`/`var` binding: the const-declaration node
     /// stays the named-function representation downstream, but naming a
     /// lambda at the declaration site is retired — `fn` is the only
     /// named-function spelling, so a lambda initializer records DS1013 and
@@ -870,7 +870,7 @@ impl Ctx {
     /// A top-level `fn name(params) -> ret { body }` declaration converts
     /// onto the const-declaration node (a `const` of one lambda) — the
     /// shape the checker, lowerer, and entry staging consume; only the
-    /// source spelling is canonicalized (F2). A bodiless `fn` (signature
+    /// source spelling is canonicalized. A bodiless `fn` (signature
     /// position only) stays a [`FnDecl`].
     fn fn_item(&mut self, p: Pair<'_, Rule>) -> ItemKind {
         let fd = self.conv_fn(p.clone(), false);
@@ -915,7 +915,7 @@ impl Ctx {
                     }
                 },
                 Rule::block_expr => body = Some(self.block(c)),
-                // the extern's bind target (H5): one plain string literal,
+                // the extern's bind target: one plain string literal,
                 // the platform declaration's own discipline — an
                 // interpolation hole or an empty literal cannot name an
                 // artifact
@@ -1029,7 +1029,7 @@ impl Ctx {
         out
     }
 
-    /// Validates a default argument value as literal-only (F7): any literal
+    /// Validates a default argument value as literal-only: any literal
     /// (a plain string must be hole-free), or a `-`/`-%` applied to one
     /// numeric literal (a negative constant). Anything else records a
     /// diagnostic; the value still carries through.
@@ -1281,7 +1281,7 @@ impl Ctx {
                             },
                             Rule::member_const => {
                                 // Const-arrow members retire with fn-only
-                                // declarations [F2]: members are `fn`
+                                // declarations: members are `fn`
                                 // declarations, bodiless in traits.
                                 self.err(
                                     self.span(&m),
@@ -1379,7 +1379,7 @@ impl Ctx {
     }
 
     /// Converts an impl-body `fn` declaration. A `const`/`var` member
-    /// (const-arrow included) retired with fn-only declarations (F2): it
+    /// (const-arrow included) retired with fn-only declarations: it
     /// records DS1010 and yields None — nothing is silently dropped.
     fn local_as_fn(&mut self, p: Pair<'_, Rule>) -> Option<FnDecl> {
         let local = self.conv_local(p);

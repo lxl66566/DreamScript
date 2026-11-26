@@ -1,4 +1,4 @@
-//! The net face's TLS tier (H5.5's ruling of 2026-11-17): https over
+//! The net face's TLS tier: https over
 //! rustls as a platform capability the host selects or omits — never
 //! builtin and never @std. `platform_module` installs these bodies only
 //! where the platform provides the tls capability: the `http_get` slot
@@ -12,25 +12,25 @@
 //! rather than installed as the process default so concurrent VMs in
 //! one process share no global crypto choice, and webpki-roots' static
 //! Mozilla set as the trust anchors — no system store and no client
-//! certs this round, an embedding host or test pinning its own roots
+//! certs, an embedding host or test pinning its own roots
 //! through [`crate::Vm::set_tls_config`].
 //!
 //! The blocking discipline is the net ops' own ([`crate::net`]): every
 //! wait rides the connection table's bounded socket timeouts, a
 //! blocking foreign call pinning its fiber. Both legs park under an
-//! installed reactor (linux this round): the plain leg through the
+//! installed reactor on Linux: the plain leg through the
 //! staged exchange machine, the rustls leg through the parked twin
 //! below — the session is a synchronous state machine, so the
 //! transport drives it a step per readiness wake, the session's own
 //! wants-write/wants-read naming the interest each step watches.
 //!
-//! The server half (ruled 2026-11-23) rides the same capability: the
+//! The server half rides the same capability: the
 //! host or test pins the rustls [`ServerConfig`] through
 //! [`crate::Vm::set_tls_server_config`] (no default identity — a
 //! server certificate is the host's own to pin, the unprovisioned
 //! call answering its own refusal), and `net_accept_tls` takes one
 //! pending connection off the bound listener and upgrades it over
-//! that identity — the staged handshake the client round's own shape
+//! that identity — the staged handshake the client leg's own shape
 //! (the same wants naming each wake's interest), the completion
 //! registering the accepted stream with its session so the connection
 //! owns the full `net_handle` face over the tls records, and a
@@ -205,8 +205,7 @@ impl Write for CloseTolerant {
     }
 }
 
-/// The parked TLS exchange's machine (the tls round of the 2026-11-23
-/// connect ruling): the rustls session over the staged connect's
+/// The parked TLS exchange's machine: the rustls session over the staged connect's
 /// transport, one `step` per readiness wake. The session is a
 /// synchronous state machine — `wants_write` names encrypted bytes it
 /// owes the socket, `wants_read` ciphertext it awaits, and its
@@ -259,8 +258,8 @@ impl TlsFetch {
 pub(crate) fn step(machine: &mut TlsFetch, net: &mut net::Connections) -> net::FetchWake {
     use crate::reactor::Direction;
     // the connect stage: the plain machine's own probe (the resolve
-    // step first, item 79 — a resolving row advancing at its posted
-    // eventfd, the direction passing through)
+    // step first — a resolving row advancing at its posted eventfd, the
+    // direction passing through)
     if !machine.connected {
         match net.connect_wake(machine.conn) {
             net::ConnectWake::Pending { watch } => return net::FetchWake::Pending { watch },
@@ -472,7 +471,7 @@ fn parked_tls_fetch(
 /// accepted connection's handle, the stream registering with its
 /// session so the connection owns the full `net_handle` face over
 /// the tls records. The ambient keeps the total spelling the
-/// deinit-carrying handle forces (C5), so a failed accept or
+/// deinit-carrying handle forces, so a failed accept or
 /// handshake halts on the net error line — `net_listen`'s own
 /// printing-halt pairing.
 pub(crate) fn net_accept_tls_fn(

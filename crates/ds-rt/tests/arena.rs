@@ -363,7 +363,7 @@ fn stale_mark_restore_panics() {
 // the fiber guards are named `<fiber>_<depth>` on purpose
 #[allow(clippy::similar_names)]
 fn per_fiber_arenas_interleave_without_cross_freeing() {
-    // H4: marks are per-fiber; a fiber owns its arena, so interleaving two
+    // marks are per-fiber: a fiber owns its arena, so interleaving two
     // fibers can never free the other's live data and needs no arena action at
     // the switch itself.
     let fiber_a = Arena::new();

@@ -273,7 +273,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 }
 
 /// The section an entry belongs to: nothing opened yet, `[deps]`, a
-/// `[deps.<name>]` subsection, or `[artifacts]` — the ruled sections, in
+/// `[deps.<name>]` subsection, or `[artifacts]` — the accepted sections, in
 /// that canonical order (the subsections sorted by name inside the deps
 /// zone, after the inline table).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -547,7 +547,7 @@ impl Parse {
         }
     }
 
-    /// `[deps]`, `[deps.<name>]`, and `[artifacts]` are the ruled
+    /// `[deps]`, `[deps.<name>]`, and `[artifacts]` are the accepted
     /// sections, in that order (the subsections sorted by name after the
     /// inline table); `[build]` is deferred (source builds wait on the
     /// pinned-toolchain reproducibility story, never permanently

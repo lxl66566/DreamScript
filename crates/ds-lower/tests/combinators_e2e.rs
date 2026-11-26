@@ -215,7 +215,7 @@ fn every_combinator_site_is_one_callg_with_list_evidence() {
     );
 }
 
-/// The combinators' retain contract balances across iterations (C4): a
+/// The combinators' retain contract balances across iterations: a
 /// loop driving map's adopted element counts, filter's borrowed
 /// elements, and reduce's owned-accumulator replacement — over `Ref`
 /// elements, the counted path — must keep every claim balanced, so the
@@ -382,8 +382,8 @@ fn main() -> int {
     );
 }
 
-/// The root frame's generic tail transfers through CALLTG [H2's guarantee
-/// closure]: the evidence words stage after the exit claims, the uop names
+/// The root frame's generic tail transfers through CALLTG: the evidence
+/// words stage after the exit claims, the uop names
 /// the real arguments, the one body runs inside the instruction, and the
 /// frame returns the body's result — the program's answer.
 #[test]
@@ -798,7 +798,7 @@ fn main() -> int {
     assert!(vm.objects().is_empty(), "the heap drains");
 }
 
-/// The fold's `Ref`-word balance across steps (C4): the accumulator
+/// The fold's `Ref`-word balance across steps: the accumulator
 /// span carries a `Ref` word (a string field), so each step's answer
 /// replaces the owned one per `Ref` word while the callable's copy-ins
 /// are claimed for the callee, and the empty fold hands the borrowed

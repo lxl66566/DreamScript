@@ -1,4 +1,4 @@
-//! The `ds bind` subcommand: H5's binding face over the packages store.
+//! The `ds bind` subcommand: the binding face over the packages store.
 //! Each `[artifacts]` library the manifest graph resolves installs
 //! content-addressed on the run path's own rule (a missing artifact
 //! refusing before anything binds), then binds: the host loader takes
@@ -7,7 +7,7 @@
 //! round will address. Binding reports the symbols the consumption seam
 //! routes calls through: a scalar-signature extern binds to the installed
 //! library and calls the symbol at run, the wider marshaling surface
-//! refusing at lowering with the seam named, and the H5 contract clauses
+//! refusing at lowering with the seam named, and the ABI contract clauses
 //! (a bound extern means panic=abort, a blocking foreign call pins its
 //! fiber) hold from the first bound library.
 

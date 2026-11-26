@@ -279,8 +279,8 @@ fn a_generic_tuple_element_iteration_drains_the_handed_counts() {
 /// index walk visits exactly the entry count and the appended elements
 /// stay unvisited this loop — the live-length read looped forever with
 /// no diagnostic. The body's direct `mut` window over the iterated
-/// binding now refuses at the check (DS3007, a diagnostic refinement
-/// over this ruling), so the pin reaches the same runtime through an
+/// binding refuses at the check (DS3007), so the pin reaches the same
+/// runtime through an
 /// aliased `var`: the alias's push mutates the shared list in place,
 /// which only the frozen count keeps terminating.
 #[test]

@@ -1,4 +1,4 @@
-//! The platform seam end to end (H5.5, E1): a package's platform
+//! The platform seam end to end: a package's platform
 //! declaration names the platform its world calls address — the lowered
 //! FuncRefs carry that name, so the host must install a platform under
 //! it (the build-target selection at link time), and the default `std`
@@ -167,8 +167,8 @@ fn tls_module() -> ds_mod::Module {
     read(&bytes).expect("the module round-trips")
 }
 
-/// The tls capability's call-site validation (H5.5's 2026-11-17
-/// ruling): an https call site's FuncRef validates against the host's
+/// The tls capability's call-site validation: an https call site's
+/// FuncRef validates against the host's
 /// tls membership at install — a tls-omitting platform under the
 /// declaration's name refuses with the structured capability error, the
 /// existing refusal diagnostic.

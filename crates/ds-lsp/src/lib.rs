@@ -64,7 +64,7 @@
 //!
 //! # Honest boundaries
 //!
-//! * One package is all open documents (G3's shared namespace): a duplicate name across two open
+//! * One package is all open documents (one shared namespace): a duplicate name across two open
 //!   files is reported in both, which is correct package semantics, not a server defect.
 //! * Script-mode files fail the library-mode parse (top-level statements are syntax errors); that
 //!   stays honest until the loading round.
@@ -362,7 +362,7 @@ fn word_at(src: &str, offset: u32) -> Option<(String, u32, u32)> {
     ))
 }
 
-/// The link name one import declaration links under (G3.5): an
+/// The link name one import declaration links under: an
 /// at-sigil path's package stem with the sigil, a bare path whole — the
 /// one rule the dep-list writer, the link positions, and the surface
 /// builder all derive from.
@@ -427,7 +427,7 @@ struct Session {
 
 impl Session {
     /// A session with the stdlib ambient registered as the package's
-    /// first member (G3): stdlib names resolve in every document, and
+    /// first member: stdlib names resolve in every document, and
     /// the ambient's file id never gains a client URI. The registration
     /// is the session composition — the run path's implicit-resolution
     /// shape — so a bare use of a migrated @std face answers hover and
@@ -740,8 +740,8 @@ impl Session {
     /// declaration itself when it names the definition — answered only
     /// for a `pub` package-level definition, the surface the spelling
     /// renders (locals, impl and trait members, and non-exported
-    /// declarations have no `.dsi` line; `pub(pkg)` and private stay out
-    /// by G4). The renderer is the one `ds info` prints, one item's
+    /// declarations have no `.dsi` line; `pub(pkg)` and private stay out).
+    /// The renderer is the one `ds info` prints, one item's
     /// signature over its own parse tree.
     fn surface(
         &mut self,
@@ -1871,7 +1871,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// The pooled-body refusal (E3) publishes in the editor like the
+    /// The pooled-body refusal publishes in the editor like the
     /// other classes: a `par_map` element body touching the world
     /// surface answers its diagnostic in the document.
     #[test]
@@ -1907,7 +1907,7 @@ mod tests {
     }
 
     /// Two open documents share one package namespace, so a duplicate
-    /// name is reported in both (correct G3 semantics, not a defect).
+    /// name is reported in both (correct package semantics, not a defect).
     #[test]
     fn duplicate_across_documents_reports_in_both() {
         let mut session = Session::new();
@@ -2131,7 +2131,7 @@ mod tests {
 
     /// A non-exported declaration has no `.dsi` line: hovering a use of
     /// it answers the checked expression alone, never a guessed surface
-    /// (`pub(pkg)` and private stay out of the .dsi by G4).
+    /// (`pub(pkg)` and private names stay out of the .dsi).
     #[test]
     fn hover_stays_honest_for_non_exported_declarations() {
         let mut session = Session::new();

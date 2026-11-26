@@ -130,19 +130,6 @@ const KERNELS: &[Kernel] = &[
 /// recorded by `PIN_BAKE_RECORD=1` on the committed tree. Every
 /// [`KERNELS`] entry must appear here exactly once — a kernel without
 /// a pin or a pin without a kernel fails the gate.
-// Re-baselined 2026-11-26 at the timer race's landing: the native
-// dispatch's third marker field and the answered-deadline VM shapes
-// moved the whole-process counts by up to 1.4% (mostly down, a
-// widened wake enum flipping an inlining decision), the loop kernels
-// by under 0.005%.
-// Re-baselined 2026-11-26 again at the racer fuel-quanta landing (item
-// 153): the back-edge deadline poll's countdown adds 2 Ir per taken
-// backward branch (3 where a kernel takes two back-edges per
-// iteration), +0.06% to +0.21% whole-process, six pins past the ±0.1%
-// band — the ruled cost of the never-parking racer's deadline cut. The
-// same recording absorbed a toolchain roll that had moved this host
-// +2.0% to +5.2% off the prior table, measured on the pristine tree
-// before this round's edit.
 const PINS: &[(&str, u64)] = &[
     ("scalar_loop::scalar_loop::scalar_dispatch", 6_485_912_913),
     ("strcat_temp::strcat_temp::serving_cats", 9_000_901_854),

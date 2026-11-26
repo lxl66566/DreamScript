@@ -1,5 +1,5 @@
-//! The typed side tables the lowering pass consumes [M3]: the
-//! per-expression type table (flow-refined inside `is` branches [B2]),
+//! The typed side tables the lowering pass consumes: the
+//! per-expression type table (flow-refined inside `is` branches),
 //! the binder facts, and the one-pass `analyze` bundle whose `Ty` handles
 //! all come from one universe.
 
@@ -132,7 +132,7 @@ fn call_spans(ast: &Ast) -> Vec<ds_diag::Span> {
 }
 
 /// The checker records every generic call's full instantiation at the
-/// call's own span [H3], in the declaration's parameter order — the
+/// call's own span, in the declaration's parameter order — the
 /// side table the lowering pass mints CALLG evidence words from. The
 /// UFCS spelling records through the same entry.
 #[test]
@@ -160,7 +160,7 @@ fn generic_calls_record_the_solved_instantiation() {
 
 /// A call whose generic parameter cannot solve from any argument reports
 /// the inference failure and records no partially-solved entry — no
-/// silent `any` fallback rides the side table [B1].
+/// silent `any` fallback rides the side table.
 #[test]
 fn unsolved_generic_calls_record_nothing() {
     let source = concat!(

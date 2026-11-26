@@ -92,7 +92,7 @@ pub(super) fn ref_hash(word: RefId) -> u32 {
     fnv_step(SEED_REF, &bytes)
 }
 
-/// The one word-equality judge the structural `==` family rides [B9]:
+/// The one word-equality judge the structural `==` family rides:
 /// floats compare bit-structurally (reflexive, total, `+0.0` and `-0.0`
 /// distinct), every other word by its derived equality. Collection
 /// content equality and map key matching answer through this judge, the
@@ -344,7 +344,9 @@ impl Objects {
         }
         // the fresh row's key must resolve on this store: a foreign word
         // refuses here, before any count moves, so the map is untouched
-        // (a content-equal foreign probe found above overwrites instead)
+        // (a content-equal foreign probe found above overwrites instead). The
+        // test sits at the store, not the router: only the store knows its own
+        // owner, so every direct caller of this seam is covered.
         if let Value::Ref(word) = key
             && word.fiber() != self.owner
         {

@@ -1,5 +1,5 @@
 //! The `map[k, v]()` constructor surface and `map_set`'s mut-window
-//! exclusivity [B3, D2]: builder-call construction through `var`
+//! exclusivity: builder-call construction through `var`
 //! receivers, the const-receiver rejection in both call spellings, and
 //! the checked reads over the hit and miss members.
 
@@ -53,7 +53,7 @@ fn map_set_builds_through_var_receivers() {
 #[test]
 fn map_set_rejects_const_receivers() {
     // a const binding may alias its shared heap word, so the mut window
-    // rejects it in both spellings [D2]
+    // rejects it in both spellings
     const REJECTED: &str =
         "DS3006 `m` is a `const` binding; a `mut` window needs a `var` receiver [D2, C3]";
     assert_eq!(
@@ -83,7 +83,7 @@ fn map_set_rejects_const_receivers() {
 
 #[test]
 fn map_reads_stay_borrowed() {
-    // reads take no window: a const receiver reads clean [C2]
+    // reads take no window: a const receiver reads clean
     assert_eq!(
         check(
             "fn f() -> string | none {\n  const m = map[string, string]()\n  map_get(m, \

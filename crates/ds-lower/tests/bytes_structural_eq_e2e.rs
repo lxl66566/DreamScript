@@ -1,4 +1,4 @@
-//! The bytes collection's structural `==`/`!=` end to end [B9]: the
+//! The bytes collection's structural `==`/`!=` end to end: the
 //! operands check clean through the string's one Ref word shape, and
 //! the chain dispatches on the bytes content-compare native — equal
 //! payloads compare equal whatever their object identity, a different

@@ -1,4 +1,4 @@
-//! The slot swap's staged-word re-check [H6 item 5]: a scalar callable
+//! The slot swap's staged-word re-check: a scalar callable
 //! word keys on the function-table index and resolution reads the name's
 //! current slot, so a swap whose incoming table moves or drops the
 //! indexed function must re-key the staged word (the transparent path)

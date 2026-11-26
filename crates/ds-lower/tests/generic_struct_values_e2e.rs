@@ -1,5 +1,5 @@
 //! A user-declared generic struct's values through its applications end
-//! to end [H3.5]: the application atom lays out as a bare struct over
+//! to end: the application atom lays out as a bare struct over
 //! the solved field signature — construction, field reads, a `var`
 //! re-assignment, union members and member arms naming the generic
 //! head, and free generic fns instantiating over the application's
@@ -353,8 +353,8 @@ fn a_generic_impl_member_dispatches_over_an_applied_receiver() {
 
 /// A deinit-carrying constructor's application refuses at the hook's
 /// own seam: the constructed value would claim the struct's deinit, and
-/// no per-shape hook instantiates this round — the CALL_GENERIC wording
-/// the generic struct's own binding keeps.
+/// no per-shape hook instantiates it — the CALL_GENERIC wording the
+/// generic struct's own binding keeps.
 #[test]
 fn a_deinit_carrying_constructor_refuses_at_the_hook_seam() {
     lower_refuses(

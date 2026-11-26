@@ -61,7 +61,7 @@ impl FnLower<'_, '_, '_> {
                 self.widen_into(&result, ty, &else_tp, else_expr.span())?;
             }
         } else {
-            // a missing else is the unit else [B2]: the checker already
+            // a missing else is the unit else: the checker already
             // types the if as the then-type united with unit
             let unit = self.unit_value(e.span())?;
             self.widen_into(&result, ty, &unit, e.span())?;
@@ -118,7 +118,7 @@ impl FnLower<'_, '_, '_> {
     /// argument, a struct member pattern's field): the tests run at the
     /// arm section's top and a mismatch slides to the next arm's
     /// dispatch entry, re-running its tag tests over the full scrutinee —
-    /// the B2 remainder rule's tag-dispatch form, no reordering — so a
+    /// the remainder rule's tag-dispatch form, no reordering — so a
     /// can-fail arm (value tests or a guard) needs a later arm it lands
     /// in.
     fn match_arms(
@@ -1452,14 +1452,14 @@ impl FnLower<'_, '_, '_> {
 
     /// The member atoms a pattern tests; empty for a catchall arm. A
     /// bare identifier names a member test when the type namespace
-    /// carries it [F9] — the same resolution the checker applies, so the
+    /// carries it — the same resolution the checker applies, so the
     /// two layers never disagree — and an or-pattern contributes every
     /// alternative's atom.
     fn pattern_atoms(&mut self, pat: &Pattern) -> Result<Vec<TypeId>, LowerError> {
         match pat {
             Pattern::Wildcard(_) => Ok(Vec::new()),
             Pattern::Binding { name, .. } => {
-                // The directed probe (F9.5) may resolve an arm's bare label
+                // The directed probe may resolve an arm's bare label
                 // to another declaration's atom than the first namespace
                 // holder; the checker's record is the arm's truth.
                 if let Some(atom) = self.directed_tag(name.span) {
@@ -1492,7 +1492,7 @@ impl FnLower<'_, '_, '_> {
                 "the dispatch resolves a member arm from the pattern's own shape, and a tuple \
                  pattern names no member; bind the member and destructure it in the arm body",
             )),
-            // a case constructor pattern names its case's atom [B3]: the
+            // a case constructor pattern names its case's atom: the
             // dispatch jumps in on the case's tag and the section tests
             // the pattern's payload sub-patterns over the case's claimed
             // region offsets
@@ -1508,7 +1508,7 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// The member atoms a pattern's head path tests: a bare label reads
-    /// the name-namespace atom, a qualified `type::label` (F9.5) the
+    /// the name-namespace atom, a qualified `type::label` the
     /// member the checker picked and recorded at the label's span.
     fn label_pattern_atoms(&self, path: &Path) -> Result<Vec<TypeId>, LowerError> {
         match path.segments.as_slice() {
@@ -1532,7 +1532,7 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// The member atom a pattern's head path names: a bare label reads the
-    /// name namespace, a qualified `type::label` (F9.5) the member the
+    /// name namespace, a qualified `type::label` the member the
     /// checker recorded at the label's span.
     fn pattern_head_atom(&self, path: &Path) -> Option<TypeId> {
         match path.segments.as_slice() {
@@ -1651,7 +1651,7 @@ impl FnLower<'_, '_, '_> {
         match pat {
             Pattern::Binding { span, name } => {
                 if self.binding_atom(&name.name).is_some() {
-                    // a bare tag arm tests membership [F9]; nothing binds
+                    // a bare tag arm tests membership; nothing binds
                     return Ok(());
                 }
                 // a union scrutinee whose place is the union's own tag
@@ -1893,7 +1893,7 @@ impl FnLower<'_, '_, '_> {
                         },
                         Pattern::Binding { span, name } => {
                             // an atom-named payload binding resolves
-                            // through the type namespace [F9], so it is a
+                            // through the type namespace, so it is a
                             // member test binding nothing — and the
                             // payload has no union of its own to test
                             // (union-typed payload fields refuse at their
@@ -1957,7 +1957,7 @@ impl FnLower<'_, '_, '_> {
     /// one word per element, bound in place (aliases, the const
     /// convention). A test position skips what the dispatch already
     /// tested: literal elements bind nothing, an atom-named element is
-    /// a member test binding nothing [F9], and an or-ladder element
+    /// a member test binding nothing, and an or-ladder element
     /// binds its last alternative's binders (the alternatives bind the
     /// same names on the same word) — the same resolution the checker's
     /// pattern walk applies, so the two layers never disagree.
@@ -1993,7 +1993,7 @@ impl FnLower<'_, '_, '_> {
                 Pattern::Wildcard(_) => {},
                 Pattern::Binding { span, name } => {
                     if arm && self.binding_atom(&name.name).is_some() {
-                        // an atom-named element is a member test [F9];
+                        // an atom-named element is a member test;
                         // nothing binds
                         continue;
                     }

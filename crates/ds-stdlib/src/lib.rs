@@ -1,8 +1,8 @@
 //! The DreamScript stdlib ambient: the checked-declaration layer that
-//! makes corpus sources check clean as-is (M3). The runtime half of the
+//! makes corpus sources check clean as-is. The runtime half of the
 //! stdlib is the ds-vm `builtin` native core (pure primitives, in every
 //! VM) plus the world surface served through the platform handler the
-//! host installs behind the platform declaration (H5.5, E1) — with the
+//! host installs behind the platform declaration — with the
 //! ds-source `@std` package layer beside it (the library-boundary
 //! un-merge: the members that migrated out of the ambient live in
 //! [`STD_MEMBERS_SOURCE`], the merged [`AMBIENT_SOURCE`] composing them
@@ -23,30 +23,30 @@
 //! * [`AMBIENT_SOURCE`]: one package member's text. The `ds check` driver registers it as a file
 //!   before the user's files (`--no-ambient` turns it off), and the standard pipeline declares it —
 //!   parse, resolve, the declaration tables, the bidirectional check. A file that redeclares an
-//!   ambient name in the same namespace is a duplicate-definition error (G3, F9), so self-contained
-//!   packages check with `--no-ambient`.
+//!   ambient name in the same namespace is a duplicate-definition error, so self-contained packages
+//!   check with `--no-ambient`.
 //! * [`declared_rows`]: the [`ds_check::DeclaredRows`] table of the ambient functions — the
-//!   effect-row surface v1 has no syntax for (E1). The rows enter through the ds-query database's
+//!   effect-row surface v1 has no syntax for. The rows enter through the ds-query database's
 //!   ambient-rows seam and are a lower bound on the computed row.
 //! * [`world_caps`]: the world functions' capability attribution, read beside the rows — the
-//!   ambient's `platform "std" provides <...>` declaration (H5) licenses per capability.
+//!   ambient's `platform "std" provides <...>` declaration licenses per capability.
 //! * [`AMBIENT_SOURCE`] carries the platform declaration itself: the ambient names the default
 //!   platform `std` with every capability, so a package including it is checked against the
 //!   platform the `ds` CLI provides.
 //!
 //! # Scope
 //!
-//! The surface is the corpus's assumed stdlib (conformance/README.md,
-//! "Ambient names"), the M3 part plus the comptime reflection vocabulary
+//! The surface is the corpus's assumed stdlib: the ambient
+//! vocabulary plus the comptime reflection vocabulary
 //! (the `field` record struct and the `fields`/`type_name` builtins the
 //! evaluator's fenced VM serves). Deliberately out of scope: the `os`
 //! build target and the `c` FFI namespace with `extern fn` C
-//! declarations (M7). A use of an out-of-scope name is the corpus's own
+//! declarations. A use of an out-of-scope name is the corpus's own
 //! staged noise, never an ambient error.
 //!
 //! # Two-namespace consequences
 //!
-//! The package namespace is two (G3, F9) — types and values — so the
+//! The package namespace is two — types and values — so the
 //! ambient's `struct map[k, v]` and the list-transform function
 //! `fn map[t, r]` coexist: brace and type positions resolve the struct,
 //! the dot position resolves the function. Consequences that remain:
@@ -71,7 +71,7 @@
 //! * `max`/`min` migrated to the @std bodied members' file as the int pair (the library-boundary
 //!   round): the word-shaped signature a linked call binds and a session composes back, the float
 //!   and ord-generic spellings riding the later linked-surface rounds. Likewise `u32` is a distinct
-//!   atom (B7) (mixed-width arithmetic is the corpus's staged noise).
+//!   atom (mixed-width arithmetic is the corpus's staged noise).
 //! * Every extern names a callee the lowering answers; the dead declarations (declared externs
 //!   whose callee no native or rule answered — `get`, `log`, `close`, `to_u32_le`, `read_config`,
 //!   `default_config`, `load_rows`, `fetch`, `consume`, `die`) are gone, so their uses are unknown
@@ -129,7 +129,7 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("exit", "proc")
 });
 
-/// The ambient functions' world-capability attribution (E1, H5): the
+/// The ambient functions' world-capability attribution: the
 /// platform surface each world-touching function belongs to, read by the
 /// effects pass beside [`declared_rows`] — the platform declaration's
 /// provides list licenses per capability, so `fsys` usage under a
@@ -145,7 +145,8 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 ///   answering the `net_listener` handle with the ds-source `accept`/`close_listener` handlers over
 ///   it), and `http_get`.
 /// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read), the parking `sleep`
-///   (the 2026-11-21 timer ruling), and the local UTC offset read the datetime face composes over.
+/// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read), the parking
+///   `sleep`,
 /// * `proc`: the CLI process surface — string argv, the environment read, process spawn (the piped
 ///   capture half answering the linear `proc_handle` over the idempotent `proc_close` seam), and
 ///   the deliberate-status `exit(code)` row.
@@ -312,7 +313,7 @@ pub const AMBIENT_SESSION_SOURCE: &str = concat!(
     include_str!("error.ds")
 );
 
-/// The ambient package member's text: the declarations of the M3
+/// The ambient package member's text: the stdlib's checked declarations. The merged reading —
 /// stdlib surface. The merged reading — the core composed with the
 /// migrated @std json and string faces, the members, and the bodied
 /// members after it, so the sources are one namespace and every
@@ -459,7 +460,7 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("panic", EffectRow::of(Effect::Trap))
 });
 
-/// The ambient functions' declared effect rows (E1) — the failure and
+/// The ambient functions' declared effect rows — the failure and
 /// world capabilities the v1 surface has no syntax for. Applied by name;
 /// a declared row is a lower bound on the computed row.
 ///
@@ -469,14 +470,14 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 ///   `net_listener_close`, `proc_close`, and `proc_close_in`), the clock (the pair, the parking
 ///   sleep, and the datetime face's local offset read), printing (stdout, stderr, stdin), and the
 ///   process face (argv, the environment read, process spawn, the piped capture rows).
-/// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
-/// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
-///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
-///   provision declares for its own member and `panic` carries as the policy-free abort; `exit`
-///   adds `world` beside it, the deliberate status riding the proc capability's op row.
+/// * `cancel`: the nursery's internal effect — `cancel`.
+/// * `trap`: the trap primitive's private spelling — the seam the `u32` explicit-call conversion
+///   routes its out-of-range failure through, the same row the CLI host's `die` provision declares
+///   for its own member and `panic` carries as the policy-free abort; `exit` adds `world` beside
+///   it, the deliberate status riding the proc capability's op row.
 ///
 /// Every other ambient function is row-pure: the combinators run their
-/// lambdas inside the enclosing definition's extent (D3), which the
+/// lambdas inside the enclosing definition's extent, which the
 /// effects pass already accounts for.
 ///
 /// The table is built on first read and shared: a consumer that must own
@@ -493,7 +494,7 @@ mod tests {
     /// The ambient parses clean and collects with no duplicate definition:
     /// every corpus file shares this member's namespaces. `map` rides both:
     /// the struct in the type namespace, the transform in the value
-    /// namespace (F9).
+    /// namespace.
     #[test]
     fn ambient_collects_into_one_clean_package() {
         let mut files = ds_diag::Files::new();
@@ -706,7 +707,7 @@ mod tests {
         }
     }
 
-    /// The trap primitive's spelling stays the ambient file's own `[G4]`:
+    /// The trap primitive's spelling stays the ambient file's own:
     /// a user's call resolves the private def but refuses at the file
     /// grain, and a user redeclaring the name collides like any ambient
     /// face — no bare trap spelling ever serves below the host.
@@ -1198,96 +1199,34 @@ mod tests {
         // the core, the json face, the string face, the bodied file,
         // the codec face, then the datetime face; the merged text the
         // same with the members' file before the bodied one
-        assert!(
-            AMBIENT_SESSION_SOURCE
-                .strip_prefix(AMBIENT_CORE_SOURCE)
-                .is_some_and(|rest| {
-                    rest.strip_prefix('\n').is_some_and(|rest| {
-                        rest.strip_prefix(JSON_SOURCE).is_some_and(|rest| {
-                            rest.strip_prefix('\n').is_some_and(|rest| {
-                                rest.strip_prefix(STRINGS_SOURCE).is_some_and(|rest| {
-                                    rest.strip_prefix('\n').is_some_and(|rest| {
-                                        rest.strip_prefix(BODIED_SOURCE).is_some_and(|rest| {
-                                            rest.strip_prefix('\n').is_some_and(|rest| {
-                                                rest.strip_prefix(CODEC_SOURCE).is_some_and(
-                                                    |rest| {
-                                                        rest.strip_prefix('\n').is_some_and(
-                                                            |rest| {
-                                                                rest.strip_prefix(DATETIME_SOURCE)
-                                                                    .is_some_and(|rest| {
-                                                                        rest.strip_prefix('\n')
-                                                                            .is_some_and(
-                                                                                |rest| {
-                                                                                    rest
-                                                                                        == ERROR_SOURCE
-                                                                                },
-                                                                            )
-                                                                    })
-                                                            },
-                                                        )
-                                                    },
-                                                )
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                }),
+        let session_parts = [
+            AMBIENT_CORE_SOURCE,
+            JSON_SOURCE,
+            STRINGS_SOURCE,
+            BODIED_SOURCE,
+            CODEC_SOURCE,
+            DATETIME_SOURCE,
+            ERROR_SOURCE,
+        ];
+        assert_eq!(
+            AMBIENT_SESSION_SOURCE,
+            session_parts.join("\n"),
             "the session source is the core, the json file, the string face, the bodied file, \
              then the codec face, then the error-box face, one newline between neighbors"
         );
-        assert!(
-            AMBIENT_SOURCE
-                .strip_prefix(AMBIENT_CORE_SOURCE)
-                .is_some_and(|rest| {
-                    rest.strip_prefix('\n').is_some_and(|rest| {
-                        rest.strip_prefix(JSON_SOURCE).is_some_and(|rest| {
-                            rest.strip_prefix('\n').is_some_and(|rest| {
-                                rest.strip_prefix(STRINGS_SOURCE).is_some_and(|rest| {
-                                    rest.strip_prefix('\n').is_some_and(|rest| {
-                                        rest.strip_prefix(STD_MEMBERS_SOURCE).is_some_and(|rest| {
-                                            rest.strip_prefix('\n').is_some_and(|rest| {
-                                                rest.strip_prefix(BODIED_SOURCE).is_some_and(
-                                                    |rest| {
-                                                        rest.strip_prefix('\n').is_some_and(
-                                                            |rest| {
-                                                                rest.strip_prefix(CODEC_SOURCE)
-                                                                    .is_some_and(|rest| {
-                                                                        rest.strip_prefix('\n')
-                                                                            .is_some_and(|rest| {
-                                                                                rest.strip_prefix(
-                                                                                    DATETIME_SOURCE,
-                                                                                )
-                                                                                .is_some_and(
-                                                                                    |rest| {
-                                                                                        rest
-                                                                                            .strip_prefix(
-                                                                                                '\n',
-                                                                                            )
-                                                                                            .is_some_and(
-                                                                                                |rest| {
-                                                                                                    rest
-                                                                                                        == ERROR_SOURCE
-                                                                                                },
-                                                                                            )
-                                                                                    },
-                                                                                )
-                                                                            })
-                                                                    })
-                                                            },
-                                                        )
-                                                    },
-                                                )
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                }),
+        let merged_parts = [
+            AMBIENT_CORE_SOURCE,
+            JSON_SOURCE,
+            STRINGS_SOURCE,
+            STD_MEMBERS_SOURCE,
+            BODIED_SOURCE,
+            CODEC_SOURCE,
+            DATETIME_SOURCE,
+            ERROR_SOURCE,
+        ];
+        assert_eq!(
+            AMBIENT_SOURCE,
+            merged_parts.join("\n"),
             "the merged source is the core, the json file, the string face, the members' file, \
              the bodied file, then the codec face, then the error-box face, one newline between \
              neighbors"

@@ -1,4 +1,4 @@
-//! The ord-routed list sort's call-site lowering (todo item 101): the
+//! The ord-routed list sort's call-site lowering: the
 //! ambient `sort[t: ord]` extern spells no comparator parameter, so the
 //! site routes one out of the solved element type's serving ord
 //! instance — the `compare` member's planned body mints as the callable

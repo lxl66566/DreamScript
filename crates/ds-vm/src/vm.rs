@@ -1,6 +1,6 @@
-//! The tier-1 VM: a dense-match dispatch loop [BL-3 note: stable Rust has no
-//! computed goto] over encoded uop bodies, proving the locked slot-overlay
-//! call ABI [BL-6, H2].
+//! The tier-1 VM: a dense-match dispatch loop (stable Rust has no computed
+//! goto) over encoded uop bodies, proving the locked slot-overlay
+//! call ABI.
 //!
 //! # Decode strategy: decode on dispatch
 //!
@@ -8,27 +8,27 @@
 //! jump table on each word's raw opcode byte, extracting the operand fields
 //! inline per arm; a pre-decoded cache is deliberately rejected on the same
 //! terms: the encoded stream is the authoritative form (the dsmod loader
-//! mmaps it [BL-7]), tier transitions are in-place J-variant rewrites of
-//! the encoded words [H1] — execution must observe them — and a decode
+//! mmaps it), tier transitions are in-place J-variant rewrites of
+//! the encoded words — execution must observe them — and a decode
 //! cache keyed per version would be extra state to invalidate across
-//! hot-reload swaps [H6 item 5]. Load decode-checks every word once, and
+//! hot-reload swaps. Load decode-checks every word once, and
 //! [`ds_abi::uop::Uop::decode`] stays the canonicity authority: the hot
 //! arms name the same causes it would, and anything they refuse falls to
 //! one slow arm that routes through the decoders, so a dispatch-time
 //! [`Trap::BadEncoding`] is a canonicity violation, not a slow path. The
-//! bias arithmetic is branch-free [BL-1].
+//! bias arithmetic is branch-free.
 //!
 //! # Fibers and nurseries
 //!
 //! The dispatcher also owns the fiber switch mechanics over the pool in
-//! `crate::fiber` [E2]: the control natives park the running fiber (record
+//! `crate::fiber`: the control natives park the running fiber (record
 //! its resume point), and entering a fiber swaps segment and call-chain
 //! ownership between its pool slot and the VM's context — two buffer
 //! swaps, O(1), no word copied. A fiber completing at its entry frame
 //! marks itself dead and switches back to its resumer with its final
 //! value.
 //!
-//! Nurseries [E2, E5] layer on top (`crate::nursery`): fibers spawn into a
+//! Nurseries layer on top (`crate::nursery`): fibers spawn into a
 //! nursery (the child-of link), the join/teardown driver drives children to
 //! death in spawn order, and a first failure raises the nursery's cancel
 //! flag — observed at taken backward branches (the `jump!` macro) and at the
@@ -39,7 +39,7 @@
 //! nursery's drive runs on the interlock stack — frames pushed and consumed
 //! LIFO, each answer delivered onto its parked joiner's call site — so join
 //! nesting depth costs heap, never the Rust stack. The fork-join
-//! combinators [E3] park the same way: a CALLG site's spawn-only body
+//! combinators park the same way: a CALLG site's spawn-only body
 //! leaves the children in a fresh nursery and the drive seam carries
 //! the assembly or fold stage, so a nested combinator (a par_map inside
 //! a par_map element) stacks drive frames on the interlock's heap
@@ -102,11 +102,11 @@ const FUEL_QUANTA: u32 = 16_384;
 const DEFAULT_STACK_LIMIT: usize = 1 << 20;
 
 /// The 2^63 boundary f64: the smallest float magnitude that cannot be an
-/// i64, for the CVTF2I range check [B7].
+/// i64, for the CVTF2I range check.
 const F64_I64_EDGE: f64 = 9_223_372_036_854_775_808.0;
 
-/// A structured stop condition raised as an enum error, never a panic [H1:
-/// the per-entry stack-limit compare is the only stack exit].
+/// A structured stop condition raised as an enum error, never a panic (the
+/// per-entry stack-limit compare is the only stack exit).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Trap {
     /// A frame entry needs more stack words than the limit allows.
@@ -116,14 +116,14 @@ pub enum Trap {
         /// The configured stack limit.
         limit: usize,
     },
-    /// An i64 add/sub/mul/div/mod left the i64 range [B7].
+    /// An i64 add/sub/mul/div/mod left the i64 range.
     IntegerOverflow,
-    /// DIVI64/MODI64 with a zero divisor [B7].
+    /// DIVI64/MODI64 with a zero divisor.
     DivideByZero,
-    /// SHLI64/SHRI64 with a shift amount outside `0..64` [B7: shifts
-    /// trap past the bit width; wrapping stays the explicit operators].
+    /// SHLI64/SHRI64 with a shift amount outside `0..64` (shifts trap past the
+    /// bit width; wrapping stays the explicit operators).
     OversizedShift,
-    /// CVTF2I on a NaN or a value outside the i64 range [B7].
+    /// CVTF2I on a NaN or a value outside the i64 range.
     CvtOutOfRange,
     /// A run entry resolved through no current module slot.
     UnknownFunction {
@@ -157,7 +157,7 @@ pub enum Trap {
         op: u32,
     },
     /// A bound extern's C-ABI call refused at the marshaling backstop
-    /// (H5): a staged word outside the scalar slice, or a signature
+    /// over a staged word outside the scalar slice, or a signature
     /// wider than the enumerated transmute serves — shapes the lowering
     /// refuses for source programs ahead of the run, so this names
     /// hand-assembled code or a corrupted pool, never a source program.
@@ -359,19 +359,17 @@ pub enum Trap {
     /// construction); the name keeps a corrupted range a structured
     /// refusal instead of an unchecked conversion.
     Utf8Content,
-    /// The bare trap primitive's deliberate trap (the 2026-11-17 die
-    /// split): a `die` spelling's message-bearing abort. The engine
-    /// reports nothing itself — what the trap prints and which exit code
+    /// The bare trap primitive's deliberate trap: a `die` spelling's message-bearing abort. The
+    /// engine reports nothing itself — what the trap prints and which exit code
     /// follows is the host's own policy.
     Die {
         /// The message the spelling staged.
         message: String,
     },
-    /// The `exit(code)` deliberate process status (the proc capability's
-    /// row, ruled 2026-11-21): like `Die`, the engine
+    /// The `exit(code)` deliberate process status: like `Die`, the engine
     /// decides nothing — the code rides the trap out and the host's
     /// exit-code policy applies above it. A negative status traps at
-    /// the seam (ruled 2026-11-22) and a wider one wraps to its low
+    /// the seam and a wider one wraps to its low
     /// byte, so the carried word is always the portable 0..=255
     /// status.
     Exit {
@@ -391,18 +389,16 @@ pub enum Trap {
     /// suspend, so the drive refuses instead of corrupting the frame
     /// chain; the frames stay for [`Vm::backtrace`].
     ReentrancyRefused,
-    /// The IO scheduler found nothing runnable and nothing waiting (the
-    /// 2026-11-21 scheduler ruling's stall guard): every fiber is parked
+    /// The IO scheduler found nothing runnable and nothing waiting: every fiber is parked
     /// on a wait that no reactor interest and no deadline can answer.
     /// A net wait always registers one or the other, so for those this
     /// names a scheduler bug; a channel wait registers neither (the
     /// waking peer is a fiber, and none can run), so a program whose
     /// every fiber sits parked on a channel no live fiber can serve
-    /// deadlocks here by design — the honest degenerate the
-    /// shared-state ruling leaves: no sender, no answer.
+    /// deadlocks here by design — the honest degenerate: no sender, no
+    /// answer.
     SchedulerDeadlock,
-    /// `chan_new(cap)` with a negative bound (the 2026-11-21
-    /// shared-state ruling): zero is the rendezvous bound — the buffer
+    /// `chan_new(cap)` with a negative bound: zero is the rendezvous bound — the buffer
     /// holds nothing and every hand-off pairs a parked sender's staged
     /// span with a receiving fiber — so only a bound below zero names
     /// no buffer and no rendezvous.
@@ -423,7 +419,7 @@ pub enum Trap {
         /// The handle's generation half, the one the check refused.
         generation: u32,
     },
-    /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
+    /// `cancel(payload)`: the fiber's own deliberate failure. The
     /// payload is the error value's whole word span — word 0 the
     /// failing member's tag, the rest its payload words in declaration
     /// order (the native channel's flat span shape); the trap never
@@ -453,8 +449,7 @@ pub enum Trap {
     /// terminates while its stack stays flat (a loop forgetting its
     /// decrement). The unbounded drives never raise it.
     OutOfFuel,
-    /// The host's shutdown event cut the drive (the 2026-11-24 signal
-    /// ruling): the host's own registered interest — the CLI's
+    /// The host's shutdown event cut the drive: the host's own registered interest — the CLI's
     /// signalfd — woke the reactor, every parked fiber answered the
     /// cancel sentinel at its resume-shaped point with its deinit
     /// hooks fired, and the drive hands control back. The engine
@@ -477,7 +472,7 @@ pub enum Trap {
 /// version's table row and the function the frame runs. Frames live inline
 /// in the fiber's value stack; this records which version's code and pool
 /// a frame executes, so retiring versions stay runnable until nothing
-/// references them [H6 item 5]. The chain belongs to the fiber whose
+/// references them. The chain belongs to the fiber whose
 /// segment holds the frames.
 #[derive(Clone, Debug)]
 pub(crate) struct CallInfo {
@@ -603,8 +598,8 @@ enum Resolved {
         /// The callee's index in the table.
         index: u32,
     },
-    /// Invoke the bound artifact's C symbol in the caller's frame (H5,
-    /// no frame push): the loaded module's shared symbol table, the
+    /// Invoke the bound artifact's C symbol in the caller's frame, with no
+    /// frame push: the loaded module's shared symbol table, the
     /// export's enumeration index, and the return's marshaling word —
     /// the absent word or a scalar word.
     Bound {
@@ -633,7 +628,7 @@ enum CachedCallee {
         table: Arc<Vec<NativeFunction>>,
         index: u32,
     },
-    /// The bound-artifact shape (H5): the loaded module's shared symbol
+    /// The bound-artifact shape: the loaded module's shared symbol
     /// table, the export's index, and the return's marshaling word (a
     /// bound symbol is not a value — the table is the stable handle, the
     /// index the callee).
@@ -1016,8 +1011,7 @@ pub(crate) enum DriveOutcome {
     /// joiner. Never the Rust stack — program nesting depth must cost
     /// heap, not stack.
     Interlock(InterlockRequest),
-    /// The current fiber parked on a world op (the 2026-11-21 scheduler
-    /// ruling): the op would block, the fiber parks with a resume
+    /// The current fiber parked on a world op: the op would block, the fiber parks with a resume
     /// point, and the driver that owns the executor moment registers
     /// the wait and runs the next ready fiber — the host executor
     /// (`root_drive`'s scheduling loop) or a nursery drive (its next
@@ -1052,7 +1046,7 @@ impl InstalledReactor {
 pub(crate) enum ParkKind {
     /// A net op's wait: the scheduler's registration payload.
     World(WorldWait),
-    /// A channel op's park (the 2026-11-21 shared-state ruling): the
+    /// A channel op's park: the
     /// waiter already entered the channel's own data, so the driver only
     /// continues the executor — no registration payload exists (the
     /// waking peer is the parked fiber's resumer).
@@ -1185,8 +1179,7 @@ pub(crate) enum ExecutorStep {
     /// The host fiber's own answer crossed (the program's or the
     /// resumed fiber's) — the drive ends with it.
     HostAnswer(FrameAnswer),
-    /// The host's shutdown event cut every parked fiber (the
-    /// 2026-11-24 signal ruling): nothing live remains, the drive
+    /// The host's shutdown event cut every parked fiber: nothing live remains, the drive
     /// ends, and the host owns the outcome.
     Shutdown,
     /// The bounded wait spent its budget: nothing is runnable and the
@@ -1349,7 +1342,7 @@ enum SwitchOutcome {
 /// The mutable execution state the frame operations share, borrowed disjoint
 /// from the dispatcher's current-function snapshot. The stack is the
 /// current fiber's segment; `max_len` is that fiber's high-water mark, so
-/// the TCO criterion holds per fiber [H2].
+/// the TCO criterion holds per fiber.
 struct StackState<'a> {
     stack: &'a mut Segment,
     callinfo: &'a mut Vec<CallInfo>,
@@ -1359,9 +1352,9 @@ struct StackState<'a> {
 }
 
 impl StackState<'_> {
-    /// Grows the segment to `new_len` after the per-entry limit compare
-    /// [H1]. Never shrinks; growth appends chunks, so live frames' words
-    /// keep their addresses [H2].
+    /// Grows the segment to `new_len` after the per-entry limit compare.
+    /// Never shrinks; growth appends chunks, so live frames' words
+    /// keep their addresses.
     #[inline]
     fn grow(&mut self, new_len: usize) -> Result<(), Trap> {
         if new_len <= self.stack.len() {
@@ -1379,8 +1372,8 @@ impl StackState<'_> {
     }
 
     /// Resolves a scalar FuncRef word (module id + function index, the
-    /// `Fn` slot classification, F2) for the CALLS dispatch and the hosted
-    /// call seam [H6 item 5]. A staged fn word is a VALUE: it carries the
+    /// `Fn` slot classification) for the CALLS dispatch and the hosted call
+    /// seam. A staged fn word is a VALUE: it carries the
     /// current table's index space (the swap-time re-key keeps it there),
     /// so `None` resolves through the target module's current slot — the
     /// hot-reload redirect a staged word picks up. `Some(row)` is the
@@ -1424,9 +1417,9 @@ impl StackState<'_> {
         Ok((version, func_id))
     }
 
-    /// Mints a scalar fn word from a pool FuncRef (the KCONST arm, F2):
+    /// Mints a scalar fn word from a pool FuncRef (the KCONST arm):
     /// a retiring frame's own-module ref carries its row's index space, so
-    /// when the minting frame's row no longer holds the module's current
+    /// when the minting frame's row does not hold the module's current
     /// slot the mint translates the index through the identity the row
     /// records — name plus frame layout, the staged re-check's judge,
     /// extended by the content identity a moved index-embedded name
@@ -1500,7 +1493,7 @@ impl StackState<'_> {
             let value = read_value(stack, fp, word.slot, caller.slots(), body_len)?;
             let staged = value.slot_type();
             // a Ref word staged against a Fn parameter is the
-            // callable-defaulted slot (F2): a closure object's word behind
+            // callable-defaulted slot: a closure object's word behind
             // a fn-typed parameter, admitted exactly like the slide admits
             // the static pairing
             if staged != word.expected
@@ -1519,7 +1512,7 @@ impl StackState<'_> {
     /// Non-tail `CALL`: the callee's metadata word lands in the caller's
     /// call word, the staged arguments overlay the caller's outgoing-argument
     /// area with no copying, and the stack grows for the callee's frame
-    /// [BL-6, H2]. The plan (the ABI's own overlay fact) arrives proven by
+    /// words. The plan (the ABI's own overlay fact) arrives proven by
     /// the site's cached facts; a refused pair re-raises here, exactly
     /// where the per-call derivation raised it.
     fn call(
@@ -1583,7 +1576,7 @@ impl StackState<'_> {
         })
     }
 
-    /// `CALLT`, the locked contract [H2]: keep the frame pointer, slide the
+    /// `CALLT`, the locked contract: keep the frame pointer, slide the
     /// staged arguments into slots `0..nargs` per the ABI slide plan (source
     /// derived from the caller's arg area), rewrite the metadata word in
     /// place (return pc preserved, callee frame size, tail chain grows by
@@ -1646,14 +1639,14 @@ impl StackState<'_> {
     }
 
     /// `RET`: the result word overlays slot 0 (the caller reads it from its
-    /// outgoing-argument slot 0 [H2]); the stack restores the caller's frame
+    /// outgoing-argument slot 0); the stack restores the caller's frame
     /// span; the caller resumes at the metadata word's return pc. The
     /// restore answers the caller's own chain-entry row as the new
     /// [`Active`]: the row is a copyable table name, so the return moves no
     /// Arc count in any shape — a same-module return, a cross-module
     /// return, or a swap between the two entries' rows alike — and the
-    /// entry always names the version the frame was entered under [H6
-    /// item 5]. A nested drive's synthetic reentry frame answers
+    /// entry always names the version the frame was entered under. A nested
+    /// drive's synthetic reentry frame answers
     /// [`RetOutcome::Boundary`] instead: its caller is Rust-side code
     /// (`Vm::call_hosted`), not a frame. The sentinel return pc is the
     /// frame's identity marker — every CALL-pushed frame carries a real
@@ -1922,7 +1915,7 @@ fn read_value(
     }
 }
 
-/// Resolves one runtime-evidence sentinel dispatch (H3) over the
+/// Resolves one runtime-evidence sentinel dispatch over the
 /// module's evidence-chain table: the frame's slot word names a chain
 /// object whose `func` is the serving body and whose `next` tail list
 /// answers that body's own evidence demands — one chain word per demand,
@@ -2268,7 +2261,7 @@ fn write_slot(
             frame_slots: slots.len(),
         });
     }
-    // a Fn slot is callable-defaulted (F2): a closure object's Ref word
+    // a Fn slot is callable-defaulted: a closure object's Ref word
     // may inhabit it at every read (the entry check, the generic
     // dispatch, the callable-word call), so the write admits the same
     // pairing — a bodied wrapper's pass-through stages its callable
@@ -2292,7 +2285,7 @@ fn write_slot(
     Ok(())
 }
 
-/// DIVI64 [B7]: zero divide and `MIN / -1` are distinct traps.
+/// DIVI64: zero divide and `MIN / -1` are distinct traps.
 // the ok_or_else form keeps the overflow value off the success path;
 // the eager ok_or form regresses the arith kernels' instruction count
 #[allow(clippy::unnecessary_lazy_evaluations)]
@@ -2303,7 +2296,7 @@ fn int_div(x: i64, y: i64) -> Result<i64, Trap> {
     x.checked_div(y).ok_or_else(|| Trap::IntegerOverflow)
 }
 
-/// MODI64 [B7]: same trap split as [`int_div`].
+/// MODI64: same trap split as [`int_div`].
 #[allow(clippy::unnecessary_lazy_evaluations)]
 fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     if y == 0 {
@@ -2312,7 +2305,7 @@ fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     x.checked_rem(y).ok_or_else(|| Trap::IntegerOverflow)
 }
 
-/// SHLI64/SHRI64/BITAND/BITXOR/BITORI64 [B7]: the shift amounts trap
+/// SHLI64/SHRI64/BITAND/BITXOR/BITORI64: the shift amounts trap
 /// outside the 0..64 window (no wrap form exists, so both carry a trap
 /// edge like the trapping arithmetic), `>>` is the arithmetic
 /// (sign-propagating) shift, and the bitwise trio is total. The dispatch
@@ -2342,8 +2335,7 @@ fn shift_bitwise_word(
             let Some(shift) = u32::try_from(y).ok().filter(|&y| y < 64) else {
                 return Err(Trap::OversizedShift);
             };
-            // Rust's i64 `>>` is arithmetic: the sign bit propagates,
-            // the shape B7 freezes
+            // Rust's i64 `>>` is arithmetic: the sign bit propagates
             Value::I64(x >> shift)
         },
         OP_BITAND_I64 => Value::I64(x & y),
@@ -2354,7 +2346,7 @@ fn shift_bitwise_word(
     write_slot(stack, fp, dst, slots, body_len, value)
 }
 
-// The peek-next load-op fusion [BL-4, the opcode census' ranked leader]:
+// The peek-next load-op fusion:
 // a constant load whose immediately following word is one of the measured
 // census arith pairs consuming the loaded slot runs both uops inside the
 // load's dispatch arm — one dispatch for two uops, pc += 2. The uop
@@ -2389,8 +2381,7 @@ fn fused_f64_arith(code: &[u32], idx: usize, dst: u8) -> Option<(u8, u8, u8, u8)
     matches!(op, OP_ADD_F64 | OP_MUL_F64).then_some((op, adst, lhs, rhs))
 }
 
-// The peek-next compare-branch fusion [BL-4, the opcode census' ranked
-// second family]: a comparison whose immediately following word is the
+// The peek-next compare-branch fusion: a comparison whose immediately following word is the
 // measured census branch spelling — JMPIF_NOT, the universal loop-head
 // exit — testing the compare's own dst takes its branch decision inside
 // the compare's dispatch: one dispatch for two uops, pc += 2, the uop
@@ -2417,7 +2408,7 @@ fn fused_jmpif_not(code: &[u32], idx: usize, dst: u8) -> Option<u16> {
     (op == OP_JMPIF_NOT).then_some(u16::from_be_bytes([hi, lo]))
 }
 
-// The peek-next tag-branch fusion [BL-4, the census' ranked third family]:
+// The peek-next tag-branch fusion:
 // a TAGTEST whose immediately following word is the measured census branch
 // spelling — JMPIF, the match dispatch's arm-guard exit — testing the tag
 // test's own dst takes its branch decision inside the tag test's dispatch,
@@ -2556,7 +2547,7 @@ fn generic_staged_check(g: &crate::native::GenericFunction, nargs: u8) -> Result
 /// The generic dispatch's kind check over the named words: a `Raw`
 /// parameter is the wildcard (the staged value words carry the call
 /// site's concrete kinds), and a `Ref` word against a `Fn` parameter is
-/// the callable-defaulted slot (F2) — the combinators' staged lambda
+/// the callable-defaulted slot — the combinators' staged lambda
 /// may be a closure object. The span forms' dynamic words are the call
 /// site's own fact and stay unchecked: a `Leading` entry checks its
 /// trailing named words, an `Interior` one its leading named words plus
@@ -2605,7 +2596,7 @@ fn generic_kind_check(g: &crate::native::GenericFunction, args: &[Value]) -> Res
 
 /// Places a native's result on the caller's outgoing-argument overlay:
 /// one word on argument slot 0, a fallible native's two-word
-/// tag+payload span [BL-2] on argument slots 0 and 1, or a span
+/// tag+payload span on argument slots 0 and 1, or a span
 /// channel's discriminant plus multi-word payload on slots
 /// `0 ..= payload.len()`. Like a RET's write, this bypasses slot typing:
 /// the overlay words belong to the call ABI, and reading them as typed
@@ -2773,7 +2764,7 @@ fn check_native_call_site(caller: &FrameLayout, nf: &NativeFunction) -> Result<(
     check_native_overlay(area, nf)
 }
 
-/// The pre-invocation width check for a bound extern's CALL (H5): the
+/// The pre-invocation width check for a bound extern's CALL: the
 /// staged words and the one overlay word the scalar answer takes must
 /// fit the caller's staging area — the same discipline
 /// [`check_native_call_site`] applies, checked before the foreign call
@@ -2803,7 +2794,7 @@ fn check_bound_overlay(area: usize) -> Result<(), Trap> {
     Ok(())
 }
 
-/// Runs one bound extern's C-ABI call (H5) in the caller's frame: the
+/// Runs one bound extern's C-ABI call in the caller's frame: the
 /// staged words read exactly like a native's, each marshaling per its
 /// own kind — a scalar word singly, a string or bytes word as its
 /// call-scoped (pointer, length) pair over the borrowed content, a heap
@@ -2939,7 +2930,7 @@ pub enum FramePc {
     Hosted,
 }
 
-/// One backtrace entry: a real frame plus its tail chain's elided count [H2].
+/// One backtrace entry: a real frame plus its tail chain's elided count.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BacktraceFrame {
     /// The frame's module.
@@ -2951,8 +2942,8 @@ pub struct BacktraceFrame {
     /// How many logical frames this physical frame elided via tail calls
     /// since the normal call that created it.
     pub elided: u32,
-    /// The frame position resolved through the module's pc-to-span table
-    /// (H7), `None` before a region (or with the section stripped): the
+    /// The frame position resolved through the module's pc-to-span table,
+    /// `None` before a region (or with the section stripped): the
     /// one source channel a renderer names a frame through.
     pub location: Option<SourceLocation>,
 }
@@ -2970,7 +2961,7 @@ pub struct SourceLocation {
     pub col: u32,
 }
 
-/// One hop of the boundary's recorded error chain (H7): the frame whose
+/// One hop of the boundary's recorded error chain: the frame whose
 /// `?` error leg propagated, innermost first, source resolved through
 /// the span table at read time.
 #[derive(Clone, Debug, PartialEq)]
@@ -3035,7 +3026,7 @@ pub enum DebugStop {
 
 /// The tier-1 VM. Construct with a [`ModuleRegistry`], then run encoded
 /// entry functions. Every VM owns its heap object store, output sink, and
-/// the single-threaded fiber pool [E2] (slot 0 is the root a `run` entry
+/// the single-threaded fiber pool (slot 0 is the root a `run` entry
 /// drives), and installs the builtin core native module
 /// ([`crate::native::BUILTIN_MODULE`]) into the registry at construction;
 /// the world surface is an installed platform handler's to serve
@@ -3058,10 +3049,10 @@ pub struct Vm {
     pub(crate) ctx_live: bool,
     pub(crate) pool: Vec<Fiber>,
     pub(crate) current: FiberId,
-    /// The nursery pool [E2]: one slot per open-or-consumed nursery, Dead
+    /// The nursery pool: one slot per open-or-consumed nursery, Dead
     /// slots reuse like fiber slots.
     pub(crate) nurseries: Vec<Nursery>,
-    /// The live root nursery bare host spawns route into [E2]; `None` or a
+    /// The live root nursery bare host spawns route into; `None` or a
     /// consumed id = the host itself is the supervisor.
     root_nursery: Option<NurseryId>,
     pub(crate) limit: usize,
@@ -3096,7 +3087,7 @@ pub struct Vm {
     /// a version (its pools die with it) and the pool-slot reuse (the
     /// slot's next fiber re-keys its rows on demand).
     kstr_cache: KstrRows,
-    /// The derived deinit-hook directories (E5): one per (module version,
+    /// The derived deinit-hook directories: one per (module version,
     /// function), keyed by the version's address — stable for its lifetime
     /// — and swept wholesale when the registry generation moves, exactly
     /// the kstr cache's discipline. A directory row is decoded from the
@@ -3135,7 +3126,7 @@ pub struct Vm {
     /// parks — the frame has advanced a full iteration). Set by the
     /// switch into a Preempted fiber; every switch resets it.
     suspend_skip: Option<(FiberId, CodePc)>,
-    /// The error-trace switch (H7): armed, the ERR_MARK arm writes the
+    /// The error-trace switch: armed, the ERR_MARK arm writes the
     /// failing frame's position into the running fiber's private ring.
     /// VM-layer state alone — no lowering input reads it, so flipping it
     /// changes no artifact.
@@ -3173,9 +3164,8 @@ pub struct Vm {
     /// of the dispatch loop alone, so every unbounded drive ignores it
     /// and its dispatch cost is unchanged.
     fuel: u64,
-    /// The fork-join worker pool opt-in (E3's 2026-11-15 sendability
-    /// ruling, crates/ds-vm/src/forkpool.rs): off by default — the
-    /// sequential interlock drive is M5's backend — and when on, a
+    /// The fork-join worker pool opt-in: off by default — the sequential
+    /// interlock drive is the backend — and when on, a
     /// `par_map` frame whose children hold exclusively scalar entry
     /// words drives them on youpipe workers through whole-fiber
     /// ownership transfer, everything else keeping the sequential drive.
@@ -3185,7 +3175,7 @@ pub struct Vm {
     /// run that answers every fork sequentially through the gate's
     /// fallback reads zero).
     fork_pool_drives: usize,
-    /// The installed reactor (the 2026-11-21 scheduler ruling): `None`
+    /// The installed reactor: `None`
     /// keeps the blocking natives — blocking semantics stay an
     /// embedder's platform choice, never a language fact. The box rides
     /// a Debug-transparent wrapper so `Vm`'s own derive stands.
@@ -3193,9 +3183,8 @@ pub struct Vm {
     /// The IO scheduler's tables: the wait register, the deadline
     /// wheel, the FIFO run queue, and the wake deliveries.
     sched: SchedState,
-    /// Whether the host's shutdown interest has woken (the 2026-11-24
-    /// signal ruling): the drive raises every open nursery's flag with
-    /// it, cuts parked fibers at their resume-shaped points, and
+    /// Whether the host's shutdown interest has woken: the drive raises every open nursery's flag
+    /// with it, cuts parked fibers at their resume-shaped points, and
     /// answers [`Trap::Shutdown`] — the host that registered the
     /// interest owns the exit code, never the engine.
     shutdown: bool,
@@ -3360,8 +3349,8 @@ impl Vm {
         self.fork_pool_drives
     }
 
-    /// Opts this VM's fork-join combinator drives into the worker pool
-    /// (E3's 2026-11-15 sendability ruling): a `par_map` frame whose
+    /// Opts this VM's fork-join combinator drives into the worker pool:
+    /// a `par_map` frame whose
     /// children hold exclusively scalar entry words transfers each whole
     /// fiber — segment, arena, heap store, call chain, claim ledger — to
     /// a youpipe worker for the element body and receives it at the
@@ -3377,17 +3366,16 @@ impl Vm {
     }
 
     /// Installs the reactor and flips the net face's data natives to
-    /// the parking discipline (the 2026-11-21 scheduler ruling, the E1
-    /// capability seam's runtime half): `net_recv`/`net_send` answer
+    /// the parking discipline: `net_recv`/`net_send` answer
     /// park requests on a would-block, the drive runs the next ready
     /// fiber, and readiness or the configured deadline completes the
-    /// parked op — single-thread executor, the multi-thread fiber
-    /// executor ruled post-1.0. A host that installs nothing keeps the
+    /// parked op — single-thread executor; the multi-thread fiber
+    /// executor is out of scope. A host that installs nothing keeps the
     /// blocking natives: the same source, the embedder's choice.
     pub fn install_reactor(&mut self, reactor: Box<dyn Reactor>) {
         self.out.enable_net_parking();
-        // the process face's blocking rows park the same way on Linux
-        // (the 2026-11-23 ruling): the child's pipes and its pidfd are
+        // the process face's blocking rows park the same way on Linux:
+        // the child's pipes and its pidfd are
         // fds, the reactor's own readiness interests; any other host
         // keeps the rows' blocking twins under whatever reactor it
         // installs
@@ -3395,8 +3383,8 @@ impl Vm {
         self.reactor = Some(InstalledReactor(reactor));
     }
 
-    /// Registers the host's shutdown door as the reactor's own interest
-    /// (the 2026-11-24 signal ruling): `handle` is a readable fd the host
+    /// Registers the host's shutdown door as the reactor's own interest:
+    /// `handle` is a readable fd the host
     /// owns — Linux's signalfd — and its wake under the reserved token is
     /// the shutdown event, never a wait. The engine decides nothing about
     /// it: the drive raises every open nursery's cancel flag, cuts
@@ -3424,8 +3412,7 @@ impl Vm {
         )
     }
 
-    /// Hands the blocking drive its stop flag (the 2026-11-24 signal
-    /// ruling's non-reactor twin): a host without a reactor keeps the
+    /// Hands the blocking drive its stop flag: a host without a reactor keeps the
     /// blocking natives, so its own signal helper — a sigwait thread, a
     /// console-control handler — flips this flag and the blocking
     /// twins' poll rows (the bounded accept, the unbounded proc wait)
@@ -3458,12 +3445,11 @@ impl Vm {
         Value::Ref(RefId::new(FIBER_ROOT, id))
     }
 
-    /// Stages a closure value for the host (the F2 capturing-lambda
-    /// object): one heap object behind one `Ref` word, the header FuncRef
-    /// word plus the moved-in capture block, born on the root heap like
-    /// every host-staged word. The host-held reference owns the object's
-    /// birth count; the module-code construction path (and with it the
-    /// value's own RC traffic) waits on lambda-value lowering.
+    /// Stages a closure value for the host (the capturing-lambda object): one
+    /// heap object behind one `Ref` word, the header FuncRef word plus the
+    /// moved-in capture block, born on the root heap like every host-staged
+    /// word. The host-held reference owns the object's birth count; only a host
+    /// stages a closure word, module code constructs none.
     #[must_use = "the reference is the handle; the count is the host's to drop"]
     pub fn alloc_closure(&mut self, func: FuncRef, captures: Vec<Value>) -> Value {
         let id = self.root_store().alloc_closure(func, captures);
@@ -3547,8 +3533,7 @@ impl Vm {
         self.out.set_tls_config(config);
     }
 
-    /// Pins the TLS server identity of the net face's tls tier (the
-    /// server half, ruled 2026-11-23): no default identity exists — a
+    /// Pins the TLS server identity of the net face's tls tier: no default identity exists — a
     /// server certificate is the host's own to pin, the unprovisioned
     /// `net_accept_tls` answering its own refusal.
     pub fn set_tls_server_config(&mut self, config: Arc<rustls::ServerConfig>) {
@@ -3584,7 +3569,7 @@ impl Vm {
 
     /// Installs a dsmod module into its two-slot table: the swap re-checks
     /// run first (below), the loader maps the payload, fills the
-    /// entry-descriptor placeholders, and the slots swap [BL-7, H6 item 5].
+    /// entry-descriptor placeholders, and the slots swap.
     /// The module is consumed, so every body's code words reach the
     /// installed table without a copy. Answers the installed version's
     /// table row, the version's single home.
@@ -3618,7 +3603,7 @@ impl Vm {
     /// validated — a mismatched link, a dep cycle, or a provider miss
     /// refuses the load. Resolution keeps reading each name's current
     /// slot, so a later swap of a loaded dep redirects the dependent's
-    /// calls [H6 item 5]. The swap re-checks cover the root's swap (the
+    /// calls. The swap re-checks cover the root's swap (the
     /// walk's own door: already-installed deps validate and skip, so only
     /// the root can move a slot). Answers the root's table row, the
     /// version's single home.
@@ -3661,7 +3646,7 @@ impl Vm {
             .and_then(ModuleVersion::content_hash)
     }
 
-    /// The slot swap's staged-word re-check [H6 item 5's re-check landing]:
+    /// The slot swap's staged-word re-check:
     /// a scalar callable word keys on the function-table index and
     /// resolution reads the name's current slot, so a swap whose incoming
     /// table moves or drops the indexed function would silently misroute
@@ -3991,7 +3976,7 @@ impl Vm {
     /// entry can never hit again (the stamp check fails), so by the time
     /// the install's sweep counts reachability no cache entry is left to
     /// name a row. The full lookup stays the fallback and the refill, so
-    /// dispatch correctness never depends on the cache [H3].
+    /// dispatch correctness never depends on the cache.
     fn sweep_call_cache(&mut self) {
         let stamp = self.registry.generation();
         for entry in &mut self.call_cache {
@@ -4001,8 +3986,8 @@ impl Vm {
         }
     }
 
-    /// The install-time reachability sweep over the version table [H6
-    /// item 5]: a row no module slot names sits on the registry's detached
+    /// The install-time reachability sweep over the version table: a row no
+    /// module slot names sits on the registry's detached
     /// list, and the sweep retires every detached row no fiber names —
     /// the context's live call chain while a drive runs, every pool slot's
     /// kept frames otherwise (interrupted fibers keep their frames, and a
@@ -4063,7 +4048,7 @@ impl Vm {
         self.registry.install_native(name, functions);
     }
 
-    /// Installs a bound-artifact module under its manifest name (H5):
+    /// Installs a bound-artifact module under its manifest name:
     /// the same replacement discipline a native table takes, so a host
     /// or a dev session installs ahead of the module installs whose
     /// pool validation resolves bound constants against the table.
@@ -4079,13 +4064,13 @@ impl Vm {
 
     /// High-water mark of the ROOT fiber's segment over the last run.
     /// Constant across unbounded tail recursion is the tail-call
-    /// acceptance criterion [H2, per fiber].
+    /// acceptance criterion, per fiber.
     #[must_use]
     pub fn max_stack_len(&self) -> usize {
         self.pool[FIBER_ROOT.index()].max_len
     }
 
-    // -- The fiber substrate [E2] --------------------------------------
+    // -- The fiber substrate --------------------------------------
     //
     // Pool ownership invariant: the running fiber's segment, call chain,
     // and heap store live in the VM's context fields while `ctx_live`
@@ -4093,7 +4078,7 @@ impl Vm {
     // live in the pool slot. A switch is three ownership swaps — no word
     // or object is ever copied.
 
-    /// Spawns a fiber bare [E2]: with a live root nursery
+    /// Spawns a fiber bare: with a live root nursery
     /// ([`Vm::open_root_nursery`]) the fiber is born its child; without one
     /// the host itself is the supervisor and the fiber detaches (no
     /// child-of link — the substrate regime the fiber fixtures pin). The
@@ -4114,7 +4099,7 @@ impl Vm {
         self.spawn_into(nursery, module, func, args)
     }
 
-    /// Spawns a fiber into an open nursery [E2]: the child-of link is set
+    /// Spawns a fiber into an open nursery: the child-of link is set
     /// and the nursery records the child in spawn order.
     ///
     /// # Errors
@@ -4148,7 +4133,7 @@ impl Vm {
         Ok(self.push_spawned(nursery, version, func_id, args))
     }
 
-    /// Spawns a fiber from a callable word's own function [E2]: the
+    /// Spawns a fiber from a callable word's own function: the
     /// in-language `spawn` seam, and the fork-join combinator's per-element
     /// fork (the element's whole word span as the entry arguments). The
     /// FuncRef resolves through the target module's current slot; the
@@ -4182,7 +4167,7 @@ impl Vm {
         self.spawn_checked(nursery, version, func_id, args)
     }
 
-    /// Spawns a fiber from a closure word's own body [E3]: the fork-join
+    /// Spawns a fiber from a closure word's own body: the fork-join
     /// combinator's closure callable. The child is entered with `args`
     /// (the element's whole word span) against the closure's own body
     /// function, and the closure's capture block is staged into the
@@ -4332,7 +4317,7 @@ impl Vm {
             // exotic death left behind — and nothing on the honest paths.
             // The recycled fiber's kept frames (a resume-interrupted
             // detached child's) fire their deinits here, at their last
-            // door [E5]
+            // door
             let recycled = FiberId(u32::try_from(slot).expect("slot fits u32"));
             self.fire_teardown_hooks(recycled, &[]);
             self.drain_claims(recycled);
@@ -4379,6 +4364,11 @@ impl Vm {
     /// completes (its final value). A trapped drive leaves the fiber
     /// interrupted (not resumable) with its frames kept for
     /// [`Vm::backtrace`].
+    ///
+    /// A fiber parked on a world wait is the scheduler's, not this door's: it
+    /// is not resumable here, because an answered payload would abandon its
+    /// registered wait and leave the later wake landing on a moved-on frame.
+    /// World-parked drives go through [`Vm::resume_fiber_io`]/[`Vm::pump_io`].
     ///
     /// # Errors
     ///
@@ -4465,7 +4455,7 @@ impl Vm {
             Err((trap, at)) => {
                 self.trap_pc = Some(at);
                 // a nursery child dying trapped under a host drive: ledger
-                // it and raise the cancel flag [E2 first failure]; the
+                // it and raise the cancel flag (the first failure); the
                 // fiber itself stays interrupted (frames kept). The blame
                 // follows the fiber the drive ended on — the drive may have
                 // switched away from `fiber` (it parked at its own resume
@@ -4775,7 +4765,7 @@ impl Vm {
     }
 
     /// High-water mark of a fiber's segment: the per-fiber TCO criterion —
-    /// a tail-looping fiber's mark never rises past its frame size [H2].
+    /// a tail-looping fiber's mark never rises past its frame size.
     #[must_use]
     pub fn fiber_max_len(&self, fiber: FiberId) -> Option<usize> {
         self.pool.get(fiber.index()).map(|f| f.max_len)
@@ -4793,7 +4783,7 @@ impl Vm {
     /// The address of word `index` in a fiber's segment — any allocated
     /// word, live or truncated-over: stable across later growth (chunks
     /// never move) and across switch round-trips (a switch copies no
-    /// words) [H2, E2].
+    /// words).
     #[must_use]
     pub fn fiber_word_addr(&self, fiber: FiberId, index: usize) -> Option<usize> {
         self.pool
@@ -4810,14 +4800,14 @@ impl Vm {
             .and_then(|f| f.callinfo.last().map(|ci| ci.fp))
     }
 
-    /// The nursery a fiber was spawned into (the child-of link [E2]);
+    /// The nursery a fiber was spawned into (the child-of link);
     /// `None` = the root fiber or a detached spawn.
     #[must_use]
     pub fn fiber_nursery(&self, fiber: FiberId) -> Option<NurseryId> {
         self.pool.get(fiber.index()).and_then(|f| f.nursery)
     }
 
-    // -- Nurseries [E2, E5] ---------------------------------------------
+    // -- Nurseries ---------------------------------------------
     //
     // Determinism: spawn order drives everything observable — the join and
     // teardown drivers enter children in spawn order, one to death at a
@@ -4825,7 +4815,7 @@ impl Vm {
     // a drive is answered with the bare PLATFORM_NONE bounce tag (the
     // run-entry convention); a child's own resumer links stay live.
 
-    /// Opens (or returns the live) root nursery [E2]: the explicit root a
+    /// Opens (or returns the live) root nursery: the explicit root a
     /// bare host spawn routes into. With none live, the host itself is the
     /// supervisor and bare spawns detach.
     pub fn open_root_nursery(&mut self) -> NurseryId {
@@ -4840,7 +4830,7 @@ impl Vm {
         id
     }
 
-    /// Opens a fresh nursery [E2]: the in-language `nursery` block's own
+    /// Opens a fresh nursery: the in-language `nursery` block's own
     /// (never the root — bare host spawns route there alone), and the
     /// fork-join combinator's own over the same reuse discipline. Dead
     /// slots reuse like fiber slots. The opening fiber owns it — the link
@@ -4889,8 +4879,8 @@ impl Vm {
         }
     }
 
-    /// Joins a nursery [E2]: drives every child to death in spawn order —
-    /// a child dying trapped raises the cancel flag for the rest [E5] —
+    /// Joins a nursery: drives every child to death in spawn order —
+    /// a child dying trapped raises the cancel flag for the rest —
     /// then reports the boundary result and consumes the nursery.
     ///
     /// # Errors
@@ -4927,7 +4917,7 @@ impl Vm {
         )
     }
 
-    /// Tears a nursery down [E5]: raises the cancel flag, drives every
+    /// Tears a nursery down: raises the cancel flag, drives every
     /// live child to death (straight-line work lands, looping work stops
     /// at its next backward branch), then consumes the nursery and reports
     /// the per-child outcomes. The owner-death panic path will call this;
@@ -4971,7 +4961,7 @@ impl Vm {
     }
 
     /// Tears a fork combinator's nursery down for a refused park or
-    /// spawn ([E5] the cancel discipline): the face drive runs the
+    /// spawn (the cancel discipline): the face drive runs the
     /// children under the raised flag — a straight-line child's first
     /// entry still lands — and the calling fiber's context, which the
     /// first child switch stashed into its pool slot, restores (the
@@ -5068,9 +5058,8 @@ impl Vm {
         }
     }
 
-    /// The worker-pool half of the fork drive [E3, the 2026-11-15
-    /// sendability ruling, crates/ds-vm/src/forkpool.rs]: eligible frames
-    /// are exactly a `par_map` seam (`par_reduce`'s fold chains one child
+    /// The worker-pool half of the fork drive: eligible frames are exactly
+    /// a `par_map` seam (`par_reduce`'s fold chains one child
     /// per step — the left data dependency — and every other seam keeps
     /// the sequential drive) whose children all still belong to the
     /// nursery and all pass the scalar sendability gate — a `Ref` word in
@@ -5170,7 +5159,7 @@ impl Vm {
         }
     }
 
-    /// The trapped-child death walk every drive's tail shares [E5]: the
+    /// The trapped-child death walk every drive's tail shares: the
     /// kept frames' deinit pass with the payload words held back, the
     /// claim drain around them, each held word's claim crossing to the
     /// joiner (the trap's delivery lands its counts there), and the Dead
@@ -5194,10 +5183,10 @@ impl Vm {
     /// death path ledgers its outcome into the nursery whoever ran it, so
     /// this loop only drives and collects. A parked child of a cancelled
     /// (or discontinuing) nursery is cut at its next resume instead of
-    /// being bounced back in [E2, E5]; a trapped child ledgers `Trapped`
+    /// being bounced back in; a trapped child ledgers `Trapped`
     /// and raises the flag, and the walk that marks such an interrupted
-    /// child dead below is the future deinit pass's hook point [E5:
-    /// teardown walks frames]. A child parking at a cross-nursery join
+    /// child dead below is the deinit pass's hook point (teardown walks
+    /// frames). A child parking at a cross-nursery join
     /// parks and returns the request — the frame pauses on that child
     /// until the pushed frame's answer re-enters it.
     fn drive_frame_children(&mut self, frame: &mut NurseryDrive) -> Option<InterlockRequest> {
@@ -5206,11 +5195,9 @@ impl Vm {
         }
         // The pass loop: one sweep drives every child it can (in spawn
         // order, each to death or a park), and a sweep that ends with
-        // live children left — all standing world-parked (the 2026-11-21
-        // scheduler ruling: the drive ran the next ready fiber, and
-        // nothing is ready) — waits on the reactor before the next
+        // live children left — all standing world-parked — waits on the reactor before the next
         // sweep. Once a sibling parks on a world op the relative order
-        // of sibling observables is unspecified (ruled), so re-sweeping
+        // of sibling observables is unspecified, so re-sweeping
         // in spawn order per wake is one fair interleaving of many.
         loop {
             while frame.cursor < frame.children.len() {
@@ -5234,7 +5221,7 @@ impl Vm {
                     // staged answer at its parked site (the scheduler's
                     // wake), exactly the join answer delivery's shape.
                     //
-                    // Otherwise the resume is preemption-shaped [E2, E5]:
+                    // Otherwise the resume is preemption-shaped:
                     // a child parked at a suspension it chose (a control
                     // call) or one the host's request injected sits at a
                     // park, so the bounce under the nursery's raised
@@ -5246,12 +5233,11 @@ impl Vm {
                     // forever; the CALLT pc-reset is deliberately not a
                     // preemption point). A world-parked child — waiting or
                     // woken — under the flag is cut the same way, its
-                    // reactor interest deregistered first (the ruling's
-                    // parked-IO cancellation: the sentinel at the
+                    // reactor interest deregistered first (the parked-IO
+                    // cancellation: the sentinel at the
                     // resume-shaped point, the reactor never reporting
                     // into a cut fiber). A Ready child is a first entry,
-                    // not a resume: its straight-line work still lands
-                    // [E5].
+                    // not a resume: its straight-line work still lands.
                     let step = if cancelled
                         && matches!(
                             state,
@@ -5306,11 +5292,11 @@ impl Vm {
                 }
                 // the child's death walk completes here: a trapped child keeps
                 // its frames until now, then its slot is released. The deinit
-                // pass fires the kept frames' hooks first (E5: teardown walks
-                // frames running deinits), holding the delivery's payload
+                // pass fires the kept frames' hooks first (teardown walks frames
+                // running deinits), holding the delivery's payload
                 // back; then every other claim the kept frames own is
                 // released, routed to each word's own heap (the one
-                // cross-heap count channel of a death [E5]). A
+                // cross-heap count channel of a death). A
                 // world-parked child skips the walk — its frames still
                 // stand for the wake.
                 match self.pool[child.index()].state {
@@ -5333,8 +5319,7 @@ impl Vm {
             // the sweep is done: waiting children keep the frame open.
             // Under the raised cancel flag the next sweep cuts them —
             // no reactor wait stands between a first failure and its
-            // siblings' cut (the 2026-11-12 amendment's parked-IO
-            // extension); otherwise the reactor owns the gap (a stall
+            // siblings' cut; otherwise the reactor owns the gap (a stall
             // guard failure raises the flag, the honest degenerate). A
             // woken sibling counts too: a channel send mid-pass wakes a
             // child the cursor already passed, so a staged delivery
@@ -5519,9 +5504,8 @@ impl Vm {
                 {
                     None => {
                         if boundary_collects {
-                            // The join channel [E2, the 2026-11-21
-                            // scheduler ruling]: the children's answer
-                            // spans collect into one list in spawn order
+                            // The join channel: the children's answer spans
+                            // collect into one list in spawn order
                             // — the joiner's own heap owns the list, the
                             // delivered words' claim rows acquire on the
                             // joiner (the fork stage's crossing), each
@@ -6057,7 +6041,7 @@ impl Vm {
     }
 
     /// A fiber dying trapped under any driver: ledger `Trapped` and raise
-    /// its nursery's cancel flag [E2 first failure]. The fiber's own state
+    /// its nursery's cancel flag. The fiber's own state
     /// is the caller's business (interrupted under interactive drives,
     /// marked dead by the nursery walk).
     pub(crate) fn trap_child(&mut self, fiber: FiberId, trap: &Trap) {
@@ -6071,9 +6055,9 @@ impl Vm {
         }
     }
 
-    /// Whether the running fiber observes a cancel discipline [E5]:
+    /// Whether the running fiber observes a cancel discipline:
     /// its own nursery's raised flag at a taken backward branch, or the
-    /// host's shutdown standing (the 2026-11-24 signal ruling) — the
+    /// host's shutdown standing — the
     /// cut is the same sentinel death either way. Only nurseries with
     /// live children are ever cancelled, so a stale id cannot fire
     /// here. A timeout racer's own nursery is its race's: the wheel's
@@ -6137,7 +6121,7 @@ impl Vm {
         Ok((version, func_id))
     }
 
-    /// The argument and frame checks every entry shares [E2]: arity,
+    /// The argument and frame checks every entry shares: arity,
     /// argument word kinds (a Ref word against a Fn parameter is the
     /// callable-defaulted slot), and the entry frame versus the stack
     /// limit.
@@ -6158,7 +6142,7 @@ impl Vm {
             // one classification of the staged word serves the compare, the
             // exemptions, and the report; a Raw parameter is the wildcard
             // and a Ref word against a Fn parameter is the
-            // callable-defaulted slot (F2): the host stages a closure word
+            // callable-defaulted slot: the host stages a closure word
             // into a fn-typed entry parameter exactly like a module call
             let actual = arg.slot_type();
             if actual != ty
@@ -6240,8 +6224,8 @@ impl Vm {
         fiber.state = FiberState::Suspended;
     }
 
-    /// Parks the running fiber on a world op at a plain `CALL` site
-    /// (the 2026-11-21 scheduler ruling): the resume point is the
+    /// Parks the running fiber on a world op at a plain `CALL` site:
+    /// the resume point is the
     /// instruction after the call, the completed op's answer delivered
     /// there when the scheduler wakes the fiber. The wait's
     /// registration belongs to the driver that owns the executor
@@ -6381,7 +6365,7 @@ impl Vm {
             WorldWait::ProcWait { pid, .. } => self.out.procs().raw_exit_handle(*pid),
             _ => wait.conn().and_then(|conn| self.out.net().raw_handle(conn)),
         };
-        // the staged machines' resolve stage (item 79's DNS twin): a
+        // the staged machines' resolve stage (the DNS twin): a
         // connect or fetch row may stand at its resolve step, whose
         // interest is the posted eventfd's readability rather than
         // the connect's writability — the tables answer the stage's
@@ -6408,7 +6392,7 @@ impl Vm {
                 // store: the context releases first, so the completion's
                 // swap lands the message where its Ref word names — an
                 // allocation over the live context rides the slot's
-                // stale stash instead (the pitfalls entry's own class)
+                // stale stash instead (the stale-store class)
                 self.host_release();
                 let result = self.wait_error_span(fiber, &wait, false, &err.0);
                 self.sched.waits.insert(token, WaitEntry {
@@ -6442,8 +6426,8 @@ impl Vm {
 
     /// Drops every wait one fiber owns (a nursery's cancel cut, a
     /// release door, the REPL's rollback and teardown): the reactor
-    /// interest deregisters first — the ruling's parked-IO cancellation
-    /// — then the table row and any staged delivery go; stale timer
+    /// interest deregisters first (the parked-IO cancellation), then the
+    /// table row and any staged delivery go; stale timer
     /// entries drop lazily on pop.
     pub(crate) fn cancel_wait(&mut self, fiber: FiberId) {
         self.sched.deliveries.remove(&fiber);
@@ -6515,7 +6499,7 @@ impl Vm {
         }
     }
 
-    /// The close seam's wake door (item 79): the close natives note the
+    /// The close seam's wake door: the close natives note the
     /// handle they closed into the sink, and the dispatcher's native
     /// call site drains the notes here — every parked wait the closed
     /// handle names deregisters its interest and enters the run queue
@@ -6527,8 +6511,8 @@ impl Vm {
     /// readiness runs the op against the closed row, the completion
     /// rendering the error span a wake on the closed handle answers —
     /// the unknown-connection or unknown-listener net floor), the proc
-    /// read the pipe's orderly end (the HUP ruling's empty string — the
-    /// close killed the child holding the write end), the proc wait
+    /// read the pipe's orderly end (HUP's empty string — the close killed
+    /// the child holding the write end), the proc wait
     /// the closed handle's io floor (the blocking twin's post-close
     /// answer). The wake never resurrects a dead fiber: a released
     /// waiter's waits died with its release door, and a fiber not
@@ -6796,7 +6780,9 @@ impl Vm {
                 },
                 // the timer-only waits completed at their own arms above;
                 // the arm keeps this match total
-                WorldWait::Sleep { .. } | WorldWait::Timeout { .. } | WorldWait::ChanDeadline { .. } => {
+                WorldWait::Sleep { .. }
+                | WorldWait::Timeout { .. }
+                | WorldWait::ChanDeadline { .. } => {
                     unreachable!("the timer-only waits completed at their own arms")
                 },
                 WorldWait::Recv { conn: id, max, .. } => {
@@ -6874,9 +6860,7 @@ impl Vm {
                         crate::net::NetAttempt::Park => return,
                     }
                 },
-                // the staged connect machine's wake (the 2026-11-23
-                // raw-socket ruling, item 79's resolve stage the first
-                // step): the readable eventfd takes the resolver
+                // the staged connect machine's wake: the readable eventfd takes the resolver
                 // helper's answer and starts the connect over the
                 // resolved addresses, the writable (or errored) wake
                 // probing the attempt — connected registering the
@@ -7116,9 +7100,8 @@ impl Vm {
         }
     }
 
-    /// The shutdown observation's engine half (the 2026-11-24 signal
-    /// ruling): the flag stands, and every open nursery's cancel flag
-    /// rises with it so the drives' cuts observe one discipline — the
+    /// The shutdown observation's engine half: the flag stands, and every open nursery's cancel
+    /// flag rises with it so the drives' cuts observe one discipline — the
     /// sentinel at the resume-shaped point, the deinit hooks firing,
     /// the boundary reporting. Nothing here decides anything: the
     /// host that registered the interest owns the outcome.
@@ -7135,9 +7118,7 @@ impl Vm {
     /// resume-shaped point while either the host's shutdown stands or
     /// its own nursery's cancel flag is raised — the flag discipline
     /// the join/teardown sweep performs for its own frame's children,
-    /// extended to the fibers no drive stands over (the 2026-11-12
-    /// amendment's parked-IO cancellation, and the 2026-11-24 signal
-    /// ruling's whole-drive cut). An unbounded accept park dies here
+    /// extended to the fibers no drive stands over. An unbounded accept park dies here
     /// exactly a bounded one does.
     fn cut_candidate(&self) -> Option<FiberId> {
         self.pool.iter().enumerate().find_map(|(slot, fiber)| {
@@ -7225,8 +7206,7 @@ impl Vm {
     }
 
     /// The single-thread executor's continuation after a drive went
-    /// quiet on a world park (the 2026-11-21 ruling: the drive runs the
-    /// next ready fiber, FIFO): enter the next woken fiber, and when
+    /// quiet on a world park: enter the next woken fiber, and when
     /// nothing is ready, eagerly start the parked joiner's own Ready
     /// nursery children (a spawned-but-unentered child otherwise runs
     /// only under its join drive), and when nothing is runnable, wait on
@@ -7462,10 +7442,9 @@ impl Vm {
         }))
     }
 
-    /// Enters `target` with `payload` [E2: switch is O(1)]: stash the
-    /// outgoing fiber's context, swap the target's in (buffer ownership
-    /// moves, no word is copied), and deliver `payload` onto the call the
-    /// target parked at (a Ready fiber drops it — first entry runs the
+    /// Enters `target` with `payload`: stash the outgoing fiber's context,
+    /// swap the target's in (buffer ownership moves, no word is copied), and deliver `payload` onto
+    /// the call the target parked at (a Ready fiber drops it — first entry runs the
     /// spawn arguments). The caller has validated the target. Entering
     /// the fiber the last drive ended on is the host's O(1) round-trip:
     /// its context was stashed at host release and swaps back in.
@@ -7506,7 +7485,7 @@ impl Vm {
         )
     }
 
-    /// Ends the running fiber [E2]: ledgers `outcome` into its nursery,
+    /// Ends the running fiber: ledgers `outcome` into its nursery,
     /// marks it dead, and switches to its resumer delivering `value` to the
     /// call the resumer parked at. `None` = the host takes the delivery —
     /// it was the resumer, or the resumer died while this fiber was parked
@@ -7588,13 +7567,13 @@ impl Vm {
     }
 
     /// The running fiber observed its nursery's cancel flag at a taken
-    /// backward branch [E5]: it stops here — no instruction of the loop
+    /// backward branch: it stops here — no instruction of the loop
     /// body it was re-entering runs — and its resumer receives the
     /// `PLATFORM_CANCELLED` sentinel.
     fn cancel_current(&mut self) -> Option<(Active, CodePc)> {
         // the cut fiber's exit decs never run: the deinit pass fires its
-        // kept frames' hooks first (E5: teardown walks frames running
-        // deinits), then the death walk releases the claims — the
+        // kept frames' hooks first (teardown walks frames running deinits),
+        // then the death walk releases the claims — the
         // cancel-cut door
         self.fire_teardown_hooks(self.current, &[]);
         self.drain_claims(self.current);
@@ -7651,7 +7630,7 @@ impl Vm {
                     *t != self.current && self.pool.get(t.index()).is_some_and(Fiber::resumable)
                 });
                 let Some(target) = target else {
-                    // no switch: the checked-read bounce answer [E2 debug surface]
+                    // no switch: the checked-read bounce answer
                     overlay_word(Value::Tag(PLATFORM_NONE), &mut self.stack, caller, fp);
                     return Ok(SwitchOutcome::Bounced);
                 };
@@ -7674,7 +7653,7 @@ impl Vm {
                 };
                 if self.pool[self.current.index()].nursery == Some(nursery) {
                     // a child joining its own nursery would deadlock the
-                    // single-threaded driver on itself [E2]
+                    // single-threaded driver on itself
                     return Err(Trap::UnknownCallee {
                         module: "nursery".into(),
                         func: nursery.0,
@@ -7685,7 +7664,7 @@ impl Vm {
                     // joiner would interlock the two drives on each other
                     // (its answer needs the standing drive's completion,
                     // the standing drive needs the joiner's death) — the
-                    // cycle the own-nursery rule refuses for one level [E2]
+                    // cycle the own-nursery rule refuses for one level
                     return Err(Trap::UnknownCallee {
                         module: "nursery".into(),
                         func: nursery.0,
@@ -7699,7 +7678,7 @@ impl Vm {
                     seam: DriveSeam::Count,
                 }))
             },
-            // the in-language seams [E2]: open, spawn, the boundary join,
+            // the in-language seams: open, spawn, the boundary join,
             // and cancel. The lowerer synthesizes every call site, so a
             // staged id always names this frame's own open nursery; the
             // guards answer the checked-read bounce tag (the native-table
@@ -7907,10 +7886,13 @@ impl Vm {
 
     /// Runs an entry function to its `HALT` or entry-frame `RET`/`RETSPAN`
     /// and reports the resulting answer span: the root fiber's drive to
-    /// completion [E2]. A multi-word answer (a tuple, a widened span)
+    /// completion. A multi-word answer (a tuple, a widened span)
     /// crosses whole — one word per span word, never a truncated head.
     /// The root's execution state resets per run (other pool fibers keep
-    /// their state); on a `Trap` the state is kept for [`Vm::backtrace`].
+    /// their state); on a `Trap` the state is kept for [`Vm::backtrace`], and
+    /// the host that reports the trap must then call [`Vm::release_interrupted`]
+    /// for the root: the kept frames' deinit hooks and their claim rows release
+    /// only at a release door, the next run's reset, or pool-slot reuse.
     /// A root that parks with the host as resumer is re-entered with the
     /// bare `PLATFORM_NONE` tag as the park's answer — a `run` entry
     /// drives to completion; interactive stepping is
@@ -7947,7 +7929,7 @@ impl Vm {
         }
     }
 
-    /// The error-trace switch (H7): armed, the `?` error leg's mark
+    /// The error-trace switch: armed, the `?` error leg's mark
     /// writes the failing frame's position into the running fiber's
     /// private ring. VM-layer state alone — no lowering input reads it,
     /// so flipping it changes no artifact.
@@ -8159,7 +8141,7 @@ impl Vm {
             .frame_size() as usize;
         self.host_release(); // stash any interrupted drive's context
         // the reset door of the death walk: a halted or trapped root
-        // drive's kept frames fire their deinits here (E5), then release
+        // drive's kept frames fire their deinits here, then release
         // their claims before the reset discards them (the tail-native
         // abandon's count dies here now, at the next run, instead of
         // leaking to the VM's drop) — and a trapped root's abandoned
@@ -8329,8 +8311,8 @@ impl Vm {
     /// invocation: a synthetic reentry frame (the entry-frame sentinel
     /// return pc marks it) is pushed on the CURRENT fiber's chain at
     /// `boundary` and driven to its return, which answers
-    /// [`DriveOutcome::Frame`]. The callee word is callable-defaulted
-    /// (F2): a scalar FuncRef names the function directly, a `Ref` word
+    /// [`DriveOutcome::Frame`]. The callee word is callable-defaulted:
+    /// a scalar FuncRef names the function directly, a `Ref` word
     /// names a closure object whose capture block lands in the callee's
     /// leading local slots exactly like a CALLS copy-in (one acquired
     /// count per `Ref` capture, balanced by the callee body's own
@@ -8685,8 +8667,8 @@ impl Vm {
         self.pool[fiber.index()].arena.release_all();
     }
 
-    /// The teardown deinit pass (E5: teardown walks frames running
-    /// deinits): every deinit claim of the dying fiber's kept frames
+    /// The teardown deinit pass (teardown walks frames running deinits):
+    /// every deinit claim of the dying fiber's kept frames
     /// whose liveness the claim ledger certifies fires its hook, exactly
     /// once, deterministically — frames innermost-first (an unwind's
     /// order), each frame's claims in directory (drop-site) order. The
@@ -8943,7 +8925,7 @@ impl Vm {
         }
         // the establishment band is the witness; span kinds still check
         // (a clobbered slot refuses) and a word an earlier drive consumed
-        // never fires twice, but the ledger's counts no longer gate
+        // never fires twice, but the ledger's counts gate nothing
         if site.band.is_some_and(|band| {
             !matches!(read(usize::from(band)), Some(Value::Tag(CLAIM_BAND_SET)))
         }) {
@@ -9108,7 +9090,7 @@ impl Vm {
     /// records), then the native tables (a uop module installed under a
     /// native table's name shadows the natives); a stamp mismatch after a
     /// swap lands here, so callee resolution always follows the current
-    /// slot [H6 item 5]. Traps are
+    /// slot. Traps are
     /// never cached — every failure comes from the
     /// full path (a refused layout pair rides the entry as its cached
     /// refusal, re-raised at the call seam, never answered as a resolution
@@ -9167,7 +9149,7 @@ impl Vm {
     /// pool kind check, the target module's current slot, the entry-word
     /// and arity checks. The pool belongs to the CALLER's module version:
     /// instruction stream and pool are version-stable, callee resolution
-    /// follows the target's current slot [H6 item 5] — the redirect a
+    /// follows the target's current slot — the redirect a
     /// parked old frame's next direct call picks up, with a retiring
     /// caller's own-module index translated through the identity its row
     /// records ([`Vm::uop_site_index`]). The pool operand's
@@ -9193,7 +9175,7 @@ impl Vm {
             });
         };
         // a bound callee resolves through the registry's bound tier alone
-        // (H5): never a uop module, never the native tables — the
+        // — never a uop module, never the native tables — the
         // artifact's symbol table under its manifest name
         if let ConstFuncRef::Bound { module, index, ret } = entry {
             let bound = self
@@ -9243,7 +9225,7 @@ impl Vm {
                         })?;
                     self.registry.resolve_indexed(module, func)
                 },
-                // the bound tier answered ahead of this match (H5)
+                // the bound tier answered ahead of this match
                 ConstFuncRef::Bound { .. } => None,
             };
         if let Some((version, func_id)) = uop_target {
@@ -9282,7 +9264,7 @@ impl Vm {
                 });
             },
             ConstFuncRef::Named { module, func } => (module.as_str(), *func),
-            // the bound tier answered ahead of this match (H5)
+            // the bound tier answered ahead of this match
             ConstFuncRef::Bound { .. } => {
                 unreachable!("the bound tier resolved ahead of the native fallback")
             },
@@ -9388,7 +9370,7 @@ impl Vm {
                 // a bound C symbol never rides the generic dispatch (the
                 // lowering refuses generic bound externs), so the honest
                 // refusal names the callee rather than routing a foreign
-                // address into the uop tables (H5)
+                // address into the uop tables
                 ConstFuncRef::Bound { module, index, .. } => {
                     return Err(Trap::UnknownCallee {
                         module: module.clone(),
@@ -9510,8 +9492,8 @@ impl Vm {
     }
 
     /// The dispatcher: decode-on-dispatch (see the module docs), then a
-    /// dense `match` over the uop [BL-3 note: computed goto is not available
-    /// on stable Rust]. A drive ends when the current fiber completes
+    /// dense `match` over the uop (computed goto is not available on stable
+    /// Rust). A drive ends when the current fiber completes
     /// ([`DriveOutcome::Died`]) or parks with the host as resumer
     /// ([`DriveOutcome::Yielded`]); switches between fibers happen inside.
     /// `boundary` is the call-chain depth of a nested reentrant drive's
@@ -9523,8 +9505,8 @@ impl Vm {
     /// instruction and answers [`Trap::OutOfFuel`] at zero; `false` compiles
     /// the charge away entirely, keeping the unbounded drives' dispatch
     /// cost (the pin table's contract) untouched.
-    // One flat match over the whole uop set is the point of a dispatch loop
-    // [BL-3]; splitting arms into helpers would fragment it and add a call
+    // One flat match over the whole uop set is the point of a dispatch loop;
+    // splitting arms into helpers would fragment it and add a call
     // per op in debug builds. The bias word re-reads u16 as i16 (the
     // format's documented flip-is-subtract), and the call arms bind the
     // caller/callee pair the site vocabulary names.
@@ -9619,7 +9601,7 @@ impl Vm {
                             };
                             return Err((e, pc));
                         }
-                        // the preemption point [E2, E5]: a taken backward branch
+                        // the preemption point: a taken backward branch
                         // (a loop back-edge, self or below) is where the running
                         // fiber observes its nursery's cancel flag. Never
                         // mid-instruction: a linear consume in flight is done.
@@ -9627,7 +9609,7 @@ impl Vm {
                         // instead of cutting: the cut would kill the fiber whose
                         // death walk is driving the hook (a teardown hook must
                         // not re-enter the nursery)
-                        // the sampling profiler's tick (H7): every Nth
+                        // the sampling profiler's tick: every Nth
                         // taken back edge records the running frame's
                         // position into the histogram, source resolved
                         // only at report time through the span tables
@@ -9825,7 +9807,7 @@ impl Vm {
                         }
                         pc.0 += 1;
                     },
-                    // the `?` error leg's propagation mark (H7): no
+                    // the `?` error leg's propagation mark: no
                     // operands, the frame's own position is the datum.
                     // Armed, the hop joins the running fiber's private
                     // ring, innermost first, the oldest dropping past the
@@ -9926,7 +9908,7 @@ impl Vm {
                         let v = match &pool[usize::from(kidx.0)] {
                             Const::F64(v) => Value::F64(*v),
                             Const::Bool(v) => Value::Bool(*v),
-                            // A fn word (F2): an install-resolved id mints
+                            // A fn word: an install-resolved id mints
                             // the word directly — the dsmod install already
                             // walked position → dep name → module id, and the
                             // mint carries exactly that one vector index.
@@ -9964,8 +9946,8 @@ impl Vm {
                                     )
                                     .map_err(|e| (e, pc))?
                                 },
-                                // a bound C symbol is not a callable word
-                                // (H5): the lowering routes every bound
+                                // a bound C symbol is not a callable word:
+                                // the lowering routes every bound
                                 // extern through its call sites, so a
                                 // value-site use never lowers to this pool
                                 // kind — the honest refusal, the same
@@ -10117,7 +10099,7 @@ impl Vm {
                             .map_err(|e| (e, pc))?;
                         pc.0 += 1;
                     },
-                    // the wrapping trio never traps (B7's wrap set), so
+                    // the wrapping trio never traps (the wrap set), so
                     // these are the only IntArith arms without a cold
                     // overflow edge
                     OP_WRAPADD_I64 => {
@@ -10356,7 +10338,6 @@ impl Vm {
                             read_f64(&self.stack, fp, rhs, slots, body_len).map_err(|e| (e, pc))?,
                         );
                         // bit-structural equality: reflexive, total, dict-safe
-                        // [B9]
                         let v = x.to_bits() == y.to_bits();
                         write_slot(&mut self.stack, fp, dst, slots, body_len, Value::Bool(v))
                             .map_err(|e| (e, pc))?;
@@ -10628,7 +10609,7 @@ impl Vm {
                         let dst = fa;
                         let func = fb;
                         let n = fc;
-                        // CLOSURE_NEW (F2): the header is the scalar FuncRef
+                        // CLOSURE_NEW: the header is the scalar FuncRef
                         // word at `func` (KCONST-minted), the capture block the
                         // n words staged at overlay positions 0..n. The object
                         // acquires one count per Ref capture as it adopts the
@@ -10690,7 +10671,7 @@ impl Vm {
                         let src = fa;
                         let obj_slot = fb;
                         let idx = fc;
-                        // CAPTURE_STORE (F2, C3): the mut window over the
+                        // CAPTURE_STORE: the mut window over the
                         // running closure's own capture block. `obj_slot` holds
                         // the closure word CALLS wrote into this frame — the
                         // frame's borrowed copy, its count the caller still
@@ -10797,7 +10778,7 @@ impl Vm {
                         let x =
                             read_f64(&self.stack, fp, src, slots, body_len).map_err(|e| (e, pc))?;
                         // trap on NaN and on magnitudes at or past 2^63; -2^63
-                        // itself is exactly i64::MIN and converts [B7]
+                        // itself is exactly i64::MIN and converts
                         if x.is_nan() || x >= F64_I64_EDGE || x < -F64_I64_EDGE {
                             return Err((Trap::CvtOutOfRange, pc));
                         }
@@ -10950,8 +10931,8 @@ impl Vm {
                             // overlays argument slot 0 exactly where a RET
                             // would put it (a fallible native's span overlays
                             // slots 0 and 1). The fiber-control natives are the
-                            // exception: the dispatcher itself is the switch
-                            // [E2] — their bodies never run from a CALL site.
+                            // exception: the dispatcher itself is the switch —
+                            // their bodies never run from a CALL site.
                             Resolved::Native { table, index } => {
                                 let nf = &table[index as usize];
                                 check_native_call_site(&f.layout, nf).map_err(|e| (e, pc))?;
@@ -11033,9 +11014,9 @@ impl Vm {
                                         },
                                         other => other,
                                     };
-                                    // the close seams' wake door (item
-                                    // 79): a native that closed a handle
-                                    // wakes the parked waits on it now
+                                    // the close seams' wake door: a native
+                                    // that closed a handle wakes the parked
+                                    // waits on it now
                                     self.wake_closed();
                                     overlay_native(result, &mut self.stack, &f.layout, fp)
                                         .map_err(|e| (e, pc))?;
@@ -11043,7 +11024,7 @@ impl Vm {
                                 }
                             },
                             // A bound artifact's C symbol runs in the
-                            // caller's frame like a native (H5): the staged
+                            // caller's frame like a native: the staged
                             // words marshal per their own kinds and the
                             // scalar answer overlays argument slot 0. The
                             // call is blocking and synchronous — it pins the
@@ -11130,12 +11111,7 @@ impl Vm {
                                         ChanStep::Answer(result) => result,
                                         ChanStep::Park(wait) => {
                                             let kind = wait.map_or(ParkKind::Chan, ParkKind::World);
-                                            return self.park_world_tail(
-                                                &active,
-                                                pc,
-                                                boundary,
-                                                kind,
-                                            )
+                                            return self.park_world_tail(&active, pc, boundary, kind)
                                         },
                                     }
                                 } else {
@@ -11159,7 +11135,7 @@ impl Vm {
                                 }
                             },
                             // A bound artifact's C symbol tail-calls in
-                            // place (H5): the blocking call pins the fiber
+                            // place: the blocking call pins the fiber
                             // for its whole duration, and the one scalar
                             // word answers exactly a native word result's
                             // tail ride
@@ -11200,7 +11176,7 @@ impl Vm {
                             },
                             other => other,
                         };
-                        // the close seams' wake door (item 79): a native
+                        // the close seams' wake door: a native
                         // that closed a handle wakes the parked waits on
                         // it now — the tail call's own return flows on
                         self.wake_closed();
@@ -11329,7 +11305,7 @@ impl Vm {
                         }
                         let callee_slot = fb;
                         let nargs = fa;
-                        // CALLS, the callable-word call form (F2): the callee
+                        // CALLS, the callable-word call form: the callee
                         // operand is a frame slot, the ISA's one dynamic-dispatch
                         // point — the callee word's identity is runtime data by
                         // construction, so the read dispatches on the word's
@@ -11493,7 +11469,7 @@ impl Vm {
                     OP_CALLG => {
                         let callee = ConstIdx(fd);
                         let nargs = fa;
-                        // A generic call site [H3]: the callee is a generic
+                        // A generic call site: the callee is a generic
                         // builtin's ONE body, and the call's evidence words sit
                         // in the overlay after the staged arguments — their
                         // count travels with the callee, so the uop carries
@@ -11516,7 +11492,7 @@ impl Vm {
                             ));
                         };
                         // A runtime-resolved trait dispatch inside a
-                        // generic impl body [H3]: the sentinel FuncRef
+                        // generic impl body: the sentinel FuncRef
                         // names the calling frame's evidence slot, and
                         // the word staged there by the site that entered
                         // the body names an evidence-chain object — the
@@ -11558,7 +11534,7 @@ impl Vm {
                             pc = CodePc(0);
                             continue 'transfer;
                         }
-                        // A user trait-method dispatch site [H3]: the
+                        // A user trait-method dispatch site: the
                         // FuncRef names the impl body the lowering resolved
                         // from the call's statically solved instance. The
                         // resolution runs through the per-site inline cache
@@ -11657,7 +11633,7 @@ impl Vm {
                                 ));
                             },
                             // a bound C symbol never rides the generic
-                            // dispatch (H5)
+                            // dispatch
                             ConstFuncRef::Bound { module, index, .. } => {
                                 return Err((
                                     Trap::UnknownCallee {
@@ -11777,8 +11753,8 @@ impl Vm {
                     OP_CALLTG => {
                         let callee = ConstIdx(fd);
                         let nargs = fa;
-                        // CALLTG, the dispatch tail call [H2's guarantee
-                        // closure]: the dispatch resolution is CALLG's own
+                        // CALLTG, the dispatch tail call: the dispatch
+                        // resolution is CALLG's own
                         // — the sentinel evidence FuncRef, a trait site's
                         // impl body, or a generic builtin's ONE body — and
                         // the transfer is CALLT's: the staged words slide
@@ -11935,7 +11911,7 @@ impl Vm {
                                 ));
                             },
                             // a bound C symbol never rides the generic
-                            // dispatch (H5)
+                            // dispatch
                             ConstFuncRef::Bound { module, index, .. } => {
                                 return Err((
                                     Trap::UnknownCallee {
@@ -12323,7 +12299,7 @@ impl Vm {
                             None => return Ok(DriveOutcome::Died(FrameAnswer::one(value))),
                         }
                     },
-                    // Major 0xE: the placed RC pair (C4). Load decode-checks
+                    // Major 0xE: the placed RC pair. Load decode-checks
                     // every word once, so a canonicity violation here is like
                     // any other; each arm moves one counted heap block's
                     // count per word.
@@ -12377,10 +12353,10 @@ impl Vm {
 
     /// Renders the live frames of the fiber the last drive ended on
     /// (innermost first): each real frame with its position plus the
-    /// tail-chain elided count [H2]. The counter is always available;
+    /// tail-chain elided count. The counter is always available;
     /// per-elision `ElisionRecord`s for lazy materialization come with
-    /// per-fiber debug recording, so at M3 the count reports how many
-    /// logical frames a debugger would materialize later.
+    /// per-fiber debug recording, so the count reports how many logical frames
+    /// a debugger would materialize later.
     #[must_use]
     pub fn backtrace(&self) -> Vec<BacktraceFrame> {
         let fiber = &self.pool[self.current.index()];
@@ -12425,7 +12401,7 @@ impl Vm {
         frames
     }
 
-    /// One channel step (the 2026-11-21 shared-state ruling): the fast
+    /// One channel step: the fast
     /// paths run against the channel's own store through the router
     /// (deposit, pop, the waiter queues), a full send or empty receive
     /// parks the caller in the channel's waiter queue — the payload's
@@ -12531,8 +12507,8 @@ impl Vm {
                 let here = self.current;
                 if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
                     // the deadline bounds only the wait: a full channel
-                    // beside a past deadline answers the failure span at
-                    // once, no park, the timer ruling's own letter
+                    // beside a past deadline answers the failure span at once,
+                    // no park
                     if nanos <= 0 {
                         return Ok(ChanStep::Answer(timeout_failure_span()));
                     }
@@ -12724,7 +12700,7 @@ impl Vm {
 
     /// Moves one parked sender's staged payload span into the slot a
     /// receive freed: the deposit takes the buffer's edge count per
-    /// `Ref` word on the payload's own heap (the C4 funnel), the sender
+    /// `Ref` word on the payload's own heap (the count funnel), the sender
     /// woken with the unit word. Stale senders drop — the payload's
     /// counts were the parked frame's own, released by whoever cut it.
     fn chan_refill(&mut self, chan: RefId) -> Result<(), Trap> {
@@ -13545,7 +13521,7 @@ mod tests {
         assert!(vm.registry.version(v1).is_none());
     }
 
-    /// The bounded-row regression the item-39 landing owns: deep install
+    /// The bounded-row regression: deep install
     /// churn with the entry frame draining between installs recycles the
     /// swept rows' slots, so the table's width stays a small constant
     /// instead of growing one row per install — and each recycled index

@@ -276,7 +276,7 @@ fn row_edit(source: &str, ast: &Ast, name: &str) -> Option<(u32, u32, String)> {
     }
     // A merge needs a plain row: an alias or condition changes what a
     // selection would mean, and a visibility modifier is already a
-    // refusal row (`pub import` names no re-export this round).
+    // refusal row (`pub import` names no re-export).
     let plain = all.iter().find(|(item, imp)| {
         names_std(imp) && imp.alias.is_none() && imp.cond.is_none() && item.vis.is_none()
     });
@@ -465,7 +465,7 @@ mod tests {
         // The migrated json and string faces: every exported name, kinds
         // and all, read out of the bundle's own compile shape — the
         // table's composed half, source order within the faces. The json
-        // face's bodied declarations are const-of-lambda bindings (F2),
+        // face's bodied declarations are const-of-lambda bindings,
         // the string face's extern entries fns.
         let members = exported_face_members(
             ds_stdlib::AMBIENT_CORE_SOURCE,

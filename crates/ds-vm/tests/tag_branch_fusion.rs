@@ -1,4 +1,4 @@
-//! The peek-next tag-branch fusion (BL-4's census-ranked third family): a
+//! The peek-next tag-branch fusion (the census' third-ranked family): a
 //! TAGTEST followed by the measured census branch spelling — JMPIF, the
 //! match dispatch's arm-guard exit — testing the tag test's own dst takes
 //! its branch decision inside the tag test's dispatch. The fused arm must

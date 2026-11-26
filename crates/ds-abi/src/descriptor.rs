@@ -1,11 +1,11 @@
-//! Two-word entry descriptors for cross-tier and cross-module calls (H2).
+//! Two-word entry descriptors for cross-tier and cross-module calls.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The tier state of one function entry. The flip is one-way: a compiled
 /// entry never returns to interpreted. A recompiled function (hot reload)
 /// gets a fresh [`EntryDescriptor`] in the second module slot instead of a
-/// backward flip (H6 item 5).
+/// backward flip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// Only word 0 (`tier1_prologue_ptr`) is valid; calls enter tier 1.
@@ -23,7 +23,7 @@ pub enum TierFlipError {
     NullCodePointer,
 }
 
-/// The two-word entry descriptor of a function (H2):
+/// The two-word entry descriptor of a function:
 /// `{tier1_prologue_ptr, tier2_code_ptr}`.
 ///
 /// Flip protocol — who writes which word, and the ordering that keeps a
@@ -42,13 +42,13 @@ pub enum TierFlipError {
 ///   (0 to non-null, never back), and the two words are read independently — word 0 never changes,
 ///   so no read can straddle a state change of both words.
 /// - Already-running tier-1 frames keep interpreting the old code; the flip affects subsequent
-///   calls only. In-frame tier transitions are in-place J-variant opcode rewrites (H1), which are
+///   calls only. In-frame tier transitions are in-place J-variant opcode rewrites, which are
 ///   `ds-jit`'s concern, not this descriptor's.
 ///
-/// Cross-module calls resolve through the two-version module slot table
-/// (H6 item 5): a hot reload publishes a fresh descriptor (fresh word 0) in
-/// the second slot, and frames still on the old version retire at their
-/// next cross-module call — the same invalidation story as the tier flip.
+/// Cross-module calls resolve through the two-version module slot table: a
+/// hot reload publishes a fresh descriptor (fresh word 0) in the second slot,
+/// and frames still on the old version retire at their next cross-module call
+/// — the same invalidation story as the tier flip.
 #[derive(Debug)]
 pub struct EntryDescriptor {
     tier1_prologue: AtomicUsize,

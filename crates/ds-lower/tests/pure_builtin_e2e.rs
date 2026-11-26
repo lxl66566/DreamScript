@@ -1,4 +1,4 @@
-//! End-to-end: the pure-builtin round's source calls lower and run —
+//! End-to-end: the pure-builtin source calls lower and run —
 //! the float math family's one-word f64 totals (IEEE semantics, a
 //! negative sqrt answering NaN, never a trap), the string search
 //! triple's membership bit and one-pass swap, and the checked

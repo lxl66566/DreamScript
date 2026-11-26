@@ -1,5 +1,5 @@
 //! One function-body word: the runnable uop stream interleaved with the
-//! M4 RC pair (C4). The module body carries both majors, so one
+//! RC pair. The module body carries both majors, so one
 //! instruction space covers the whole placement contract: jump targets
 //! count RC words, and no stream ever renumbers (the majors below 0xE
 //! are untouched).
@@ -16,7 +16,7 @@ pub enum InstDecodeError {
 }
 
 /// One instruction word of a function body: a runnable micro-operation
-/// or a placed reference-counting op (C4).
+/// or a placed reference-counting op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Inst {
     /// A runnable micro-operation.

@@ -1,5 +1,5 @@
-//! The collection face end to end through the `ds` binary (the H5.5
-//! member-tier ruling): the taught spellings present over the ambient —
+//! The collection face end to end through the `ds` binary (the
+//! member-tier surface): the taught spellings present over the ambient —
 //! the `list[t]()`/`map[k, v]()` empty constructors, the inherent member
 //! spellings over the native seams (`xs.push(x)` and `m.set(k, v)`
 //! mutating in place and answering the collection, `xs.get(i)` and

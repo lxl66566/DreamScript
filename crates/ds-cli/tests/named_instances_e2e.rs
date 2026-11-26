@@ -1,5 +1,5 @@
-//! The named-instance vocabulary end to end through the `ds` binary (the
-//! B6 two-impls escape): two impls of one trait over one head — the
+//! The named-instance vocabulary end to end through the `ds` binary:
+//! two impls of one trait over one head — the
 //! unnamed row answering every plain spelling as before, the named rows
 //! answering only their selected call sites — the qualified spelling
 //! selecting the same instance, a generic impl's selected dispatch riding
@@ -45,7 +45,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// The B6 escape itself: one unnamed and two named impls of one trait
+/// The named-instance escape itself: one unnamed and two named impls of one trait
 /// over one head — the plain spelling keeps the unnamed row's answer,
 /// each selection answers its own named body, and the qualified
 /// spelling selects the same instance.

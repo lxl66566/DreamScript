@@ -1,4 +1,4 @@
-//! Restore-on-every-pop-path guards (C4/H4).
+//! Restore-on-every-pop-path guards.
 
 use core::mem;
 

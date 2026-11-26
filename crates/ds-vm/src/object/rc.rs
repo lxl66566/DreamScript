@@ -184,7 +184,7 @@ impl Objects {
         }
     }
 
-    /// `rc_inc` (C4): the reference in the slot naming `obj` gains one
+    /// `rc_inc`: the reference in the slot naming `obj` gains one
     /// owner.
     ///
     /// # Errors
@@ -196,7 +196,7 @@ impl Objects {
         Ok(())
     }
 
-    /// `rc_dec` (C4): one owner drops. A unique death frees the object —
+    /// `rc_dec`: one owner drops. A unique death frees the object —
     /// a string unbinds its intern entry, a list drops one count per
     /// `Ref` element it holds — and threads the id onto the free list
     /// (the next compatible allocation claims it) while the block's
@@ -275,7 +275,7 @@ impl Objects {
             // the block's death hook (the payload's own drop glue) runs,
             // then the memory pools for the next compatible allocation
             self.heap.rc_dispose::<Object>(header);
-            // one owned count per Ref word drops here (C4): lists per
+            // one owned count per Ref word drops here: lists per
             // element, maps per key and value word, closures per capture.
             // The dec is split so a zero queues the object instead of
             // recursing; a stored reference is live by construction, and
@@ -310,7 +310,7 @@ impl Objects {
     /// Allocates a fresh closure object (the header FuncRef plus the
     /// capture block), owned by the caller. The capture words are adopted
     /// as-is: a moved-in `Ref` word keeps its count — the object owns it
-    /// now — while copyable words are plain copies [F2].
+    /// now — while copyable words are plain copies.
     pub fn alloc_closure(&mut self, func: FuncRef, captures: Vec<Value>) -> u32 {
         self.alloc(Object::Closure(Closure { func, captures }))
     }

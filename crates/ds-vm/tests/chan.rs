@@ -1,4 +1,4 @@
-//! The bounded channel e2e (the 2026-11-21 shared-state ruling): a
+//! The bounded channel e2e: a
 //! heap-object channel whose buffer lives on the creating fiber's store,
 //! hand-assembled programs over the three builtin seams (`chan_new` 87,
 //! `chan_send` 88, `chan_recv` 89), and the host nursery face to drive
@@ -13,7 +13,7 @@
 //!   slot from the parked sender's staged payload.
 //! - the tail shapes: a child whose entry frame tail-calls recv parks with the final-delivery
 //!   sentinel, the wake completing the fiber with the received word as its answer.
-//! - cross-heap payloads: a child's own-heap string deposits into the parent-owned buffer (the C4
+//! - cross-heap payloads: a child's own-heap string deposits into the parent-owned buffer (the
 //!   foreign-post funnel's edge count) and the receiving fiber reads it back content-equal.
 //! - the stall guard: a recv with no live sender is the honest deadlock (`SchedulerDeadlock`), and
 //!   `chan_new` refuses a bound below one.

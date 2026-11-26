@@ -1,4 +1,4 @@
-//! The @std extraction family's local typing [E4]: `unwrap_or`'s eager
+//! The @std extraction family's local typing: `unwrap_or`'s eager
 //! fallback meets the extracted type, `unwrap_or_else`'s zero-parameter
 //! lambda checks against it, `ok_or` unions the new member in for `?` to
 //! propagate, and `map_err` mirrors the `.err`/`.ok` handler rules —

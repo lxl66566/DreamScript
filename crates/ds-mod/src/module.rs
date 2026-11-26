@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// One entry of the locked constants payload: an i64, f64, bool, UTF-8
-/// string, or function reference (G3.5).
+/// string, or function reference.
 ///
 /// f64 values are stored and restored by bit pattern, so NaN payloads
 /// survive a round trip unchanged.
@@ -35,7 +35,7 @@ pub enum Constant {
         /// blocks payload.
         func: u32,
     },
-    /// A bound extern's C-ABI callee (H5): the `[artifacts]` name whose
+    /// A bound extern's C-ABI callee: the `[artifacts]` name whose
     /// installed library owns the symbol, the symbol's position in that
     /// library's export enumeration, and the return's marshaling word —
     /// a scalar word or the absent word a unit return rides. The
@@ -113,7 +113,7 @@ impl core::hash::Hash for Constant {
     }
 }
 
-/// One evidence-chain object of the runtime-evidence seam `[H3]`: the
+/// One evidence-chain object of the runtime-evidence seam: the
 /// serving body a staged evidence word names, plus one tail chain index
 /// per that body's own evidence demands (in the body's pair order). The
 /// staged words carry indices into the module's chain table; a nested
@@ -135,7 +135,7 @@ pub struct EvidenceChain {
 /// table is the name side, so a host can build `Value::Tag` arguments
 /// without the front end — and the declaring declaration beside the
 /// label keeps a row unambiguous where several declarations share a
-/// label across packages (F9.5).
+/// label across packages.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct MemberTag {
     /// The declaring declaration's name (a free-standing `tag`
@@ -244,9 +244,9 @@ pub enum FunctionError {
     Encode(EncodeError),
 }
 
-/// One per-function record of the blocks payload (BL-7): local name, frame
+/// One per-function record of the blocks payload: local name, frame
 /// layout, its constant pool, and the validated body as canonical 32-bit
-/// words — uops interleaved with the 0xE RC pair (C4).
+/// words — uops interleaved with the 0xE RC pair.
 ///
 /// Construction validates the body once: every word encodes canonically at
 /// its pc, and every jump lands inside the function's own code. The record
@@ -320,7 +320,7 @@ impl Function {
         &self.name
     }
 
-    /// The static frame layout (BL-6).
+    /// The static frame layout.
     #[must_use]
     pub fn layout(&self) -> &FrameLayout {
         &self.layout
@@ -377,7 +377,7 @@ pub(crate) const fn slot_tag(slot: SlotType) -> u8 {
     }
 }
 
-/// One bound extern's return word as a compact byte (H5): `Unit` rides
+/// One bound extern's return word as a compact byte: `Unit` rides
 /// the tag no [`SlotType`] spells (`slot_tag`'s I32 byte, a kind the
 /// bound return never legally held), the scalar words their own
 /// [`slot_tag`] bytes — so an artifact the scalar round wrote decodes
@@ -431,17 +431,17 @@ pub struct Module {
     pub(crate) deps: Vec<Dep>,
     pub(crate) source_hash: Hash128,
     pub(crate) collector: CollectorHooks,
-    /// Committed BL-7 field, value pending: 0 until M3 defines the
+    /// Committed field, value pending: 0 until the lowering defines the
     /// computation. Non-zero values read from a file are round-tripped,
     /// not validated.
     pub(crate) max_call_depth: u32,
-    /// Committed BL-7 field (IR-version checksum), value pending: 0 until
-    /// M3 defines the computation. Non-zero values read from a file are
+    /// Committed field (IR-version checksum), value pending: 0 until
+    /// the lowering defines the computation. Non-zero values read from a file are
     /// round-tripped, not validated.
     pub(crate) ir_checksum: u32,
     pub(crate) constants: Vec<Constant>,
     pub(crate) functions: Vec<Function>,
-    /// The evidence-chain table `[H3]`: the staged evidence words index it,
+    /// The evidence-chain table: the staged evidence words index it,
     /// the nested runtime dispatches walk it one hop per call.
     pub(crate) chains: Vec<EvidenceChain>,
     /// The tag table (member atom name to tag id), in first-use order.
@@ -451,8 +451,8 @@ pub struct Module {
 }
 
 impl Module {
-    /// Creates a module with default flags, the dormant collector, pending
-    /// BL-7 fields (zero), no dependencies, no constants, no functions,
+    /// Creates a module with default flags, the dormant collector, the
+    /// pending fields (zero), no dependencies, no constants, no functions,
     /// and no debug spans.
     #[must_use]
     pub fn new(name: impl Into<String>, target: TargetClass, source_hash: Hash128) -> Self {
@@ -523,27 +523,27 @@ impl Module {
         self
     }
 
-    /// The checked blake3-128 source hash (G3.5).
+    /// The checked blake3-128 source hash.
     #[must_use]
     pub fn source_hash(&self) -> Hash128 {
         self.source_hash
     }
 
-    /// The reserved two-hook collector interface state (C4, H4).
+    /// The reserved two-hook collector interface state.
     #[must_use]
     pub fn collector(&self) -> CollectorHooks {
         self.collector
     }
 
-    /// The committed BL-7 max-call-depth field; 0 means "value pending"
-    /// until M3 defines the computation.
+    /// The committed max-call-depth field; 0 means "value pending"
+    /// until the lowering defines the computation.
     #[must_use]
     pub const fn max_call_depth(&self) -> u32 {
         self.max_call_depth
     }
 
-    /// The committed BL-7 IR-version checksum field; 0 means "value
-    /// pending" until M3 defines the computation.
+    /// The committed IR-version checksum field; 0 means "value
+    /// pending" until the lowering defines the computation.
     #[must_use]
     pub const fn ir_checksum(&self) -> u32 {
         self.ir_checksum
@@ -601,7 +601,7 @@ impl Module {
         }
     }
 
-    /// The evidence-chain table, in stored order `[H3]`.
+    /// The evidence-chain table, in stored order.
     #[must_use]
     pub fn chains(&self) -> &[EvidenceChain] {
         &self.chains

@@ -1,4 +1,4 @@
-//! The parameter-passing modes (C2) end to end: a `mut` parameter is a
+//! The parameter-passing modes end to end: a `mut` parameter is a
 //! re-storable slot over the borrowed staging (the caller's binding never
 //! observes the callee's re-seat — the window copies in), and a `move`
 //! parameter consumes its argument (the caller's staging hands the count

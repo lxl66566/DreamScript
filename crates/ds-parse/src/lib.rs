@@ -1,8 +1,10 @@
-//! Parser for DreamScript: lexer, pest grammar, and spanned AST for the
-//! decided surface of docs/en/design-decisions.md (F1-F7, B3, B4, B7, G3,
-//! G4).
+//! Parser for DreamScript: lexer, pest grammar, and spanned AST.
 //!
-//! The public surface is one query, [`parse`], shaped for the M1 memoized
+//! The surface is closed: bindings, `fn` declarations, traits and impls, one
+//! fixed operator set. Custom operators, subscript slicing, vararg/spread,
+//! `or`, `??` and `?.` have no spelling, so they do not parse.
+//!
+//! The public surface is one query, [`parse`], shaped for a memoized
 //! compiler-as-query-library: it takes the source registry plus a file id and
 //! returns either the [`Ast`] or the diagnostics. Invalid source never
 //! panics: a lexical pre-scan guards nesting depth (recursive-descent stack
@@ -10,7 +12,7 @@
 //! bracket classes; remaining structural failures map onto the pest
 //! furthest-failure position.
 //!
-//! # Script entry (G3)
+//! # Script entry
 //!
 //! Module bodies are pure declarations; the one exception is the entry file
 //! under script mode, whose top-level statements fold into one synthesized
@@ -19,7 +21,7 @@
 //! diagnostic, so every non-entry path through the pipeline stays
 //! pure-declaration.
 //!
-//! # Newline sensitivity (F1)
+//! # Newline sensitivity
 //!
 //! Statements are newline-terminated; there are no semicolons. A binary
 //! operator must sit on the same line as its left operand, so `a +\nb`
@@ -27,7 +29,7 @@
 //! open on the next line (method chains); calls, indexes, and `?` must open
 //! on the same line as their operand.
 //!
-//! # File structure (G3)
+//! # File structure
 //!
 //! A file is a `Vec` of `##`-separated [`Block`]s; a file without
 //! separators is one block. Top-level definitions are order-independent

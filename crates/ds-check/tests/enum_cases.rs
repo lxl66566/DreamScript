@@ -1,4 +1,4 @@
-//! The enum-block declaration story [B3]: cases mint into the tag
+//! The enum-block declaration story: cases mint into the tag
 //! namespace like standalone tags, the enum name is the union of its
 //! cases, construction is fixed per declaration with cross-spellings as
 //! structured checker errors, and qualified case paths test the case's
@@ -136,9 +136,9 @@ fn call_forms_on_bare_cases_and_structs_stay_rejected() {
 
 #[test]
 fn a_case_label_beside_a_value_follows_the_fn_at_call_form() {
-    // F9.5: tag names left the value namespace, so the call form always
-    // means the fn — even beside a payloaded case of the same label. The
-    // constructor families keep F9's residual DS2014 class.
+    // Tag names left the value namespace, so the call form always means
+    // the fn — even beside a payloaded case of the same label. The
+    // constructor families keep the DS2014 class.
     let found = codes(concat!(
         "tag int\n",
         "enum e { make(int) }\n",
@@ -252,7 +252,7 @@ fn unit_cases_of_a_generic_enum_test_over_the_applied_head() {
         "  }\n",
         "}\n",
     ));
-    // the directed arm label refuses unknown-member (F9.5), the
+    // the directed arm label refuses unknown-member, the
     // non-member reading of today's not-a-member mismatch
     assert!(
         found
@@ -262,7 +262,7 @@ fn unit_cases_of_a_generic_enum_test_over_the_applied_head() {
     );
 }
 
-/// `none` is the predeclared unit atom (B4), so a payloaded case named
+/// `none` is the predeclared unit atom, so a payloaded case named
 /// `none` claims no atom of its own: the construction refuses at its own
 /// seam instead of typing the binding empty and surfacing the nonsense
 /// match diagnostics later.

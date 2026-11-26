@@ -53,7 +53,7 @@ pub(crate) struct Member {
 }
 
 /// The member identity the dep-list writer records and the walk
-/// validates (G3.5), delegated to the ds-pkg fold so a root's walked
+/// validates, delegated to the ds-pkg fold so a root's walked
 /// members and a dep's resolved bundle share one identity definition:
 /// a single member's source hash, or the composed fold over every
 /// member in ascending path order — one length-prefixed path and text
@@ -70,7 +70,7 @@ pub(crate) fn member_identity(members: &[Member]) -> Hash128 {
     .expect("a walked member set carries at least one UTF-8 member")
 }
 
-/// One linked package's compiled module and member surfaces (G4): the
+/// One linked package's compiled module and member surfaces: the
 /// module the load walk installs, and the exports a dependent's imports
 /// validate against, in the package compile's own file space.
 struct LinkedPackage {
@@ -88,7 +88,7 @@ struct LinkedPackage {
 /// artifacts (installed content-addressed ahead of the walk), and the
 /// compiled packages those identities pin, memoized by link name so a
 /// package the walk and the surface builder both demand compiles once.
-/// The graph's bindable artifact loads (H5): the modules whose bytes load
+/// The graph's bindable artifact loads: the modules whose bytes load
 /// and enumerate, beside each load that refused with its rendered reason.
 type BoundLoads = (Vec<(String, ds_vm::BoundModule)>, Vec<(String, String)>);
 
@@ -501,7 +501,7 @@ pub(crate) fn implicit_std_graph() -> Graph {
 
 /// The bundle's source members (the reserved manifest member aside), in
 /// ascending path order: one package serves one module composed of
-/// every member file (G3), so an empty package refuses — the module has
+/// every member file, so an empty package refuses — the module has
 /// no trees to serve — and each member must read as UTF-8 text.
 fn members_of(name: &str, bundle: &Package) -> Result<Vec<Member>> {
     let mut members = Vec::new();
@@ -534,7 +534,7 @@ pub(crate) fn walk_sources(root: &Path) -> Result<Vec<PathBuf>> {
     ds_pkg::walk_sources(root).map_err(|error| anyhow!("{error}"))
 }
 
-/// The members one package-root entry carries (G3: one package, one
+/// The members one package-root entry carries (one package, one
 /// namespace): a manifest-free entry stays the single member the
 /// script rule always compiled — the manifest-free run path over the
 /// implicit `@std` graph never sees a sibling — while a manifest beside
@@ -588,7 +588,7 @@ pub(crate) fn root_members(entry: &Path) -> Result<Vec<Member>> {
 /// The members one `ds test` entry composes: the test file as the script
 /// entry beside the package's own members — the walk never lists
 /// `tests/` — so the test reads the package's declarations in the one
-/// namespace (G3) while every sibling test stays an independent entry.
+/// namespace while every sibling test stays an independent entry.
 /// A manifest-free root composes the test file alone, the bare-script
 /// shape. The entry rides first; the walked members follow in ascending
 /// bundle-relative path order, the identity fold deterministic.
@@ -823,7 +823,7 @@ impl Graph {
         artifact_pins_of(&self.artifacts)
     }
 
-    /// The graph's bindable artifacts (H5): each resolved `[artifacts]`
+    /// The graph's bindable artifacts: each resolved `[artifacts]`
     /// library whose bytes load and enumerate installs under its manifest
     /// name — the native module a bound extern's pool constant addresses
     /// — beside the loads that refused, each with its reason. A library
@@ -861,7 +861,7 @@ impl Graph {
         (modules, refused)
     }
 
-    /// Installs the graph's bindable artifacts into a VM registry (H5) —
+    /// Installs the graph's bindable artifacts into a VM registry —
     /// the run path's own step, ahead of the module installs whose pool
     /// validation resolves a bound extern's constant against the bound
     /// tables exactly like a platform's served ops. Answers the loads
@@ -886,7 +886,7 @@ impl Graph {
         self.members.contains_key(ds_stdlib::STD_PACKAGE_NAME)
     }
 
-    /// One linked package's compiled module and exports (G4), memoized by
+    /// One linked package's compiled module and exports, memoized by
     /// link name: the package's members compose one module under the link
     /// name at the recorded identity, its own imports validating and
     /// binding against this same graph, dependencies first. A name the
@@ -1006,11 +1006,11 @@ impl Graph {
             .map(|package| package.module.clone()))
     }
 
-    /// The import surfaces one compile's trees bind through (G4): one
+    /// The import surfaces one compile's trees bind through: one
     /// [`ImportSurface`] per import declaration the graph serves, keyed
     /// by the declaration's span. `@std` keeps the merged-ambient
     /// reading (its selections validate against the compile unit's
-    /// merged namespace, the ambient round's behavior); a linked
+    /// merged namespace, the ambient's own behavior); a linked
     /// package's import serves the named members' exported entries with
     /// the link position a call lowering addresses — the positions the
     /// dep-list writer records, so both derive from the same
@@ -1067,7 +1067,7 @@ impl Graph {
                 }
             }
         }
-        // the run's bound artifacts join the graph (H5): each resolved
+        // the run's bound artifacts join the graph: each resolved
         // `[artifacts]` library a walked source's extern binds enumerates
         // into the fold in export order — the table a bound extern's
         // declaration validates against and the VM install binds below.
@@ -1140,7 +1140,7 @@ impl Graph {
             return Ok(ImportSurface::NoSuchMember { member: name });
         };
         // The member selector: the at-sigil path's segments after the
-        // link stem name member files (G3); a bare path links whole.
+        // link stem name member files; a bare path links whole.
         let selector = if import.path.at_sign && import.path.segments.len() > 1 {
             Some(&import.path.segments[1])
         } else {
@@ -1304,8 +1304,8 @@ impl Graph {
     }
 }
 
-/// Reads and compiles one package-shaped root over its member set (G3:
-/// one package, one namespace): a manifest-free root stays the single
+/// Reads and compiles one package-shaped root over its member set (one
+/// package, one namespace): a manifest-free root stays the single
 /// member the script rule always compiled, while a manifest beside the
 /// entry composes the entry member and every sibling into one compile
 /// unit — the same member walk a dep-side compile rides — under the

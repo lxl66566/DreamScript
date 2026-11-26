@@ -1,10 +1,7 @@
-//! The fork-join worker pool differential pins [E3, the 2026-11-15
-//! sendability ruling]: a pool-enabled VM answers the same program the
-//! sequential interlock drive answers — byte-identical values, traps,
-//! and observable counts — while the scalar-gated frames demonstrably
-//! run on workers and the gated-out shapes (a `Ref` word in an entry
-//! frame, the `par_reduce` fold chain) keep the sequential drive. What
-//! the fixtures pin:
+//! The fork-join worker pool differential pins: a pool-enabled VM answers the same program the
+//! sequential interlock drive answers — byte-identical values, traps, and observable counts — while
+//! the scalar-gated frames demonstrably run on workers and the gated-out shapes (a `Ref` word in an
+//! entry frame, the `par_reduce` fold chain) keep the sequential drive. What the fixtures pin:
 //!
 //! - the differential itself: every main's answer and trap equal under pool-off and pool-on, the
 //!   pooled children dead at every boundary, and ten fresh pool runs answering identically.
@@ -23,9 +20,9 @@
 //! - the out-of-contract divergences pinned honestly per drive: a `fiber_resume` of a host-parked
 //!   fiber and a join of a foreign nursery both answer differently worker-side, because the worker
 //!   holds no sibling targets — the source surface now refuses both spellings inside par_* element
-//!   bodies statically (ds-check's pooled-body check, [E3]), so these pins document the
-//!   embedder-only seam: hand-assembled bytecode never passes that check, and a host driving one
-//!   owns the divergence.
+//!   bodies statically (ds-check's pooled-body check), so these pins document the embedder-only
+//!   seam: hand-assembled bytecode never passes that check, and a host driving one owns the
+//!   divergence.
 
 use ds_vm::{
     Const, ConstFuncRef, FiberId, FiberState, FrameAnswer, FunctionDef, ModuleRegistry,
@@ -1723,7 +1720,7 @@ fn ref_words_in_the_entry_span_fall_back_identically() {
 
 #[test]
 fn a_resume_of_a_host_parked_fiber_bounces_worker_side() {
-    // OUT OF CONTRACT (the pool's purity ruling): a pooled child has no
+    // OUT OF CONTRACT: a pooled child has no
     // sibling targets on its worker — the host-parked fiber 1's slot is
     // an empty placeholder there, so its fiber_resume answers the
     // checked-read bounce tag while the sequential drive enters the

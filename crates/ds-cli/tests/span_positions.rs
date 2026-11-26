@@ -1,5 +1,5 @@
-//! The pc-to-span section's faces end to end through the `ds` binary
-//! [H7]: a trap's backtrace renders each kept frame's file, line, and
+//! The pc-to-span section's faces end to end through the `ds` binary:
+//! a trap's backtrace renders each kept frame's file, line, and
 //! column through the module's span table, and the boundary's
 //! unhandled-error report prints the `?` legs' recorded chain beside
 //! the message. The run path arms the VM's error-trace switch; the

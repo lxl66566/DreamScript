@@ -200,7 +200,7 @@ fn a_kept_set_over_a_span_member_refuses_naming_the_narrow() {
     );
 }
 
-// ---- the block tail read's claim staging (item 73) ------------------------------
+// ---- the block tail read's claim staging --------------------------------------
 //
 // A value block whose tail reads a local binder answers the binder's own
 // words, and the block's scope end runs before any consumer exists, so

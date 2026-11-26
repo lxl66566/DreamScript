@@ -1,5 +1,4 @@
-//! A cancel-cut owner's own block nursery tears down at the cut (the
-//! 2026-11-26 prompt-teardown ruling): the cancel-cut door runs the same
+//! A cancel-cut owner's own block nursery tears down at the cut: the cancel-cut door runs the same
 //! release fixpoint the release doors run, so a cancelled block's
 //! children never hold a wait past the cut — the race nursery's prompt
 //! close, generalized over the ordinary blocks. What the fixture pins:

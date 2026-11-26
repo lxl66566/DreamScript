@@ -1,4 +1,4 @@
-//! The fn type as a constructor's bracketed type argument [F2, F9]:
+//! The fn type as a constructor's bracketed type argument:
 //! `list[fn(int) -> int]()` and `map[string, fn(int) -> int]()` parse,
 //! solve, and type the element story — the fn-typed binding takes a named
 //! fn value, elements push, and read-back narrows to a callable binding.

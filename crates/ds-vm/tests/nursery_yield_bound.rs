@@ -1,11 +1,11 @@
-//! The M5 park bound [E2, E5]: the join/teardown driver's re-entry of a
+//! The park bound: the join/teardown driver's re-entry of a
 //! parked child is a preemption-shaped point — under the nursery's raised
 //! cancel flag the re-entry delivers the cut, so explicit cancellation
 //! always terminates a parked child at its next resume (the one bound on
 //! a child whose park leaves no taken backward jump before its loop; an
 //! uncancelled park-then-loop may hang exactly like any infinite loop, and
-//! a self-tail-loop child that never parks never observes — the CALLT
-//! ruling). The child parks through the host's suspension request
+//! a self-tail-loop child that never parks never observes it). The child
+//! parks through the host's suspension request
 //! (`Vm::request_suspend`, the retired debug yield's host-face
 //! replacement): the request is one-shot, so the child parks once and
 //! then tail-loops without ever re-parking. The pins:

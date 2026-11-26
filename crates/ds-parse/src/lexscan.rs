@@ -482,7 +482,7 @@ fn dispatch(
                 && at(1) == b'#'
                 && matches!(prev, None | Some(b'\n')) =>
             {
-                // A line-initial `##` opens a separator line (G3); the
+                // A line-initial `##` opens a separator line; the
                 // rest of the line is separator text, invisible here.
                 i = match memchr::memchr(b'\n', &b[i..]) {
                     Some(p) => i + p + 1,

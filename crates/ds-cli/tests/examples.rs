@@ -108,7 +108,7 @@ zip 3 enum 2 5
 
 #[test]
 fn par_map_forks_one_child_per_element_and_joins_in_input_order() {
-    // E3's fork-join slice: each element runs as its own spawned child
+    // the fork-join slice: each element runs as its own spawned child
     // under a fresh nursery, the boundary join assembles the answers in
     // input order (spawn order is the drive order), and the sequential
     // reduce folds them after
@@ -120,7 +120,7 @@ fn par_map_forks_one_child_per_element_and_joins_in_input_order() {
 
 #[test]
 fn par_reduce_chains_one_child_per_element_in_input_order() {
-    // E3's fork-join fold over the @std library spelling: the
+    // the fork-join fold over the @std library spelling: the
     // non-commutative order witness (a string chain through the native
     // concat) and the empty-input init answer; the multi-word struct
     // fold keeps its seam-level pin in the lowerer's e2e (the library
@@ -412,7 +412,7 @@ fn slice_members_clamp_and_flatten_composes_over_map() {
     // list the bounds imply), both spellings bare and UFCS; flatten
     // composes the flat spelling over map's hosted lambda — the
     // fn-typed parameter's list-returning signature never solves from a
-    // concrete lambda at the call site (B2), so flatten is the half
+    // concrete lambda at the call site, so flatten is the half
     // that lands — the nested-empty edge included, and the fluent
     // spelling chains the same pair through a dot-call's receiver
     assert_eq!(
@@ -424,7 +424,7 @@ fn slice_members_clamp_and_flatten_composes_over_map() {
 
 #[test]
 fn schema_builds_its_table_at_comptime() {
-    // The comptime witness (G1, G2): schema(page) and cases(tone)
+    // The comptime witness: schema(page) and cases(tone)
     // evaluate on the fenced VM at compile time over the declared
     // fields and enum cases, the list of field names embeds through the
     // round-two list surface, and the banner's scalar-literal arguments

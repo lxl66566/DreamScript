@@ -1,4 +1,4 @@
-//! The retiring code's own pool references [H6 item 5 residual]: a live
+//! The retiring code's own pool references: a live
 //! code row's direct call names the swapped module through its constant
 //! pool by function-table index, the code is immutable, and resolution
 //! follows the module's current slot — so a reordering swap that moves or

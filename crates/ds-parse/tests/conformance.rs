@@ -1,8 +1,7 @@
 //! Conformance smoke test: every `conformance/*.ds` at the repo root parses
-//! with zero syntax diagnostics. Per the corpus README, `unresolved` items
-//! live as comments and `reject` items are live code that must parse (they
-//! fail at M2 type checking, not here), so a clean whole-file parse is the
-//! right M1 expectation for every file.
+//! with zero syntax diagnostics. `unresolved` items live as comments and
+//! `reject` items are live code that must parse (they fail at type checking,
+//! not here), so a clean whole-file parse is the expectation for every file.
 
 use ds_diag::Files;
 use ds_parse::parse;

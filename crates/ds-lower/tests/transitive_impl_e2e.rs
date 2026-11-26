@@ -1,4 +1,4 @@
-//! Generic-impl transitive evidence end to end [H3]: a nested dispatch
+//! Generic-impl transitive evidence end to end: a nested dispatch
 //! whose serving body is itself a generic impl's member. The entering
 //! site stages one evidence word per demanded pair — the index of an
 //! evidence-chain object carrying the serving body's table index plus

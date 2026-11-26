@@ -5,7 +5,7 @@
 //! [`Query`], tying its key type to its value type so `db.get::<ParseFile>(f)`
 //! cannot mix them up. Consumers may implement [`Query`] for their own
 //! markers over existing key kinds (for example, tools keying into the
-//! placeholder M2+ variants ahead of their milestones).
+//! placeholder variants).
 
 use std::sync::Arc;
 
@@ -114,7 +114,7 @@ impl Query for LinearityCheck {
 
 /// Marker for the expanded-package query: [`QueryKey::Expanded`]. The
 /// key is the package id; the value is the package's parse memos' trees
-/// through the derive expansion (G1), the substrate the resolve and
+/// through the derive expansion, the substrate the resolve and
 /// check family computes over.
 pub struct Expanded;
 
@@ -135,9 +135,9 @@ impl Query for Expanded {
 }
 
 /// Marker for the resolve query: [`QueryKey::Resolve`]. The key is the
-/// package id — 0 while M2's one package is every registered file; the
+/// package id — 0 while the one package is every registered file; the
 /// value is the package's namespace, per-file resolutions, and the
-/// expansion-refusal, collection, and resolution diagnostics (G3).
+/// expansion-refusal, collection, and resolution diagnostics.
 pub struct Resolve;
 
 impl Query for Resolve {
@@ -158,7 +158,7 @@ impl Query for Resolve {
 
 /// Marker for the type-of query: [`QueryKey::TypeOf`]. The key is the
 /// definition's block packed `(file << 8) | block` (see
-/// [`QueryKey::TypeOf`]); the value is its typed story (B2).
+/// [`QueryKey::TypeOf`]); the value is its typed story.
 pub struct TypeOf;
 
 impl Query for TypeOf {
@@ -179,7 +179,7 @@ impl Query for TypeOf {
 
 /// Marker for the effects-of query: [`QueryKey::EffectsOf`]. The key is
 /// the definition's package index — declaration order across the
-/// registered files (G3); the value is its effect row (E1).
+/// registered files; the value is its effect row.
 pub struct EffectsOf;
 
 impl Query for EffectsOf {
@@ -200,7 +200,7 @@ impl Query for EffectsOf {
 
 /// Marker for the platform-check query: [`QueryKey::PlatformCheck`]. The
 /// key is the package id; the value is the package's platform-check
-/// diagnostics (H5, E1).
+/// diagnostics.
 pub struct PlatformCheck;
 
 impl Query for PlatformCheck {
@@ -220,7 +220,7 @@ impl Query for PlatformCheck {
 }
 
 /// Marker for the pooled-check query: [`QueryKey::PooledCheck`]. The key
-/// is the package id; the value is the pooled-body refusal (E3) the CLI
+/// is the package id; the value is the pooled-body refusal the CLI
 /// compile seam and the editor's diagnostics both publish.
 pub struct PooledCheck;
 
@@ -242,7 +242,7 @@ impl Query for PooledCheck {
 
 /// Marker for the checked-package query: [`QueryKey::CheckedPackage`]. The
 /// key is the package id; the value is the whole-package bidirectional
-/// check (B2) the per-definition stories and the
+/// check the per-definition stories and the
 /// [`Analyzed`](crate::Analyzed) query's bundle slice.
 pub struct CheckedPackage;
 
@@ -263,7 +263,7 @@ impl Query for CheckedPackage {
 }
 
 /// Marker for the analyzed-package query: [`QueryKey::Analyzed`]. The key
-/// is the package id; the value is the full check bundle (B2) the run path
+/// is the package id; the value is the full check bundle the run path
 /// lowers from, sliced off the checked package's own pass over the parse
 /// memos' trees.
 pub struct Analyzed;
@@ -286,7 +286,7 @@ impl Query for Analyzed {
 
 /// Marker for the package-linearity query:
 /// [`QueryKey::PackageLinearity`]. The key is the package id; the value
-/// is the M2 affine pass (C1, C5) over the expansion's own trees, the
+/// is the affine pass over the expansion's own trees, the
 /// substrate the per-definition facts slice.
 pub struct PackageLinearity;
 
@@ -307,8 +307,8 @@ impl Query for PackageLinearity {
 }
 
 /// Marker for the package-effects query: [`QueryKey::PackageEffects`]. The
-/// key is the package id; the value is the whole package's effect rows
-/// (E1), the substrate the per-definition rows slice.
+/// key is the package id; the value is the whole package's effect rows,
+/// the substrate the per-definition rows slice.
 pub struct PackageEffects;
 
 impl Query for PackageEffects {

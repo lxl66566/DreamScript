@@ -1,5 +1,5 @@
 //! Instance-environment behavior over the shapes of
-//! `conformance/generics_coherent_traits.ds` [B6]: union-head decomposition,
+//! `conformance/generics_coherent_traits.ds`: union-head decomposition,
 //! disjoint-head rejection with witness, head normalization, conditional
 //! instances with the structural cycle check, per-package versus link-time
 //! checking, and lookup — plus one exhaustive small-universe pass mirroring
@@ -113,7 +113,7 @@ fn union_heads_decompose_into_per_branch_instances() {
     assert_eq!(f.env.len(), 5, "failed declarations insert nothing");
 }
 
-/// The named-instance vocabulary (the B6 two-impls escape): a named impl
+/// The named-instance vocabulary (the two-impls escape): a named impl
 /// coexists with an unnamed one over the same trait and head, each
 /// answering its own slot alone — the default slot keeps the unnamed
 /// resolution, the named row answers only its selected call, and a
@@ -178,7 +178,7 @@ fn coherence_and_link_elections_run_per_vocabulary_slot() {
 fn corpus_disjoint_head_rejection_names_witness() {
     // conformance/generics_coherent_traits.ds impl-json-int-bool: the union
     // head must be rejected against impl-json-int and impl-json-bool with
-    // witness `int` [B6].
+    // witness `int`.
     let mut f = fixture();
     f.declare(f.json, TypeExpr::atom(f.int)).unwrap();
     f.declare(f.json, TypeExpr::atom(f.boolean)).unwrap();
@@ -565,7 +565,7 @@ fn benign_chains_are_not_rejected() {
 #[test]
 fn link_time_check_catches_cross_batch_overlap() {
     // Two packages, each coherent alone; the overlap is only visible in the
-    // merged environment [G3, B6].
+    // merged environment.
     let mut f = fixture();
     let mut package_a = InstanceEnv::new();
     package_a
@@ -633,8 +633,7 @@ fn link_time_check_re_solves_heads_after_membership_growth() {
 
 #[test]
 fn link_time_check_catches_cross_batch_cycle() {
-    // The self-satisfying pair only closes across the merge [section 10
-    // item 7].
+    // The self-satisfying pair only closes across the merge.
     let mut f = fixture();
     let a = f.universe.declare_tag("a").unwrap();
     let b = f.universe.declare_tag("b").unwrap();
@@ -810,7 +809,7 @@ fn resolve_is_exact_containment_and_lookup_only() {
     let bool_ty = f.ty(f.boolean);
 
     let unconditional = f.declare(f.eq, TypeExpr::atom(f.int)).unwrap()[0];
-    // The conditional's own condition never filters lookup [B6].
+    // The conditional's own condition never filters lookup.
     let conditional = f
         .declare_conditional(f.show, TypeExpr::atom(f.int), vec![Condition::new(
             f.eq,
@@ -880,7 +879,7 @@ fn declare_and_accessors_reject_bad_ids() {
 fn exhaustive_lookup_unique_for_non_empty_queries() {
     let mut u = Universe::new();
     // [none, type, a, b, c, d]: every universe carries the builtin `type`
-    // atom beside none (G1, G2), so the model accounts for it.
+    // atom beside none, so the model accounts for it.
     let atoms: Vec<TypeId> = [TypeId::NONE, TypeId::TYPE]
         .into_iter()
         .chain(

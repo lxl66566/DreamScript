@@ -453,9 +453,9 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
 /// script-cache artifact and `ds build`'s output, the cold run writes
 /// the `@std` dep member's dsmod beside the root's, the warm run
 /// serves both families from disk (the debug markers proving the walk
-/// never compiled), and the checked-in merged ambient dsmod no longer
-/// answers the bundle's identity (the un-merge split the two: the walk
-/// refuses the stale artifact naming both hashes).
+/// never compiled), and the checked-in merged ambient dsmod carries
+/// another identity than the bundle's (the walk refuses the stale
+/// artifact naming both hashes).
 #[test]
 fn both_writers_record_the_dep_list_a_walk_resolves() {
     const IMPORT_MAIN: &str =
@@ -525,10 +525,10 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
         "ds build records the same dep list"
     );
 
-    // the merged ambient dsmod no longer answers the bundle's identity:
-    // the walk over the cached artifact refuses the stale served bytes
-    // naming both hashes — the un-merge split the merged artifact's
-    // identity from the bundle the implicit resolution records
+    // the merged ambient dsmod carries another identity than the
+    // bundle: the walk over the cached artifact refuses the stale served
+    // bytes naming both hashes — the merged artifact's identity differs
+    // from the bundle the implicit resolution records
     let mut registry = ds_vm::ModuleRegistry::new();
     registry.install_platform(ds_vm::Platform::std());
     let mut vm = ds_vm::Vm::new(registry);

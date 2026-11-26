@@ -6,9 +6,9 @@
 //! carries the source's blake3 hash, so [`ds_mod::read_checked`] verifies
 //! what this pipeline records.
 //!
-//! Lowering's contract is the M3 subset: monomorphic const-arrow
+//! Lowering serves a subset: monomorphic const-arrow
 //! functions, rebindable `var` locals with assignment and `while` loops,
-//! UFCS dot-calls onto resolved free functions (F3), the covered builtin
+//! UFCS dot-calls onto resolved free functions, the covered builtin
 //! natives, early exits, interpolation, and tail positions. Constructs
 //! outside it fail with a structured diagnostic naming the construct and
 //! the seam it needs.
@@ -39,15 +39,15 @@ use ds_parse::{ItemKind, parse, parse_script};
 const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 
 /// The host provision's member file: the CLI-owned declaration member an
-/// entry session registers beside the ambient (the 2026-11-17 die split —
-/// the convenience spelling is host code, never ambient or `@std` source).
+/// entry session registers beside the ambient — the convenience spelling
+/// is host code, never ambient or `@std` source).
 /// The `$` stem keeps it outside every plausible user stem.
 pub(crate) const HOST_FILE: &str = "$host.ds";
 
 /// The host provision's text: the `die` spelling's declaration, `pub`
-/// like every ambient face `[G4]` because the member's name is the
+/// like every ambient face because the member's name is the
 /// host's surface to the entry files, not a private one. `die` routes to
-/// the builtin core's bare trap primitive (the 2026-11-17 split) — what
+/// the builtin core's bare trap primitive — what
 /// it prints and which exit code follows is this host's own policy,
 /// which is why it stays here while the policy-free `panic` and the
 /// deliberate-status `exit` are ambient declarations; an un-provisioned
@@ -81,7 +81,7 @@ pub(crate) fn package_ambient_files(no_ambient: bool, link_name: &str) -> usize 
     usize::from(!no_ambient && link_name != ds_stdlib::STD_PACKAGE_NAME)
 }
 
-/// Extracts every member file's exported top-level definitions (G4):
+/// Extracts every member file's exported top-level definitions:
 /// one [`Export`] per package def whose defining span names a member
 /// source — the module's own ambient excluded — carrying the facts an
 /// import surface serves (the written signature of a callable, the
@@ -90,7 +90,7 @@ pub(crate) fn package_ambient_files(no_ambient: bool, link_name: &str) -> usize 
 /// literal a plain initializer is, the dep-side evaluation's answer a
 /// computed one — and the word layout a struct, enum, or enum-case
 /// declaration carries as its own). A `const` binding whose value
-/// is a function (F2) exports as callable when its signature registered;
+/// is a function exports as callable when its signature registered;
 /// a data const exports as a binding, its fact its evaluated value. A
 /// `pub import` row's bound selections export too
 /// — the transitive surface closure — under the names the rows bound,
@@ -139,7 +139,7 @@ fn exports_of(
         let id = ds_check::DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
         if let Some(entry) = analyzed.package.foreign().get(&id) {
             // an import-bound definition is not this package's own: only
-            // a `pub import` row's binding re-exports (G4's transitive
+            // a `pub import` row's binding re-exports (the transitive
             // closure), the row's own span the definition site a
             // dependent's diagnostics name — the origin's declaring span
             // lives in the origin package's file space and never rebases
@@ -233,7 +233,7 @@ fn exports_of(
     exports
 }
 
-/// The member files' trait-impl link rows (G4): one per plain trait
+/// The member files' trait-impl link rows: one per plain trait
 /// impl whose trait crossed as a fact, the head and member bodies
 /// addressed over the same word vocabulary and module table the export
 /// rows serve. Everything the walk refuses (a generic or conditional
@@ -278,7 +278,7 @@ fn inherent_facts_of(
     ds_check::import::InherentFact::member_facts(analyzed, ambient_files, functions, &facts)
 }
 
-/// The producer's default-body gate (G4): an exported trait member
+/// The producer's default-body gate: an exported trait member
 /// whose declared default body cannot cross — the body never planned,
 /// stages runtime evidence, or carries an effect row — refuses this
 /// compile here, naming the member at its own declaration, exactly
@@ -314,7 +314,7 @@ fn default_body_gate(
     if diags.is_empty() { Ok(()) } else { Err(diags) }
 }
 
-/// Rebases one signature's span set across file registries (G4): every
+/// Rebases one signature's span set across file registries: every
 /// span and written type names the consuming compile's own registry, so
 /// the diagnostics a link pass mints render there. A signature whose
 /// file ids all map is untouched in shape.
@@ -411,20 +411,20 @@ pub(crate) fn rebase_span(
 
 /// One compiled source: the lowered module plus what the run entry path
 /// needs — the module's name and the export surface a dependent's
-/// imports bind through (G4).
+/// imports bind through.
 pub struct CompiledSource {
     /// The lowered module, its name derived from the file's stem, with
     /// the tag table recorded.
     pub lowered: Lowered,
     /// The module name.
     pub name: String,
-    /// Every member file's exported top-level definitions (G4), in
+    /// Every member file's exported top-level definitions, in
     /// declaration order: the surface a dependent's import selections
     /// validate against, carrying the written signatures and effect rows
     /// the dependent's own checks read. Empty for a script compile's
     /// own view of itself.
     pub exports: Vec<Export>,
-    /// The member files' declared trait impls (G4): the owner-keyed
+    /// The member files' declared trait impls: the owner-keyed
     /// member link rows a dependent's trait call sites dispatch
     /// through, each member body's index addressing this module's own
     /// table. Empty for a script compile's own view of itself.
@@ -437,8 +437,8 @@ pub struct CompiledSource {
     pub inherent: Vec<ds_check::import::InherentFact>,
 }
 
-/// One member file's exported definition: the import surface's facts
-/// (G4), in this compile's own file space — a dependent rebases the
+/// One member file's exported definition: the import surface's facts,
+/// in this compile's own file space — a dependent rebases the
 /// spans into its own registry when it builds its import surfaces.
 #[derive(Clone, Debug)]
 pub struct Export {
@@ -564,7 +564,7 @@ struct Inputs<'a> {
     name: String,
     display: String,
     main_required: bool,
-    /// The module's content identity (G3.5): a script's or single-member
+    /// The module's content identity: a script's or single-member
     /// package's source hash, a multi-member package's composed fold.
     /// Every cache tier keys on it — the dsmod artifact's header, the
     /// persisted `.dsi` prefix — so a member edit re-keys each one.
@@ -572,7 +572,7 @@ struct Inputs<'a> {
     dep_content: &'a BTreeMap<String, Hash128>,
 }
 
-/// Compiles one package module over its member sources (G3's one
+/// Compiles one package module over its member sources (one
 /// namespace per package): the members share one compile unit after the
 /// ambient, the module serves under `name` at the caller-supplied
 /// `identity` (a single member's source hash, a composed fold over
@@ -684,7 +684,7 @@ fn compile_text(
         ds_stdlib::AMBIENT_CORE_SOURCE
     };
     let ambient_files = usize::from(!no_ambient && !std_pkg);
-    // The die provision (the 2026-11-17 split): an entry session carries
+    // The die provision: an entry session carries
     // the host member as its last registered source — a plain member, so
     // the ambient band, the serve tiers' file counts, and the export
     // rules all see one more member file and nothing else moves. The
@@ -725,7 +725,7 @@ fn compile_text(
         ids.push(id);
     }
     let name = inputs.name.clone();
-    // The import surfaces (G4): a resolved graph's linked packages
+    // The import surfaces: a resolved graph's linked packages
     // validate and bind this compile's own imports (the ambient's merged
     // member served as `@std` when it registers). A graph absent keeps
     // every import declarative. The builder registers the selected
@@ -817,7 +817,7 @@ fn compile_text(
     {
         eprint!("{}", render::human(warning, &files));
     }
-    // The affine walk (C1, C5): the same pass `ds check` and `ds repl`
+    // The affine walk: the same pass `ds check` and `ds repl`
     // consult before committing, refusing here before anything lowers
     // or runs. Lowering derives its move and deinit placement from this
     // walk's facts, which hold only over a clean one — a moved-then-used
@@ -857,7 +857,7 @@ fn compile_text(
     // expanded into impl items there, so the original parse trees would
     // misalign with the resolutions and tables below.
     let asts = &analyzed.asts;
-    // The platform check [H5]: the package's world usage verified inside
+    // The platform check: the package's world usage verified inside
     // what its platform declaration provides. Without the ambient there
     // are no declared rows to attribute, but the declaration itself is
     // still validated — the `@std` package's own member compile the
@@ -907,7 +907,7 @@ fn compile_text(
             "the source fails the platform check",
         ));
     }
-    // The pooled-body refusal [E3]: a fork-join combinator's element
+    // The pooled-body refusal: a fork-join combinator's element
     // body refuses the members a pooled drive cannot serve — the
     // sibling-addressing fiber control natives and the world surface —
     // unconditionally, so legality never depends on the host's pool
@@ -922,12 +922,12 @@ fn compile_text(
     }
     let name = inputs.name.clone();
     let source_hash = inputs.identity;
-    // The comptime evaluator (G1): comptime calls run on the fenced VM
+    // The comptime evaluator: comptime calls run on the fenced VM
     // here, their answers embedding at the call sites below — a package
     // with no comptime call evaluates nothing.
     let comptime = ds_comptime::evaluate(&name, source_hash, asts, &analyzed, &effects)
         .map_err(|diags| reject(&files, &diags, "the source fails the comptime fence"))?;
-    // The dep-side const evaluation (G4): a linked member's exported
+    // The dep-side const evaluation: a linked member's exported
     // computed consts evaluate here, on the producer's own compile, so
     // their values ride the export surface as link facts — the run path
     // never pays for a compile nothing imports (a root or script's own
@@ -1180,7 +1180,7 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
 }
 
 /// The module's dep list, recorded from the source's import declarations
-/// into the header's link table (G3.5): one entry per linked name in
+/// into the header's link table: one entry per linked name in
 /// declaration order — the plain list the load walk consumes, so a built
 /// artifact names its deps and a walk over it never re-derives them from
 /// source. A compile with import surfaces records the surfaces' own
@@ -1190,8 +1190,8 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
 ///
 /// An `@`-sigil path links its package stem with the sigil kept
 /// (`@std/csv` links `@std`): the sigil space is the registry's package
-/// space, a package is one module this round (G3.5's single-member
-/// ruling), and the member path stays a within-package selector the load
+/// space, a package is one module (a single member), and the member path
+/// stays a within-package selector the load
 /// link does not carry. A bare path links the path as written. Aliases
 /// and selective lists are spellings inside the source; a conditional
 /// import records unconditionally (the artifact may run under the
@@ -1201,7 +1201,7 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
 /// a name package resolution pinned, and the zero marker for every name
 /// whose content nothing supplies; a zero link names a dep at no pinned
 /// content, which the load walk's validation refuses.
-/// The link name one import declaration records and links under (G3.5):
+/// The link name one import declaration records and links under:
 /// an at-sigil path's package stem with the sigil (later segments are
 /// member selectors), a bare path whole. The dep-list writer, the link
 /// positions, and the surface builder all derive from this one rule.
@@ -1544,7 +1544,7 @@ mod tests {
         );
     }
 
-    // ---- the dep-list writer (G3.5's link table) ----
+    // ---- the dep-list writer (the header's link table) ----
 
     /// The ambient member's source hash: the @std module's content
     /// identity the writer records and the checked-in artifact carries.
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     /// A source importing two @std members builds one dep entry — the
-    /// sigil package stem, single-member packages this round — at the
+    /// sigil package stem, one module per package — at the
     /// ambient's content hash; write -> read keeps the list, and a walk
     /// over the built artifact installs @std first and the module last,
     /// the same ids a hand-built root carrying the same dep assigns.
@@ -1692,7 +1692,7 @@ mod tests {
 
     /// A user-package import the compile cannot resolve records the zero
     /// marker — a name linked at no pinned content — and the walk refuses
-    /// it as a provider miss this round: no package resolution exists to
+    /// it as a provider miss: no package resolution exists to
     /// serve or validate it.
     #[test]
     fn an_unresolved_package_import_records_a_zero_link_the_walk_refuses() {

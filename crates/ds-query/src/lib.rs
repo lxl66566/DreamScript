@@ -1,11 +1,11 @@
-//! Memoized query engine for DreamScript: the compiler as a query library
-//! (H6 item 1). Every consumer — CLI, LSP, REPL, hot reload, formatter —
+//! Memoized query engine for DreamScript: the compiler as a query library.
+//! Every consumer — CLI, LSP, REPL, hot reload, formatter —
 //! reads compiler data through [`Db`] and nowhere else.
 //!
 //! # Model
 //!
 //! Inputs are typed ([`InputKey`], today file contents and the registered
-//! file set; package config at M7) and stamped with a global [`Revision`]
+//! file set) and stamped with a global [`Revision`]
 //! when they change. Queries are
 //! keyed by the [`non_exhaustive`] [`QueryKey`] enum and
 //! memoized: each memo stores its value, the dependency edges recorded while
@@ -29,7 +29,7 @@
 //! file does not poison dependents. [`QueryKey::BlockIndex`] maps the tree's
 //! block spans to block ids (degrading to a `##` text scan when the parse
 //! failed). [`QueryKey::BlockSource`] is the renewal seam: it returns one
-//! block's source text, and downstream block-keyed queries (the M2+
+//! block's source text, and downstream block-keyed queries (the
 //! resolve/type_of family) depend on it instead of on the file — so editing
 //! block 3 of 7 leaves the other six blocks' dependents valid: their
 //! dependency's value — the block text — recomputes to an equal value and
@@ -39,9 +39,9 @@
 //!
 //! A checker pass is memoized at its own grain, and the per-definition
 //! queries slice its value instead of re-running it: `CheckedPackage` runs
-//! the bidirectional check (B2) once per package, `PackageLinearity` the
-//! affine pass (C1, C5) once per package over the expansion's own trees,
-//! and `PackageEffects` the effects pass (E1) once per package. `TypeOf`,
+//! the bidirectional check once per package, `PackageLinearity` the
+//! affine pass once per package over the expansion's own trees,
+//! and `PackageEffects` the effects pass once per package. `TypeOf`,
 //! `LinearityCheck`, and `EffectsOf` therefore depend on one package-grain
 //! key each (plus the block index for the definition's block), so a
 //! definition's cost is one bucket lookup in the pass's block-grain fact
@@ -50,10 +50,10 @@
 //! package holds. The memoed payloads are shared arcs, so answering a read
 //! from a memo clones pointers. `PlatformCheck` reads the same effects
 //! memo, so the effects pass runs once for both. `Expanded` runs the derive
-//! expansion (G1) once over the parse set, and `Resolve` with the check
+//! expansion once over the parse set, and `Resolve` with the check
 //! family computes over its trees, so a derived member's call resolves and
-//! checks at the ordinary grain — `ds check` and a REPL session's check
-//! no longer refuse it. `Analyzed` slices the checked package's own
+//! checks at the ordinary grain; `ds check` and a REPL session's check
+//! accept it. `Analyzed` slices the checked package's own
 //! bundle — the one bidirectional run that value paid — so a round that
 //! reads both check-family queries (an editor's diagnostics plus a hover)
 //! checks the package once; the bundle carries the expansion's own trees,
@@ -67,11 +67,11 @@
 //! * Query-level cycles — a query transitively reading its own in-flight result — mean
 //!   non-termination and are an engine error, detected and reported as [`QueryError::Cycle`] with
 //!   the full path.
-//! * Intra-package definition cycles are legal language semantics (G3), resolved by whole-package
-//!   fixpoint at M2. They are the queries' values' business, not the engine's; nothing here
-//!   prevents them.
+//! * Intra-package definition cycles are legal language semantics, resolved by whole-package
+//!   fixpoint. They are the queries' values' business, not the engine's; nothing here prevents
+//!   them.
 //!
-//! # Package grain (M7 seam)
+//! # Package grain
 //!
 //! Package-grain invalidation arrives with package loading: a
 //! `PackageConfig` input in [`InputKey`] plus package-keyed queries reading

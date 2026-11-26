@@ -1,5 +1,5 @@
 //! The front-end computes: parse, block index, the block-source seam, and
-//! the M2 linearity check.
+//! the linearity check.
 //!
 //! Dependency shape, top to bottom:
 //!
@@ -19,39 +19,39 @@
 //!   visible-from offset) — the substrate completion's position slice reads, so the walk runs once
 //!   per file; an unparseable file answers empty frames.
 //! * `expanded` reads every registered file's parse (and the file-set input through
-//!   [`Ctx::file_count`]) and runs the ds-check derive expansion (G1): the one place the package's
-//!   trees expand, so every package-grain pass below checks the same synthesized impls. Package
-//!   grain — any parse edit, and a derive attribute edit in particular, re-derives this value and
+//!   [`Ctx::file_count`]) and runs the ds-check derive expansion: the one place the package's trees
+//!   expand, so every package-grain pass below checks the same synthesized impls. Package grain —
+//!   any parse edit, and a derive attribute edit in particular, re-derives this value and
 //!   everything reading it.
-//! * `resolve` reads the expanded value and runs the ds-check collection and resolution passes (G3)
-//!   over the expanded trees — expansion precedes resolution — so a derive-synthesized member
-//!   resolves like a hand-written one. Every registered file is the package, a file whose parse
-//!   failed contributes no declarations, and the value carries the namespace, per-file use tables,
-//!   their reverse-edge index (every use of each resolved target, built in the same compute the
-//!   tables are), and the expansion-refusal, collection, and resolution diagnostics; its dependency
-//!   is the expansion alone, so the query invalidates at file grain and on registration through it
+//! * `resolve` reads the expanded value and runs the ds-check collection and resolution passes over
+//!   the expanded trees — expansion precedes resolution — so a derive-synthesized member resolves
+//!   like a hand-written one. Every registered file is the package, a file whose parse failed
+//!   contributes no declarations, and the value carries the namespace, per-file use tables, their
+//!   reverse-edge index (every use of each resolved target, built in the same compute the tables
+//!   are), and the expansion-refusal, collection, and resolution diagnostics; its dependency is the
+//!   expansion alone, so the query invalidates at file grain and on registration through it
 //!   (collection is package-wide, so any parse edit can change any resolution).
 //! * `checked_package` reads the resolve and expanded values and runs the ds-check bidirectional
-//!   pass (B2) over the expanded trees once, carrying the analyzer's whole bundle beside the
-//!   package's check-family diagnostics and every top-level binding's rendered type. Package grain:
-//!   its dependencies are the two values.
+//!   pass over the expanded trees once, carrying the analyzer's whole bundle beside the package's
+//!   check-family diagnostics and every top-level binding's rendered type. Package grain: its
+//!   dependencies are the two values.
 //! * `analyzed` reads the expansion as its identity anchor and slices the checked package's own
-//!   bundle (B2): the shared trees, namespace, resolutions, declaration tables, and typed result —
-//!   the value the run path lowers from, over the expansion's own trees — so a round that reads
-//!   both check-family queries runs the bidirectional pass once, and no consumer re-expands or
+//!   bundle: the shared trees, namespace, resolutions, declaration tables, and typed result — the
+//!   value the run path lowers from, over the expansion's own trees — so a round that reads both
+//!   check-family queries runs the bidirectional pass once, and no consumer re-expands or
 //!   re-resolves the queries' inputs. Package grain like `checked_package`.
-//! * `package_linearity` reads the analyzed bundle and the expansion and runs the M2 affine pass
-//!   (C1, C5) over the expansion's own trees — the same trees the check family checked — so a
-//!   derive-synthesized impl body answers linearity facts like a hand-written one, computed from
-//!   the bundle's own tables with no second expansion, resolution, or check. When the first tree is
-//!   the stdlib ambient, the pass parks behind the process cell the ambient serve owns: the first
-//!   query's walk fills it, later queries install it and walk only their own files. Package grain
-//!   like `checked_package`: the expansion is the identity anchor (its recompute always counts as
+//! * `package_linearity` reads the analyzed bundle and the expansion and runs the affine pass over
+//!   the expansion's own trees — the same trees the check family checked — so a derive-synthesized
+//!   impl body answers linearity facts like a hand-written one, computed from the bundle's own
+//!   tables with no second expansion, resolution, or check. When the first tree is the stdlib
+//!   ambient, the pass parks behind the process cell the ambient serve owns: the first query's walk
+//!   fills it, later queries install it and walk only their own files. Package grain like
+//!   `checked_package`: the expansion is the identity anchor (its recompute always counts as
 //!   changed), the fact lists are the value's own renewal identity.
 //! * `package_effects` reads the resolve and expanded values and runs the ds-check effects pass
-//!   (E1) over the already collected and resolved expanded trees: the M2 package is all registered
-//!   files (G3), a file whose parse failed contributes no tree (its definitions are absent). The
-//!   file-set input rides along through the expansion, so registration invalidates every row too.
+//!   over the already collected and resolved expanded trees: the package is all registered files, a
+//!   file whose parse failed contributes no tree (its definitions are absent). The file-set input
+//!   rides along through the expansion, so registration invalidates every row too.
 //! * `type_of` reads the checked package and slices one definition's story out of it: the
 //!   declaration and body diagnostics whose primary labels address the definition's block, plus the
 //!   solved type of each binding it holds. The slice's dependencies are the checked package and the
@@ -63,8 +63,8 @@
 //! * `platform_check` reads the expanded value and `package_effects`, and runs
 //!   `ds_check::check_platform` over the same trees against the package's platform declaration.
 //! * `pooled_check` reads the analyzed bundle and the fixed declared-row table, and runs
-//!   `ds_check::check_pooled_bodies`: the pooled-body refusal (E3) the CLI compile seam and the
-//!   editor's diagnostics publish alike. Package grain like `platform_check`.
+//!   `ds_check::check_pooled_bodies`: the pooled-body refusal the CLI compile seam and the editor's
+//!   diagnostics publish alike. Package grain like `platform_check`.
 //!
 //! [`Ctx::file_content`]: crate::Ctx::file_content
 //! [`Ctx::file_count`]: crate::Ctx::file_count
@@ -102,7 +102,7 @@ fn package_asts(ctx: &mut Ctx<'_>) -> Result<Vec<Arc<Ast>>, QueryError> {
     Ok(asts)
 }
 
-/// The package's derive-expanded trees (G1): every registered file's
+/// The package's derive-expanded trees: every registered file's
 /// parse through the ds-check expansion, the substrate the resolve and
 /// check family below computes over — the one place the package's trees
 /// expand, so every pass checks the same synthesized impls. Package
@@ -121,7 +121,7 @@ pub(crate) fn expanded(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
     }))
 }
 
-/// Name resolution for the package (G3): the ds-check collection and
+/// Name resolution for the package: the ds-check collection and
 /// resolution passes over the expanded trees (the `expanded` value's),
 /// so a derive-synthesized member resolves like a hand-written one; the
 /// value's diagnostics carry the expansion's refusal classes ahead of
@@ -129,9 +129,9 @@ pub(crate) fn expanded(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
 /// tables' reverse edge (`UseIndex::build` in the same compute): uses
 /// are fully materialized at this grain, so the def-to-uses index costs
 /// one walk here and every reference request after is one lookup. The
-/// [`PackageId`] key is the package grain — M2 has one package, every
-/// registered file, so the id is ignored until M7's package loading
-/// mints real identity.
+/// [`PackageId`] key is the package grain: one package holds every
+/// registered file, so the id is ignored until package loading mints real
+/// identity.
 pub(crate) fn resolve(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, QueryError> {
     let QueryKey::Resolve(package) = key else {
         return Err(QueryError::KindMismatch(key));
@@ -203,7 +203,7 @@ fn placement_spans(facts: impl Iterator<Item = Span>) -> Vec<(u32, Span)> {
         .collect()
 }
 
-/// The whole-package bidirectional check (B2): the analyzer's bundle
+/// The whole-package bidirectional check: the analyzer's bundle
 /// over the package's expanded trees, after the collection and
 /// resolution over the same trees. The substrate every definition's
 /// typed story and the `analyzed` query's bundle both slice, so the pass
@@ -231,7 +231,7 @@ pub(crate) fn checked_package(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryV
     )))
 }
 
-/// The analyzed package (B2): the checked package's own bundle, sliced
+/// The analyzed package: the checked package's own bundle, sliced
 /// — the one bidirectional run that value already paid serves both
 /// check-family queries, so a keystroke a session reads both (the
 /// editor's diagnostics plus a hover) checks the package once. The
@@ -255,7 +255,7 @@ pub(crate) fn analyzed(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Q
     )))
 }
 
-/// The type story of one definition (B2): a slice of the checked package
+/// The type story of one definition: a slice of the checked package
 /// into the definition's block. `DefId` packs `(file << 8) | block` like
 /// [`queries::linearity_check`](crate), so the definition is its block
 /// until real definition identity arrives.
@@ -296,7 +296,7 @@ pub(crate) fn type_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue, Qu
     Ok(QueryValue::TypeOf(TypeOfOutput { types, diags }))
 }
 
-/// The M2 affine pass (C1, C5) over the package's expanded trees: the
+/// The affine pass over the package's expanded trees: the
 /// walk the run path lowers from, reusing the analyzed bundle's own
 /// trees, namespace, resolutions, declaration tables, and binder facts,
 /// so a derive-synthesized impl body answers linearity facts like a
@@ -397,12 +397,12 @@ pub(crate) fn package_linearity(
     }))
 }
 
-/// One definition's effect row (E1): a slice of the package's computed
+/// One definition's effect row: a slice of the package's computed
 /// rows by the definition's package index.
 ///
-/// Package grain at M2 (G3): every registered file is the package, so an
+/// Package grain: every registered file is the package, so an
 /// edit anywhere — or a file registered mid-session — moves the row
-/// memo's value and every reader re-derives. One limit stays for the M7
+/// memo's value and every reader re-derives. One limit stays for the
 /// `PackageConfig` seam: the ambient row table (`ds_check::DeclaredRows`)
 /// is fixed when the database is built, so world rows flow only once the
 /// platform declaration supplies it.
@@ -418,7 +418,7 @@ pub(crate) fn effects_of(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryValue,
         .ok_or(QueryError::NoEffectRow(def))
 }
 
-/// The package's effect rows (E1): the ds-check effects pass over the
+/// The package's effect rows: the ds-check effects pass over the
 /// expanded trees, reusing the `resolve` value's collected package and
 /// per-file resolutions (built over the same trees) instead of re-running
 /// collection and resolution per file. Package grain like `resolve` — its
@@ -494,7 +494,7 @@ fn parse_fresh(ctx: &Ctx<'_>, file: FileId) -> (Option<Arc<Ast>>, Vec<Diagnostic
     }
 }
 
-/// The package's platform check (H5, E1): the package's computed rows
+/// The package's platform check: the package's computed rows
 /// (rows plus world-capability attribution) verified inside what its
 /// platform declaration provides. Package grain like `resolve` — the
 /// dependencies are read through the `package_effects` and `expanded`
@@ -511,7 +511,7 @@ pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryVa
     }))
 }
 
-/// The package's pooled-body refusal (E3): every pooled call's (the
+/// The package's pooled-body refusal: every pooled call's (the
 /// @std `par_map`/`par_reduce` library fns, recognized by resolved
 /// member identity) callable argument hunted for the worker-diverging
 /// members — the sibling-addressing fiber control natives and the
@@ -654,7 +654,7 @@ enum ScanFrame {
     BlockComment,
 }
 
-/// The line-initial `##` block separator (G3).
+/// The line-initial `##` block separator.
 const SEPARATOR: &str = "##";
 
 /// Splits `source` into blocks for files whose parse failed: a byte-level
@@ -664,7 +664,7 @@ const SEPARATOR: &str = "##";
 /// bracket, at column 0 — and never inside strings, raw strings, char
 /// literals, interpolation holes, comments, brackets, or mid-line. The
 /// separator owns the rest of its line; a leading separator opens an empty
-/// first block; a file without separators is one block (G3).
+/// first block; a file without separators is one block.
 ///
 /// A block's extent runs from the newline ending the previous separator
 /// line (its opening newline, as in the tree) to its last content byte —

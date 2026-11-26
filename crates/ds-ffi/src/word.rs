@@ -1,4 +1,4 @@
-//! The enumerated per-register-class transmute (H5), shared by every
+//! The enumerated per-register-class transmute, shared by every
 //! marshaling face: the call site's function-pointer type must match
 //! the staged words' register classes exactly, so the placements are
 //! enumerated up front — every GP/FP placement of at most
@@ -87,7 +87,7 @@ impl Cursor<'_> {
     }
 }
 
-/// The per-placement call (H5): the macro takes the staged words, the
+/// The per-placement call: the macro takes the staged words, the
 /// placement mask (bit i set when word i is FP), and the return type,
 /// transmutes the symbol's address into the matching `unsafe extern "C"`
 /// function-pointer type, and calls it. Each arm is a monomorphized call

@@ -1,4 +1,4 @@
-//! The solved-dispatch side table of inherent-impl dot-calls (F3): every
+//! The solved-dispatch side table of inherent-impl dot-calls: every
 //! call whose owner covers the receiver records the selected method at
 //! the call's own span, and the declaration tables carry the
 //! method-to-impl-item tie the lowerer dispatches through. Inherent
@@ -425,7 +425,7 @@ fn an_inherent_call_inside_a_generic_body_records_none() {
     );
 }
 
-// ---- the type-keyed static surface (the 2026-11-15 ruling) --------------
+// ---- the type-keyed static surface --------------------------------------
 
 /// A receiverless inherent member is callable through its type name: the
 /// resolution pass records the type-keyed candidates at the method
@@ -526,7 +526,7 @@ fn the_two_member_call_forms_are_disjoint() {
     );
 }
 
-/// The namespace split decides the receiver's tier (F9): a value named
+/// The namespace split decides the receiver's tier: a value named
 /// like the type shadows the type-keyed call at the receiver position
 /// (locals first, value defs next, the type namespace last), and a
 /// free function with the member's name never applies behind a type

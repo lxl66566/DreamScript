@@ -85,7 +85,7 @@ fn a_disagreement_refuses_naming_the_file() {
     let store = Store::open(root.path());
     let package = package_of("app", "1.0.0", "fn main() {}");
     let identity = store.install(&package).expect("the install lands");
-    // drift the installed bytes: the file's own hash no longer answers
+    // drift the installed bytes: the file's own hash does not answer
     // the identity its name claims
     let file = store.path_of(identity);
     let corrupt = b"not a bundle".to_vec();

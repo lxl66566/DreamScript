@@ -264,7 +264,7 @@ fn nested_and_sibling_scopes_never_panic() {
     property(wide.as_bytes());
 }
 
-/// The R15 refinement surface, enumerated: `&&`-chain conditions of one
+/// The refinement surface, enumerated: `&&`-chain conditions of one
 /// to four conjuncts with explicit else branches (the else narrows
 /// nothing for chains, inverts single conjuncts), and match arms mixing
 /// literal, guarded, binder, and wildcard patterns over unions.
@@ -309,11 +309,11 @@ fn refinement_combinations_never_panic() {
     }
 }
 
-/// Two files in one check run (the G3 shared namespace): declarations in
-/// one file consumed by the other, with honest cross-file diagnostics.
-/// Every diagnostic from both the parse and the check walks renders
-/// through both ds-diag renderers — the R25 cross-file excerpt naming
-/// and the R20 stale-offset clamps must survive real pipeline output.
+/// Two files in one check run (one shared namespace): declarations in one
+/// file consumed by the other, with honest cross-file diagnostics. Every
+/// diagnostic from both the parse and the check walks renders through
+/// both ds-diag renderers — each label naming its own file, stale offsets
+/// clamped to their file's span — over real pipeline output.
 #[test]
 fn cross_file_check_renders_never_panic() {
     let lib = "enum cfg_err {\n  missing\n  bad_port { got: int }\n}\n\nfn get_port(j: int | \

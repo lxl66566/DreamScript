@@ -5,7 +5,7 @@
 //! one-member root, the composed member fold otherwise), which
 //! [`ds_mod::read_checked`] verifies. A source with a `ds.pkg` beside it
 //! builds as a package: the manifest resolves over the store, the root
-//! composes every member of its namespace (G3) — one module, exactly
+//! composes every member of its namespace — one module, exactly
 //! what the same package serves as a dep — and the artifact's link
 //! table records the resolved graph's identities.
 

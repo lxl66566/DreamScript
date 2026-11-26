@@ -5,8 +5,7 @@
 //! to the boundary fn's return union, and the payload and message
 //! extracting over the narrowed box. The containment check itself
 //! stays unchanged: a `?` whose error side the return union does not
-//! carry refuses exactly as before the box existed, the no-implicit-
-//! widening half of the ruling.
+//! carry refuses — the no-implicit-widening rule.
 
 use std::{
     env, fs,

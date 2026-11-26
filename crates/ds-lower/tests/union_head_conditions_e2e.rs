@@ -647,9 +647,9 @@ fn a_multiword_element_substitution_refuses_at_the_sources_shape() {
 /// whose bound demand dispatches into a generic impl member keeps the
 /// one-word instantiation boundary: the instance's own parameters carry
 /// the argument's whole span, but the body's runtime-evidence dispatch
-/// stages the receiver into the serving member's Raw-word body — a
-/// shape the impl-member instantiation round owns (the generic impl
-/// members still ride one Raw body this round).
+/// stages the receiver into the serving member's Raw-word body — the
+/// shape the impl-member instantiation owns, so the generic impl members
+/// still ride one Raw body.
 #[test]
 fn a_free_generic_call_keeps_its_one_word_instantiation_boundary() {
     let source = format!(

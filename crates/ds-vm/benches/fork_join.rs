@@ -1,4 +1,4 @@
-//! The fork-join scheduler backend measurement [E3]: the parked-CALLG
+//! The fork-join scheduler backend measurement: the parked-CALLG
 //! slice's own per-child fork overhead — one spawned child plus the
 //! interlock drive's join per element, the whole sequential single-thread
 //! cost — against the candidate parallel backends' per-element dispatch
@@ -8,8 +8,8 @@
 //! landed worker pool's own pair — the trivial slice under the pool
 //! (the ownership-transfer overhead per child) and the heavy-body pair
 //! where the pool's parallelism pays (the acceptance witness: real
-//! speedup with byte-identical answers). The M5 backend decision reads
-//! these numbers, so the bench is the decision's reproducible record:
+//! speedup with byte-identical answers). These numbers are the backend
+//! decision's reproducible record:
 //! per-child and per-element costs are the totals' difference over the
 //! 64-element span.
 

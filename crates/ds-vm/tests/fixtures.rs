@@ -100,7 +100,7 @@ fn sum_to_100_returns_5050() {
 }
 
 /// Mutual tail calls, the canonical ds-abi encoding
-/// (H2.a): slots [n, t, scratch, staged], pool k0=0, k1=1, k2=true,
+/// slots [n, t, scratch, staged], pool k0=0, k1=1, k2=true,
 /// k3=FuncRef odd, k4=FuncRef even, k5=false. KCONST supplies the base-case
 /// bools directly.
 fn even_odd_fixture() -> ModuleRegistry {
@@ -184,7 +184,7 @@ fn mutual_even_odd_at_ten_million_runs_at_constant_stack() {
     );
 }
 
-/// The M0 pair split across two module tables: `even` in `half_a`, `odd`
+/// The pair split across two module tables: `even` in `half_a`, `odd`
 /// in `half_b`, each hop a cross-module transfer through the other
 /// module's named FuncRef — the frame-reuse slide over the dsmod seam
 /// (the registry install carries no package graph, so the pair cycles
@@ -277,7 +277,7 @@ fn cross_module_even_odd_fixture(tail: bool) -> ModuleRegistry {
     reg
 }
 
-/// The M0 acceptance's cross-module mirror: even/odd split across two
+/// The acceptance run's cross-module mirror: even/odd split across two
 /// module tables, 10^7 mutual hops each crossing the boundary, and the
 /// value stack stays at one frame's span throughout — the frame-reuse
 /// transfer slides arguments and rewires the frame exactly like the
@@ -331,7 +331,7 @@ fn the_cross_module_tail_transfer_answers_like_the_stacked_reference() {
 
 /// Self tail recursion that traps after N slides: `countdown(n)` tail-calls
 /// itself until n == 0, then adds i64::MAX to itself. The trap's backtrace
-/// must report the one real frame plus the tail chain's elided count [H2].
+/// must report the one real frame plus the tail chain's elided count.
 fn countdown_fixture() -> ModuleRegistry {
     registry(
         "t",
@@ -399,7 +399,7 @@ fn trapped_tail_chain_backtrace_reports_elided_frames() {
     assert_eq!(frames[1].elided, 0);
 }
 
-/// Two-slot module table [H6 item 5]: swapping in a new version redirects
+/// Two-slot module table: swapping in a new version redirects
 /// subsequent qualified calls; the old version retires.
 fn counter_version(get_value: i64) -> ModuleVersion {
     ModuleVersion::new("counter", vec![FunctionDef {
@@ -539,7 +539,7 @@ fn callt_from_a_pure_arg_area_frame_delivers_the_argument() {
 }
 
 /// Deep NON-tail recursion: every CALL grows the stack by the callee frame,
-/// so the per-entry limit compare traps [H1].
+/// so the per-entry limit compare traps.
 #[test]
 fn deep_non_tail_recursion_traps_at_the_stack_limit() {
     let reg = registry("loop", &[funcref("loop", 0)], vec![def(
@@ -691,7 +691,7 @@ fn float_uops_execute_with_bit_structural_equality() {
                 dst: 2,
                 lhs: 0,
                 rhs: 1,
-            }, // NaN == NaN by bits [B9]
+            }, // NaN == NaN by bits
             Uop::Halt { slot: 2 },
         ]),
         def("icvt", &[I64, F64, F64, Bool], 1, 0, &[
@@ -732,7 +732,7 @@ fn float_uops_execute_with_bit_structural_equality() {
     );
 }
 
-/// The B7 trap edges: zero divide, MIN / -1, multiplication overflow, the
+/// The integer trap edges: zero divide, MIN / -1, multiplication overflow, the
 /// f64-to-i64 conversion range, and pool-kind mismatches.
 #[test]
 fn arithmetic_and_conversion_edges_trap() {

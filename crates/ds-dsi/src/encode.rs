@@ -36,7 +36,7 @@ pub fn extract(
     method_rows: &[ServedMethodRow],
 ) -> PrefixDsi {
     let package = &analyzed.package;
-    // The import-bound definitions (G4): excluded from the def-named
+    // The import-bound definitions: excluded from the def-named
     // atom log and re-keyed as mints (see `universe_log`), like their
     // exclusion from the defs below.
     let foreign: HashSet<DefId> = package.foreign().keys().copied().collect();
@@ -49,7 +49,7 @@ pub fn extract(
         .enumerate()
         .filter_map(|(index, def)| {
             let id = DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
-            // The import-bound definitions (G4) never ride the artifact:
+            // The import-bound definitions never ride the artifact:
             // their link-pass products (the foreign map, the per-file
             // bindings, the module refs) are compile-time state a serve
             // re-derives from its own fresh graph, and the defs themselves

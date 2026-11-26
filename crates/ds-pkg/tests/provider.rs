@@ -249,7 +249,7 @@ fn a_corrupt_cached_bundle_refetches_and_repairs() {
     let fixture = fixture();
     let (_, remote) = resolve_with(&fixture, std::slice::from_ref(&fixture.lib));
     assert_eq!(remote.fetches.len(), 1);
-    // corrupt the installed bytes: the file's own hash no longer answers
+    // corrupt the installed bytes: the file's own hash does not answer
     // its identity's claim
     std::fs::write(
         fixture.store.path_of(fixture.lib.content_hash()),

@@ -1,10 +1,9 @@
-//! The byte-atom typing ruling [F6] and the range-wired `in` honesty
-//! [F7, F8]: `b'x'` literals type through the `byte` atom — the stdlib
-//! ambient declares it, and a self-contained package may declare its own
-//! — byte sits outside the int conversion family (arithmetic, ordering,
-//! and range membership refuse), and a non-range `in` right side either
-//! types against one list's element type [F7] or is refused at the
-//! checker instead of typing bool ahead of a ruling.
+//! The byte atom and the range-wired `in` honesty: `b'x'` literals type
+//! through the `byte` atom — the stdlib ambient declares it, and a
+//! self-contained package may declare its own — byte sits outside the int
+//! conversion family (arithmetic, ordering, and range membership refuse),
+//! and a non-range `in` right side either types against one list's element
+//! type or is refused at the checker instead of typing bool.
 
 use ds_check::type_check;
 use ds_diag::Files;
@@ -46,7 +45,7 @@ fn clean(source: &str) {
 
 /// Checks one source against the real stdlib ambient alone: the ambient
 /// is a package member registered before the user's sources, so no user
-/// declaration may repeat its names in the same namespace [G3, F9].
+/// declaration may repeat its names in the same namespace.
 fn check_ambient(source: &str) -> Vec<String> {
     let mut files = Files::new();
     let amb = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
@@ -71,7 +70,7 @@ fn byte_literals_type_through_a_declared_byte_atom() {
 
 #[test]
 fn a_byte_literal_without_a_byte_atom_names_it() {
-    // Inference never falls back [B1, B7]: the atom must be declared, by
+    // Inference never falls back: the atom must be declared, by
     // the ambient or by the package itself.
     let mut files = Files::new();
     let file = files.add_source("t.ds", "const sep = b'x'\n");
@@ -95,7 +94,7 @@ fn the_ambient_declares_byte() {
         diags.join("\n")
     );
     // A user redeclaration of the ambient's label in the type namespace
-    // is the cross-file tag shadow (F9.5): a distinct atom, its own
+    // is the cross-file tag shadow: a distinct atom, its own
     // file's uses reading it first, the refusal only within one file.
     let diags = check_ambient("tag byte\n");
     assert!(
@@ -112,7 +111,7 @@ fn the_ambient_declares_byte() {
 
 #[test]
 fn byte_sits_outside_the_int_conversion_family() {
-    // No implicit widening exists [B7]: every operator family refuses a
+    // No implicit widening exists: every operator family refuses a
     // byte operand instead of converting it. The first diagnostic is the
     // refusal; the empty-typed result may cascade one inference note.
     assert_eq!(
@@ -159,7 +158,7 @@ fn non_list_in_right_sides_refuse_at_the_checker() {
     assert_eq!(check("fn f(n: int) -> bool { 1 in n }\n"), [MSG]);
 }
 
-/// List membership [F7]: the operand carries the list's element type and
+/// List membership: the operand carries the list's element type and
 /// the result is bool; a width or atom outside the element set names the
 /// element type, never a silent bool.
 #[test]

@@ -1,4 +1,4 @@
-//! The marshaling round's widened C-ABI encoding (H5): the signature
+//! The widened C-ABI encoding: the signature
 //! vocabulary — the scalar words, a `string` or `bytes` parameter
 //! riding a call-scoped (pointer, length) pair of
 //! GP words, the borrow valid for the call's duration alone (the type
@@ -13,7 +13,7 @@
 //! marshaling word), and the VM stage marshals each staged word per
 //! its own kind onto the signature below. The returning direction (a
 //! foreign `char*` answer needing an ownership story) and
-//! deinit-carrying handles stay queued with the ownership round.
+//! deinit-carrying handles are outside this face.
 
 use crate::{
     Symbol,
@@ -25,7 +25,7 @@ use crate::{
 /// parameter occupying two.
 pub const MAX_PARAMS: usize = 4;
 
-/// One extern parameter's marshaling encoding (H5): the scalar words
+/// One extern parameter's marshaling encoding: the scalar words
 /// plus the borrowed string/bytes pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Param {
@@ -54,7 +54,7 @@ impl Param {
     }
 }
 
-/// One extern return's marshaling encoding (H5): a scalar word or the
+/// One extern return's marshaling encoding: a scalar word or the
 /// absent word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ret {
@@ -144,7 +144,7 @@ fn pair_words(bytes: &[u8]) -> [ArgWord; 2] {
 }
 
 impl Symbol {
-    /// Calls the bound symbol over one marshaled signature (H5): the
+    /// Calls the bound symbol over one marshaled signature: the
     /// arguments stage per their encodings — scalar words singly, a
     /// `string`/`bytes` borrow as its call-scoped (pointer, length)
     /// pair — and the answer marshals back, the unit return answering

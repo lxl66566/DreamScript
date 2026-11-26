@@ -1,5 +1,4 @@
-//! The timer race through `ds run` (the 2026-11-25 handled-deadline
-//! ruling): the deadline is an answered failure — the io taxonomy's
+//! The timer race through `ds run`: the deadline is an answered failure — the io taxonomy's
 //! own `timed_out` member riding the classed fallible native span —
 //! so `?` and `.err` extract it and every race exits 0, the timeout
 //! trap retired. What the fixtures pin:
@@ -126,8 +125,7 @@ fn the_deadline_cuts_a_parking_looper() {
 fn the_deadline_cuts_a_never_parking_looper() {
     // a body that never parks: the wheel fires only when no fiber is
     // runnable, so the cut answers through the interpreter's back-edge
-    // deadline poll — before this round the drive spun past its own
-    // deadline forever
+    // deadline poll (the drive never spins past its own deadline)
     let (status, stdout, stderr) = run_source(
         r#"fn main() -> () {
   const held = timeout(20000000) {

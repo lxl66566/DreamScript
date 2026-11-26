@@ -1,6 +1,6 @@
 //! End-to-end `ds info` through the binary: the `.dsi` rendering of a
 //! package root and of one member file — `pub` declarations alone, in
-//! source order, signature-spelled and re-parsable (G4).
+//! source order, signature-spelled and re-parsable.
 
 use std::{
     env, fs,
@@ -151,9 +151,9 @@ fn a_missing_or_empty_target_refuses() {
 }
 
 /// The `.dsi` over the repo's own stdlib surface — the surface carrying
-/// `pub const urls`, whose bare-spelling line used to fail DS1002 and
-/// poison every line behind it — re-parses clean through `ds check`: the
-/// document contract (G4) checked end to end.
+/// `pub const urls`, whose bare-spelling line a DS1002 refusal would
+/// poison with every line behind it — re-parses clean through `ds check`:
+/// the document contract checked end to end.
 #[test]
 fn the_stdlib_surface_reparses_clean() {
     let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/ds-stdlib/src");

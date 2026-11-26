@@ -1,4 +1,4 @@
-//! The generic-call seam end to end [H3, phase 1]: `len` call sites over
+//! The generic-call seam end to end [, phase 1]: `len` call sites over
 //! string and list receivers lower to CALLG — the callee is the ambient
 //! generic's ONE body and the staged words end in the instantiated-type
 //! evidence word — the module round-trips through the writer and loader,

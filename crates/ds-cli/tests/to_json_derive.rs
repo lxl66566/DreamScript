@@ -45,10 +45,10 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// target's full and absent-optional rows (the nested derive, the list
 /// and nested-list walks, the absent member left out), the optional
 /// list field absent and present, the enum's two unit shapes and its
-/// payload object, the discriminator ruling's encode rows (2026-11-21:
-/// two payloaded cases answering their own member keys, the sole tuple
-/// payload its bare array, a mixed enum's wrapped cases, the lone
-/// tuple-payload case its bare array and its roundtrip), the
+/// payload object, the discriminator's encode rows (two payloaded
+/// cases answering their own member keys, the sole tuple payload its
+/// bare array, a mixed enum's wrapped cases, the lone tuple-payload
+/// case its bare array and its roundtrip), the
 /// roundtrip rows (present optional kept, absent optional still
 /// absent, a missing required member refused, the lone tuple case's
 /// re-encode through the narrowed place and its wrong shape refused), and the

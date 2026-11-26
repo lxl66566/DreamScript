@@ -13,11 +13,9 @@ use crate::{
 
 /// The blocks-section payload version this crate writes and reads.
 /// Version 2 appends the module-level evidence-chain table after the
-/// function records; version 3 appends the tag table; version 4 retires
-/// the entry staging table (the process surface's string argv
-/// superseded entry-parameter staging); version 5 carries each tag
-/// row's declaring declaration name beside the label (F9.5, the
-/// re-key's format leg).
+/// function records; version 3 appends the tag table; version 4 drops the
+/// entry staging table; version 5 carries each tag
+/// row's declaring declaration name beside the label.
 pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 5;
 
 /// The debug-spans section's payload version: the pc-to-span table's
@@ -217,14 +215,14 @@ fn put_str<S: Sink>(out: &mut S, s: &str) {
 
 /// Versioned placeholder payload for the type-metadata and effect-rows
 /// sections: payload version 0 plus a reserved zero uleb. Completed at
-/// M2/M3 inside the locked framing.
+/// sections: payload version 0 plus a reserved zero uleb, inside
 fn placeholder_into<S: Sink>(out: &mut S) {
     out.push(0);
     out.uleb(0);
 }
 
-/// The blocks payload, version 4: per-function records over the BL-5
-/// uop set and BL-6 frame layouts, then the module-level evidence-chain
+/// The blocks payload, version 5: per-function records over the uop
+/// set and frame layouts, then the module-level evidence-chain
 /// table and the tag table. See the crate docs for the byte layout.
 fn blocks_into<S: Sink>(
     out: &mut S,
@@ -251,7 +249,7 @@ fn blocks_into<S: Sink>(
         for word in function.code() {
             out.put(&word.to_le_bytes());
         }
-        // Entry-descriptor placeholder word pair [H1]: the loader fills the
+        // Entry-descriptor placeholder word pair: the loader fills the
         // tier pointers at install time; the bytes are zero on disk.
         out.put(&[0u8; 8]);
     }

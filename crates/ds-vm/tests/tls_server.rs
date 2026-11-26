@@ -1,6 +1,5 @@
-//! The net face's server-half TLS tier end to end (the 2026-11-23
-//! ruling): `net_accept_tls` upgrading the accepted connection over a
-//! host-pinned rustls server identity, the connection owning the full
+//! The net face's server-half TLS tier end to end: `net_accept_tls` upgrading the accepted
+//! connection over a host-pinned rustls server identity, the connection owning the full
 //! `net_handle` face over the tls records — hermetic, loopback only,
 //! the server certificate pinned through
 //! [`Vm::set_tls_server_config`] and the client roots through
@@ -105,7 +104,7 @@ fn answer_string(vm: &Vm, answer: &FrameAnswer) -> String {
 }
 
 /// A self-signed server certificate for `127.0.0.1` and the client
-/// config pinning it as the sole trust anchor (the client round's
+/// config pinning it as the sole trust anchor (the client-side
 /// fixture pattern).
 fn pinned_pair() -> (rustls::ServerConfig, Arc<rustls::ClientConfig>) {
     let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
@@ -240,11 +239,11 @@ fn serve_tls() -> FunctionDef {
     )
 }
 
-/// `(host: string, port: int, response: string) -> word`: two upgrade
-/// rounds over one listener — the overlap proof's server, the second
-/// connection standing in the accept queue while the first is
-/// served — answering the second round's request on success, the
-/// failing call's message on failure.
+/// `(host: string, port: int, response: string) -> word`: two upgrades
+/// over one listener — the overlap proof's server, the second connection
+/// standing in the accept queue while the first is served — answering the
+/// queued connection's request on success, the failing call's message on
+/// failure.
 ///
 /// Slots: [host, port, response, lid, conn, t, request, tag, payload].
 fn serve_tls_two() -> FunctionDef {

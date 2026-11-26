@@ -8,7 +8,7 @@
 //! only for its call to trap on the result width.
 //!
 //! Layout conventions (the contract ds-lower targets): every fallible
-//! native's result is a uniform two-word span [BL-2] on the caller's
+//! native's result is a uniform two-word span on the caller's
 //! argument slots 0 and 1 — word 0 the discriminant (`PLATFORM_IO_OK`
 //! or the failure's io class), word 1 the payload — so a caller of one sizes its
 //! overlay area to two; the overlay slots declare `Raw` because the same

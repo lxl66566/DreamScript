@@ -22,8 +22,8 @@ impl FnLower<'_, '_, '_> {
             })
     }
 
-    /// Whether a call can transfer control in tail position [H2]: a
-    /// name call, a UFCS dot-call onto a resolved free function [F3],
+    /// Whether a call can transfer control in tail position: a
+    /// name call, a UFCS dot-call onto a resolved free function,
     /// or a member dot-call the checker solved to a monomorphic
     /// inherent body — its mangled `<target>#<member>` identity plans
     /// as a plain local callee, so the CALLT transfer applies. A
@@ -43,9 +43,9 @@ impl FnLower<'_, '_, '_> {
         match &**callee {
             // A minted case constructor produces a value in place; it
             // never transfers control, so tail position lowers it as a
-            // plain value [B3]. The extraction family inlines too, so a
+            // plain value. The extraction family inlines too, so a
             // tail-position family call lowers through the value walk's
-            // return, not a control transfer [E4]. A comptime call in
+            // return, not a control transfer. A comptime call in
             // the runtime module embeds or refuses in place, so its tail
             // position takes the same value walk: treating it as a
             // transfer stages the embedded answer and emits no return,
@@ -55,7 +55,7 @@ impl FnLower<'_, '_, '_> {
                 // callee tracking: the tail transfers through CALLT when
                 // the callee word is provably count-free (a scalar naming
                 // one function), and lowers in place (CALLS plus return)
-                // where tracking cannot prove it [H2's closure ruling]
+                // where tracking cannot prove it
                 !matches!(
                     self.res.get(*span),
                     Some(Res::Def(def))
@@ -95,7 +95,7 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// Lowers a tail-position expression: calls become CALLT, everything
-    /// else returns directly [H2].
+    /// else returns directly.
     pub(super) fn tail(&mut self, e: &Expr) -> Result<(), LowerError> {
         match e {
             Expr::Paren { inner, .. } => self.tail(inner),
@@ -121,7 +121,7 @@ impl FnLower<'_, '_, '_> {
                 let result = if let Some(else_expr) = else_ {
                     self.tail(else_expr)
                 } else {
-                    // a missing else falls through to the unit return [B2]
+                    // a missing else falls through to the unit return
                     let unit = self.unit_value(e.span())?;
                     self.emit_return(&unit.place, unit.ty, e.span())
                 };
@@ -178,7 +178,7 @@ impl FnLower<'_, '_, '_> {
                 ..
             }) => {
                 // A spawned child's tail answer is the join channel's
-                // element [E2]: the frame returns it, the completion
+                // element: the frame returns it, the completion
                 // ledger carries the whole span, and the boundary
                 // collects the answers in spawn order — the plan entry's
                 // return is the body's answer type, so the exit shapes
@@ -190,7 +190,7 @@ impl FnLower<'_, '_, '_> {
                 ..
             }) => {
                 // A binding tail is a statement, not the block's value:
-                // it lowers, and the frame returns unit [F2].
+                // it lowers, and the frame returns unit.
                 self.local_stmt(local)?;
                 let unit = self.unit_value(block.span)?;
                 self.emit_return(&unit.place, unit.ty, block.span)
@@ -542,9 +542,9 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// Writes one value into a destination span: same-type word moves, or
-    /// a member construction with TAG_NEW into a union [BL-2].
+    /// a member construction with TAG_NEW into a union.
     /// Moves a deinit value's claim from its source base word to a
-    /// re-span destination's base (C5): the movs write a fresh copy of
+    /// re-span destination's base: the movs write a fresh copy of
     /// the words, and a pinned copy never dups, so the claim transfers
     /// silently. In-place spans and claim-less sources do nothing.
     fn transfer_claim(&mut self, dst_base: u8, src: &Place, src_ty: Ty) -> Result<(), LowerError> {

@@ -1,4 +1,4 @@
-//! The derive-clone acceptance [G1]: `#[derive(clone)]` on a struct, an
+//! The derive-clone acceptance: `#[derive(clone)]` on a struct, an
 //! enum, and a tag expands into ordinary `impl clone` items after
 //! parse, and the derived member is callable through the same
 //! trait-dispatch path as a hand-written impl — the direct dot call,
@@ -9,7 +9,7 @@
 //! enum payload shape constructing within its narrowed case (unit,
 //! tuple, struct), the bare tag answering itself, and a union-typed
 //! binding dispatching through the sibling branches of the one written
-//! head. The duplicate is shallow (C4): each Ref word dups through the
+//! head. The duplicate is shallow: each Ref word dups through the
 //! placement pass — a count bump, never a deep copy — so the
 //! clone-and-drop cycles balance the heap, and the placed pin locks the
 //! derived body's shape alone: the Ref word moves by Mov into the one
@@ -164,9 +164,8 @@ fn the_expansion_appends_one_impl_per_derive() {
     );
 }
 
-/// The retired refusal (the unit-word ruling): a part-less struct's
-/// `Self` spans the one reserved word, so the clone derive accepts the
-/// shape — the old DS2030 fixture now checks clean and its impl
+/// A part-less struct's `Self` spans the one reserved word, so the clone
+/// derive accepts the shape: the DS2030 fixture checks clean and its impl
 /// synthesizes beside the declaration.
 #[test]
 fn a_partless_struct_accepts_the_clone_derive() {

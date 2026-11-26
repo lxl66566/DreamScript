@@ -1,18 +1,18 @@
 //! The types_hybrid run items, replicated at uop level: the config-parser
 //! flow of `conformance/types_hybrid.ds` (`get_port`, `load`, the `.err`
-//! handler, `same`) hand-assembled over the M3 uop extensions, plus its
+//! handler, `same`) hand-assembled over the uop extensions, plus its
 //! structural-`==` and interpolation surface. Every fixture asserts the
 //! exact golden stdout of its run.
 //!
 //! Layout conventions this suite pins (the contract ds-lower targets):
 //!
-//! - Union values are tag + payload spans [BL-2]: one tag word, then the widest member's payload,
-//!   with per-member payload offsets that respect the slot types where the value flows (unit
-//!   members carry no payload; dead payload slots hold whatever was last written and are never
-//!   read). Spans are uniform-width per type: every value of a type occupies the same word count,
-//!   so RETSPAN returns one width per function.
+//! - Union values are tag + payload spans: one tag word, then the widest member's payload, with
+//!   per-member payload offsets that respect the slot types where the value flows (unit members
+//!   carry no payload; dead payload slots hold whatever was last written and are never read). Spans
+//!   are uniform-width per type: every value of a type occupies the same word count, so RETSPAN
+//!   returns one width per function.
 //! - `int | missing | bad_port` lowers to the tagged baseline (`INT` member tag + i64 payload); `T
-//!   | none` niche packing [B4] is a later pass over exactly these spans.
+//!   | none` niche packing is a later pass over exactly these spans.
 //! - Early exits: `or return`/`?` are TAG_TEST + JMPIF + a RETSPAN that either constructs the
 //!   alternative (`or return missing`) or propagates the span by re-spanning it (`?`). Bare-struct
 //!   returns use RETSPAN too; single-word returns may use RET.
@@ -186,7 +186,7 @@ fn find_num() -> FunctionDef {
 /// `const get_port = (p: probe) -> int | missing | bad_port`, the source's
 /// union flow: the `or return missing` of the `int | none` probe, the range
 /// check, and the `bad_port { got: -1 }` construction. Result spans
-/// [Tag, I64] (the tagged `int` baseline; B4 niche packing is later).
+/// [Tag, I64] (the tagged `int` baseline; niche packing is later).
 fn get_port() -> FunctionDef {
     def(
         "get_port",
@@ -331,7 +331,7 @@ fn default_config() -> FunctionDef {
 
 /// `const main = (p: probe)`: the `.err` dispatch over `config | cfg_err`
 /// with the handler's `match e { b if b is bad_port => log(...), _ => ... }`
-/// (println standing in for log, M5 owns effects), then
+/// (println standing in for log), then
 /// `same = cfg == default_config()` — the structural `==` chain — and the
 /// interpolated report. The overlay area is Raw: it stages the probe, then
 /// receives load's 4-word result, then stages builtin calls.
@@ -1112,20 +1112,19 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_BYTE).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_U32_OF).is_some());
     assert!(reg.resolve_native("builtin", BUILTIN_INT_OF_U32).is_some());
-    // the float math family (76-83) and the string search triple
-    // (84-86): the 2026-11-21 pure-builtin round
+    // the float math family (76-83) and the string search triple (84-86)
     for index in 76..=86 {
         assert!(reg.resolve_native("builtin", index).is_some());
     }
-    // the bounded channel's intercepted triple (87-89): the 2026-11-21
-    // shared-state ruling's send/recv/construct seams
+    // the bounded channel's intercepted triple (87-89): its
+    // send/recv/construct seams
     for index in BUILTIN_CHAN_NEW..=BUILTIN_CHAN_RECV {
         assert!(reg.resolve_native("builtin", index).is_some());
     }
     // the ord-routed list sort's reserved slot (90): its reentrant ONE
     // body lives in the generic table, CALLG-addressed
     assert!(reg.resolve_native("builtin", BUILTIN_SORT).is_some());
-    // the collection member round (91-97): the indexed element store,
+    // the collection members (91-97): the indexed element store,
     // removal, splice, and emptying, the map's row removal, membership
     // read, and entry-order pair list
     assert!(reg.resolve_native("builtin", BUILTIN_LIST_SET).is_some());
@@ -1154,10 +1153,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     // the channel deadline twins (108-109): the intercepted send/recv
     // deadline seams, their steps the dispatcher's own like the triple's
     assert!(
-        reg.resolve_native("builtin", BUILTIN_CHAN_SEND_DEADLINE).is_some()
+        reg.resolve_native("builtin", BUILTIN_CHAN_SEND_DEADLINE)
+            .is_some()
     );
     assert!(
-        reg.resolve_native("builtin", BUILTIN_CHAN_RECV_DEADLINE).is_some()
+        reg.resolve_native("builtin", BUILTIN_CHAN_RECV_DEADLINE)
+            .is_some()
     );
     assert!(
         reg.resolve_native("builtin", 110).is_none(),

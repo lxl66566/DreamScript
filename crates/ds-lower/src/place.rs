@@ -1,6 +1,6 @@
-//! The Perceus dup/drop placement pass (C4): decides, per heap-referenced
+//! The Perceus dup/drop placement pass: decides, per heap-referenced
 //! word of one function frame, where `rc_inc`/`rc_dec` go — replacing the
-//! M3 placeholders (nothing emitted) with placed RC ops in the symbolic
+//! placeholders (nothing emitted) with placed RC ops in the symbolic
 //! buffer.
 //!
 //! # Model
@@ -24,11 +24,11 @@
 //!   with its own exit drops), so a dying source forwards its count and a live source dups; a
 //!   consuming (`move`-mode) parameter's staging is the hand-off — the count and any deinit claim
 //!   ride into the callee, whose bind-time claim fires the hook at its own death sites; a native is
-//!   a transient borrow window (C2) — never a dup, and a dying source drops right after the call.
-//!   The window opens before the call's operand evaluation and pins every word its CALL reads: a
-//!   death firing inside that window (a later operand's own last-use dec) defers to the window's
-//!   flush, so the object survives the CALL; nested windows flush LIFO, and a word several nested
-//!   calls read dies at the outermost reading window's flush;
+//!   a transient borrow window — never a dup, and a dying source drops right after the call. The
+//!   window opens before the call's operand evaluation and pins every word its CALL reads: a death
+//!   firing inside that window (a later operand's own last-use dec) defers to the window's flush,
+//!   so the object survives the CALL; nested windows flush LIFO, and a word several nested calls
+//!   read dies at the outermost reading window's flush;
 //! * exits (RET/RETSPAN/CALLT) transfer the returned words and drop every other still-owned word,
 //!   in ascending slot order; HALT ends the program, where the heap dies whole — no drops.
 //!
@@ -53,7 +53,7 @@
 //! kept it, and an arm keeping a word the join does not keep decs it at
 //! its own flow end (the balanced join: a count produced or kept on one
 //! arm's path dies inside that arm), so each runtime path drops each
-//! count once. The deinit hook (C5) rides the value's base word: when
+//! count once. The deinit hook rides the value's base word: when
 //! the dying value's concrete type declares a `deinit`, the drop first
 //! stages the value's whole word span, calls the synthesized deinit
 //! function while the fields are still live, then emits the `RCDEC` on
@@ -101,7 +101,7 @@ use ds_diag::Span;
 
 use super::func::Op;
 
-/// One declared deinit hook (C5): the pool index of the struct's
+/// One declared deinit hook: the pool index of the struct's
 /// synthesized deinit function, the word width of the value it stages
 /// at the death, and the span's `Ref` word offsets — the claim decs
 /// each at the value's death, so a multi-`Ref` span dies as one unit.
@@ -118,7 +118,7 @@ pub(crate) struct Hook {
 /// One outstanding reference count this frame must account for.
 #[derive(Clone, Debug)]
 pub(crate) struct Owned {
-    /// The deinit hook of the dying value this word anchors (C5). A
+    /// The deinit hook of the dying value this word anchors. A
     /// hook rides the value's base word only: a scalar base word owns
     /// the hook without any `Ref` count, and the span's other `Ref`
     /// words fold into the claim (their decs fire with the hook's).
@@ -137,10 +137,9 @@ pub(crate) struct Owned {
     /// Whether the word carries a `Ref` count alongside any hook. A
     /// claimed base word keeps this clear — its decs are the hook's.
     count: bool,
-    /// A deinit value's word: its uses are borrows and never kill it
-    /// (the C5 discipline keeps the value live to its drop site); only
-    /// a consuming move, the scope end, an assignment, or the frame
-    /// exit may fire the drop.
+    /// A deinit value's word: its uses are borrows and never kill it,
+    /// so the value stays live to its drop site; only a consuming move, the
+    /// scope end, an assignment, or the frame exit may fire the drop.
     pinned: bool,
     /// The loop nesting depth at the production site.
     depth: usize,
@@ -236,7 +235,7 @@ pub(crate) struct Placement {
     /// The checker's affine facts, shared by every function's walk:
     /// the final use per binder span and the consuming uses (a move
     /// forces the death test true at exactly that use — a rebinding in
-    /// value position, or a `move`-mode parameter's argument [C2]).
+    /// value position, or a `move`-mode parameter's argument).
     /// Consumed as a shared table so a linear surface slots in without
     /// re-deriving affine facts.
     facts: Rc<AffineFacts>,
@@ -271,7 +270,7 @@ pub(crate) struct Placement {
     /// Words a borrowed registration names (a borrow parameter, a
     /// handler member alias, a pattern field): the binder aliases the
     /// owner's value, so the frame never anchors its deinit claim
-    /// there — the owner's own drop site fires the hook (C5).
+    /// there — the owner's own drop site fires the hook.
     borrowed: HashSet<u8>,
     /// Loop nesting depth of the current walk position.
     loop_depth: usize,
@@ -374,9 +373,8 @@ impl Placement {
 
     /// One count-moving site touched `slot` (a dup inc, a call-staging
     /// forward, a foreign count written into the slot, an exit transfer,
-    /// a loop carry, a claim fold): the borrow rewrite no longer
-    /// applies, on any path — the acquire keeps the count's movement
-    /// honest.
+    /// a loop carry, a claim fold): the borrow rewrite does not apply, on
+    /// any path — the acquire keeps the count's movement honest.
     fn transit(&mut self, slot: u8) {
         self.kstr_slots.remove(&slot);
         self.strcat_slots.remove(&slot);
@@ -406,7 +404,7 @@ impl Placement {
         std::mem::take(&mut self.strcat_slots)
     }
 
-    /// Registers one deinit-carrying value's claim (C5): the hook
+    /// Registers one deinit-carrying value's claim: the hook
     /// anchors the value's base word and fires at the value's unique
     /// death, dec-ing every `Ref` word of the span (the hook's refs).
     /// The span's other plain-count words fold into the claim — their
@@ -522,7 +520,7 @@ impl Placement {
         })
     }
 
-    /// Fires one word's deinit claim at a hand-off (C5): the word
+    /// Fires one word's deinit claim at a hand-off: the word
     /// escapes as a smaller value (a field read of the dying struct),
     /// so the claim the word anchors runs here while the value's other
     /// words are still live. The `Ref` words of the span whose absolute
@@ -664,7 +662,7 @@ impl Placement {
     }
 
     fn recompute_death(&mut self, word: u8) {
-        // A pinned word's death never derives from last uses (C5): the
+        // A pinned word's death never derives from last uses: the
         // value stays live to its drop site, so only the checker's
         // forced moves (the consuming use that transfers ownership) may
         // claim it at a use.
@@ -839,7 +837,7 @@ impl Placement {
     }
 
     /// A `var` re-assignment overwrites `words`: the replaced references
-    /// die before the store threads (the store site the M3 comment pins).
+    /// die before the store threads (the store site the comment pins).
     /// A loop-carried word's dec is a rollover, not a claim death: the
     /// body re-executes, so the word keeps its claim for the back-edge
     /// join — each iteration's dec consumes the previous content's count
@@ -893,7 +891,7 @@ impl Placement {
     }
 
     /// One staged word of a consuming (`move`-mode) argument: the
-    /// callee's own parameter binding owns the value's death (C2), so
+    /// callee's own parameter binding owns the value's death, so
     /// the count and any claim the word anchors ride the staging
     /// together — the callee's bind-time claim fires the hook exactly
     /// once at its own death site, so this frame never fires it (a
@@ -1061,7 +1059,7 @@ impl Placement {
         }
     }
 
-    /// The central drop (C5): a deinit claim stages the value's whole
+    /// The central drop: a deinit claim stages the value's whole
     /// word span and calls the synthesized deinit function first — while
     /// the value's fields are still alive — then the RCDEC consumes the
     /// count when the word carries one (a unique death pools the block
@@ -1367,7 +1365,7 @@ mod tests {
         }
     }
 
-    /// The deinit hook (C5): a dying value's claim stages its whole word
+    /// The deinit hook: a dying value's claim stages its whole word
     /// span, calls the synthesized deinit, clears its establishment band
     /// (the op the VM's claim directory reads the band word from), then
     /// decs every `Ref` word of the span — the structure every drop site

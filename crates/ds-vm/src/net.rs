@@ -4,10 +4,10 @@
 //! `platform`'s module docs): `net_connect`, `net_send`,
 //! `net_recv`, `net_close`, `http_get`, and the listener face
 //! `net_listen`/`net_accept`/`net_listener_close`. The fallible ops
-//! answer with the uniform two-word tag+payload span [BL-2]
+//! answer with the uniform two-word tag+payload span
 //! — the shared success marker on word 0, the payload on word 1 — and
 //! failures carry the class discriminant of the ambient `net_err` case
-//! they answer by error class (ruled 2026-11-12): a bounded wait that
+//! they answer by error class: a bounded wait that
 //! expired answers `timeout`, every other failure `refused`, the
 //! message `Ref` as payload shaped `"op target: detail"` like the file
 //! natives' `io_err` messages. `net_close` and `net_listener_close`
@@ -42,7 +42,7 @@
 //! A hostile host cannot hang the interpreter: a socket that never
 //! answers yields `net_err` "timed out after ...".
 //!
-//! # Parking discipline (the 2026-11-21 scheduler ruling)
+//! # Parking discipline
 //!
 //! Installing a reactor on the VM ([`crate::Vm::install_reactor`]) flips
 //! the registered-connection surface to non-blocking and the data
@@ -55,13 +55,13 @@
 //! same way on the listener's own readability (a pending connection is
 //! readable), the wake performing the accept and registering the
 //! accepted stream like a connecting one — but its park carries no
-//! deadline (the 2026-11-24 signal ruling): the signal is the quiet
+//! deadline: the signal is the quiet
 //! accept's backstop, so the host's registered shutdown interest (or
 //! the blocking twin's stop flag below) ends a quiet wait, every other
 //! op's deadline discipline unchanged. Blocking stays the
 //! embedder's platform choice: no reactor installed, the natives below
 //! block exactly as before. `net_connect` and the plain `http_get`
-//! exchange park too (the 2026-11-23 ruling): std cannot open a
+//! exchange park too: std cannot open a
 //! non-connecting socket, so the parked connect rides the raw OS
 //! socket — libc's own `socket`/`fcntl(O_NONBLOCK)`/`connect` and
 //! completion probe over no socket library, the epoll driver's
@@ -74,9 +74,8 @@
 //! staged connect (its wants-write/wants-read naming the interest each
 //! step watches); a non-Linux host keeps the blocking twins under any
 //! reactor until its driver round owns the raw seam. The staged
-//! connect's first step is the hostname resolution (ruled 2026-11-24,
-//! item 79): under the reactor an IP-literal host connects inline
-//! exactly the blocking twin's own resolution, a name resolves on the
+//! connect's first step is the hostname resolution: under the reactor an IP-literal host connects
+//! inline exactly the blocking twin's own resolution, a name resolves on the
 //! connection table's resolver helper thread — std's own
 //! `to_socket_addrs`, its completion posting the eventfd the reactor
 //! watches ([`crate::resolver`]) — and the wake starts the connect
@@ -95,7 +94,7 @@
 //! # The TLS tier
 //!
 //! `http_get` speaks HTTP/1.0 over a plain `std::net::TcpStream` — no
-//! async runtime. The tls capability (H5.5's 2026-11-17 ruling) is a
+//! async runtime. The tls capability is a
 //! host-level selection: where the platform provides it, the `http_get`
 //! slot carries the routing body of [`crate::tls`] (an `https://` URL
 //! rides rustls) and the capability's own `https_get` op is served;
@@ -105,7 +104,7 @@
 //! the status line is not inspected, and only close-delimited HTTP/1.0
 //! responses decode (no chunked transfer).
 //!
-//! The server half (ruled 2026-11-23) rides the same capability: the
+//! The server half rides the same capability: the
 //! host or test pins the rustls server identity
 //! ([`crate::Vm::set_tls_server_config`], no default), and
 //! `net_accept_tls` upgrades the accepted connection over it — the
@@ -196,7 +195,7 @@ pub(crate) struct Connections {
     /// [`crate::tls`], the transport this table owns).
     #[cfg(target_os = "linux")]
     tls_fetches: Vec<(i64, crate::tls::TlsFetch)>,
-    /// The parked DNS twin's pending rows (item 79, ruled 2026-11-24):
+    /// The parked DNS twin's pending rows:
     /// one per resolving connect, keyed by the pre-minted ids the
     /// resolved connect stage registers under — the job cell shared
     /// with the resolver helper thread that posts it
@@ -330,12 +329,10 @@ struct Fetch {
     seen: Vec<u8>,
 }
 
-/// The raw OS socket binding of the parked connect (the 2026-11-23
-/// ruling): libc's own symbols — `socket`, `fcntl(O_NONBLOCK)`,
-/// `connect`, and the completion probe — over no socket library, the
-/// epoll driver's OS-own-symbols precedent. The parked connect is the
-/// linux driver's own this round; a non-linux host keeps the blocking
-/// twin under any reactor, riding the kqueue/IOCP driver rounds.
+/// The raw OS socket binding of the parked connect: libc's own symbols — `socket`,
+/// `fcntl(O_NONBLOCK)`, `connect`, and the completion probe — over no socket library, the epoll
+/// driver's OS-own-symbols precedent. The parked connect belongs to the Linux driver; any other
+/// host keeps the blocking twin under whatever reactor it installs.
 #[cfg(target_os = "linux")]
 mod raw_sock {
     use std::{
@@ -693,13 +690,11 @@ impl Connections {
         }
     }
 
-    /// Starts one non-blocking connect over the raw OS socket (the
-    /// 2026-11-23 ruling): an IP-literal host resolves inline (the
-    /// machine starting at its connect stage exactly today), a name
-    /// submits its resolution to the resolver helper thread — item
-    /// 79's parked DNS twin, the machine's step 0 (ruled 2026-11-24)
-    /// — answering the pre-minted row id whose eventfd readability
-    /// the wake's resolve stage consumes. [`NetConnectStart::Pending`]
+    /// Starts one non-blocking connect over the raw OS socket: an IP-literal
+    /// host resolves inline, without parking (the machine starting at its
+    /// connect stage), a name submits its resolution to the resolver helper
+    /// thread (the parked DNS twin) answering the pre-minted row id whose
+    /// eventfd readability the wake's resolve stage consumes. [`NetConnectStart::Pending`]
     /// names the resolving or connecting row the park's completion
     /// reads — the id pre-minted, so the wake registers the stream
     /// under the very id the parked caller saw.
@@ -784,7 +779,7 @@ impl Connections {
     /// direction the row's current stage still watches.
     #[cfg(target_os = "linux")]
     pub(crate) fn connect_wake(&mut self, conn: i64) -> ConnectWake {
-        // the resolve stage (item 79): the eventfd's readable wake
+        // the resolve stage: the eventfd's readable wake
         // takes the worker's answer, a failed lookup answering its
         // own error, the resolved addresses feeding the connect stage
         // under the very id the parked caller saw
@@ -904,8 +899,8 @@ impl Connections {
     }
 
     /// The interest direction one pending connect row's current stage
-    /// watches (the park's initial registration, item 79): the
-    /// resolve stage's eventfd readability, the connect stage's raw
+    /// watches (the park's initial registration): the resolve stage's eventfd
+    /// readability, the connect stage's raw
     /// writability. An unknown row answers the connect's own — the
     /// rows only stand under the linux driver, where the connect
     /// stage is the machine a row cannot be past.
@@ -1435,8 +1430,7 @@ pub(crate) struct Listeners {
     /// installed on the VM flips this, and a bound listener answers
     /// would-block to the thread — never a block.
     parking: bool,
-    /// The host's blocking-drive stop flag (the 2026-11-24 signal
-    /// ruling's non-reactor twin): a host without a reactor keeps the
+    /// The host's blocking-drive stop flag: a host without a reactor keeps the
     /// blocking rows, so its own signal helper flips this flag and the
     /// bounded poll observes it between rounds. A host that installs
     /// none keeps today's behavior — the flag stands false forever.
@@ -1532,14 +1526,11 @@ impl Listeners {
         }
     }
 
-    /// The bounded blocking accept on handle `lid`: std's listener
-    /// carries no OS accept timeout, so the non-blocking socket polls
-    /// to the configured deadline — the same bound every blocking net
-    /// wait keeps, polled rather than waited because that is the only
-    /// portable shape. The host's stop flag answers between rounds
-    /// (the 2026-11-24 signal ruling's blocking twin): a stopped drive
-    /// answers the `Interrupted` marker the accept rows map to the
-    /// shutdown trap, never a net failure span.
+    /// The bounded blocking accept on handle `lid`: std's listener carries no OS accept timeout, so
+    /// the non-blocking socket polls to the configured deadline — the same bound every blocking net
+    /// wait keeps, polled rather than waited because that is the only portable shape. The host's
+    /// stop flag answers between rounds: a stopped drive answers the `Interrupted` marker the
+    /// accept rows map to the shutdown trap, never a net failure span.
     pub(crate) fn accept(&mut self, lid: i64) -> io::Result<TcpStream> {
         let timeout = self.timeout;
         let stopped = self.stop.clone();
@@ -1685,8 +1676,7 @@ fn normalize(err: io::Error, timeout: Duration) -> io::Error {
 }
 
 /// The class of one net failure: the `net_err` member the platform
-/// discriminant answers by error class (ruled 2026-11-12, widened
-/// 2026-11-21 to the alias's whole class set) — every kind the classes
+/// discriminant answers by error class — every kind the classes
 /// name lands on its tag, the rest folding into the `net_other` floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NetClass {
@@ -1864,7 +1854,7 @@ pub(crate) fn net_connect_fn(
         ));
     };
     let target = format!("{host}:{port}");
-    // the parked twin (the 2026-11-23 ruling): a reactor owns
+    // the parked twin: a reactor owns
     // readiness, so the connect rides the raw OS socket —
     // non-blocking, EINPROGRESS parked on the writability the
     // completion reports, SO_ERROR the wake's probe. The linux
@@ -2027,8 +2017,8 @@ pub(crate) fn recv_answer(heaps: &mut Heaps, conn: i64, bytes: Vec<u8>) -> Nativ
 /// call — removes the handle, closing the socket. Total and idempotent:
 /// an unknown handle is a no-op (mirroring `close_raw`, so a deinit
 /// firing on an already-closed handle stays clean). The close notes
-/// the handle for the wake door: a parked wait on it wakes now
-/// (item 79), its deadline never the line.
+/// the handle for the wake door: a parked wait on it wakes now, its deadline
+/// never the line.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn net_close_fn(
     _heaps: &mut Heaps,
@@ -2083,8 +2073,8 @@ pub(crate) fn net_listen_fn(
 /// into the connection table so it owns the `net_handle` face in full.
 /// Under an installed reactor the accept parks on the listener's
 /// readability (the wake performing the accept) with no deadline — the
-/// 2026-11-24 signal ruling makes the signal the quiet accept's
-/// backstop, every other op's deadline discipline unchanged; otherwise
+/// signal is the quiet accept's backstop, every other op's deadline
+/// discipline unchanged; otherwise
 /// the wait blocks the thread, bounded by the configured net timeout,
 /// and the host's stop flag answers the shutdown trap between the
 /// poll's rounds.
@@ -2262,7 +2252,7 @@ mod tests {
         assert_eq!(NetClass::of(&err), NetClass::Timeout);
     }
 
-    /// The widened error-class mapping (2026-11-21): every kind a class
+    /// The widened error-class mapping: every kind a class
     /// names lands on its own discriminant, and the kinds no class names
     /// portably fold into the `net_other` floor.
     #[test]
@@ -2375,7 +2365,7 @@ mod tests {
         );
     }
 
-    /// The parked connect's raw machine (the 2026-11-23 ruling): a
+    /// The parked connect's raw machine: a
     /// loopback connect either completes at once or stands in progress
     /// with the wake's SO_ERROR probe finishing it — the registered
     /// handle live either way — and a refused port answers its class
@@ -2462,7 +2452,7 @@ mod tests {
         }
     }
 
-    /// The parked DNS twin's machine (item 79, ruled 2026-11-24): a
+    /// The parked DNS twin's machine: a
     /// name answers the pre-minted pending row at once — the drive
     /// thread never blocks in the resolution — the eventfd the row's
     /// interest and its readability the stage's direction; the wake

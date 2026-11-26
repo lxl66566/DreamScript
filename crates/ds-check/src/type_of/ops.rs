@@ -1,7 +1,7 @@
-//! The F5 operator table, checked over solved operands (B7): trapping
+//! The operator table, checked over solved operands: trapping
 //! defaults need no checker action (the VM traps); wrapping forms are
 //! integer-only; mixed int/float arithmetic is an error suggesting the
-//! explicit conversion; `==` is B9's structural equality with its
+//! explicit conversion; `==` is structural equality with its
 //! carve-outs. The numeric vocabulary is data — a name-to-class table over
 //! declared atoms, never builtin identity.
 
@@ -142,14 +142,14 @@ impl Bodies<'_> {
 
     pub(crate) fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Val {
         // `x in a..b` / `x in a..=b`: the range fixes the element type
-        // instead of a collection's [F7].
+        // instead of a collection's.
         if op == BinaryOp::In
             && let Expr::Range { start, end, .. } = peel_paren(right)
         {
             return self.in_range(left, start, end, span);
         }
         let left_val = self.expr(left, None);
-        // `a && b`: b sees a's narrowing [B2] — `x is int && x >= 1` types
+        // `a && b`: b sees a's narrowing — `x is int && x >= 1` types
         // the comparison against the narrowed x.
         let right_val = if op == BinaryOp::And {
             let narrows = self.harvest(left);
@@ -174,10 +174,10 @@ impl Bodies<'_> {
         )
     }
 
-    /// The F5 operator table, checked over solved operands: trapping
-    /// defaults need no checker action (the VM traps (B7)); wrapping forms
+    /// The operator table, checked over solved operands: trapping
+    /// defaults need no checker action (the VM traps); wrapping forms
     /// are integer-only; mixed int/float arithmetic is an error suggesting
-    /// the explicit conversion; `==` is B9's structural equality with its
+    /// the explicit conversion; `==` is structural equality with its
     /// carve-outs. A poisoned operand (its subtree already reported)
     /// suppresses the operator's own complaint — the root cause stands
     /// alone.
@@ -265,7 +265,7 @@ impl Bodies<'_> {
                         }
                     },
                     (Some((lc, ln)), Some((_rc, rn))) => {
-                        // Mixed int/float [B7]: suggest converting the
+                        // Mixed int/float: suggest converting the
                         // integer side to the float type.
                         let (int_span, int_name) = if matches!(lc, NumericClass::Int) {
                             (left_span, ln.clone())
@@ -396,9 +396,8 @@ impl Bodies<'_> {
             In => {
                 // Only non-range right sides reach here (`binary` routes
                 // `x in a..b` first). Membership over one list
-                // application is ruled [F7]: the operand carries the
-                // element type and the result is bool; every other
-                // right side keeps the honest refusal until its ruling.
+                // application carries the operand's element type and the
+                // result is bool; every other right side refuses.
                 if let Some(element) = self.list_element(right) {
                     if !self.decls.universe.contains(element, left) {
                         self.error(
@@ -455,7 +454,7 @@ impl Bodies<'_> {
         }
     }
 
-    /// Structural equality over all data (B9); carve-outs: (1) function
+    /// Structural equality over all data; carve-outs: (1) function
     /// comparison rejected statically; (2) disjoint operands make the
     /// comparison constant, rejected as dead.
     fn equality_val(&mut self, left: Ty, right: Ty, span: Span) -> Val {
@@ -493,7 +492,7 @@ impl Bodies<'_> {
 
     /// Types one range's endpoints and returns the element type both
     /// agree on: integers of one width. Mixed widths name the
-    /// conversion; a float or non-numeric endpoint is rejected (B7). A
+    /// conversion; a float or non-numeric endpoint is rejected. A
     /// poisoned endpoint already reported and stays quiet.
     pub(crate) fn range_element(&mut self, start: &Expr, end: &Expr, span: Span) -> Option<Ty> {
         let start_val = self.expr(start, None);
@@ -532,7 +531,7 @@ impl Bodies<'_> {
         None
     }
 
-    /// The element type of one whole-list application [F7]: membership
+    /// The element type of one whole-list application: membership
     /// reads it. `None` for any other type — a union of lists, a
     /// non-list application, a non-application.
     fn list_element(&mut self, ty: Ty) -> Option<Ty> {
@@ -544,7 +543,7 @@ impl Bodies<'_> {
         (self.decls.defs_of_atoms.get(&ctor) == Some(&def)).then_some(*element)
     }
 
-    /// Range membership (F7): the operand must carry the range's integer
+    /// Range membership: the operand must carry the range's integer
     /// type; the result is bool.
     fn in_range(&mut self, left: &Expr, start: &Expr, end: &Expr, span: Span) -> Val {
         let bool_ty = self.bool_ty();
@@ -616,7 +615,7 @@ fn op_text(op: BinaryOp) -> &'static str {
     }
 }
 
-/// B7 numeric classes, modeled as data: a declared atom name to its class.
+/// Numeric classes, modeled as data: a declared atom name to its class.
 /// The checker never hardcodes a type identity — a numeric type is a
 /// declared atom whose name sits in this table.
 const NUMERIC_TABLE: &[(&str, NumericClass)] = &[

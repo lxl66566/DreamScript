@@ -167,8 +167,8 @@ impl RunCache {
         self.lookup_at(root, &name, Hash128::compute(source.as_bytes()))
     }
 
-    /// The cached artifact for one package root's composed member set
-    /// (G3): the key folds the root's member identity — the same
+    /// The cached artifact for one package root's composed member set:
+    /// the key folds the root's member identity — the same
     /// ascending-path fold a dep-side identity records — so a sibling
     /// member's edit is another key and a warm artifact never serves the
     /// old member set. A one-member root folds its lone member's text
@@ -331,8 +331,8 @@ impl RunCache {
     /// prefix another:
     /// - the domain tag above;
     /// - the module name: the file stem lands in the artifact header;
-    /// - the compile's content identity (G3.5): a plain script's or one-member root's source hash,
-    ///   a multi-member root's composed member fold, so a sibling edit is another key;
+    /// - the compile's content identity: a plain script's or one-member root's source hash, a
+    ///   multi-member root's composed member fold, so a sibling edit is another key;
     /// - the ambient identity: the stdlib ambient's text hash when its impl bodies lower into the
     ///   module, a marker byte when `--no-ambient` compiles without it;
     /// - each resolved dep's link name and content hash in ascending name order: the identities

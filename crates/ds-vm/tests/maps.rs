@@ -8,7 +8,7 @@
 //! read's both members.
 //!
 //! Layout conventions (the contract ds-lower targets): `map_get` is the
-//! checked shape — a two-word tag+payload span [BL-2] on the caller's
+//! checked shape — a two-word tag+payload span on the caller's
 //! argument slots 0 and 1, word 0 the discriminant (`PLATFORM_IO_OK` with
 //! the value, `PLATFORM_NONE` with the probe key) — so a caller sizes its
 //! overlay area to two; `map_set` overlays one word (the inert unit

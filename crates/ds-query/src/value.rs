@@ -66,7 +66,7 @@ pub struct BlockInfo {
 /// file's blocks in source order, mapping byte spans to blocks.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BlockIndexOutput {
-    /// Blocks in source order; every file has at least one (G3). Shared like
+    /// Blocks in source order; every file has at least one. Shared like
     /// the parse payload: a memo hit clones the arc, not the blocks.
     pub blocks: Arc<[BlockInfo]>,
 }
@@ -84,7 +84,7 @@ pub struct ScopeIndexOutput {
 /// Result of the [`LinearityCheck`](crate::QueryKey::LinearityCheck)
 /// query: the linearity facts of one definition — the diagnostics and
 /// placements whose spans address its block, sliced out of the package
-/// pass (C1, C5).
+/// pass.
 ///
 /// The slice is defined by primary spans: a diagnostic belongs to the
 /// definition its primary label addresses, so the two-span `DS3001`
@@ -148,7 +148,7 @@ impl PartialEq for LinearityOutput {
 impl Eq for LinearityOutput {}
 
 /// Result of the [`PackageLinearity`](crate::QueryKey::PackageLinearity)
-/// query: the M2 affine pass (C1, C5) over the package's derive-expanded
+/// query: the affine pass over the package's derive-expanded
 /// trees, the substrate every definition's [`LinearityOutput`] slices. The
 /// fact lists are shared, so a memo hit clones arcs, not the facts.
 ///
@@ -162,9 +162,9 @@ impl Eq for LinearityOutput {}
 pub struct PackageLinearityOutput {
     /// Diagnostics in walk order.
     pub diags: Arc<[Diagnostic]>,
-    /// Consuming uses of owned non-copyable bindings (C1).
+    /// Consuming uses of owned non-copyable bindings.
     pub moves: Arc<[Move]>,
-    /// Scope-exit deaths of live owned non-copyable bindings (C5).
+    /// Scope-exit deaths of live owned non-copyable bindings.
     pub drops: Arc<[DropSite]>,
     /// The final use of every tracked binding.
     pub last_uses: Arc<[LastUse]>,
@@ -214,7 +214,7 @@ impl PackageLinearityOutput {
 }
 
 /// Result of the [`Expanded`](crate::QueryKey::Expanded) query: the
-/// package's parse memos' trees through the derive expansion (G1), shared
+/// package's parse memos' trees through the derive expansion, shared
 /// so every package-grain pass checks the same synthesized impls without
 /// expanding per query.
 ///
@@ -231,7 +231,7 @@ pub struct ExpandedOutput {
     /// every session and compute without a clone.
     pub asts: Arc<[Arc<Ast>]>,
     /// Derive-refusal diagnostics: unimplemented or unknown derive names,
-    /// un-derivable parts, and the B9 equality refusal. Shared like the
+    /// un-derivable parts, and the structural equality refusal. Shared like the
     /// parse payload: memo hits clone the arc, not the diagnostics.
     pub diags: Arc<[Diagnostic]>,
 }
@@ -249,7 +249,7 @@ impl Eq for ExpandedOutput {}
 /// Result of the [`Resolve`](crate::QueryKey::Resolve) query: one
 /// package's collected namespace, per-file resolutions, reverse-edge
 /// index, and the derive-refusal, collection, and resolution diagnostics
-/// (G3) — the expansion's classes ride with the resolve half because the
+/// — the expansion's classes ride with the resolve half because the
 /// expanded trees are its input.
 #[derive(Clone, Debug)]
 pub struct ResolveOutput {
@@ -285,7 +285,7 @@ impl PartialEq for ResolveOutput {
 impl Eq for ResolveOutput {}
 
 /// Result of the [`TypeOf`](crate::QueryKey::TypeOf) query: one
-/// definition's typed story, sliced out of the package check (B2).
+/// definition's typed story, sliced out of the package check.
 ///
 /// The slice is defined by primary spans, like
 /// [`LinearityOutput`](crate::LinearityOutput): a diagnostic belongs to
@@ -305,7 +305,7 @@ pub struct TypeOfOutput {
 }
 
 /// Result of the [`CheckedPackage`](crate::QueryKey::CheckedPackage) query:
-/// the whole-package bidirectional check (B2), the substrate every
+/// the whole-package bidirectional check, the substrate every
 /// definition's [`TypeOfOutput`] and the
 /// [`Analyzed`](crate::QueryKey::Analyzed) query's bundle both slice. The
 /// payloads are shared, so a memo hit clones arcs, not the package.
@@ -404,7 +404,7 @@ pub(crate) struct CheckedPackageFacts {
 }
 
 /// Result of the [`PackageEffects`](crate::QueryKey::PackageEffects) query:
-/// the whole-package effect rows (E1), the substrate the per-definition
+/// the whole-package effect rows, the substrate the per-definition
 /// rows and the platform check both read.
 ///
 /// Equality compares the computed definitions (identity, name, row,
@@ -435,7 +435,7 @@ impl PartialEq for PackageEffectsOutput {
 impl Eq for PackageEffectsOutput {}
 
 /// Result of the [`Analyzed`](crate::QueryKey::Analyzed) query: the full
-/// check bundle (B2) — the derive-expanded trees, namespace, per-file
+/// check bundle — the derive-expanded trees, namespace, per-file
 /// resolutions, declaration tables, and typed result — as shared handles
 /// (the trees, namespace, resolutions, and resolution-time diagnostics
 /// are the `Expanded` and `Resolve` memos' own arcs), so a memo hit
@@ -443,8 +443,8 @@ impl Eq for PackageEffectsOutput {}
 /// keeps the universe its `Ty`s were minted by alive.
 #[derive(Clone)]
 pub struct AnalyzedOutput {
-    /// The bundle: everything the affine pass (C1) and the lowering pass
-    /// (M3) read, the analyzer's own pass over the parse memos' trees.
+    /// The bundle: everything the affine pass and the lowering pass
+    /// read, the analyzer's own pass over the parse memos' trees.
     pub analyzed: Analyzed,
     /// Every top-level binding's id and rendered solved type, order-stable
     /// across the type map's iteration order. Solved handles are
@@ -514,7 +514,7 @@ impl fmt::Debug for AnalyzedOutput {
 }
 
 /// Result of the [`PlatformCheck`](crate::QueryKey::PlatformCheck) query:
-/// the platform-declaration and capability-subset diagnostics (H5, E1) of
+/// the platform-declaration and capability-subset diagnostics of
 /// one package, shared like the resolve payload so memo hits clone the
 /// arc, not the diagnostics.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -525,7 +525,7 @@ pub struct PlatformCheckOutput {
 }
 
 /// Result of the [`PooledCheck`](crate::QueryKey::PooledCheck) query: the
-/// pooled-body refusal diagnostics (E3) of one package, shared like the
+/// pooled-body refusal diagnostics of one package, shared like the
 /// resolve payload so memo hits clone the arc, not the diagnostics.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PooledCheckOutput {
@@ -536,8 +536,7 @@ pub struct PooledCheckOutput {
 
 /// Computed value of one query, stored in the memo table.
 ///
-/// `non_exhaustive` because later milestones add their payload variants
-/// when they land.
+/// `non_exhaustive` so a new payload variant breaks no consumer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum QueryValue {

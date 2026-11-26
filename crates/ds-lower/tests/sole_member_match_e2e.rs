@@ -1,4 +1,4 @@
-//! The single-member scrutinee match probes (item 92): a lone arm naming
+//! The single-member scrutinee match probes: a lone arm naming
 //! the scrutinee's sole member lowers as its body with the binders bound
 //! at the member's own words — a single-member span carries no tag word,
 //! so no tag test exists to emit. The `.err`/`.ok` answer-widening makes

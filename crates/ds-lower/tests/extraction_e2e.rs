@@ -1,4 +1,4 @@
-//! The extraction-family surface end to end [E4]: the checked fixture
+//! The extraction-family surface end to end: the checked fixture
 //! parses, checks clean, lowers, round-trips through the ds-mod writer,
 //! installs into the VM, and runs — `unwrap_or` evaluates both operands
 //! eagerly and moves the payload or the fallback word, `unwrap_or_else`

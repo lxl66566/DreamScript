@@ -39,7 +39,7 @@ fn test_cache() -> PathBuf {
 /// the two deinits fire at `main`'s scope exit, a clean exit their pin.
 /// The fallible recv's match arms each answer the unit a statement
 /// match needs (a bare fallible call cannot stand as a block's own
-/// answer under the M3 contract).
+/// answer (a bare fallible call cannot stand as a block's own answer).
 fn source(port: u16) -> String {
     format!(
         r#"fn main() -> int {{
@@ -161,9 +161,8 @@ fn an_unprovisioned_accept_tls_halts_on_the_net_error_line() {
 /// deinit's own idempotent twin) closes the bound listener before the
 /// accept reads it, so the accept answers the unknown-listener floor
 /// and the total spelling halts on the net error line exactly the
-/// failed bind's way — the 2026-11-24 ruling's pinned refusal (a
-/// non-halting accept stays the ownership round's optional-over-linear
-/// union seam, no accept-specific patch).
+/// failed bind's way (a non-halting accept stays the
+/// optional-over-linear union seam, no accept-specific patch).
 #[test]
 fn a_failed_accept_halts_on_the_total_spellings_error_line() {
     let dir = support::guarded_dir("ds-cli-net-accept-");

@@ -1,7 +1,7 @@
-//! The `default` derive acceptance [G1]: `#[derive(default)]` on a
+//! The `default` derive acceptance: `#[derive(default)]` on a
 //! struct, an enum, or a tag expands into the ordinary receiverless
-//! inherent impl (`impl <decl> { fn default() -> Self }`, the
-//! 2026-11-15 ruling) after parse, and the synthesized member flows
+//! inherent impl (`impl <decl> { fn default() -> Self }`) after parse,
+//! and the synthesized member flows
 //! through the normal checker and the normal lowering like every derive
 //! family — nothing in the emission paths knows the surface exists. The
 //! struct body keys one default per field by the field's type
@@ -30,9 +30,8 @@ use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 const SOURCE: &str = include_str!("fixtures/derive_default_probe.ds");
 
 /// The part-less struct's own probe: its default member returns the
-/// reserved unit word, so it runs FIRST in a fresh VM (the stale-frame
-/// trap the unit-word representation carries is the VM's own residual,
-/// not this family's).
+/// reserved unit word, so it runs FIRST in a fresh VM: the imperative
+/// runner's stale-frame trap belongs to the VM, not to this family.
 const PARTLESS: &str = concat!(
     "tag int\n",
     "#[derive(default)]\n",
@@ -160,7 +159,7 @@ fn the_synthesized_bodies_carry_no_dispatch_uop() {
     );
 }
 
-/// The compound-field lift [H3.5] running: a generic application's
+/// The compound-field lift running: a generic application's
 /// member body constructs its own value — the field-carrying head's
 /// body from concrete parts, both argument shapes answering through
 /// the one member, the part-less head's body the reserved word — and

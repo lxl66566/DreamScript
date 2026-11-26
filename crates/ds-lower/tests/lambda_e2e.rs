@@ -1,4 +1,4 @@
-//! Lambda-value lowering (the callable-word phases, F2): a non-capturing
+//! Lambda-value lowering (the callable-word phases): a non-capturing
 //! lambda in value position synthesizes one module-level function and
 //! mints its scalar FuncRef word into the callee's frame slot (KCONST
 //! over the pool's same-module FuncRef entry); a call whose callee is a
@@ -196,8 +196,8 @@ fn main() -> int {
 
 /// One lambda capturing another lambda's closure word refuses: the
 /// synthesized body's capture slot would classify Fn while the captured
-/// value is a Ref word (capturing callables stays outside the ruled
-/// surface — pass the callable as a parameter instead).
+/// value is a Ref word (capturing a callable is outside the surface —
+/// pass the callable as a parameter instead).
 #[test]
 fn a_lambda_capturing_a_closure_refuses() {
     refused(
@@ -239,7 +239,7 @@ fn an_omitted_default_on_a_callable_value_refuses() {
 }
 
 // The affine-closure shapes (the mut window over the uniquely-held
-// capture block, C1/C3/D1): a lambda capturing a `var` binding moves it,
+// capture block): a lambda capturing a `var` binding moves it,
 // the binding dead in the enclosing scope, and the closure's own
 // assignments re-store the object's capture slot — the mutation visible
 // across calls. The refusals below pin the kill's boundary.

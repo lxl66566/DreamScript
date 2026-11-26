@@ -1,5 +1,4 @@
-//! The host's shutdown cut and the quiet accept's bound (the
-//! 2026-11-24 signal rulings) over hand-assembled fixtures:
+//! The host's shutdown cut and the quiet accept's bound over hand-assembled fixtures:
 //!
 //! - the shutdown cut: a parked accept under the reactor — its wait now unbounded, the signal its
 //!   backstop — observes the host's registered shutdown door (here a socket standing in for the
@@ -10,8 +9,8 @@
 //! - the nursery-cancel cut reaching the unbounded park: a flagged nursery's parked child dies with
 //!   the sentinel through the executor's cut pass — no drive stands over it — so its unbounded wait
 //!   cannot strand the honest channel deadlock behind it.
-//! - the join sweep's own cut of an unbounded accept child under a raised flag — the 2026-11-12
-//!   amendment's parked-IO cancellation, the root-nursery host-driven shape.
+//! - the join sweep's own cut of an unbounded accept child under a raised flag — the parked-IO
+//!   cancellation at the root-nursery host-driven shape.
 //! - the blocking twin's stop flag: a reactor-less VM keeps the bounded blocking poll, and the
 //!   host's flag answers the shutdown trap between rounds — the non-Linux and reactor-less
 //!   embedder's door, pinned on every platform.
@@ -379,9 +378,8 @@ fn a_flagged_nurserys_unbounded_accept_dies_to_the_executor_cut() {
 }
 
 /// The join sweep's cut of an unbounded accept child under a raised
-/// flag — the 2026-11-12 amendment's parked-IO cancellation, the
-/// host-driven root-nursery shape: the boundary reports the parked
-/// child `Cancelled` beside the failing `Trapped`, the long net bound
+/// flag — the parked-IO cancellation, the host-driven root-nursery shape: the boundary reports the
+/// parked child `Cancelled` beside the failing `Trapped`, the long net bound
 /// proving the cut (never a deadline) answered. Needs a reactor
 /// driver and early-returns without one.
 #[test]

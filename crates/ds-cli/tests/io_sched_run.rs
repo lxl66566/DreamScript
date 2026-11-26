@@ -1,5 +1,4 @@
-//! The IO scheduler through `ds run` (the 2026-11-21 scheduler
-//! rulings): the CLI installs the platform's reactor, so a source's
+//! The IO scheduler through `ds run`: the CLI installs the platform's reactor, so a source's
 //! net face parks on a would-block instead of blocking the drive —
 //! the single-thread executor waits on the reactor, the peer's write
 //! wakes the parked recv, and the completed answer flows through the

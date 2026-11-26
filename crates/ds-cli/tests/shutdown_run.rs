@@ -1,6 +1,5 @@
-//! The CLI host's signal shutdown end to end (the 2026-11-24 signal
-//! rulings), over the real `ds` binary as a child process — the one
-//! process that may own its signal mask. The parked server accepts
+//! The CLI host's signal shutdown end to end, over the real `ds` binary as a child process — the
+//! one process that may own its signal mask. The parked server accepts
 //! with no bound (the signal its backstop), the host's signalfd door
 //! observes the signal, the drive cuts the parked accept at its
 //! resume-shaped point with the frame's deinit hooks fired, and the

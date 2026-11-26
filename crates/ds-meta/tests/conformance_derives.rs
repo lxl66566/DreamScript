@@ -1,5 +1,5 @@
 //! The derive slice's conformance gate, pinned beside the engine: the
-//! ruled refusal classes and the clean run items over
+//! refusal classes and the clean run items over
 //! `conformance/derives.ds`, through the meta layer's expanding
 //! analyze entry (the raw trees enter here).
 

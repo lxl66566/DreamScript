@@ -1,9 +1,9 @@
-//! The trait instance environment and coherence checking (B6).
+//! The trait instance environment and coherence checking.
 //!
 //! Traits are implemented by *instances* declared over type heads. The only
 //! coherence rule is pairwise disjointness of the heads of one trait: for
-//! every pair `H1`, `H2` of same-trait heads, `H1 & H2 = Empty` must hold
-//! (B6). It is checked incrementally at declaration (per package (G3)) by
+//! every pair `a`, `b` of same-trait heads, `a & b = Empty` must hold.
+//! It is checked incrementally at declaration (per package) by
 //! [`InstanceEnv::declare`] and again over the final environment — once
 //! the single package's declarations settle, and over every link merge —
 //! by [`InstanceEnv::check_all`] (a checked-ambient served prefix keeps
@@ -22,7 +22,7 @@
 //! # Head normalization
 //!
 //! A declaration's head is a [`TypeExpr`], possibly a union. Written unions
-//! decompose recursively into per-branch instances before any check (B6):
+//! decompose recursively into per-branch instances before any check:
 //! `impl eq for int | string` becomes two instances. Every other expression
 //! is one branch whose head is its solved atom set ([`Universe::solve`]), so
 //! intersections and differences normalize away: `a & b` of distinct atoms
@@ -54,8 +54,7 @@
 //! when `j` implements `T` and `j`'s head contains `Q`. A conditional
 //! instance whose condition edges reach back to itself — directly
 //! (`show for json_t if show[json_t]`) or transitively through other
-//! conditional instances — is rejected ([`Error::ConditionCycle`]); this is
-//! the structural cycle check of design-decisions section 10 item 7.
+//! conditional instances — is rejected ([`Error::ConditionCycle`]).
 //!
 //! Termination: the condition-dependency graph has the declared instances as
 //! its finite vertex set and the edge relation above ranges only over them,
@@ -75,7 +74,7 @@
 //!
 //! The corpus rejection of `conformance/generics_coherent_traits.ds`: after
 //! `json` for `int` and `json` for `bool`, the union head decomposes and both
-//! branches overlap; the error names both heads and the witness `int` (B6).
+//! branches overlap; the error names both heads and the witness `int`.
 //!
 //! ```
 //! use ds_check::{Error, InstanceDecl, InstanceEnv, TypeExpr, Universe};
@@ -159,7 +158,7 @@ impl<T> Condition<T> {
     }
 }
 
-/// An inherent impl's declared generic bounds (F3): the impl's solved head
+/// An inherent impl's declared generic bounds: the impl's solved head
 /// plus one condition per declared bound over the declaration's minted
 /// variable atoms — the trait form's per-instance record mirrored for an
 /// impl that declares no instance. Call sites verify and stage their
@@ -176,7 +175,7 @@ pub struct InherentBounds {
 }
 
 /// The body of an instance declaration. Opaque placeholder: method tables
-/// are M2 checker work; the environment carries it without interpreting it.
+/// are the checker's work; the environment carries it without interpreting it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct InstanceBody;
 
@@ -213,7 +212,7 @@ pub struct InstanceDecl {
     /// The impl's name; `None` is the default vocabulary.
     pub name: Option<Arc<str>>,
     /// The head as written; unions decompose into per-branch instances at
-    /// declaration (B6).
+    /// declaration.
     pub head: TypeExpr,
     /// Conditions; empty for an unconditional instance.
     pub conditions: Vec<Condition<TypeExpr>>,
@@ -337,14 +336,14 @@ impl CondEdges<'_> {
 
 /// The trait instance environment: per-branch instances in declaration
 /// order, with incremental (declaration) and final (link-time) coherence
-/// checking (B6). Heads and conditions are solved snapshots against the
+/// checking. Heads and conditions are solved snapshots against the
 /// universe state at their declaration; the written forms are stored
 /// alongside, and [`InstanceEnv::check_all`] re-solves them against the
 /// final universe before its passes.
 ///
 /// Per-package checking runs [`InstanceEnv::declare`] while building; the
 /// package check then runs [`InstanceEnv::check_all`] once over its own
-/// closed set, and link merges run it again over the merged one (G3).
+/// closed set, and link merges run it again over the merged one.
 #[derive(Default)]
 pub struct InstanceEnv {
     instances: Vec<Instance>,
@@ -367,7 +366,7 @@ pub struct InstanceEnv {
     /// rebuilds). The solve-side scans walk only their own trait's rows
     /// through [`InstanceEnv::of_trait`].
     by_trait: IdTable<TraitId, Vec<InstanceId>>,
-    /// The rows a link merge shadowed (B6's link layering): the losing
+    /// The rows a link merge shadowed (the link layering): the losing
     /// impl's branches stay stored (their ids stay stable for the
     /// declaration tables) but every resolution scan skips them — the
     /// winner is the only instance the solved tables carry for the head.
@@ -433,7 +432,7 @@ impl InstanceEnv {
     }
 
     /// The stored, unshadowed instances of `trait_id` whose heads
-    /// intersect `head` (B6): the rows a link merge resolves its
+    /// intersect `head`: the rows a link merge resolves its
     /// shadowing against. The probe is the declaration probe's own —
     /// set algebra first, the instantiation probe over the pairs it
     /// cannot decide — and the error path's witness materialization
@@ -586,7 +585,7 @@ impl InstanceEnv {
         }
         let written = universe.set_ty(&written_members);
 
-        // Declaration-time coherence [B6]: every new branch against every
+        // Declaration-time coherence: every new branch against every
         // existing same-trait head, then new branches against each other
         // (duplicate branches like `int | int` overlap here). Decomposition
         // precedes the check, so errors name per-branch heads, and each
@@ -747,8 +746,8 @@ impl InstanceEnv {
         self.served
     }
 
-    /// Closure check over the final instance environment (B6, section 10
-    /// item 7): every head and condition is first re-solved against the
+    /// Closure check over the final instance environment: every head and
+    /// condition is first re-solved against the
     /// current universe (stored heads are declaration-time snapshots, and a
     /// trait-as-type head widens when its trait gains members), then
     /// pairwise disjointness of same-trait heads runs over all pairs in
@@ -839,8 +838,8 @@ impl InstanceEnv {
         Ok(())
     }
 
-    /// Appends another environment's instances (link (G3)). The appended
-    /// instances are renumbered, so previously held ids from `other` are
+    /// Appends another environment's instances (link). The appended
+    /// instances are renumbered, so ids minted before the merge are
     /// invalid; callers re-query — the appended rows' recorded probe
     /// verdicts renumber with them. Coherence over the merged set is
     /// [`InstanceEnv::check_all`]'s job; the receiver's own served prefix
@@ -874,7 +873,7 @@ impl InstanceEnv {
     /// Lookup: every instance of `trait_id` whose head contains the queried
     /// type ([`Universe::contains`], exact containment). Lookup-only: an
     /// instance's own conditions never filter it here, and there is no
-    /// selection policy (B6) — with coherent heads the answer is unique for
+    /// selection policy — with coherent heads the answer is unique for
     /// every non-empty query.
     #[must_use]
     pub fn resolve(&self, universe: &Universe, trait_id: TraitId, queried: Ty) -> Vec<InstanceId> {
@@ -924,7 +923,7 @@ impl InstanceEnv {
     }
 }
 
-/// Flattens written unions into branches (B6): only `|` nodes split, so a
+/// Flattens written unions into branches: only `|` nodes split, so a
 /// negated-constraint or trait-ref head stays one branch even when it solves
 /// to several atoms.
 fn collect_branches(expr: &TypeExpr, out: &mut Vec<TypeExpr>) {
@@ -998,7 +997,7 @@ struct ProbedHead<'a> {
 }
 
 /// Builds the overlap error for two same-trait heads that intersect, with a
-/// witness value type of the intersection (B6); `Ok(None)` when the heads
+/// witness value type of the intersection; `Ok(None)` when the heads
 /// are disjoint. `a` is the earlier-declared head. Heads the set algebra
 /// reads disjoint because a generic head is opaque get the instantiation
 /// probe (a pure query — it never writes the universe; the error path

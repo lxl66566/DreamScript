@@ -1,4 +1,4 @@
-//! DreamScript's FFI substrate (H5): binding a native library's C
+//! DreamScript's FFI substrate: binding a native library's C
 //! symbols with no loader dependency — the OS primitives called raw
 //! (dlopen/dlsym over the platform libc, LoadLibraryW/GetProcAddress
 //! over kernel32), cfg-split per platform — and enumerating a library's
@@ -11,13 +11,13 @@
 //! (pointer, length) word pair, a unit return as the absent word — the
 //! face the language side consumes, the lowering seam admitting the
 //! pair and unit-return shapes and the VM stage marshaling each staged
-//! word per its own kind onto it. Its H5
+//! word per its own kind onto it. Its ABI
 //! contract clauses, holding from the first bound library: a bound
 //! extern means panic=abort (a foreign panic cannot unwind through the
 //! interpreter), and a blocking foreign call pins its fiber
 //! (cancellation is observed only at VM re-entry). Deinit-carrying
 //! handles and the returning direction of string/bytes marshaling are
-//! the ownership round's own refusals until it lands.
+//! outside this face.
 
 mod exports;
 mod marshal;
@@ -86,7 +86,7 @@ impl Drop for Library {
     }
 }
 
-/// One bound symbol: its address alone, the shape a marshaling round
+/// One bound symbol: its address alone, the shape the marshaling face
 /// transmutes into a typed call. The address points into the loaded
 /// image of the [`Library`] that resolved it, so it stays valid only
 /// while that library stays loaded — dropping the library releases the

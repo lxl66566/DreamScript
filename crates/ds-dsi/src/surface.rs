@@ -10,7 +10,7 @@
 //! binding included), structs, enums, tags, and traits render; a
 //! binding's initializer, an alias's target, a struct or enum's supers,
 //! a case's `#[default]` marker, an associated type, and an extern's
-//! `extern` keyword stay fresh by G3.5 or outside the format, so those
+//! `extern` keyword stay fresh outside the format, so those
 //! declarations render no line here (the source rendering keeps spelling
 //! them). A generic function renders its generic parameters — the
 //! bodiless spelling — where a bodied generic fn's source line drops
@@ -93,7 +93,7 @@ fn line_of(
 ) -> Option<String> {
     let decls = &prefix.decls.decls;
     let item = match def.kind {
-        // a bodied fn converts onto a const-arrow binding (F2) whose
+        // a bodied fn converts onto a const-arrow binding whose
         // signature the fns table carries beside the bodiless fn's; a
         // plain binding (no stored signature) renders no line below
         DefKind::Fn | DefKind::Const => {

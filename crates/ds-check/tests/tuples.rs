@@ -1,4 +1,4 @@
-//! Anonymous-tuple modeling [B3]: structural tuple atoms, product
+//! Anonymous-tuple modeling: structural tuple atoms, product
 //! distribution at solving, tuple witnesses, coherence over tuple heads, and
 //! an exhaustive bitset-oracle pass over a tuple-bearing universe mirroring
 //! `algebra.rs`. Containers of the corpus (`list[json]`,
@@ -239,7 +239,7 @@ fn tuple_witnesses_are_structural() {
 #[test]
 fn coherence_and_membership_over_tuple_heads() {
     // Tuple atoms are atoms: instance heads, overlap witnesses, and trait
-    // membership all run through the same set algebra [B6 over B3].
+    // membership all run through the same set algebra.
     let mut u = Universe::new();
     let int = u.declare_tag("int").unwrap();
     let boolean = u.declare_tag("bool").unwrap();
@@ -304,7 +304,7 @@ fn tuple_fixture() -> TupleFixture {
     universe.impl_trait(r, b).unwrap();
 
     // Pre-mint every tuple the family can express, capturing the ids.
-    // The builtin `type` atom rides beside none (G1, G2), in no trait.
+    // The builtin `type` atom rides beside none, in no trait.
     let mut atoms = vec![TypeId::NONE, TypeId::TYPE, a, b];
     let tuples: Vec<TypeExpr> = vec![
         TypeExpr::tuple(vec![]),

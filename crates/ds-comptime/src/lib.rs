@@ -71,8 +71,8 @@ const COMPTIME_FUEL: u64 = 1 << 28;
 /// One diagnostic per honest refusal: a runtime callee the fence
 /// refuses (a row beyond pure and `trap`, a generic body, a member
 /// call), a world-touching call the rows cannot attribute (the install
-/// seam), an argument shape the round does not stage, a result it
-/// cannot embed, or a trap the fenced run raised.
+/// seam), an argument shape it cannot stage, a result it cannot embed, or
+/// a trap the fenced run raised.
 pub fn evaluate<T>(
     module_name: &str,
     source_hash: Hash128,
@@ -230,7 +230,7 @@ where
 }
 
 /// Evaluates the package's exported computed consts — the dep-side half
-/// of the const link facts (G4): every `pub` data const of a member file
+/// of the const link facts: every `pub` data const of a member file
 /// past the ambient band whose initializer is no plain literal plans its
 /// initializer into the same evaluation slice the comptime path lowers,
 /// the fenced VM answers each site's value, and the embedded answer
@@ -354,7 +354,7 @@ struct ConstSite {
 }
 
 /// Every dep-side evaluation site, in declaration order: the exported
-/// (`pub`, G4's dependent-facing tier) immutable data consts defined
+/// (`pub`, the dependent-facing tier) immutable data consts defined
 /// past the ambient band whose initializer carries no plain literal
 /// fact. Callable bindings (a lambda or fn-typed initializer) ride the
 /// callable clause; a plain literal's fact stands on its own; private
@@ -647,34 +647,32 @@ where
     fns
 }
 
-/// The fence's row predicate (the 2026-11-17 amendment): a pure row
+/// The fence's row predicate: a pure row
 /// admits, and a row of `trap` alone admits — trap is deterministic and
 /// never the fence's business, a trap the fenced run hits reporting as
 /// the comptime call's own compile error. Every other row (a world row,
 /// an error row, a nursery internal, or any of them beside `trap`)
-/// refuses exactly as the 2026-11-15 ruling held.
+/// refuses.
 fn row_admits(row: EffectRow) -> bool {
     row.minus(EffectRow::of(Effect::Trap)).is_pure()
 }
 
-/// The fence's callee admission (the 2026-11-15 ruling, the 2026-11-17
-/// amendment): an ordinary runtime callee admits by its own solved row —
-/// an empty (pure) row and a row of `trap` alone admit the callee's
-/// body into the slice ([`row_admits`]), every other row refusing at
+/// The fence's callee admission: an ordinary runtime callee admits by its
+/// own solved row — an empty (pure) row and a row of `trap` alone admit the
+/// callee's body into the slice ([`row_admits`]), every other row refusing at
 /// the fence naming the comptime fn, the callee, and the call. The rows
 /// are the effects pass's solved fixpoint, so a direct callee's row
 /// already carries its transitive closure: one refusing reach anywhere
 /// behind a callee refuses that callee here. Trap never refuses here —
 /// a trap the fenced run hits reports as the comptime call's own
 /// compile error — so the pass's unsolved-type over-approximation (every
-/// trapping operator rows `trap`, B7) fences nothing. An admitted
+/// trapping operator rows `trap`) fences nothing. An admitted
 /// callee still refuses when the slice cannot plan what it reaches — a
 /// generic body's evidence seam, a member call the slice plans no body
-/// for, a binding shape no module function lowers — each an honest
-/// residual of this round. The slice's lowering keeps its belt refusal
-/// for the shapes this walk does not match (a fn-value indirection),
-/// and the install seam keeps the world refusal (DS2033's capability
-/// diagnostic) behind the admission.
+/// for, a binding shape no module function lowers. The slice's lowering
+/// keeps its belt refusal for the shapes this walk does not match (a
+/// fn-value indirection), and the install seam keeps the world refusal
+/// (DS2033's capability diagnostic) behind the admission.
 /// One fence refusal's owner: the declaration the diagnostic names — a
 /// comptime function or an exported const — with the error code its own
 /// seam refuses under.
@@ -701,7 +699,7 @@ struct Admission<'a> {
     /// admits, the fenced VM's stack bounding it), the value marking a
     /// finished admission.
     states: HashMap<DefId, bool>,
-    /// Every struct whose declaration carries a `deinit` member (C5):
+    /// Every struct whose declaration carries a `deinit` member:
     /// the slice plans no hooks, so a literal of one refuses at the
     /// fence — the hook's side effects cannot silently skip at comptime.
     deinits: HashSet<DefId>,
@@ -972,7 +970,7 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// One struct literal of a deinit-carrying struct (C5): the slice
+    /// One struct literal of a deinit-carrying struct: the slice
     /// plans no deinit hooks, so the value's death would silently skip
     /// the hook inside the fence — the literal refuses here, inside the
     /// comptime fn's own body or inside the helper `via` names.
@@ -1195,10 +1193,10 @@ impl<'a> Reflection<'a> {
                 records
             },
             // generic enums (opaque atoms), tags, and structural atoms
-            // answer no fields — reflection over generic declarations
-            // waits on substitution (a non-generic enum reaches
-            // `register_enum` instead: it owns no atom of its own, its
-            // name naming the union of its minted cases)
+            // answer no fields: a generic declaration's fields exist only
+            // after substitution (a non-generic enum reaches `register_enum`
+            // instead: it owns no atom of its own, its name naming the union
+            // of its minted cases)
             _ => Vec::new(),
         };
         let index = self.push(ComptimeType {
@@ -1278,7 +1276,7 @@ impl<'a> Reflection<'a> {
     /// shape — `type` stages a declared type's reflection index (the
     /// argument a single type name), one of the four scalar atoms stages
     /// a plain literal of its kind, and anything else has no comptime
-    /// staging this round.
+    /// staging.
     fn stage(
         &mut self,
         vm: &mut Vm,
@@ -1432,7 +1430,7 @@ fn stage_literal(vm: &mut Vm, kind: ScalarKind, arg: &Expr) -> Result<Value, Str
 }
 
 /// One integer literal's raw digit text (radix prefix kept, separators
-/// already stripped by the parser) to its word `[B7]`.
+/// already stripped by the parser) to the integer word it denotes.
 fn parse_int_word(text: &str) -> Option<i64> {
     let (radix, digits) = match text.as_bytes() {
         [b'0', b'x', ..] => (16, &text[2..]),
@@ -1991,7 +1989,7 @@ mod tests {
 
     use super::row_admits;
 
-    /// The fence's row predicate (the 2026-11-17 amendment): a pure row
+    /// The fence's row predicate: a pure row
     /// and a row of `trap` alone admit — the over-approximation the
     /// effects pass rows onto unsolved-type trapping operators (string
     /// concat included) fences nothing — while every other row refuses:

@@ -98,8 +98,8 @@ fn mixed_files_report_per_file_actions() {
     );
 }
 
-/// A plain script entry file folds into the written `fn main` (the R20
-/// synthetic path); the formatted output re-parses and re-formats
+/// A plain script entry file folds into the written `fn main` (the
+/// synthesized entry path); the formatted output re-parses and re-formats
 /// identically.
 #[test]
 fn a_script_entry_folds_to_written_main_and_round_trips() {

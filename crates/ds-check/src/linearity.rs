@@ -1,4 +1,4 @@
-//! The affine pass (C1, C5): one intraprocedural forward walk computing
+//! The affine pass: one intraprocedural forward walk computing
 //! definite-initialization and last-use together.
 //!
 //! # Model
@@ -17,7 +17,7 @@
 //! a later use really does execute on the moved path. `var` re-assignment
 //! re-initializes; the replaced value's death is the assignment itself.
 //!
-//! # Copyability (C1)
+//! # Copyability
 //!
 //! `~Copyable` subtracts the default copyability constraint, so everything
 //! copies by default. A type is non-copyable when any of its member atoms
@@ -30,7 +30,7 @@
 //! binding time ([`BinderFact`], in scope-sensitive positions), so this
 //! pass consumes recorded facts instead of re-solving types.
 //!
-//! # Modes (C2)
+//! # Modes
 //!
 //! Borrow and `mut` parameters are windows the caller retains: borrowing
 //! uses read freely, and a consuming use whose value stays in scope (a
@@ -40,46 +40,45 @@
 //! hold transferring out, a double deinit at runtime.
 //! Only `move` parameters consume their argument. Unresolvable callees
 //! (an indirect call through a fn-typed value) default to borrowing; the
-//! M4 runtime `rc==1` uniqueness checks close that gap.
+//! runtime `rc==1` uniqueness checks close that gap.
 //!
-//! # deinit well-formedness (C5)
+//! # deinit well-formedness
 //!
 //! The static half: `deinit` is declared on `~Copyable` types only and at
 //! most once per struct. Every owned non-copyable binding either moves
 //! (ownership, and deinit with it, transfers) or reaches its scope end
-//! live, where the walk records the drop site the runtime half (M4) must
+//! live, where the walk records the drop site the runtime half must
 //! honor on every path — early return, panic, and cancellation included.
 //!
 //! # Walk order
 //!
-//! Top-level bindings are evaluated on demand and order-independent (G3);
+//! Top-level bindings are evaluated on demand and order-independent;
 //! their initializers walk in a first pass over each file's items so a
 //! linear definition consumed in one item and used in another is a move
 //! wherever the items sit. Function and impl bodies walk after them.
 //!
-//! # Known limits (recorded for the later passes that close them)
+//! # Known limits
 //!
 //! * Per-binder copyability comes from the declared type; refinement inside an `is` branch of a
-//!   mixed binding (`file | int` narrowed to `int`) still moves. Per-point precision is M4
+//!   mixed binding (`file | int` narrowed to `int`) still moves. Per-point precision is
 //!   borrow-inference work.
 //! * A field projection in value position moves the whole receiver binding (partial-move tracking
-//!   is the M4 Perceus placement pass).
+//!   is the Perceus placement pass).
 //! * Field projection out of a borrow/mut window never moves.
-//! * `defer` bodies walk at their source position; scope-exit semantics land with defer lowering
-//!   (E5, M3).
+//! * `defer` bodies walk at their source position.
 //! * The loop audit checks one re-execution round (the condition and body of `while`, the body of
 //!   `for`) against the merged state; a use the forward walk already reported is never reported
 //!   twice. A loop nested inside an outer audit round skips its own round — the audit walk mutates
 //!   nothing, so the round is a duplicate re-check that compounded per nesting level.
-//! * The uninitialized state is infrastructure: every binding form in the M2 surface carries an
-//!   initializer and the resolver binds in flow order, so [`ErrorCode::UninitializedUse`] fires
-//!   only once a surface form can defer initialization.
+//! * The uninitialized state is infrastructure: every binding form carries an initializer and the
+//!   resolver binds in flow order, so [`ErrorCode::UninitializedUse`] fires only once a surface
+//!   form can defer initialization.
 //! * Candidate method calls (`Res::Dot(DotRes::Methods)`) consume their receiver only when every
 //!   candidate's first parameter is `move`; their non-receiver arguments walk as borrows until
 //!   candidate selection is exposed to this pass.
 //! * A lambda body walks once at its source position, so a call re-executing a body whose capture
 //!   an earlier call already consumed goes unaudited. Closure call cardinality is a later surface
-//!   decision (an Fn-vs-once contract); until it lands, the M4 runtime rc check owns that seam.
+//!   decision (an Fn-vs-once contract); the runtime rc check owns that seam.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -103,7 +102,7 @@ use crate::{
 };
 
 /// Affine facts of one local binder, recorded by the bidirectional walk at
-/// the binding site (C1) and consumed here.
+/// the binding site and consumed here.
 #[derive(Clone, Copy, Debug)]
 pub struct BinderFact {
     /// Whether uses of the binding copy freely; the `~Copyable` marker, a
@@ -116,7 +115,7 @@ pub struct BinderFact {
     /// Whether the binding is a `var` (a mut parameter or window binder
     /// counts too): a lambda capturing a mutable binding moves it into
     /// the capture block, so the binding is dead in the enclosing scope
-    /// from the construction on (the affine-closure ruling, C1).
+    /// from the construction on.
     pub mutable: bool,
 }
 
@@ -132,7 +131,7 @@ pub struct Move {
 }
 
 /// One scope-exit death of a live owned non-copyable binding: where the
-/// runtime half (M4) must run deinit on every path (C5).
+/// runtime half must run deinit on every path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropSite {
     /// The binder's name span.
@@ -160,16 +159,16 @@ pub struct LastUse {
 pub struct Linearity {
     /// Diagnostics in walk order.
     pub diags: Vec<Diagnostic>,
-    /// Consuming uses of owned non-copyable bindings (C1).
+    /// Consuming uses of owned non-copyable bindings.
     pub moves: Vec<Move>,
-    /// Scope-exit deaths of live owned non-copyable bindings (C5).
+    /// Scope-exit deaths of live owned non-copyable bindings.
     pub drops: Vec<DropSite>,
     /// The final use of every tracked binding.
     pub last_uses: Vec<LastUse>,
 }
 
-/// The full static check of one package: bidirectional types (B2) then the
-/// affine pass (C1, C5). Callers wanting every diagnostic read both lists.
+/// The full static check of one package: bidirectional types then the
+/// affine pass. Callers wanting every diagnostic read both lists.
 #[must_use]
 pub fn check<T>(files: &ds_diag::Files, asts: &[T]) -> (Checked, Linearity)
 where
@@ -225,7 +224,7 @@ where
         epoch: 0,
         escaping: false,
     };
-    // Two package-wide passes [G3]: every file's top-level binder
+    // Two package-wide passes: every file's top-level binder
     // patterns come live before any initializer or body walks — bodied
     // top-level `fn`s are const-of-lambda Local items, so bodies walk in
     // the same pass as plain initializers, and a per-file interleave
@@ -381,7 +380,7 @@ where
     }
 }
 
-// ---- copyability [C1] -------------------------------------------------------
+// ---- copyability ------------------------------------------------------------
 
 /// Whether a solved type copies freely: every member atom does.
 pub(crate) fn ty_copyable(decls: &Decls, ty: Ty, linear_vars: &FxHashMap<TypeId, bool>) -> bool {
@@ -407,7 +406,7 @@ fn atom_copyable(
     linear_vars: &FxHashMap<TypeId, bool>,
     seen: &mut Vec<TypeId>,
 ) -> bool {
-    // A cyclic type is illegal in v0 [C4]; stopping as copyable on a
+    // A cyclic type is illegal in v0; stopping as copyable on a
     // revisit keeps the recursion finite without deciding legality here.
     if seen.contains(&atom) {
         return true;
@@ -416,7 +415,7 @@ fn atom_copyable(
     let Ok(decl) = decls.universe.atom_decl(atom) else {
         return true;
     };
-    // A minted type variable: the generic parameter's bound decides [C1].
+    // A minted type variable: the generic parameter's bound decides.
     if decl.name.starts_with('$') {
         return linear_vars.get(&atom).copied().unwrap_or(true);
     }
@@ -479,7 +478,7 @@ fn expr_copyable(
 ) -> bool {
     match expr {
         TypeExpr::Atom(atom) => atom_copyable(decls, *atom, linear_vars, seen),
-        // A trait used as a type copies when every member atom does [B1].
+        // A trait used as a type copies when every member atom does.
         TypeExpr::Trait(id) => decls.universe.trait_decl(*id).map_or(true, |decl| {
             decl.members
                 .iter()
@@ -508,9 +507,9 @@ fn struct_linear(decls: &Decls, def: DefId) -> bool {
 /// Where a binding's value lives during the walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-    /// Declared, no value yet. Unreachable in the M2 surface (every
+    /// Declared, no value yet. Unreachable in the written surface (every
     /// binding form carries an initializer); kept as the lattice's base
-    /// so the deferred-initialization forms land on it directly.
+    /// so a deferred-initialization form lands on it directly.
     #[allow(dead_code)]
     Uninit,
     /// Holding a value.
@@ -580,11 +579,7 @@ struct StateUndo {
 pub fn comptime_copy_counts(checked: &Checked) -> HashMap<Span, usize> {
     let mut counts: HashMap<Span, usize> = HashMap::default();
     for (span, info) in &checked.comptime_loops {
-        let copies = if info.per_instance.is_some() {
-            1
-        } else {
-            info.fields.len()
-        };
+        let copies = if info.per_instance.is_some() { 1 } else { info.fields.len() };
         counts.insert(*span, copies);
     }
     for ((.., span), info) in &checked.comptime_instance_loops {
@@ -596,7 +591,7 @@ pub fn comptime_copy_counts(checked: &Checked) -> HashMap<Span, usize> {
 
 /// The forward walker. One instance covers one package; top-level
 /// bindings' states persist across items so a value consumed in one item
-/// and used in another is still a move (G3, C1).
+/// and used in another is still a move.
 struct Lin<'a> {
     package: &'a Package,
     decls: &'a Decls,
@@ -607,13 +602,13 @@ struct Lin<'a> {
     copy_counts: HashMap<Span, usize>,
     res: Option<&'a Resolutions>,
     /// The interpolation holes whose `show` the checker solved at their
-    /// own span (F6): the solved dispatch, read for the receiver's
+    /// own span: the solved dispatch, read for the receiver's
     /// passing mode — the implicit dispatch borrows exactly where the
     /// written `.show()` would.
     hole_dispatches: &'a FxHashMap<Span, TraitCall>,
     /// The same table for solved inherent dispatches.
     hole_inherents: &'a FxHashMap<Span, MethodId>,
-    /// Every dispatched hole's member (F6): the runtime-evidence form
+    /// Every dispatched hole's member: the runtime-evidence form
     /// records only here, so the receiver-mode read falls through to it.
     hole_runtime: &'a FxHashMap<Span, MethodId>,
     out: Linearity,
@@ -639,7 +634,7 @@ struct Lin<'a> {
     /// for the walk's duration.
     capture_sink: Option<Vec<Place>>,
     /// Capture depth: inside a lambda or spawn body, every use of a
-    /// binding from an outer epoch is a capture and moves it (C1).
+    /// binding from an outer epoch is a capture and moves it.
     epoch: usize,
     /// Whether the subtree's value leaves its borrowing frame: a return's
     /// expression, a `move` argument's staging, a function or lambda
@@ -650,7 +645,7 @@ struct Lin<'a> {
 }
 
 impl<'a> Lin<'a> {
-    /// First pass: one file's top-level binder patterns come live (G3).
+    /// First pass: one file's top-level binder patterns come live.
     /// Every file registers before any walk pass.
     fn register_top_bindings(&mut self, ast: &'a Ast) {
         for block in &ast.blocks {
@@ -725,8 +720,8 @@ impl<'a> Lin<'a> {
         }
     }
 
-    /// One function body: parameters bind (owned only in `move` mode
-    /// (C2)), the body walks, and live owned parameters drop at the end.
+    /// One function body: parameters bind (owned only in `move` mode),
+    /// the body walks, and live owned parameters drop at the end.
     fn fn_decl(&mut self, f: &'a FnDecl) {
         self.scopes.push(Vec::new());
         for param in &f.params {
@@ -745,7 +740,7 @@ impl<'a> Lin<'a> {
     }
 
     /// Walks every declared `deinit` body like a borrowed-receiver
-    /// function body (C5): `self` is the dying instance, never owned by
+    /// function body: `self` is the dying instance, never owned by
     /// this frame, so its uses borrow and its fields' last-use facts —
     /// what the deinit function's own lowering consumes — record here.
     fn deinit_bodies(&mut self, s: &'a StructDecl) {
@@ -761,7 +756,7 @@ impl<'a> Lin<'a> {
         }
     }
 
-    /// The declarative deinit checks (C5): `deinit` lives on `~Copyable`
+    /// The declarative deinit checks: `deinit` lives on `~Copyable`
     /// declarations only, and at most once per struct.
     fn deinit_shape(&mut self, s: &'a StructDecl) {
         let linear = s.supers.iter().any(linear_marker);
@@ -833,7 +828,7 @@ impl<'a> Lin<'a> {
         }
     }
 
-    /// Pattern binders as top-level definitions (G3): owned, copyable from
+    /// Pattern binders as top-level definitions: owned, copyable from
     /// the memoized top-level types, no scope-exit death.
     fn bind_pattern_defs(&mut self, pat: &'a Pattern) {
         for (_, name) in Self::pattern_binders(pat) {
@@ -929,7 +924,7 @@ impl<'a> Lin<'a> {
     }
 
     /// Records the scope-exit deaths of one scope's live owned
-    /// non-copyable binders (C5), in bind order.
+    /// non-copyable binders, in bind order.
     fn drop_scope(&mut self, at: Span) {
         let places = self.scopes.pop().unwrap_or_default();
         if self.audit {
@@ -954,7 +949,7 @@ impl<'a> Lin<'a> {
     // ---- the read/move core -----------------------------------------------------
 
     /// One use of a binding: checks initialization and liveness, records
-    /// the last use, and moves when the use is consuming (C1).
+    /// the last use, and moves when the use is consuming.
     fn read(&mut self, place: Place, at: Span, consuming: bool) {
         let Some(info) = self.info.get(&place).copied() else {
             return;
@@ -962,10 +957,10 @@ impl<'a> Lin<'a> {
         match self.state.get(&place).copied() {
             Some(State::Live) => {
                 // Inside a lambda or spawn body, using an outer binding is
-                // a capture: the closure owns the value from here on [C1].
+                // a capture: the closure owns the value from here on.
                 let captured = self.epoch > info.epoch;
                 // A lambda's capture of a mutable owned binding moves it
-                // into the capture block (the affine-closure ruling): the
+                // into the capture block: the
                 // sink records the place so the lambda's post-walk kills
                 // it in the enclosing scope. A spawned body keeps the
                 // spawn seam's acquire discipline — the spawn arm suspends
@@ -981,7 +976,7 @@ impl<'a> Lin<'a> {
                 // borrow/`mut` parameter's window) at a position whose
                 // value leaves the frame hands out an ownership the window
                 // does not hold — a double deinit at runtime — so the
-                // escape rejects here [C2]. Local aliases and display
+                // escape rejects here. Local aliases and display
                 // reads keep the borrow-copy discipline (the value dies
                 // inside the window's own scope, the hook staying with the
                 // owner), and a capture's own channel is the lowerer's
@@ -1022,8 +1017,8 @@ impl<'a> Lin<'a> {
     /// Whether `place` is a mutable owned local captured by a body the
     /// current lambda walk is inside (the kill sink's admission
     /// predicate): the binding moves into the capture block at the
-    /// construction, so the enclosing scope's later uses are use-after-move
-    /// [C1]. Borrows and `mut` windows never qualify (ownership the
+    /// construction, so the enclosing scope's later uses are use-after-move.
+    /// Borrows and `mut` windows never qualify (ownership the
     /// frame does not hold), nor do spawned captures (the sink is
     /// suspended there).
     fn is_captured_var(&self, place: Place) -> bool {
@@ -1092,7 +1087,7 @@ impl<'a> Lin<'a> {
 
     /// Merges a loop body's delta into the entry state in place and rewinds:
     /// a place the body moved stays moved after the loop, since the back edge
-    /// re-executes it (C1).
+    /// re-executes it.
     fn merge_loop(&mut self, mark: usize) {
         let mut body = self.delta_since(mark);
         self.rewind(mark);
@@ -1170,7 +1165,7 @@ impl<'a> Lin<'a> {
                         // `$x` is a consuming value use of the name, same
                         // as a `${x}` hole — unless the checker solved a
                         // `show` dispatch behind the hole, whose receiver
-                        // passes per the solved member's mode (F6)
+                        // passes per the solved member's mode
                         ds_parse::StrPart::Ident { span, name, .. } => {
                             let consuming = self.hole_dispatch_consuming(*span).unwrap_or(true);
                             self.name_use(name, consuming);
@@ -1199,7 +1194,7 @@ impl<'a> Lin<'a> {
                         Some(expr) => {
                             self.expr(expr, true);
                         },
-                        // Punning is a value use of the name [B3].
+                        // Punning is a value use of the name.
                         None => self.name_use(name, true),
                     }
                 }
@@ -1231,8 +1226,8 @@ impl<'a> Lin<'a> {
                 self.expr(index, true);
                 false
             },
-            // The map application's bracketed arguments are type spellings
-            // [F9]; a type-name path is no binding use, so the walk only
+            // The map application's bracketed arguments are type spellings;
+            // a type-name path is no binding use, so the walk only
             // keeps the arm total.
             Expr::MapApply { key, value, .. } => {
                 self.expr(key, consuming);
@@ -1247,7 +1242,7 @@ impl<'a> Lin<'a> {
             Expr::Binary {
                 op, left, right, ..
             } => {
-                // Structural comparison borrows its operands [B9].
+                // Structural comparison borrows its operands.
                 let borrowed = matches!(op, BinaryOp::Eq | BinaryOp::Ne);
                 self.expr(left, !borrowed);
                 self.expr(right, !borrowed);
@@ -1284,10 +1279,10 @@ impl<'a> Lin<'a> {
             },
             Expr::Break(_) | Expr::Continue(_) => true,
             // The nursery body runs now; `defer` blocks are walked at
-            // their source position until defer lowering lands [E5].
+            // their source position.
             Expr::Nursery { body, .. } | Expr::Defer { body, .. } => self.block(body),
             // The child body's uses are captures: ownership moves at the
-            // spawn expression, on the current state [E2]. The capture
+            // spawn expression, on the current state. The capture
             // sink suspends for the walk — a spawned child's captures
             // keep the spawn seam's acquire discipline, so no kill fires
             // for them at any enclosing construction.
@@ -1334,7 +1329,7 @@ impl<'a> Lin<'a> {
     }
 
     /// The receiver mode one interpolation hole's solved `show` dispatch
-    /// passes (F6): consuming exactly when the solved member's receiver
+    /// passes: consuming exactly when the solved member's receiver
     /// parameter consumes, mirroring the written dot-call's rule; `None`
     /// when no dispatch record sits at the span, leaving the hole's own
     /// value-use mode.
@@ -1366,7 +1361,7 @@ impl<'a> Lin<'a> {
         };
         self.scopes.push(Vec::new());
         // Parameters bind inside the capture boundary: they are locals of
-        // this frame, so their uses in the body are not captures [C1];
+        // this frame, so their uses in the body are not captures;
         // a nested lambda entered later still captures them.
         self.epoch += 1;
         for param in params {
@@ -1391,7 +1386,7 @@ impl<'a> Lin<'a> {
         self.epoch -= 1;
         // A captured `var` binding moved into the capture block at this
         // construction: every use in the enclosing scope after it reads a
-        // dead binding [C1]. Only a binding still live here moves — an
+        // dead binding. Only a binding still live here moves — an
         // affine capture already died at its own consuming use inside the
         // body, and a nested lambda's kill may have beaten this walk here.
         if !self.audit {
@@ -1689,7 +1684,7 @@ impl<'a> Lin<'a> {
         self.block(body);
         self.merge_loop(mark);
         // The loop re-executes the condition and body on the back edge:
-        // one audit round against the merged state (C1). A loop nested
+        // one audit round against the merged state. A loop nested
         // inside an outer audit round skips its own: the audit walk
         // mutates nothing, so the round would re-check the same reads
         // against the same state, and the re-walk compounded per nesting
@@ -1723,7 +1718,7 @@ impl<'a> Lin<'a> {
             }
             return false;
         }
-        // The iterable feeds a linear cursor: a consuming use (D3).
+        // The iterable feeds a linear cursor: a consuming use.
         self.expr(iter, true);
         let mark = self.undo.len();
         self.scopes.push(Vec::new());
@@ -1783,7 +1778,7 @@ impl<'a> Lin<'a> {
             }
         }
         // An indirect or unknown callee: borrow everything (call-scoped
-        // windows close at the call [C2]).
+        // windows close at the call).
         self.expr(callee, false);
         for arg in args {
             self.expr(&arg.value, false);
@@ -1877,7 +1872,7 @@ impl<'a> Lin<'a> {
     }
 
     /// Walks one call's arguments per the callee's parameter modes: an
-    /// argument consumes its binding only in `move` mode (C2).
+    /// argument consumes its binding only in `move` mode.
     fn sig_call(
         &mut self,
         sig: &FnSig,
@@ -2064,12 +2059,11 @@ fn place_steps(left: &Expr) -> Vec<PlaceStep<'_>> {
 
 #[cfg(test)]
 mod tests {
-    //! No M2 surface form defers initialization (every binding carries an
+    //! No surface form defers initialization (every binding carries an
     //! initializer and the resolver binds in flow order), so the
     //! uninitialized lattice base has no source-level test. This exercises
-    //! it directly: when a future surface form (a `var x: t` declaration
-    //! without an initializer, still undecided in the record) reaches the
-    //! walk, DS3002 fires and this stays green as the semantic floor.
+    //! it directly by placing a binder in the uninitialized state: DS3002
+    //! fires on the first read.
 
     use super::*;
 

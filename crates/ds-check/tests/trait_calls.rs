@@ -1,4 +1,4 @@
-//! The solved-dispatch side table of trait-method call sites [B6]: every
+//! The solved-dispatch side table of trait-method call sites: every
 //! call whose instance the environment statically resolves records the
 //! selected member, the trait, the unique instance, the declaring impl
 //! item, and the receiver's type, keyed by the call's own span. Sites an
@@ -147,7 +147,7 @@ const FREE_FIRST_SOURCE: &str = concat!(
 );
 
 /// When a free function and a trait method share the dotted name, the
-/// free tier wins and the call site records no trait dispatch [F3].
+/// free tier wins and the call site records no trait dispatch.
 #[test]
 fn free_functions_win_the_dot_position() {
     let (ast, analyzed) = analyze_source("free_first.ds", FREE_FIRST_SOURCE);
@@ -206,7 +206,7 @@ const AMBIGUITY_SOURCE: &str = concat!(
 
 /// Two traits whose members both accept the receiver are true ambiguity —
 /// a compile error, never a priority order — and only the qualified
-/// spelling records its dispatch [F3, B6].
+/// spelling records its dispatch.
 #[test]
 fn two_traits_sharing_the_name_are_true_ambiguity() {
     let (ast, analyzed) = analyze_source("ambiguity.ds", AMBIGUITY_SOURCE);
@@ -742,8 +742,8 @@ fn ordered_generic_pair_closes_at_package_level() {
         "the call site of an incoherent pair records no dispatch"
     );
     // The body check still walks an incoherent environment, so the call
-    // site keeps its follow-on ambiguity; the pair no longer depends on
-    // it to surface.
+    // site keeps its follow-on ambiguity; the pair does not depend on it
+    // to surface.
     let follow_on = analyzed
         .checked
         .diags

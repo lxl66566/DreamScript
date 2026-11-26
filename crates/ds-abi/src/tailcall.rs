@@ -1,4 +1,4 @@
-//! The CALLT argument slide (H2): the heart of the slot-overlay ABI.
+//! The CALLT argument slide: the heart of the slot-overlay ABI.
 
 use std::ops::Range;
 
@@ -160,7 +160,7 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 }
 
 /// Computes the CALLT argument slide from the caller's frame layout to a
-/// callee's (H2). Pure: a compile-time fact between two static layouts,
+/// callee's. Pure: a compile-time fact between two static layouts,
 /// checked again by the VM at hand-assembled call sites.
 ///
 /// The staged arguments are the first `callee.params_len()` slots of the
@@ -172,14 +172,14 @@ fn plan_direction(src: &Range<usize>, dst: &Range<usize>) -> SlideDirection {
 /// ([`SlideError::StagingTooSmall`]) with pairwise-equal slot types
 /// ([`SlideError::TypeMismatch`]), with two exceptions: a staged `Ref`
 /// against a `Fn` parameter is the callable-defaulted slot admitting a
-/// closure object's word (F2), and the `Raw` exemption is one-way — a
+/// closure object's word, and the `Raw` exemption is one-way — a
 /// staged `Raw` word (caller side) passes against any callee parameter
 /// typing, while a `Raw` callee parameter is matched only by a `Raw`
 /// staged word, because the check grants the exemption to the staged
 /// side alone.
 ///
 /// Cost: n word copies at displacement [`SlidePlan::delta`] — the O(delta)
-/// argument slide plus a jump of (H2); the stack never grows at any depth,
+/// argument slide plus a jump; the stack never grows at any depth,
 /// in any tier. Argument words move as raw words: a tail call moving
 /// arguments transfers ownership with zero RC traffic. The VM rebuilds the
 /// plan at each call site (hand-assembled code is never trusted), so the
@@ -202,7 +202,7 @@ pub fn slide_plan(caller: &FrameLayout, callee: &FrameLayout) -> Result<SlidePla
         // `Raw` staging carries no static type: the value words are
         // checked at the call site instead (see SlotType::Raw). A staged
         // `Ref` against a `Fn` parameter is the callable-defaulted slot
-        // (F2): the arriving word is a closure object's reference behind a
+        // the arriving word is a closure object's reference behind a
         // fn-typed parameter, so the slide admits the pairing and the call
         // readers resolve the word by its runtime kind.
         if staged != expected
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn mutual_even_odd_slide_matches_the_record_encoding() {
-        // even/odd, the record's H2 example: one i64 param, one bool
+        // even/odd, the slide example: one i64 param, one bool
         // temp, one staged outgoing i64 ("slide r3 into slot0").
         let even = layout(vec![I64, Bool, I64], 1, 1);
         let odd = layout(vec![I64, Bool, I64], 1, 1);
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn a_staged_closure_word_lands_in_a_fn_parameter() {
-        // the callable-defaulted slot (F2): a closure stages its Ref word
+        // the callable-defaulted slot: a closure stages its Ref word
         // against a fn-typed parameter; every other pairing still refuses
         let caller = layout(vec![Ref], 0, 1);
         let callee = layout(vec![Fn, Bool], 1, 1);

@@ -1,26 +1,21 @@
-//! The library-boundary round's end-to-end pins (todo item 53): the
-//! ordering pair left the ambient core as the @std package's first
-//! bodied members (the word-shaped int signature a linked call binds)
-//! and the pure string operations left it as the @std string face
-//! (each declaration naming the builtin core native the lowering
-//! routes by name), the entry surfaces keep the bare spellings alive
-//! (the run path's script sessions composing the faces back beside
-//! the core, the dev script rounds and the REPL serving the merged
-//! composition — the implicit resolution while the migration runs),
-//! and a package compile over a std-declaring graph keeps the
-//! boundary the migration left: the ambient band is the shrunk core,
-//! a bare use an unknown name, the linked import the binding face.
-//! The FP combinator round (todo item 81) rides the same pins: the
-//! landed list pair are bodied members of the same file, so the bare
-//! spellings run through a script session while the linked import
-//! keeps the generic-head refusal until its crossing round (the take,
-//! drop, and flat_map shapes wait on the ambient splice's
-//! lowering-time-records seam, their residuals on todo item 81). The
-//! pooled pair (todo item 66) rides it too: `par_map`/`par_reduce`
-//! are bodied members over the private fork-join engine seams, so the
-//! bare spellings keep the sequential contract (the pooled drive's
-//! byte-identical answers pinned at the VM level) while the fold's
-//! init parameter reads the library spelling's one-word instantiation
+//! The library-boundary end-to-end pins: the ordering pair are the @std
+//! package's first bodied members (the word-shaped int signature a linked
+//! call binds) and the pure string operations are the @std string face
+//! (each declaration naming the builtin core native the lowering routes
+//! by name); the entry surfaces keep the bare spellings alive (the run
+//! path's script sessions composing the faces back beside the core, the
+//! dev script rounds and the REPL serving the merged composition), while
+//! a package compile over a std-declaring graph keeps the boundary: the
+//! ambient band is the shrunk core, a bare use an unknown name, the
+//! linked import the binding face. The list pair are bodied members of
+//! the same file, so the bare spellings run through a script session
+//! while the linked import keeps the generic-head refusal (the take,
+//! drop, and flat_map shapes refuse at the ambient splice's
+//! lowering-time-records seam). `par_map`/`par_reduce` pin the same way:
+//! bodied members over the private fork-join engine seams, so the bare
+//! spellings keep the sequential contract (the pooled drive's
+//! byte-identical answers pinned at the VM level) while the fold's init
+//! parameter reads the library spelling's one-word instantiation
 //! boundary (the multi-word fold keeps its seam-level pin in the
 //! lowerer's e2e).
 

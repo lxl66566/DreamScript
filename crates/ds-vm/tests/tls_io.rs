@@ -1,4 +1,4 @@
-//! The net face's TLS tier end to end (H5.5's 2026-11-17 ruling): https
+//! The net face's TLS tier end to end: https
 //! over rustls against a local TLS server — hermetic, no external
 //! network — with the server's self-signed certificate pinned as the
 //! client's trust anchor through [`Vm::set_tls_config`]. Golden
@@ -72,7 +72,7 @@ fn std_registry() -> ModuleRegistry {
 }
 
 /// The registry of a tls-omitting host: the std platform minus the tls
-/// capability (the "selected or omitted per host" ruling).
+/// capability.
 fn no_tls_registry() -> ModuleRegistry {
     let mut reg = ModuleRegistry::new();
     reg.install_platform(Platform::new("std", &[

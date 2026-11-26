@@ -1,8 +1,8 @@
-//! # ds-lower: checked programs to executable dsmod modules `[M3]`
+//! # ds-lower: checked programs to executable dsmod modules
 //!
 //! The lowering pass: one checked package (parse -> `ds_check::analyze`)
-//! becomes one ds-mod module — frame layouts per the locked BL-6 rules,
-//! uop bodies per the BL-5 contract — that the tier-1 VM runs through the
+//! becomes one ds-mod module — frame layouts per the locked rules,
+//! uop bodies per the locked uop set — that the tier-1 VM runs through the
 //! ds-mod writer/loader path.
 //!
 //! # Architecture
@@ -10,11 +10,11 @@
 //! Three stages per package:
 //!
 //! 1. **Planning** collects the lowerable top-level functions: const-arrow lambdas — monomorphic or
-//!    free-generic (plus the synthesized functions lambda values register mid-lowering, F2). A free
-//!    generic fn lowers its ONE body once `[H3]`: call sites stage the instantiated evidence words
-//!    its body's runtime demands read, in the outgoing-argument area after the true arguments.
-//!    Comptime items stay exempt, and generic lambdas as values and comptime parameters refuse at
-//!    their own doors. A `main` entry must exist.
+//!    free-generic (plus the synthesized functions lambda values register mid-lowering). A free
+//!    generic fn lowers its ONE body once: call sites stage the instantiated evidence words its
+//!    body's runtime demands read, in the outgoing-argument area after the true arguments. Comptime
+//!    items stay exempt, and generic lambdas as values and comptime parameters refuse at their own
+//!    doors. A `main` entry must exist.
 //! 2. **Shapes** map every solved type onto its slot representation ([`shape` module docs]):
 //!    scalars are one word, bare structs are field spans, unions are tag+payload spans with
 //!    per-member payload offsets. Tag ids are module-wide, assigned in first-use order.
@@ -22,17 +22,17 @@
 //!    tables: per-expression solved types (`expr_types`, flow-refined), per-binder declared types
 //!    (`binders`), and per-use name resolutions. Slots bump-allocate (params first, then
 //!    locals/temps); the outgoing-argument area sizes itself as the max over call sites of staged
-//!    words and result spans, per BL-6, and any overlay word that carries more than one word type
-//!    over the frame's lifetime is `SlotType::Raw`.
+//!    words and result spans, and any overlay word that carries more than one word type over the
+//!    frame's lifetime is `SlotType::Raw`.
 //!
 //! Early exits lower exactly as the golden ds-vm fixtures do: `?` and the
 //! extraction handlers emit TAG_TEST + JMPIF, then either construct the
 //! alternative or re-span the propagated member into the enclosing return
 //! union with RETSPAN. Interpolation lowers to `str_*` builtin calls
 //! chained with STRCAT. Tail positions lower to CALLT (the stack never
-//! grows `[H2]`) and final expressions to RET/RETSPAN.
+//! grows) and final expressions to RET/RETSPAN.
 //!
-//! # The Perceus placement pass (C4, rides the walk)
+//! # The Perceus placement pass (rides the walk)
 //!
 //! The walk in `[func]` is also the forward pass of the dup/drop placement
 //! (`[place]`): every Ref-typed word owns a reference count, and both the
@@ -71,7 +71,7 @@ use func::{BodyId, EvidenceEnv, FnLower, GenericFn, Plan};
 use shape::Shapes;
 
 /// One op of a function body: a runnable micro-operation or a placed
-/// reference-counting op (C4). The module's executable code carries the
+/// reference-counting op. The module's executable code carries the
 /// same sequence, so this type is the placement contract the VM stream
 /// agrees with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,7 +220,7 @@ impl Lowered {
             .map(|row| row.id)
     }
 
-    /// Records the module's dependency list into the header (G3.5's link
+    /// Records the module's dependency list into the header (link
     /// table), so a built artifact names its linked deps and a load walk
     /// over it resolves without re-deriving the list from source.
     /// Lowering itself produces no cross-module links (natives are named,
@@ -236,7 +236,7 @@ impl Lowered {
 
     /// One function's placed op sequence: the runnable uops plus the
     /// placed RC ops (dup/drop) at their exact positions — the artifact
-    /// the M4 placement contract pins and the VM seam will splice in. A
+    /// the placement contract pins and the VM seam will splice in. A
     /// body served from the checked-in artifact answers an empty stream:
     /// its code words already ride the module verbatim.
     #[must_use]
@@ -245,9 +245,9 @@ impl Lowered {
             .and_then(|index| self.placed.get(index as usize).map(Vec::as_slice))
     }
 
-    /// `main`'s per-statement value ends, in statement order, the last
-    /// entry the tail's exit boundary: the resumed-frame seam's resume
-    /// targets, read against the current round's own lowering.
+    /// `main`'s per-statement value ends, in statement order: the
+    /// resumed-frame seam's resume targets, the last entry the tail's exit
+    /// boundary.
     #[must_use]
     pub fn value_ends(&self, name: &str) -> Option<&[u32]> {
         self.function_index(name)
@@ -266,7 +266,7 @@ impl Lowered {
 }
 
 /// One embedded comptime answer, as the runtime module materializes it
-/// at the call site (G1): the evaluator's recorded constant. The
+/// at the call site: the evaluator's recorded constant. The
 /// embeddable results are the scalar atoms, string, a list over
 /// embeddable elements, and a tuple over embeddable scalars (each the
 /// literal a user would have written) — a comptime function answering
@@ -450,7 +450,7 @@ where
         }
     }
     // the affine facts the placement pass consumes: last uses and moves
-    // come from the checker (C1), never re-derived here — the caller's
+    // come from the checker, never re-derived here — the caller's
     // own walk serves when it already ran over the same tables
     let walked;
     let lin = if let Some(lin) = facts {
@@ -518,7 +518,7 @@ where
 /// # Errors
 ///
 /// [`LowerError::NotChecked`] when the package still carries checker
-/// diagnostics; [`LowerError::Unsupported`] for constructs outside the M3
+/// diagnostics; [`LowerError::Unsupported`] for constructs outside the
 /// runtime contract (each error names the seam it needs); [`LowerError::NoMain`]
 /// when no lowerable `main` entry exists.
 pub fn lower<T>(
@@ -693,7 +693,7 @@ where
 
 /// The comptime slice the evaluator compiles for its fenced run: the
 /// package's comptime functions plus the ordinary helpers whose defs
-/// `admitted` names (the evaluator's row-based admission pass, G1), all
+/// `admitted` names (the evaluator's row-based admission pass), all
 /// lowered as ordinary locals — a comptime function calling another, or
 /// an admitted helper, is a plain intra-module call there, and calls
 /// into runtime functions the set does not name refuse (the slice's
@@ -817,7 +817,7 @@ where
 }
 
 /// Plans one struct item's declared `deinit` member as a synthesized
-/// module function before any body lowers (C5): binding a value of a
+/// module function before any body lowers: binding a value of a
 /// deinit-carrying struct claims the hook by naming this plan's function,
 /// so the table index must exist before the first binder mints its pool
 /// constant. The synthesized function is one borrowed `self` parameter —
@@ -877,7 +877,7 @@ fn body_span(lambda: &Expr) -> Span {
 }
 
 /// A `#[derive(...)]` attribute refuses at lowering: the checker's
-/// derive expansion consumes the attribute there (G1), so an attribute
+/// derive expansion consumes the attribute there, so an attribute
 /// reaching this pass means the trees were not the analyzer's own —
 /// `lower` must run over `Analyzed::asts`, where consumed attributes
 /// are stripped and their impls are ordinary items.
@@ -897,10 +897,10 @@ fn refuse_derive(item: &Item) -> Result<(), LowerError> {
 /// Collects one top-level item into the plan when it is a lowerable
 /// const-arrow function: a monomorphic one lowers its own body, a free
 /// generic one its single ONE body with the runtime-evidence demands its
-/// bounds collect [H3]. Everything else is skipped; comptime functions
+/// bounds collect. Everything else is skipped; comptime functions
 /// are the evaluator's slice — the runtime module plans none of them and
 /// the slice plans nothing else beyond the row-admitted helpers
-/// `admitted` names (the evaluator's own admission pass, G1).
+/// `admitted` names (the evaluator's own admission pass).
 fn plan_item(
     item: &Item,
     plan: &mut Plan,
@@ -1050,7 +1050,7 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
         let mut name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
         // A named impl's body carries its vocabulary in the mangle:
         // two impls of one trait over one head name distinct bodies
-        // (the B6 two-impls escape), and `#` stays outside the
+        // (the two-impls escape), and `#` stays outside the
         // identifier charset, so no user-declared name collides.
         if let Some(impl_name) = &imp.name {
             name.push('#');
@@ -1453,7 +1453,7 @@ type LowerAll<'b> = (
     Vec<Vec<(u32, Span)>>,
 );
 
-/// The platform name the world natives' pool FuncRefs address (H5, E1):
+/// The platform name the world natives' pool FuncRefs address:
 /// the package's `platform "..."` declaration's name, the default
 /// platform `std` when no declaration names one — the host must install
 /// a platform under this name or the module's install refuses the world

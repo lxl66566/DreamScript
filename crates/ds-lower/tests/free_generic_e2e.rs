@@ -1,5 +1,5 @@
-//! The free-generic-fn call surface end to end [H3, the CALL_GENERIC
-//! round]: a free generic fn lowers its ONE body once, its parameters
+//! The free-generic-fn call surface end to end: a free generic fn lowers
+//! its ONE body once, its parameters
 //! over the fn's own type variables bind one Raw word each, and every
 //! call site entering the body stages the runtime-evidence words its
 //! bound demands read — in the caller's outgoing-argument area after
@@ -206,7 +206,7 @@ fn a_lone_callee_demand_collects_into_the_calling_frame() {
     .expect("the lone callee demand collects into the calling frame");
     // main's direct call plans name_it's own instance over int; the
     // generic impl member's body — lowering over its variables' Raw
-    // words — enters ride's ONE body, the runtime form this round
+    // words — enters ride's ONE body
     assert!(
         lowered
             .functions()

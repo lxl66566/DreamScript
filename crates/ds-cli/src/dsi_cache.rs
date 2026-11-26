@@ -137,7 +137,7 @@ impl PrefixCache {
     /// The persisted prefix for one compile's identity together with the
     /// registration the caller collected its files under; `None` is the
     /// miss every caller falls back from. `source_hash` is the compile's
-    /// content identity (G3.5) — a single source's text hash, a
+    /// content identity — a single source's text hash, a
     /// multi-member package's composed fold — so a member edit is
     /// another key. An unreadable, stale, or corrupt artifact is a miss
     /// — never an error.

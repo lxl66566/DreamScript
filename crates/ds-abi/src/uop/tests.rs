@@ -861,7 +861,7 @@ fn xor_negation_adjacency_holds_for_every_comparison() {
 #[test]
 fn conditional_jump_sense_flip_is_one_bit() {
     // JMPIF^1 == JMPIF_NOT adjacency: a branch-sense rewrite is one opcode
-    // bit, the foundation of compare-and-branch fusion [BL-4]
+    // bit, the foundation of compare-and-branch fusion
     let jf = Jmpif { cond: 9, target: 4 };
     let jfn = JmpifNot { cond: 9, target: 4 };
     assert_eq!(jf.opcode() ^ 1, jfn.opcode());
@@ -1254,7 +1254,7 @@ fn purity_table_is_exact() {
 /// `fn sum_to(n: i64) -> i64 { let mut acc = 0i64; while n > 0 { acc += n; n -= 1 }; acc }`
 /// from the archive seed corpus, ported to the locked encoding: immediates ride
 /// the constant pool (k0 = 0i64, k1 = 1i64) because comparisons take slot
-/// operands only (BL-1). Slots: r0 = n, r1 = acc, r2 = compare bool, r3 =
+/// operands only. Slots: r0 = n, r1 = acc, r2 = compare bool, r3 =
 /// the zero constant, r4 = the one constant.
 // archive sketch erratum: its `JMPIF_NOT` exit polarity (jumps when the
 // condition is false) would leave the loop on the first iteration, and its
@@ -1329,7 +1329,7 @@ fn sum_to_fixture_round_trips_with_biased_jumps() {
     );
 }
 
-/// The mutual `even`/`odd` (H2's example). Slots:
+/// The mutual `even`/`odd`. Slots:
 /// r0 = n, r1 = compare bool, r2 = constant scratch, r3 = the outgoing
 /// argument (the slide source the ABI derives as the arg-area slot). Pool:
 /// k0 = 0i64, k1 = 1i64, k2 = true, k3 = FuncRef odd, k4 = FuncRef even,

@@ -1,4 +1,4 @@
-//! The interpolation boundary end to end [F6]: printable primitives
+//! The interpolation boundary end to end: printable primitives
 //! convert through the str natives inside the STRCAT chain, strings and
 //! chars pass their Ref word through untouched, both hole spellings
 //! work, the pinned escape set cooks the literal parts, and the empty
@@ -94,7 +94,7 @@ fn bare_ident_holes_and_the_empty_literal() {
 }
 
 /// An explicit `str(e)` call routes through the same checked-type
-/// conversion the interpolation holes use [F6]: scalars convert through
+/// conversion the interpolation holes use: scalars convert through
 /// the str natives, strings pass their Ref word through, and a
 /// tail-position call returns the conversion like any value.
 #[test]

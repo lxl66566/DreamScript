@@ -619,9 +619,9 @@ fn the_fence_refuses_a_file_call() {
 
 #[test]
 fn a_trap_row_helper_admits_and_embeds_its_answer() {
-    // int arithmetic rows `trap` (B7's default), and a row of `trap`
-    // alone admits (the 2026-11-17 amendment): the helper's body joins
-    // the fenced evaluation and its answer embeds at the call site
+    // int arithmetic rows `trap`, and a row of `trap` alone admits: the
+    // helper's body joins the fenced evaluation and its answer embeds at
+    // the call site
     let out = output_of(&source(concat!(
         "struct point { x: int, y: int }\n",
         "fn double(n: int) -> int { n * 2 }\n",

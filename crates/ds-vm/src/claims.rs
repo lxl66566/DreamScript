@@ -1,9 +1,8 @@
 //! Per-fiber claim ledgers: the multiset of heap counts a fiber's frames
-//! own at each moment — the substrate the teardown drain walk releases
-//! (the cross-heap accounting channel of the counts-stay ruling), plus
-//! the deinit-claim directory the teardown hook pass derives from each
-//! function body's own claim accounting (E5: teardown walks frames
-//! running deinits).
+//! own at each moment — the substrate the teardown drain walk releases —
+//! plus the deinit-claim directory the teardown hook pass derives from each
+//! function body's own claim accounting (teardown walks frames running
+//! deinits).
 //!
 //! Every count a frame acquires enters its fiber's ledger; every release
 //! (a frame's drop, a delivery to another fiber or the host) leaves it.
@@ -27,7 +26,7 @@ use crate::{
     value::RefId,
 };
 
-/// The name suffix of a struct's synthesized deinit function (C5): ds-lower
+/// The name suffix of a struct's synthesized deinit function: ds-lower
 /// names it `<struct>$deinit`, and `$` sits outside the identifier charset,
 /// so the suffix names synthesized deinits and nothing else — the directory
 /// scan's callee test. Same mangle family as the impl `<t>#<x>#<m>` names.
@@ -264,7 +263,7 @@ impl ClaimTable {
 
     /// The fiber's outstanding count on `word` (0 when none): the
     /// teardown hook pass's liveness witness — a deinit claim whose span
-    /// words no longer carry counts on this ledger has already died its
+    /// words carry no counts on this ledger has already died its
     /// ordinary death (its drop's RCDECs released them).
     pub(crate) fn count_of(&self, word: RefId) -> u32 {
         if word.fiber() == self.owner {

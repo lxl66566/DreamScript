@@ -1,4 +1,4 @@
-//! The IO scheduler's data (the 2026-11-21 scheduler ruling): the wait
+//! The IO scheduler's data: the wait
 //! table, the deadline wheel, and the FIFO run queue. A fiber parking
 //! on a world op records what it waits for (an IO readiness interest
 //! plus a bounded deadline — the net face's own wait bound — or the
@@ -6,8 +6,8 @@
 //! the wake completes the parked op against the fiber's own store and
 //! stages the answer for delivery at the resume point, the fiber
 //! entering the run queue in wake order (FIFO fairness — the pure
-//! fork-join drive's spawn-order determinism is already ruled
-//! unspecified once a sibling can park on a world op). Cancellation
+//! fork-join drive's spawn-order determinism is unspecified once a
+//! sibling can park on a world op). Cancellation
 //! deregisters the interest first: the reactor never reports into a
 //! fiber the cancel discipline already cut.
 //!
@@ -56,18 +56,13 @@ pub enum WorldWait {
     /// readable) performs the accept and answers the accepted
     /// connection's handle, the stream registering into the connection
     /// table like a connecting one. The wait carries no deadline: the
-    /// 2026-11-24 signal ruling makes the signal the quiet accept's
-    /// backstop, so the park stands until a connection arrives, the
+    /// signal is the quiet accept's backstop, so the park stands until a
+    /// connection arrives, the
     /// nursery's cancel cut, or the host's shutdown.
     Accept { listener: i64 },
     /// `net_connect(host, port)`: the staged machine's rows — the
-    /// resolve stage first (item 79, ruled 2026-11-24: a name's
-    /// resolution runs on the resolver helper thread, its posted
-    /// eventfd the readable interest) and the in-progress raw connect
-    /// after (the 2026-11-23 ruling, the writability the completion
-    /// reports — the wake probing `SO_ERROR`, connected registering
-    /// the stream under the pending row's id, a spurious wake
-    /// leaving the wait standing). The row's fd releases with the
+    /// resolve stage first and the in-progress raw connect
+    /// after. The row's fd releases with the
     /// wait whichever door ends it; `target`
     /// carries the "host:port" the error spans name (no table key
     /// renders it).
@@ -111,7 +106,7 @@ pub enum WorldWait {
         target: String,
         deadline: Instant,
     },
-    /// `proc_read`/`proc_read_err(pid, max)` (the 2026-11-23 ruling):
+    /// `proc_read`/`proc_read_err(pid, max)`:
     /// the child's pipe IS an fd, so the readable wake performs one
     /// read (at most `max` bytes) and answers its string span; the
     /// empty string is the pipe's orderly end. Linux parked twin only
@@ -122,16 +117,14 @@ pub enum WorldWait {
         max: usize,
         deadline: Instant,
     },
-    /// `proc_wait(pid)`: the exit interest rides a pidfd (the
-    /// 2026-11-23 ruling) — the readable wake (the child exited)
+    /// `proc_wait(pid)`: the exit interest rides a pidfd — the readable wake (the child exited)
     /// reaps the status non-blockingly and answers it idempotently
     /// over the reaped word; a spurious wake (the child still runs)
     /// leaves the wait standing.
     ProcWait { pid: i64, deadline: Instant },
     /// `sleep(nanos)`: the timer-only wait — no IO interest, no
     /// deregistration target, the wheel's own firing IS the
-    /// completion, answering the unit word (the time face's op, the
-    /// 2026-11-21 timer ruling).
+    /// completion, answering the unit word (the time face's own op).
     Sleep { deadline: Instant },
     /// `timeout(nanos, thunk)`: the calling fiber parks until its racer
     /// answers or the deadline passes — no IO interest, the wheel's firing
@@ -237,8 +230,8 @@ impl WorldWait {
     }
 
     /// An accept wait's constructor (the listener's own handle rides
-    /// in; the park is unbounded — the signal round's backstop
-    /// ruling, every other op's deadline discipline unchanged).
+    /// in; the park is unbounded — the signal is its backstop, every other
+    /// op's deadline discipline unchanged).
     #[must_use]
     pub fn accept(listener: i64) -> Self {
         Self::Accept { listener }
@@ -313,8 +306,8 @@ impl WorldWait {
         Self::ProcWait { pid, deadline }
     }
 
-    /// The wait's deadline, `None` for the one wait the signal ruling
-    /// left unbounded (the quiet accept — the signal is its backstop)
+    /// The wait's deadline, `None` for the one wait left unbounded (the
+    /// quiet accept — the signal is its backstop)
     /// and the park the wheel never arms.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {

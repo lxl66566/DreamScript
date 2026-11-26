@@ -27,6 +27,19 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  comment-refs:
+    name: python tools/check_comment_refs.py --self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # No toolchain: a code comment states current behavior, so no comment
+      # may cite a doc path, a doc section or item, a decision-rule ID, a
+      # date, a ruling, a work item, or a project phase. Tier 1 denies and
+      # must stay at zero; tier 2 is a frozen budget that may only fall.
+      - run: python3 tools/check_comment_refs.py --self-test
+      - run: python3 tools/check_comment_refs.py
+
   test:
     strategy:
       fail-fast: false

@@ -110,7 +110,7 @@ pub struct DefData {
     pub name: String,
     /// What the declaration defines, as a [`DefKind`] discriminant.
     pub kind: u8,
-    /// The declared visibility tier (G4), as a [`ds_check::Vis`]
+    /// The declared visibility tier, as a [`ds_check::Vis`]
     /// discriminant.
     pub vis: u8,
     /// The defining name span.
@@ -162,7 +162,7 @@ pub enum ResData {
     Dot(DotResData),
     /// The `.err`/`.ok` handler surface form.
     Handler,
-    /// A module alias an import bound (G4). The alias's module-reference
+    /// A module alias an import bound. The alias's module-reference
     /// table itself never serves — no linked compile persists a prefix —
     /// so a served entry here is a generation-side contract break, kept
     /// round-trip-faithful rather than refused at the format.
@@ -189,7 +189,7 @@ pub enum DotResData {
         /// Candidate method indexes.
         candidates: Vec<u32>,
     },
-    /// The module-qualified tier behind an import's alias (G4).
+    /// The module-qualified tier behind an import's alias.
     Module {
         /// The linked function's definition index.
         func: u32,
@@ -220,7 +220,7 @@ pub struct UniverseLog {
     pub memberships: Vec<(TraitRef, AtomRef)>,
     /// The shape-phase atom mints, in mint order: impl type variables,
     /// the structural atoms their head solving minted, and the linked
-    /// types' late-minted atoms (G4). Each entry keeps its raw
+    /// types' late-minted atoms. Each entry keeps its raw
     /// generation id — the mint log is a contiguous tail of the
     /// generation's atom space, so every entry landing at one
     /// constant shift off that id is the replay's own drift check.
@@ -262,7 +262,7 @@ pub enum MintData {
         /// The argument sets, in position order.
         args: Vec<u32>,
     },
-    /// A minted linked struct (G4): an import-bound type's def-named
+    /// A minted linked struct: an import-bound type's def-named
     /// atom, minted past the shape phase — the merged compile resolves
     /// its fields by name once every mint has landed.
     Struct {
@@ -272,7 +272,7 @@ pub enum MintData {
         /// and its own minted applications.
         fields: Vec<FieldData>,
     },
-    /// A minted linked opaque struct (G4): a bodiless import-bound
+    /// A minted linked opaque struct: a bodiless import-bound
     /// type's reserved atom — identity alone, its shape never set, so
     /// the serve reserves the name and every value use keeps the
     /// local spelling's own refusals.
@@ -425,7 +425,7 @@ pub struct FnSigData {
     pub params: Vec<ParamSigData>,
     /// The written return type; absent means inferred or unit.
     pub ret: Option<ds_parse::Type>,
-    /// The extern's bind target (H5), when the signature is a bound
+    /// The extern's bind target, when the signature is a bound
     /// extern's.
     pub bind: Option<String>,
 }
@@ -437,11 +437,11 @@ pub struct ParamSigData {
     pub name: String,
     /// Span of the name.
     pub span: Span,
-    /// Passing mode (C2).
+    /// Passing mode.
     pub mode: ds_parse::ParamMode,
     /// Written type; absent for inferred lambda parameters.
     pub ty: Option<ds_parse::Type>,
-    /// Literal-only default (F7), as written.
+    /// Literal-only default, as written.
     pub default: Option<ds_parse::Expr>,
 }
 

@@ -8,7 +8,7 @@
 //!
 //! Layout conventions (the contract ds-lower targets): every total pure
 //! string native overlays one word on the caller's argument slot 0;
-//! `parse_int` answers the fallible two-word span [BL-2] and the checked
+//! `parse_int` answers the fallible two-word span and the checked
 //! reads `substring`/`char_at` their ok/none span on argument slots 0 and
 //! 1 — word 0 the discriminant (`PLATFORM_IO_OK` / `PLATFORM_PARSE_ERR` /
 //! `PLATFORM_NONE`), word 1 the payload — so a caller of one sizes its

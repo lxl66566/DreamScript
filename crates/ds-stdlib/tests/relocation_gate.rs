@@ -8,7 +8,7 @@
 //! mint sequences, plain and signature tables, instance rows, solved
 //! records, and checked facts. A positional serve seam answers a
 //! regenerated-but-relocated composition with silently wrong ids — the
-//! miscompile class the pitfalls entry records — so this gate holds the
+//! miscompile class; so this gate holds the seam name-addressed.
 //! seam name-addressed.
 
 use std::sync::Arc;

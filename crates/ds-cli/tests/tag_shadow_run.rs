@@ -1,4 +1,4 @@
-//! The F9.5 cross-file tag shadow end to end through the `ds` binary: a
+//! The cross-file tag shadow end to end through the `ds` binary: a
 //! two-member package where the second member re-declares the first's
 //! tag label. The directed probe resolves each bare label use against
 //! the expected union's members, so the value the shadowing member

@@ -13,7 +13,7 @@
 //! next round's check surfacing a still-referenced name); one session
 //! pins the rollback's line-scoped nursery teardown (a trapping line's
 //! abandoned nursery dies with the rollback, so its never-entered
-//! child never runs and the next round's install clears the recycled
+//! child never runs and the next install clears the recycled
 //! slots).
 
 use std::{env, process::Command};
@@ -334,7 +334,7 @@ fn a_referenced_binding_refuses_its_drop_and_the_session_continues() {
 #[test]
 fn expression_prints_value_type_and_effect_row() {
     // The tail expression's value, its inferred type, and its own effect
-    // row (the per-span table): int arithmetic traps on overflow (B7), a
+    // row (the per-span table): int arithmetic traps on overflow, a
     // println line is unit-typed and world-effecting — and the second
     // line's row stays the tail's own `world`, not the session row
     // `trap | world` the earlier statement widens `main` to.
@@ -390,7 +390,7 @@ fn a_derived_declaration_lowers_through_the_analyzed_query() {
     // block and the line still runs: the run path lowers the analyzed
     // bundle's own expanded trees, where the consumed attribute became
     // an ordinary impl item — an attribute reaching the lowering pass
-    // unexpanded is the misuse the M3 contract refuses.
+    // unexpanded is the misuse lowering refuses.
     let (out, ok) = session(concat!(
         "#[derive(show)] struct point { x: int, y: int }\n",
         "const p = point { x: 1, y: 2 }\n",

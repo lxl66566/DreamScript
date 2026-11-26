@@ -1,4 +1,4 @@
-//! `ds fmt` as a compiler component (H6 item 2): a block-aware, zero-option
+//! `ds fmt` as a compiler component: a block-aware, zero-option
 //! formatter over the parse query. The public entry formats a whole file;
 //! internally every `##` block renders from its own AST plus trivia only
 //! (`render_block`), and one item renders standalone ([`format_item`]), so
@@ -13,18 +13,18 @@
 //! - Generic application renders with square brackets (`list[int]`); the angle form the parser
 //!   tolerates is never emitted. Case-type references (`bad_number(string)`) keep their parentheses
 //!   — the AST's `Path` carries the delimiter.
-//! - Trailing commas are tolerated everywhere per F1 and never emitted; the one exception is the
+//! - Trailing commas are tolerated everywhere and never emitted; the one exception is the
 //!   one-element tuple/pattern `(x,)`, where the comma alone keeps it a tuple.
 //! - Trait/impl members always render as `fn name(params) -> ret { ... }`; the AST erases the
 //!   const-arrow member spelling, so one form is chosen.
 //! - Multiline struct/enum/trait/impl bodies and match arms are newline-separated without commas
 //!   `[6.1]`; commas survive only inside a one-line inline container. Named arguments render `name:
-//!   value` and literal signature defaults render `= lit` (F7).
+//!   value` and literal signature defaults render `= lit`.
 //! - `.`-chains keep the author's line breaks (continuations at base indent + 2); everything else
 //!   that fits its container's layout renders flat.
 //! - Paths render with `::` separators; `a.b` types render `a::b`.
-//! - A call whose only argument is the trailing block (F7) renders without a parenthesis pair of
-//!   its own (`with_file(p, f) { ... }`); `else if` chains keep the `if`.
+//! - A call whose only argument is the trailing block renders without a parenthesis pair of its own
+//!   (`with_file(p, f) { ... }`); `else if` chains keep the `if`.
 //! - There is NO wrapping: long lines stay long. A braced container renders inline iff its span
 //!   lies on one source line; otherwise it opens up — the exceptions are struct literals and a
 //!   tag's struct payload, which fold to one line whatever the source spelled (their field lists
@@ -71,7 +71,7 @@
 mod ctx;
 mod decl;
 mod expr;
-/// The `.dsi` signature spellings (G4): the pub items' re-parsable
+/// The `.dsi` signature spellings: the pub items' re-parsable
 /// declaration lines `ds info` prints and the LSP hover answers.
 pub mod signature;
 mod ty;

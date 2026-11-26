@@ -1,6 +1,5 @@
-//! The reactor behind the net/time faces (the 2026-11-21 scheduler
-//! ruling): readiness over IO handles, installed through the capability
-//! seam as VM state — an embedder that installs nothing keeps the
+//! The reactor behind the net/time faces: readiness over IO handles, installed through the
+//! capability seam as VM state — an embedder that installs nothing keeps the
 //! blocking natives, so blocking semantics stay a host choice and never
 //! a language fact. The trait names the platform shapes (epoll on
 //! Linux, kqueue and IOCP the other two named drivers; io_uring a later
@@ -22,8 +21,7 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IoHandle(pub u64);
 
-/// The reserved token of the host's shutdown interest (the
-/// 2026-11-24 signal ruling): a host registers its own shutdown door
+/// The reserved token of the host's shutdown interest: a host registers its own shutdown door
 /// — Linux's signalfd — as one more reactor interest under this token,
 /// and the drive reads its wake as the shutdown event, never a wait.
 /// Minted wait tokens count up from zero, so the reservation can never
@@ -491,8 +489,7 @@ mod tests {
     /// packed epoll_event writes 12 bytes per event, so an aligned
     /// reader's earlier tokens once absorbed the next event's bits as
     /// their high half — a token the wait table never minted, its wake
-    /// silently dropped (the parked-IO wake loss under load, fixed
-    /// 2026-11-23). Two simultaneously-readable fds pin the contract.
+    /// silently dropped. Two simultaneously-readable fds pin the contract.
     #[test]
     fn a_multi_event_batch_reports_every_token_exactly() {
         let (mut dialer_a, acceptor_a) = pair();

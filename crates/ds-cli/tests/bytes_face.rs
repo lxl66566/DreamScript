@@ -1,9 +1,8 @@
-//! The bytes representation face end to end through the `ds` binary
-//! (the 2026-11-18 ruling): `show` renders the payload as a byte list
+//! The bytes representation face end to end through the `ds` binary:
+//! `show` renders the payload as a byte list
 //! over the ambient's ds-source impl, the derive families compose over
 //! a bytes part (the ambient's show/ord/hash impls answering the
-//! synthesized dispatches — before the ruling each refused at the
-//! missing member), and the UTF-8 bridges take the string's own bytes
+//! synthesized dispatches), and the UTF-8 bridges take the string's own bytes
 //! each way, the decode answering the taxonomy's `string | utf8_err`
 //! union through match extraction.
 

@@ -1,16 +1,16 @@
-//! Surface type expressions over atoms and trait constraints (B1).
+//! Surface type expressions over atoms and trait constraints.
 //!
 //! Expressions are the durable written form (field signatures, annotations).
 //! [`crate::Universe::solve`] evaluates them into canonical solved types;
 //! difference and negation nodes never survive solving, and tuple products
-//! distribute over unions element-wise (B3).
+//! distribute over unions element-wise.
 
 use crate::atom::{TraitId, TypeId};
 
 /// A type expression: unions, intersections, differences of nominal atoms,
-/// plus trait constraints (B1). [`TypeExpr::Not`] is the complement of a
-/// marker trait such as `~Copyable` (C1); [`TypeExpr::Diff`] is compile-time
-/// only and erases entirely (B1). [`TypeExpr::Empty`] is the canonical
+/// plus trait constraints. [`TypeExpr::Not`] is the complement of a
+/// marker trait such as `~Copyable`; [`TypeExpr::Diff`] is compile-time
+/// only and erases entirely. [`TypeExpr::Empty`] is the canonical
 /// empty set, minted by the conversion layer where a written name solves to
 /// no atoms (a zero-case enum); the surface spells no empty-type keyword,
 /// so no written form produces it.
@@ -18,17 +18,17 @@ use crate::atom::{TraitId, TypeId};
 pub enum TypeExpr {
     /// A nominal atom by identity.
     Atom(TypeId),
-    /// A trait used as a type: the set of its member atoms (B1).
+    /// A trait used as a type: the set of its member atoms.
     Trait(TraitId),
-    /// A negated constraint: the complement of a trait's members (C1).
+    /// A negated constraint: the complement of a trait's members.
     Not(TraitId),
     /// Union.
     Union(Box<Self>, Box<Self>),
     /// Intersection.
     Inter(Box<Self>, Box<Self>),
-    /// Difference `a & ~b`; erases at solving (B1).
+    /// Difference `a & ~b`; erases at solving.
     Diff(Box<Self>, Box<Self>),
-    /// An anonymous tuple `(t0, t1, ...)` (B3). Solving distributes the
+    /// An anonymous tuple `(t0, t1, ...)`. Solving distributes the
     /// product over union elements into one structural atom per combination,
     /// so `(a | b, c)` solves to `(a, c) | (b, c)`.
     Tuple(Vec<Self>),
@@ -75,7 +75,7 @@ impl TypeExpr {
         Self::Diff(Box::new(self), Box::new(other))
     }
 
-    /// An anonymous tuple of the given elements (B3).
+    /// An anonymous tuple of the given elements.
     #[must_use]
     pub fn tuple(elements: Vec<Self>) -> Self {
         Self::Tuple(elements)

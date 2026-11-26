@@ -1,4 +1,4 @@
-//! The one pattern-binder collection (F4): every name a binding pattern
+//! The one pattern-binder collection: every name a binding pattern
 //! binds, as (name span, name) pairs in walk order.
 //!
 //! Declaration-side passes — package def collection, const registration,
@@ -7,7 +7,7 @@
 //! field binds, a case pattern's sub-patterns bind, wildcards and test
 //! positions never do). The typing walks in [`crate::type_of`] assign
 //! types over the same shapes and are separate by design. The arm walk
-//! (F9) shares the recursion and adds the member-test rule: in a
+//! shares the recursion and adds the member-test rule: in a
 //! match-arm pattern a bare identifier naming a constructor type or the
 //! predeclared `none` is a member test that binds nothing.
 
@@ -36,7 +36,7 @@ pub(crate) fn arm_pattern_binders<'p>(
 }
 
 /// `member_tests` is `Some` in the arm walk: there a bare identifier
-/// naming a member test binds nothing (F9); `None` walks the declaration
+/// naming a member test binds nothing; `None` walks the declaration
 /// shapes, where every `Binding` binds.
 fn binders_into<'p>(
     pat: &'p Pattern,

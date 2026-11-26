@@ -1,4 +1,4 @@
-//! The `par_reduce` fork-join fold pins [E3, the parked-CALLG slice]:
+//! The `par_reduce` fork-join fold pins (the parked-CALLG slice):
 //! the fold's left data dependency chains one spawned child per element
 //! (the callable's own function entered with the running accumulator and
 //! the element, the seam's chain state carrying the fold between
@@ -11,7 +11,7 @@
 //! - the input list is untouched: its elements read back identical after the chain.
 //! - the accumulator's `Ref` counts follow `reduce`'s owned discipline (a string fold through the
 //!   native `concat`): the init stays borrowed until the first delivered answer adopts, each
-//!   superseded word dec'd at adoption, and the heap drains at the end.
+//!   replaced word dec'd at adoption, and the heap drains at the end.
 //! - first failure: the failing element's trap re-raises at the par_reduce call site with the owned
 //!   accumulator released (the step's nursery consumed by its join — the chain holds no live
 //!   sibling at a failure).
@@ -21,7 +21,7 @@
 //!   heap stack, and the inner fold lands identically to the hosted equivalent.
 //! - the wider fold: the init's whole word span stages between the list and the callable at any
 //!   width, each element callable answering the next accumulator whole — a capturing closure
-//!   folding pairs in input order, a mixed (int, string) fold balancing each superseded string's
+//!   folding pairs in input order, a mixed (int, string) fold balancing each replaced string's
 //!   count at adoption, and a failing step re-raising at the call site with the owned span
 //!   released.
 //! - the callable backstop: a staged `Ref` word against the callable slot refuses (the fork spawns
@@ -290,7 +290,7 @@ fn parking_shift10_def() -> FunctionDef {
 
 /// `(acc: int, b: int) -> int`: b == 0 dies trapped at the division;
 /// otherwise it counts b down through a taken backward branch — the
-/// preemption point a cancelled drive would observe [E5].
+/// preemption point a cancelled drive would observe.
 fn guard2_def() -> FunctionDef {
     def(
         "guard2",
@@ -827,7 +827,7 @@ fn biased_pair_def() -> FunctionDef {
 /// `(n: int, acc: string, s: string) -> (int, string)`: s == "" dies
 /// trapped at the division; otherwise answers [n * 10 + 1, acc ++ s]
 /// through the native concat — the mixed fold whose `Ref` word adopts
-/// per step (each superseded string dec'd at adoption), the failure
+/// per step (each replaced string dec'd at adoption), the failure
 /// shape after two adoptions.
 fn wide_strcat_guard_def() -> FunctionDef {
     // body slots 0..6, overlay words 7..8
@@ -1146,7 +1146,7 @@ fn a_string_fold_balances_the_accumulator_counts() {
     let mut vm = Vm::new(pr_registry());
     // "1" ++ "2" ++ "3" through the native concat: each delivered
     // answer adopts (the child's completion count landing on the
-    // joiner), each superseded word dec'd — the drain at teardown pins
+    // joiner), each replaced word dec'd — the drain at teardown pins
     // the balance
     let answer = vm
         .run("pr", "main_ref_chain", &[])
@@ -1261,7 +1261,7 @@ fn a_capturing_closure_folds_a_wide_pair_in_input_order() {
 fn a_wide_fold_balances_the_accumulator_s_ref_counts() {
     let mut vm = Vm::new(pr_registry());
     // the mixed (int, string) fold: each step's fresh string adopts
-    // with the child's completion count on the joiner, each superseded
+    // with the child's completion count on the joiner, each replaced
     // string dec'd at adoption — the final word carries exactly the
     // transferred count to the host, "1" -> "12" -> "123"
     let answer = vm

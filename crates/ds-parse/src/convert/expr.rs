@@ -275,7 +275,7 @@ impl Ctx {
     }
 
     /// Comparison level: `cmp_op` operands, plus `in` tails whose right side
-    /// is one optional bare range (F5).
+    /// is one optional bare range.
     fn cmp(&mut self, p: Pair<'_, Rule>) -> Expr {
         let span = self.span(&p);
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
@@ -433,7 +433,7 @@ impl Ctx {
                 };
                 match acc {
                     // The block feeds the directly preceding call's final
-                    // parameter as its zero-argument lambda [F7], so it
+                    // parameter as its zero-argument lambda, so it
                     // attaches to that call instead of wrapping a second,
                     // computed-callee call around it.
                     Expr::Call {
@@ -511,7 +511,7 @@ impl Ctx {
         }
     }
 
-    /// Converts call arguments (F7): named arguments (`f(x: 1)`) must follow
+    /// Converts call arguments: named arguments (`f(x: 1)`) must follow
     /// positional ones, and a name may appear once. Both violations are
     /// diagnostics, not grammar failures. The discipline runs as a pass
     /// over the collected arguments, borrowing the idents already stored

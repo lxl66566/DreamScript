@@ -212,7 +212,7 @@ fn a_mut_self_receiver_reseats_its_window() {
 
 /// An omitted defaulted member parameter stages the literal default at
 /// the call site: the member spelling matches the free-fn spelling
-/// [F7] — the checker proved the default's literal against the
+///  — the checker proved the default's literal against the
 /// parameter type, so the call lowers it exactly like a written
 /// argument and the body reads the staged word.
 #[test]
@@ -241,7 +241,7 @@ fn an_omitted_defaulted_member_parameter_stages_the_literal_default() {
 /// A member tail recursion runs deep at constant stack: a member
 /// dot-call solved to a monomorphic inherent body is a plain local
 /// callee, so its tail position lowers through CALLT and the frame
-/// transfers instead of growing the stack [H2]. A plain CALL at this
+/// transfers instead of growing the stack. A plain CALL at this
 /// depth would need ~21M stack words against the VM's 1MiB-word limit,
 /// so completing at all proves the transfer — and the max-stack pin
 /// keeps it constant across every one of the 3 million slides.

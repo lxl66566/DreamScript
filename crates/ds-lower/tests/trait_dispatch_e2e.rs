@@ -9,11 +9,11 @@
 //! substitution, resolved from the checker-recorded bounds) ahead of
 //! the instance word, and the body's nested calls on the bound variable
 //! dispatch at runtime through the staged slot (the sentinel FuncRef
-//! the CALLG carries names the frame's evidence slot). Inherent
-//! dot-calls no longer refuse here: the inherent dispatch surface has
-//! its own end-to-end suite, and the out-of-scope generic shapes still
+//! the CALLG carries names the frame's evidence slot). Inherent dot-calls
+//! lower through the local callee path (their end-to-end suite is
+//! separate), and the out-of-scope generic shapes still
 //! refuse naming their seams. A defaulted member parameter stages the
-//! trait's declared literal at every dispatch spelling [F7] — the
+//! trait's declared literal at every dispatch spelling — the
 //! declaration is the default's single authority.
 
 use ds_abi::{ConstIdx, Uop};
@@ -243,9 +243,9 @@ fn user_instance_evidence_words_are_instance_ids() {
     );
 }
 
-/// An inherent dot-call lowers this round: the body plans under its
-/// two-part mangle and the call site is a plain local call (the
-/// end-to-end run lives in the inherent dispatch suite).
+/// An inherent dot-call lowers: the body plans under its two-part
+/// mangle and the call site is a plain local call (the end-to-end run
+/// lives in the inherent dispatch suite).
 #[test]
 fn an_inherent_dot_call_lowers_through_the_local_callee_path() {
     let source = concat!(
@@ -441,7 +441,7 @@ fn lower_default_probe() -> (String, Lowered) {
     (DEFAULT_SOURCE.to_owned(), lowered)
 }
 
-/// The trait-member default authority end to end [F7]: every dispatch
+/// The trait-member default authority end to end: every dispatch
 /// spelling stages the trait's declared default at the call site — the
 /// dot form and the qualified form answer identically for the omitted
 /// default and for the written argument, the string default's Ref word

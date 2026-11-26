@@ -1,4 +1,4 @@
-//! The bound-artifact native tier (H5): each `[artifacts]` library the
+//! The bound-artifact native tier: each `[artifacts]` library the
 //! run's graph resolved installs as a native module under its manifest
 //! name — the loaded library's own symbols, in export enumeration order,
 //! so a pool `Constant::Bound` callee addresses one symbol by its
@@ -9,7 +9,7 @@
 //! lifetime, pinned by the load reference, and the return-word
 //! conversions around the call).
 //!
-//! The H5 contract clauses hold here: a bound extern means panic=abort (a
+//! The bound contract clauses hold here: a bound extern means panic=abort (a
 //! foreign abort kills the process, the VM never unwinding through a
 //! foreign frame), and the blocking call pins its fiber for its whole
 //! duration — no preemption point exists inside the C call, cancellation

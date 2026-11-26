@@ -299,8 +299,8 @@ fn symbol(files: &Files, item: &Item) -> Option<lsp::DocumentSymbol> {
         detail: None,
         kind,
         tags: None,
-        // The field is required but superseded by tags; the slice emits
-        // neither.
+        // The protocol requires the field, but `tags` carries the same
+        // information; both stay unset.
         #[allow(deprecated)]
         deprecated: None,
         range: range(files, item.span),

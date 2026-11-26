@@ -1,4 +1,4 @@
-//! Factory-returned closures balance their counts (C4): a call result
+//! Factory-returned closures balance their counts: a call result
 //! that is a closure Ref classifies its copy-out word Ref (the physical
 //! frame word the call slide already validates), so the binding owns the
 //! count — a loop-carried const consumes each iteration's closure at its

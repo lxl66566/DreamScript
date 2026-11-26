@@ -1,10 +1,10 @@
-//! The G4 import surface: the linked half of name binding. An import's
+//! The import surface: the linked half of name binding. An import's
 //! selected symbols bind at use sites through a caller-supplied surface —
 //! one entry per import declaration, keyed by the declaration's span —
 //! while an `@std` import no graph serves keeps the merged-ambient
 //! reading (its selections validate against the compile unit's merged
-//! namespace, the landed visibility-round behavior) and an import no
-//! linked package serves stays declarative for the link walk.
+//! namespace) and an import no linked package serves stays declarative
+//! for the link walk.
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use crate::{EffectRow, Vis, decls::FnSig};
 /// it exactly as the literal a user would have written — no linked-module
 /// evaluation and no instantiation machinery behind it. A computed
 /// initializer carries no fact (its value is an evaluation of the linked
-/// module, the artifact round's seam) and stays refused.
+/// module) and stays refused.
 #[derive(Clone, PartialEq, Debug)]
 pub enum ConstFact {
     /// An unsuffixed integer literal, radix prefixes included.
@@ -113,7 +113,7 @@ impl ConstFact {
     }
 
     /// The fact one literal carries; suffixed numerics answer `None`
-    /// (explicit widths are not in the contract).
+    /// (explicit widths carry no fact).
     fn of_literal(lit: &ds_parse::Literal) -> Option<Self> {
         match lit {
             ds_parse::Literal::Int { suffix, text } if suffix.is_empty() => {
@@ -198,8 +198,7 @@ pub enum TypeFact {
     /// vocabulary, with the declaration's linearity (`~Copyable`)
     /// riding beside them — the consuming compile's mint carries the
     /// same move discipline a local declaration would. The producer
-    /// gates deinit-carrying declarations out of the fact: a linked
-    /// deinit body is the artifact round's member machinery.
+    /// gates deinit-carrying declarations out of the fact.
     Struct {
         /// Named fields over the word vocabulary.
         fields: Vec<TypeField>,
@@ -647,9 +646,8 @@ impl TypeFact {
     /// `ambient_files` leading trees are the ambient members, whose
     /// definitions never export; an import-bound def is another
     /// package's identity and rides its own re-export row), and the
-    /// deinit-carrying structs stay out (C5: a linked deinit body is the
-    /// artifact round's member machinery). The map's keys are exactly
-    /// the candidates whose fact survived.
+    /// deinit-carrying structs stay out. The map's keys are exactly the
+    /// candidates whose fact survived.
     #[must_use]
     pub fn member_facts(
         analyzed: &crate::type_of::Analyzed,
@@ -745,8 +743,7 @@ impl TypeFact {
     }
 
     /// One declaration's fact over the eligible set: the kind dispatch
-    /// the export walk owns, the struct deinit gate included (a linked
-    /// deinit body is the artifact round's member machinery).
+    /// the export walk owns, the struct deinit gate included.
     fn of_def(
         package: &crate::resolve::Package,
         decls: &crate::Decls,
@@ -976,7 +973,7 @@ impl ImplFact {
                         continue;
                     };
                     let Some(trait_ref) = &imp.trait_ref else {
-                        continue; // an inherent impl is the type-keyed seam's own round
+                        continue; // an inherent impl belongs to the type-keyed seam
                     };
                     let [only] = trait_ref.path.segments.as_slice() else {
                         continue;
@@ -1378,7 +1375,7 @@ struct WordSolver<'a> {
 impl WordSolver<'_> {
     /// One solved field type's word kind, when it spells in the
     /// vocabulary: a bare atom, a union — `t | none` either order is
-    /// exactly `t?` (B4), and any other union is one enum's complete
+    /// exactly `t?`, and any other union is one enum's complete
     /// case set or a union of words — or a tuple, one word per
     /// positional member.
     fn word_of_expr(&self, expr: &crate::TypeExpr) -> Option<TypeWord> {
@@ -1483,7 +1480,7 @@ impl WordSolver<'_> {
     }
 
     /// One union's word kind: `t | none` in either order is exactly
-    /// `t?` (B4) — the optional over the other side's whole word — any
+    /// `t?` — the optional over the other side's whole word — any
     /// other union is one enum's complete case set or a union of words.
     fn union_word(&self, left: &crate::TypeExpr, right: &crate::TypeExpr) -> Option<TypeWord> {
         let atom = |expr: &crate::TypeExpr| match expr {
@@ -1538,7 +1535,7 @@ impl WordSolver<'_> {
 
     /// One atom set's word kind when the set is exactly one non-generic
     /// enum's case atoms — that enum's own Named word: the written
-    /// spelling names the enum, whose solving rebuilds this union [B3].
+    /// spelling names the enum, whose solving rebuilds this union.
     /// A partial case set (a true subset union) answers `None` here and
     /// the caller's union fallback spells it word per member.
     fn enum_word(&self, atoms: &[crate::atom::TypeId]) -> Option<TypeWord> {
@@ -1658,7 +1655,7 @@ impl WordSolver<'_> {
     /// body (visit-stack-guarded, so an inline cycle refuses), an
     /// optional marker wraps one word, parenthesization peels, and a
     /// union body builds one word per member with `t | none` the
-    /// optional rule (B4). Every other written shape — a tuple, a fn
+    /// optional rule. Every other written shape — a tuple, a fn
     /// type, a multi-segment path, an applied alias — answers `None`.
     fn written_word(
         &self,
@@ -1748,7 +1745,7 @@ impl WordSolver<'_> {
 
     /// One written union body's word: the members flatten (a
     /// parenthesized subtree recursing), the predeclared `none` marks
-    /// the optional (B4), and every other member carries one word — a
+    /// the optional, and every other member carries one word — a
     /// case or a tag spelling here as the Named word the union's tag
     /// word carries. A `none`-only body answers `None`.
     fn written_union(
@@ -1918,9 +1915,9 @@ pub struct ForeignEntry {
     /// compiler-wired criterion — never a linked body.
     pub func: Option<u32>,
     /// The entry links the reserved `@std` package: the compiler-wired
-    /// identity the @std spellings and recognitions key on — this round
-    /// the package's first member is the ambient core itself (the
-    /// migrated members riding beside it), and a declaring compile
+    /// identity the @std spellings and recognitions key on — the
+    /// package's first member is the ambient core itself (the migrated
+    /// members riding beside it), and a declaring compile
     /// registers that same core as its ambient, so a word-shaped atom
     /// head the consuming ambient also declares is the same declaration,
     /// and the lowerer's compiler-wired recognition keeps serving its
@@ -1967,7 +1964,7 @@ impl MemberSurface {
 /// order, then each surface's re-export origins as the walk met them
 /// (`pub import`), so a transitive entry's FuncRef addresses the origin
 /// package the same dep list names. The graph also carries the run's
-/// bound artifacts (H5): each `[artifacts]` name the manifest graph
+/// bound artifacts: each `[artifacts]` name the manifest graph
 /// resolved mapped to its installed library's exported C symbols in
 /// enumeration order — the fold a bound extern's declaration resolves
 /// through, exactly the table the run installs as the artifact's native
@@ -3121,8 +3118,8 @@ mod tests {
         );
     }
 
-    /// The consumer-side mint of the artifact round's richer alias and
-    /// union words: a linked struct field over a partial case-subset
+    /// The consumer-side mint of the richer alias and union words: a
+    /// linked struct field over a partial case-subset
     /// union and linked aliases whose bodies name a linked type and a
     /// union mint exactly the products a local declaration would — the
     /// field's solved signature the union of the minted case atoms, the
@@ -3766,10 +3763,7 @@ mod tests {
         let analyzed = crate::type_of::analyze(&files, &[ast]);
         let facts =
             super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
-        let functions = vec![
-            "pair#size".to_owned(),
-            "pair#make".to_owned(),
-        ];
+        let functions = vec!["pair#size".to_owned(), "pair#make".to_owned()];
         let rows = super::InherentFact::member_facts(&analyzed, 0, &functions, &facts);
         assert_eq!(rows.len(), 1, "one row crosses: the pub pair impl alone");
         let row = &rows[0];
@@ -3780,7 +3774,8 @@ mod tests {
                 .map(|member| (member.name.as_str(), member.func))
                 .collect::<Vec<_>>(),
             vec![("size", 0), ("make", 1)],
-            "the planned members cross in order; the defaulted and generic members keep their refusals"
+            "the planned members cross in order; the defaulted and generic members keep their \
+             refusals"
         );
         assert_eq!(
             row.members[0].sig.params.len(),
@@ -3795,7 +3790,10 @@ mod tests {
             panic!("the pair row crosses over its planned member alone");
         };
         assert_eq!(
-            only.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            only.members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["size"],
             "an unplanned member keeps its refusal without refusing the impl"
         );

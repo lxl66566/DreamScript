@@ -1,4 +1,4 @@
-//! The B2 first-order return unification [B2]: a fn-typed parameter
+//! The first-order return unification: a fn-typed parameter
 //! whose written return carries an unsolved variable takes the lambda
 //! argument's inferred answer and binds the written return's variables
 //! by first-order pattern match — an application strips to its
@@ -121,7 +121,7 @@ fn a_generic_fn_value_keeps_the_own_variable_refusal() {
 }
 
 /// The generic call's solved instantiation records the matched return
-/// beside the call [H3] — the side table the lowering pass mints
+/// beside the call — the side table the lowering pass mints
 /// CALLG evidence words from.
 #[test]
 fn the_solved_instantiation_records_the_matched_return() {

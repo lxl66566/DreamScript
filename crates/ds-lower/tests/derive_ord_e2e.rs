@@ -1,4 +1,4 @@
-//! The derive-ord acceptance [G1]: `#[derive(ord)]` on a struct, an
+//! The derive-ord acceptance: `#[derive(ord)]` on a struct, an
 //! enum, and a tag expands into ordinary `impl ord` items after parse,
 //! and the derived member is callable through the same trait-dispatch
 //! path as a hand-written impl — the direct dot call, the qualified

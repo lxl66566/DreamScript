@@ -17,11 +17,11 @@ pub enum ExportError {
     /// The bytes are neither a PE image nor an ELF shared object.
     #[error("the library is neither a PE image nor an ELF shared object")]
     UnknownFormat,
-    /// A Mach-O library, whose export table this round does not read
+    /// A Mach-O library, whose export table this reader does not read
     /// (the matrix carries the PE and ELF legs).
     #[error("a Mach-O library's export table is outside this round: the matrix carries PE and ELF")]
     MachO,
-    /// A 32-bit ELF library: this round reads ELF64 alone.
+    /// A 32-bit ELF library: the reader parses ELF64 alone.
     #[error("a 32-bit ELF library refuses: this round reads ELF64 alone")]
     Elf32,
     /// The format's export tables do not read: a length or offset that

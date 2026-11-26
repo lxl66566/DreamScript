@@ -1,6 +1,5 @@
-//! The platform tz seam: the one world op the datetime face rides (the
-//! 2026-11-24 todo 101 round) — the host's local UTC offset for a
-//! unix-seconds timestamp, seconds east of UTC (west negative). The
+//! The platform tz seam: the one world op the datetime face rides — the host's local UTC offset for
+//! a unix-seconds timestamp, seconds east of UTC (west negative). The
 //! calendar math and the fixed-shape formatting compose in @std ds
 //! source over this op and the pure walk; nothing here renders fields
 //! or strings, the op answers the offset word alone.

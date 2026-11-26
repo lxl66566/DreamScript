@@ -1,17 +1,17 @@
-//! Package-level name resolution over the parsed surface (G3, F3, F9).
+//! Package-level name resolution over the parsed surface.
 //!
 //! A [`Package`] collects the declarations of its files into TWO
-//! namespaces (G3, F9): a type namespace (structs, enums, enum cases,
+//! namespaces: a type namespace (structs, enums, enum cases,
 //! tags, aliases, traits) and a value namespace (functions, const/var
 //! bindings). Files in
 //! one package share both, there are zero intra-package imports, and
 //! top-level definitions are order-independent — collection inserts every
 //! declaration before any use is resolved, so intra-file and cross-file
 //! definition cycles are legal by construction (resolution is name lookup,
-//! not dependency ordering; the "whole-package fixpoint" of the record is
-//! exactly this two-pass shape).
+//! not dependency ordering; the "whole-package fixpoint" is exactly this
+//! two-pass shape).
 //!
-//! # Namespace split (F9)
+//! # Namespace split
 //!
 //! Constructor positions resolve against the TYPE namespace only: brace
 //! construction (`user { ... }`), bare tag references, pattern paths, and
@@ -26,7 +26,7 @@
 //! error. `struct map` and `fn map` therefore coexist, each resolving in
 //! its own positions.
 //!
-//! # Method tier (F3)
+//! # Method tier
 //!
 //! UFCS resolution is fixed: a dot-call `x.f(args)` feeds the receiver to
 //! the first parameter of a FREE function named `f` if one exists (the
@@ -35,13 +35,13 @@
 //! fns keyed by their target type — different owners may share one
 //! method name); `Trait::f(x)` qualifies directly. Trait methods are
 //! REGISTERED here only — selection among candidates is the checker's
-//! type-directed work, and F3's true-ambiguity error therefore lives
+//! type-directed work, and the true-ambiguity error therefore lives
 //! there too, never as a priority search here. The fed parameter index is
 //! recorded (always 0 today — capability parameters have no syntax yet,
 //! so the first parameter IS the first data parameter; the checker
 //! enforces the exclusion once they do).
 //!
-//! # Local scoping (F2)
+//! # Local scoping
 //!
 //! Params, lets, lambda parameters, match-arm binders, and for-patterns
 //! bind into lexical scopes. Same-scope redefinition is an error (both
@@ -51,16 +51,16 @@
 //! function is in scope inside its own body via the package table
 //! (recursion). Generic parameters bind in a separate type-variable scope
 //! stack for type positions; a trait member's signatures additionally bind
-//! `Self` as the self type (F2, record 6.1). Or-pattern alternatives rebind
+//! `Self` as the self type. Or-pattern alternatives rebind
 //! identical names into one arm scope without error; whether alternatives
-//! must bind the SAME set is the checker's (F4).
+//! must bind the SAME set is the checker's.
 //!
 //! # Positions that do not resolve here
 //!
 //! Bare field accesses (`x.f` without a call) are struct-owned and
 //! type-directed — the checker resolves them. `.err(h)`/`.ok(h)` are
-//! decided surface handler forms [section 10 item 2], not names, and are
-//! recorded as [`Res::Handler`]. Imports (G4) declare no namespace names:
+//! decided surface handler forms, not names, and are
+//! recorded as [`Res::Handler`]. Imports declare no namespace names:
 //! the resolver validates an `@`-sigil import's selected symbols against
 //! the package's `pub` surface (a missing or non-`pub` selection
 //! refuses), while every other import stays declarative for the link
@@ -127,7 +127,7 @@ pub enum DefKind {
     /// A named function or extern function.
     Fn,
     /// A `const` binding (const-arrow functions included — they are
-    /// bindings whose value is a function (F2)).
+    /// bindings whose value is a function).
     Const,
     /// A `var` binding.
     Var,
@@ -135,19 +135,19 @@ pub enum DefKind {
     Struct,
     /// An enum.
     Enum,
-    /// A unit tag (B1).
+    /// A unit tag.
     Tag,
-    /// A case minted by an enum block (B3): a member of the tag
+    /// A case minted by an enum block: a member of the tag
     /// namespace like a tag, constructed per its payload.
     Case,
-    /// A trait (B6).
+    /// A trait.
     Trait,
-    /// A type alias (F7).
+    /// A type alias.
     TypeAlias,
 }
 
 impl DefKind {
-    /// Whether the kind declares into the type namespace (F9); the rest
+    /// Whether the kind declares into the type namespace; the rest
     /// declare into the value namespace.
     #[must_use]
     pub const fn in_type_namespace(self) -> bool {
@@ -180,7 +180,7 @@ impl DefKind {
     }
 }
 
-/// The visibility tier of one package-level definition (G4).
+/// The visibility tier of one package-level definition.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Vis {
     /// Private: the defining file alone sees the name.
@@ -192,7 +192,7 @@ pub enum Vis {
 }
 
 impl Vis {
-    /// The tier a declaration's modifier spells: absent is private (G4).
+    /// The tier a declaration's modifier spells: absent is private.
     #[must_use]
     pub const fn of(vis: Option<ds_parse::Vis>) -> Self {
         match vis {
@@ -217,7 +217,7 @@ pub struct Def {
     pub name: String,
     /// What the declaration defines.
     pub kind: DefKind,
-    /// The declared visibility tier (G4).
+    /// The declared visibility tier.
     pub vis: Vis,
     /// Span of the defining name occurrence; carries the file.
     pub span: Span,
@@ -268,10 +268,10 @@ pub enum MethodOwner {
     /// A function of an inherent impl (`impl t { fn ... }`), owned by the
     /// impl's target TYPE. The owner travels as its name, not its DefId:
     /// registration runs at collection, which may precede the target's
-    /// declaring file (G3), and type names are package-unique (the first
+    /// declaring file, and type names are package-unique (the first
     /// def wins), so the name IS the owner identity. The checker resolves
     /// the name to the owner's atom at call sites and selects by
-    /// (owner, name) (F3).
+    /// (owner, name).
     Inherent(String),
 }
 
@@ -297,11 +297,11 @@ pub enum Res {
         /// Span of the introducing binder.
         bind: Span,
     },
-    /// The `Trait::f` escape hatch (F3): the named trait's member.
+    /// The `Trait::f` escape hatch: the named trait's member.
     TraitMethod(MethodId),
-    /// The callee name of a UFCS dot-call (F3).
+    /// The callee name of a UFCS dot-call.
     Dot(DotRes),
-    /// The `.err(h)`/`.ok(h)` handler surface form [section 10 item 2];
+    /// The `.err(h)`/`.ok(h)` handler surface form;
     /// no name sits behind it.
     Handler,
     /// A module alias an import binds (`import p as c`): the receiver of
@@ -310,7 +310,7 @@ pub enum Res {
     Module(ModuleId),
 }
 
-/// The resolution of a dot-call's method position (F3).
+/// The resolution of a dot-call's method position.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum DotRes {
     /// The free-function tier won: the receiver feeds parameter
@@ -329,7 +329,7 @@ pub enum DotRes {
         /// Candidate method ids: trait members and inherent impl fns.
         candidates: Vec<MethodId>,
     },
-    /// The receiver names a type (the receiverless-member ruling): the
+    /// The receiver names a type: the
     /// candidates are that type's own inherent impl members, and the
     /// call is type-keyed — resolved at check time, dispatched with no
     /// instance word. A value shadowing the type name (a local or a
@@ -546,7 +546,7 @@ impl UseIndex {
 }
 
 /// A package: the declarations of its files in the type and value
-/// namespaces (G3, F9), plus the method-tier registries (F3). Collection
+/// namespaces, plus the method-tier registries. Collection
 /// (`add_file`) is order-independent; use resolution (`resolve`) runs
 /// against the complete tables, which is what makes intra-package
 /// definition cycles legal.
@@ -568,12 +568,12 @@ pub struct Package {
     value_names: FxHashMap<String, DefId>,
     methods: Vec<MethodDecl>,
     method_index: FxHashMap<String, Vec<MethodId>>,
-    /// The import-bound functions, keyed by their def (G4): the
+    /// The import-bound functions, keyed by their def: the
     /// signatures the declaration pass registers and the link facts the
     /// call lowering addresses. Foreign defs sit outside both name
     /// tables — only the importing file's bindings reach them.
     foreign: FxHashMap<DefId, ForeignEntry>,
-    /// Each file's import bindings (G4): the selection names and module
+    /// Each file's import bindings: the selection names and module
     /// aliases the file's use sites resolve through.
     imports: FxHashMap<ds_diag::FileId, FileImports>,
     /// The module references the files' import aliases bound, indexed by
@@ -585,7 +585,7 @@ pub struct Package {
     /// Dedupes a foreign const def per linked binding: a literal const
     /// has no module table index, so its name is the fact's identity.
     foreign_const_defs: FxHashMap<(u32, String), DefId>,
-    /// The registered foreign type defs, keyed by name alone (G4): one
+    /// The registered foreign type defs, keyed by name alone: one
     /// linked type owns a name across the compile — the universe mints
     /// by name, so a second linked type of the same name refuses its
     /// selection instead of mis-shaping the first's spellings. A local
@@ -593,7 +593,7 @@ pub struct Package {
     /// refuses it), keeping the shadowing discipline the value namespace
     /// already follows.
     foreign_type_defs: FxHashMap<String, DefId>,
-    /// The selections a `pub import` row bound (G4's re-export): the
+    /// The selections a `pub import` row bound (a re-export): the
     /// import-bound defs that join this package's export surface, with
     /// the bound name (an alias's spelling included) and the row's own
     /// span — the definition site a dependent's diagnostics name, since
@@ -609,13 +609,13 @@ pub struct Package {
     /// positional guess. Duplicate rows (two imports of one package)
     /// ride twice; the seed is idempotent per name and id.
     linked_tags: Vec<ds_mod::MemberTag>,
-    /// The linked members' trait-impl facts the link pass collected
-    /// (G4): the owner-keyed member links a consuming trait call site
+    /// The linked members' trait-impl facts the link pass collected: the
+    /// owner-keyed member links a consuming trait call site
     /// dispatches through, deduplicated per linked impl — two imports
     /// of one package share the row the first registered.
     linked_impls: Vec<crate::import::ImplFact>,
-    /// The linked members' inherent-impl facts the link pass collected
-    /// (G4), each member row beside the method id its own registration
+    /// The linked members' inherent-impl facts the link pass collected,
+    /// each member row beside the method id its own registration
     /// minted (`None` for a member a root registration owns — the
     /// root-over-deps layering's loser): the type-keyed member links a
     /// consuming static or value call site dispatches through,
@@ -624,10 +624,9 @@ pub struct Package {
     /// install the sig and the member link over exactly the rows the
     /// link pass registered, never a root registration a member lost
     /// to.
-    linked_inherent:
-        Vec<(crate::import::InherentFact, Vec<Option<MethodId>>)>,
+    linked_inherent: Vec<(crate::import::InherentFact, Vec<Option<MethodId>>)>,
     /// The tag declarations a file re-declares beside an earlier file's
-    /// same-label tag or case (F9.5): label to the shadowing def. The
+    /// same-label tag or case: label to the shadowing def. The
     /// first declaration per label owns the type namespace's entry; a
     /// shadowing file's own uses resolve through here first, its atom
     /// a distinct declaration the directed probe reads beside the
@@ -635,7 +634,7 @@ pub struct Package {
     file_tags: FxHashMap<ds_diag::FileId, FxHashMap<String, DefId>>,
     /// The file currently collecting (`add_file`): the gate that tells
     /// a same-file redeclaration (refused, both namespaces) from a
-    /// cross-file tag shadow (F9.5, kept distinct).
+    /// cross-file tag shadow (kept distinct).
     collecting_file: Option<ds_diag::FileId>,
 }
 
@@ -799,9 +798,7 @@ impl Package {
     /// declaration pass installs each member's sig and member link
     /// over its recorded id, skipping a member a root registration owns.
     #[must_use]
-    pub fn linked_inherent_facts(
-        &self,
-    ) -> &[(crate::import::InherentFact, Vec<Option<MethodId>>)] {
+    pub fn linked_inherent_facts(&self) -> &[(crate::import::InherentFact, Vec<Option<MethodId>>)] {
         &self.linked_inherent
     }
 
@@ -814,7 +811,7 @@ impl Package {
     }
 }
 
-/// One file's import bindings (G4): the names its import declarations
+/// One file's import bindings: the names its import declarations
 /// selected (under their own or their per-symbol alias spelling), the
 /// module aliases its `as` clauses bound, and the import declarations a
 /// resolved graph served through a linked surface — the spans whose
@@ -852,7 +849,7 @@ enum ModuleSurface {
     },
 }
 
-/// Resolves one package (G3): collects every file's declarations into one
+/// Resolves one package: collects every file's declarations into one
 /// namespace, then resolves every file's name uses against the complete
 /// tables — collection is order-independent and resolution runs last,
 /// which is what makes intra-package definition cycles legal. The
@@ -879,7 +876,7 @@ where
     (package, resolutions, diags)
 }
 
-/// [`resolve_package`] with import surfaces linked (G4): the same
+/// [`resolve_package`] with import surfaces linked: the same
 /// collection and resolution, plus the link pass between them — one
 /// pass over every file's import declarations that validates each
 /// selection against its linked member's surface and binds what passes
@@ -957,7 +954,7 @@ impl Package {
     /// Collects one parsed file's declarations into the namespace,
     /// returning duplicate-definition diagnostics as they are met (both
     /// spans named; the first definition is the secondary label). Imports
-    /// contribute nothing yet (G4, M7).
+    /// contribute nothing yet.
     pub fn add_file(&mut self, ast: &Ast) -> Vec<Diagnostic> {
         self.files.push(ast.file);
         self.collecting_file = Some(ast.file);
@@ -1001,17 +998,17 @@ impl Package {
         )
     }
 
-    /// The link pass (G4): after every file collected and before any
+    /// The link pass: after every file collected and before any
     /// use resolves, two passes over the import declarations the graph
     /// serves — every linked member's exported definitions register as
     /// package defs first (so no selection's validation depends on
     /// import order inside the file), then each selection validates
     /// against its linked member's surface (a missing name, a non-`pub`
-    /// tier, or a shape this round cannot bind refusing at the import),
+    /// tier, or a shape this pass cannot bind refusing at the import),
     /// what passes binds into the importing file's namespace, and an
     /// `as` alias binds a module reference the file's qualified calls
     /// resolve through. Running after collection keeps the pass
-    /// order-independent (G3): a use before its import declaration in
+    /// order-independent: a use before its import declaration in
     /// the same file still binds.
     pub fn link_imports(&mut self, asts: &[&Ast], imports: &ImportGraph) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
@@ -1084,8 +1081,7 @@ impl Package {
                                 if self.linked_inherent.iter().any(|(row, _)| row == fact) {
                                     continue;
                                 }
-                                let Some(&def) = self.foreign_type_defs.get(&fact.target)
-                                else {
+                                let Some(&def) = self.foreign_type_defs.get(&fact.target) else {
                                     continue;
                                 };
                                 // the owner must be this package's own
@@ -1104,46 +1100,45 @@ impl Package {
                                         .method_candidates(&member.name)
                                         .find(|&id| self.method(id).owner == owner);
                                     methods.push(match claimed {
-                                            Some(first) => {
-                                                // the root's own impl
-                                                // member owns the name:
-                                                // the linked member loses
-                                                // the root-over-deps
-                                                // layering, and the call
-                                                // sites keep the root's
-                                                // body
-                                                diags.push(
-                                                    Diagnostic::warning(
-                                                        ErrorCode::LinkShadowedInherentMember,
-                                                        format!(
-                                                            "the root package's impl member `{}` \
-                                                             of `{}` shadows {}'s linked member; \
-                                                             drop the local impl to adopt it, or \
-                                                             keep the current selection",
-                                                            member.name, fact.target, fact.pkg,
-                                                        ),
-                                                    )
-                                                    .with_secondary(
-                                                        self.method(first).span,
-                                                        "the winning local member",
-                                                    )
-                                                    .with_primary(
-                                                        member.span,
-                                                        "the shadowed linked member",
+                                        Some(first) => {
+                                            // the root's own impl
+                                            // member owns the name:
+                                            // the linked member loses
+                                            // the root-over-deps
+                                            // layering, and the call
+                                            // sites keep the root's
+                                            // body
+                                            diags.push(
+                                                Diagnostic::warning(
+                                                    ErrorCode::LinkShadowedInherentMember,
+                                                    format!(
+                                                        "the root package's impl member `{}` of \
+                                                         `{}` shadows {}'s linked member; drop \
+                                                         the local impl to adopt it, or keep the \
+                                                         current selection",
+                                                        member.name, fact.target, fact.pkg,
                                                     ),
-                                                );
-                                                None
-                                            },
-                                            None => Some(self.register_method(
-                                                &Ident {
-                                                    span: member.span,
-                                                    name: member.name.clone(),
-                                                },
-                                                owner.clone(),
-                                                &mut diags,
-                                            )),
+                                                )
+                                                .with_secondary(
+                                                    self.method(first).span,
+                                                    "the winning local member",
+                                                )
+                                                .with_primary(
+                                                    member.span,
+                                                    "the shadowed linked member",
+                                                ),
+                                            );
+                                            None
                                         },
-                                    );
+                                        None => Some(self.register_method(
+                                            &Ident {
+                                                span: member.span,
+                                                name: member.name.clone(),
+                                            },
+                                            owner.clone(),
+                                            &mut diags,
+                                        )),
+                                    });
                                 }
                                 self.linked_inherent.push((fact.clone(), methods));
                             }
@@ -1333,8 +1328,8 @@ impl Package {
     }
 
     /// Validates one linked member's selections: each names an exported
-    /// definition whose shape binds this round, and what passes binds
-    /// into the importing file's namespace (G4). A `pub import` row's
+    /// definition whose shape binds, and what passes binds
+    /// into the importing file's namespace. A `pub import` row's
     /// bindings record as re-exports — the export surface's transitive
     /// closure — under the name the row bound (an alias's spelling
     /// included), the row's own span the definition site a dependent's
@@ -1376,8 +1371,8 @@ impl Package {
                 );
                 continue;
             }
-            // The bindable def this selection names, when its shape binds
-            // this round: a function through its signature's spellability,
+            // The bindable def this selection names, when its shape binds:
+            // a function through its signature's spellability,
             // a literal const through its value fact, a flat struct
             // through its registered structural fact.
             let bindable = match entry.kind {
@@ -1613,8 +1608,7 @@ impl Package {
                         // read. Union positions keep the tag-seam refusal
                         // (the two modules' private tag tables), and every
                         // tag- or struct-bearing head keeps its Unbound
-                        // refusal; the arm retires when the core's atoms
-                        // stop crossing as plain words.
+                        // refusal.
                         let std_equivalent = entry.std
                             && !in_union
                             && args.is_empty()
@@ -1732,7 +1726,7 @@ impl Package {
         &self.foreign
     }
 
-    /// The selections a `pub import` row bound (G4's re-export): the
+    /// The selections a `pub import` row bound (a re-export): the
     /// def, the bound name it exports under, and the row's span — in
     /// binding order, a def bound by two pub rows riding twice.
     #[must_use]
@@ -1798,7 +1792,7 @@ impl Package {
             .chain(self.methods.iter())
     }
 
-    /// The definition of a type-namespace name, if any (F9): the growth
+    /// The definition of a type-namespace name, if any: the growth
     /// tier answers first, the shared base below.
     #[must_use]
     pub fn lookup_type(&self, name: &str) -> Option<DefId> {
@@ -1809,7 +1803,7 @@ impl Package {
         })
     }
 
-    /// The type declaration a name carries for ONE FILE's uses (F9.5):
+    /// The type declaration a name carries for ONE FILE's uses:
     /// the file's own shadowing tag declaration beats the first
     /// declaration per label, whose entry owns the shared namespace.
     #[must_use]
@@ -1820,7 +1814,7 @@ impl Package {
         self.lookup_type(name)
     }
 
-    /// The definition of a value-namespace name, if any (F9): the growth
+    /// The definition of a value-namespace name, if any: the growth
     /// tier answers first, the shared base below.
     #[must_use]
     pub fn lookup_value(&self, name: &str) -> Option<DefId> {
@@ -1903,7 +1897,7 @@ impl Package {
         }) {
             // An impl or platform declaration names no package-level
             // name, and `pub(pkg)` on an import names nothing — imports
-            // are already package-wide (one namespace per package, G3).
+            // are already package-wide (one namespace per package).
             // A `pub import`'s meaning is the link pass's: its bound
             // selections join the export surface there, so collection
             // alone cannot judge the modifier.
@@ -1972,7 +1966,7 @@ impl Package {
         }
     }
 
-    /// Declares one name into its kind's namespace (F9); a duplicate
+    /// Declares one name into its kind's namespace; a duplicate
     /// WITHIN that namespace reports both spans and keeps the first
     /// definition — the same name in the other namespace coexists.
     fn declare(
@@ -1998,7 +1992,7 @@ impl Package {
         if let Some(first) = existing {
             // Within one module a label names at most one tag
             // declaration: the file's own shadow is the duplicate the
-            // refusal names (F9.5 keeps the same-file refusal).
+            // refusal names.
             if matches!(kind, DefKind::Tag | DefKind::Case)
                 && let Some(file) = self.collecting_file
                 && let Some(prev) = self.file_tags.get(&file).and_then(|tags| tags.get(name))
@@ -2016,7 +2010,7 @@ impl Package {
                 return prev;
             }
             // A tag family declaration shadowing an earlier FILE's
-            // same-label declaration stays distinct (F9.5): the def
+            // same-label declaration stays distinct: the def
             // registers, the shared namespace keeps the first, and the
             // declaring file's own uses resolve through the shadow map.
             // Every other family keeps the refusal.
@@ -2076,8 +2070,13 @@ impl Package {
     /// twice) that reports both spans and keeps the first — the discipline
     /// of [`Self::declare`]. Different owners may share a method name —
     /// two traits, or two inherent impls on different target types; call
-    /// sites disambiguate by receiver (F3).
-    fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) -> MethodId {
+    /// sites disambiguate by receiver.
+    fn register_method(
+        &mut self,
+        name: &Ident,
+        owner: MethodOwner,
+        diags: &mut Vec<Diagnostic>,
+    ) -> MethodId {
         if let Some(id) = self
             .method_candidates(&name.name)
             .find(|&id| self.method(id).owner == owner)
@@ -2144,7 +2143,7 @@ struct FileResolver<'a> {
     package: &'a Package,
     uses: Vec<(Span, Res)>,
     diags: Vec<Diagnostic>,
-    /// The file being resolved: the shadowing tag lookup (F9.5) is
+    /// The file being resolved: the shadowing tag lookup is
     /// per file, a file's own tag declaration beating the first's.
     file: ds_diag::FileId,
     /// The file's import bindings, when the link pass produced any.
@@ -2177,7 +2176,7 @@ impl FileResolver<'_> {
             ItemKind::Import(imp) => self.import(imp, item.vis),
             ItemKind::Tag(_) | ItemKind::Platform(_) => {},
             ItemKind::Local(local) => {
-                // A top-level binding declares a PACKAGE def [G3], not a
+                // A top-level binding declares a PACKAGE def, not a
                 // local: the initializer and annotation resolve here, the
                 // binders bind nowhere, and uses reach the name through
                 // the package table.
@@ -2196,7 +2195,7 @@ impl FileResolver<'_> {
                     match member {
                         StructMember::Field(field) => self.type_(&field.ty),
                         // `self` inside a deinit body is the dying
-                        // instance [C5], borrowed; the walk never types it,
+                        // instance, borrowed; the walk never types it,
                         // so binding the name here is all resolution owes.
                         StructMember::Deinit { span, body } => {
                             self.scopes.push(FxHashMap::default());
@@ -2246,8 +2245,7 @@ impl FileResolver<'_> {
                 for ty in &t.supers {
                     self.type_(ty);
                 }
-                // A trait member's signatures spell the self type `Self`
-                // [F2, record 6.1].
+                // A trait member's signatures spell the self type `Self`.
                 self.type_scopes
                     .push(FxHashMap::from_iter([("Self".to_owned(), t.name.span)]));
                 for member in &t.members {
@@ -2274,8 +2272,8 @@ impl FileResolver<'_> {
                         _ => self.path_use(&trait_ref.path),
                     }
                 }
-                // An impl's members spell the self type `Self` [F2, record
-                // 6.1], trait and inherent alike.
+                // An impl's members spell the self type `Self`, trait and
+                // inherent alike.
                 self.type_scopes
                     .push(FxHashMap::from_iter([("Self".to_owned(), imp.span)]));
                 self.type_(&imp.target);
@@ -2318,9 +2316,9 @@ impl FileResolver<'_> {
 
     fn param(&mut self, param: &Param, receiver: bool) {
         if let Some(ty) = &param.ty {
-            // The annotated receiver's `self` annotation is the checker's
-            // to report (the receiver ruling names the new spelling); a
-            // plain `self` path here would double-report.
+            // The annotated receiver's `self` annotation is the
+            // checker's to report; a plain `self` path here would
+            // double-report.
             let bare_self = matches!(
                 ty,
                 Type::Path { path, args, .. }
@@ -2422,16 +2420,15 @@ impl FileResolver<'_> {
                 ..
             } => {
                 match callee.as_ref() {
-                    // UFCS: a dot-callee gets tiered resolution [F3];
+                    // UFCS: a dot-callee gets tiered resolution;
                     // a bare type name as the receiver takes the
-                    // type-keyed tier instead (the receiverless ruling).
+                    // type-keyed tier instead.
                     Expr::Field { recv, name, .. } => {
                         self.dot_recv_use(recv);
                         self.dot_use(recv, name);
                     },
-                    // A call-form name resolves per the namespace split
-                    // [F9]; a generic-application constructor head is a
-                    // type use [F9].
+                    // A call-form name resolves per the namespace split;
+                    // a generic-application constructor head is a type use.
                     Expr::Path { path, .. } if path.segments.len() == 1 => {
                         self.call_name_use(&path.segments[0]);
                     },
@@ -2458,7 +2455,7 @@ impl FileResolver<'_> {
             Expr::Field { recv, name, .. } => {
                 // Bare field access: struct-owned, type-directed later.
                 // A module-alias receiver takes the qualified member's
-                // value seam instead (G4).
+                // value seam instead.
                 if let Some(module) = self.module_ref_receiver(recv) {
                     self.module_member_value_use(recv, module, name);
                 } else {
@@ -2550,16 +2547,16 @@ impl FileResolver<'_> {
         }
     }
 
-    /// Refuses a use crossing the private tier's file boundary (G4): a
+    /// Refuses a use crossing the private tier's file boundary: a
     /// private name is its defining file's alone. The resolution still
     /// records, keeping the refusal the single diagnostic the later
     /// passes see (the collision precedent).
     fn enforce_vis(&mut self, span: Span, def: DefId) {
         let def_decl = self.package.def(def);
         if def_decl.vis == Vis::Private && def_decl.span.file != span.file {
-            // the retired collection spellings name their member
-            // replacement in the message; every other private name keeps
-            // the plain boundary refusal
+            // The message names the member spelling for these collection
+            // names; every other private name keeps the plain boundary
+            // refusal
             let hint = match def_decl.name.as_str() {
                 "list_get" => "; the member spelling is `xs.get(i)`",
                 "list_push" => "; the member spelling is `xs.push(x)`",
@@ -2592,7 +2589,7 @@ impl FileResolver<'_> {
         self.uses.push((span, Res::Def(def)));
     }
 
-    /// One import declaration (G4): an `@std` import's selections validate
+    /// One import declaration: an `@std` import's selections validate
     /// against the exported surface — the compile unit's merged namespace
     /// serving the undeclared reading — while a graph that resolved the
     /// reserved package serves the same span through its linked surface
@@ -2603,7 +2600,7 @@ impl FileResolver<'_> {
     /// will evaluate; until then the import records and links as written.
     /// A `pub import` of `@std` refuses here: the merged-ambient reading
     /// binds the compile's own names, never import-bound defs, so no
-    /// selection re-exports until the un-merge (item 53).
+    /// selection re-exports until the un-merge.
     fn import(&mut self, imp: &ds_parse::ImportDecl, vis: Option<ds_parse::Vis>) {
         if !imp.path.at_sign || imp.path.segments.first().is_none_or(|s| s.name != "std") {
             return;
@@ -2661,9 +2658,9 @@ impl FileResolver<'_> {
     /// namespace comes next, and the type namespace last — a bare tag is a
     /// value-producing constructor, and a struct/enum/trait name reached
     /// here still resolves so the checker words its "type used as a value"
-    /// error (F9). Bare `none` is the universe's distinguished unit atom
-    /// (B4), not a package name; the checker types it directly, so it
-    /// records nothing here.
+    /// error. Bare `none` is the universe's distinguished unit atom, not a
+    /// package name; the checker types it directly, so it records nothing
+    /// here.
     fn name_use(&mut self, name: &Ident) {
         if let Some(bind) = self.lookup_local(&name.name) {
             self.uses.push((name.span, Res::Local { bind }));
@@ -2702,9 +2699,9 @@ impl FileResolver<'_> {
         })
     }
 
-    /// The import-bound function a name selects in the resolving file
-    /// (G4): locals and package names shadow imported names, the
-    /// resolver's own priority.
+    /// The import-bound function a name selects in the resolving file:
+    /// locals and package names shadow imported names, the resolver's own
+    /// priority.
     fn import_binding(&self, name: &str) -> Option<DefId> {
         self.imports
             .and_then(|imports| imports.names.get(name))
@@ -2719,7 +2716,7 @@ impl FileResolver<'_> {
             .map(|&(module, _)| module)
     }
 
-    /// The import-bound type a name selects in the resolving file (G4):
+    /// The import-bound type a name selects in the resolving file:
     /// a selection of a linked type's def, when the package's own type
     /// namespace does not declare the name — the same shadowing priority
     /// the value positions follow.
@@ -2732,7 +2729,7 @@ impl FileResolver<'_> {
             .then_some(def)
     }
 
-    /// The callee of a call form (F9): locals first (an indirect call of a
+    /// The callee of a call form: locals first (an indirect call of a
     /// bound function value), then the value namespace, then the type
     /// namespace (a constructor call — tag or payload construction).
     /// Present in BOTH namespaces the call is ambiguous — an error naming
@@ -2745,11 +2742,11 @@ impl FileResolver<'_> {
         let type_def = self.package.lookup_type_in(self.file, &name.name);
         match (self.package.lookup_value(&name.name), type_def) {
             (Some(value), Some(ty)) => {
-                // A tag family declaration yields to the value (F9.5):
+                // A tag family declaration yields to the value:
                 // tag names left the value namespace, so the call form
                 // always means the fn or const. Every other family is
-                // the constructor collision F9 keeps — DS2014, naming
-                // both declarations.
+                // a constructor collision — DS2014, naming both
+                // declarations.
                 if matches!(self.package.def(ty).kind, DefKind::Tag | DefKind::Case) {
                     self.def_use(name.span, value);
                 } else {
@@ -2775,7 +2772,7 @@ impl FileResolver<'_> {
     }
 
     /// A call-form name present in both namespaces: DS2014, naming both
-    /// declarations (F9).
+    /// declarations.
     fn namespace_collision(&mut self, name: &Ident, value: DefId, ty: DefId) {
         let value_def = self.package.def(value);
         let ty_def = self.package.def(ty);
@@ -2796,7 +2793,7 @@ impl FileResolver<'_> {
         );
     }
 
-    /// A generic-application constructor `list[page]()` (F9): the head
+    /// A generic-application constructor `list[page]()`: the head
     /// resolves in the type namespace and the bracketed arguments are type
     /// uses. A head that names no type is an ordinary index expression
     /// (`xs[i]`), whose typing is the checker's.
@@ -2811,7 +2808,7 @@ impl FileResolver<'_> {
         }
     }
 
-    /// The map constructor's type application `map[k, v]` (F9, B3): the
+    /// The map constructor's type application `map[k, v]`: the
     /// head is a type use and the two bracketed arguments are type uses,
     /// the list application's own convention.
     fn map_apply_use(&mut self, head: &Ident, key: &Expr, value: &Expr) {
@@ -2841,7 +2838,7 @@ impl FileResolver<'_> {
     }
 
     /// A path expression: one segment is a name use; `Trait::f` qualifies
-    /// directly (F3); longer paths are module paths (G4, M7).
+    /// directly; longer paths are module paths.
     fn path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => self.name_use(only),
@@ -2931,8 +2928,8 @@ impl FileResolver<'_> {
         }
     }
 
-    /// A brace-construction head `user { ... }` (F9): the type namespace
-    /// only; longer paths are module paths (G4, M7).
+    /// A brace-construction head `user { ... }`: the type namespace
+    /// only; longer paths are module paths.
     fn ctor_path_use(&mut self, path: &Path) {
         match path.segments.as_slice() {
             [only] => {
@@ -2960,12 +2957,12 @@ impl FileResolver<'_> {
         }
     }
 
-    /// A UFCS dot-call's method position (F3): free functions first, then
+    /// A UFCS dot-call's method position: free functions first, then
     /// registered methods; the `.err`/`.ok` handler forms are surface
     /// syntax, not names. The dot is a function position, so the free
-    /// tier searches the VALUE namespace only (F9). A receiver that is
+    /// tier searches the VALUE namespace only. A receiver that is
     /// a bare name resolving through the type namespace takes the
-    /// type-keyed tier instead (the receiverless-member ruling): the
+    /// type-keyed tier instead: the
     /// value tiers never apply behind a type name.
     fn dot_use(&mut self, recv: &Expr, name: &Ident) {
         if let Some(module) = self.module_ref_receiver(recv) {
@@ -2980,7 +2977,7 @@ impl FileResolver<'_> {
     }
 
     /// Whether a dot-call's receiver is a bare name this file's import
-    /// aliases bound (G4): no local and no package name shadows it —
+    /// aliases bound: no local and no package name shadows it —
     /// the module reference is the weakest reading, exactly like the
     /// type-keyed tier's discipline.
     fn module_ref_receiver(&self, recv: &Expr) -> Option<ModuleId> {
@@ -3089,7 +3086,7 @@ impl FileResolver<'_> {
         }
     }
 
-    /// A module alias's qualified member in value position (G4): a
+    /// A module alias's qualified member in value position: a
     /// linked package's fact-carrying const binds through the alias
     /// exactly as its selection spelling does — the same def, so every
     /// later pass embeds the literal — while every other member keeps
@@ -3171,7 +3168,7 @@ impl FileResolver<'_> {
     /// type namespace: no local and no value-namespace def shadows it
     /// (the ordinary name-use priority), and a type-namespace def names
     /// it — the package's own declarations first, the file's import
-    /// bindings below, the same priority a type position spells (G4).
+    /// bindings below, the same priority a type position spells.
     /// Such a receiver is a type, not a value — the type-keyed call tier
     /// owns it, so a linked type name refuses its member calls at the
     /// check instead of falling to the value tiers. An instantiated
@@ -3311,7 +3308,7 @@ impl FileResolver<'_> {
             .push((name.span, Res::Dot(DotRes::Static { candidates })));
     }
 
-    /// The ordinary value tiers behind the dot [F3, F9]: the handler
+    /// The ordinary value tiers behind the dot: the handler
     /// forms, then free functions, then every registered method
     /// candidate. A receiver that reaches here carries a value reading
     /// (a local, a value def, or a tag/case constructor value).
@@ -3322,7 +3319,7 @@ impl FileResolver<'_> {
         }
         if let Some(func) = self.package.lookup_value(&name.name) {
             // Capability parameters have no syntax yet, so the receiver
-            // feeds parameter 0 — the first data parameter [F3].
+            // feeds parameter 0 — the first data parameter.
             self.enforce_vis(name.span, func);
             self.uses
                 .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
@@ -3422,11 +3419,11 @@ impl FileResolver<'_> {
         } else if let Some(def) = self.package.lookup_type_in(self.file, &name.name) {
             self.def_use(name.span, def);
         } else if name.name == "none" {
-            // `none` is the universe's distinguished unit atom [B4], not a
+            // `none` is the universe's distinguished unit atom, not a
             // package declaration; the checker solves it directly.
         } else if name.name == "self" {
-            // `self` as a type name is retired; the receiver type is
-            // spelled `Self` [F2, record 6.1].
+            // `self` in a type position refuses; the receiver type is
+            // spelled `Self`.
             self.diags.push(
                 Diagnostic::error(
                     ErrorCode::LowercaseSelfType,
@@ -3439,7 +3436,7 @@ impl FileResolver<'_> {
                 }),
             );
         } else if let Some(def) = self.import_type_binding(&name.name) {
-            // a linked type's selection (G4): the sentinels above keep
+            // a linked type's selection: the sentinels above keep
             // their readings before any imported spelling
             self.def_use(name.span, def);
         } else {
@@ -3452,13 +3449,13 @@ impl FileResolver<'_> {
 
     /// Binds a pattern's binders into the current scope and resolves its
     /// case paths. `or_rebind` allows identical rebinding across
-    /// or-pattern alternatives (F4).
+    /// or-pattern alternatives.
     fn bind_pattern(&mut self, pat: &Pattern, or_rebind: bool) {
         self.pattern_at(pat, or_rebind, false);
     }
 
     /// A match-arm pattern: sub-patterns are member tests first, bindings
-    /// second (F9).
+    /// second.
     fn arm_pattern(&mut self, pat: &Pattern) {
         self.pattern_at(pat, false, true);
     }
@@ -3513,7 +3510,7 @@ impl FileResolver<'_> {
         }
     }
 
-    /// The type-namespace entry a bare arm identifier names (F9): the
+    /// The type-namespace entry a bare arm identifier names: the
     /// predeclared `none`, a constructor type's def, or nothing (a
     /// binding). Traits and aliases are sets, not constructors.
     fn arm_tag(&self, name: &Ident, arm: bool) -> ArmTag {
@@ -3530,7 +3527,7 @@ impl FileResolver<'_> {
             .map_or(ArmTag::Binding, ArmTag::Def)
     }
 
-    /// Pattern paths are constructor references (F9): the type namespace
+    /// Pattern paths are constructor references: the type namespace
     /// only.
     fn pattern_path(&mut self, path: &Path) {
         let candidates = || {
@@ -3556,7 +3553,7 @@ impl FileResolver<'_> {
             },
             // The tail is a case name; case tables are the checker's.
             // A tag-family head routes its label through the qualified
-            // spelling instead (F9.5).
+            // spelling instead.
             [head, tail] => {
                 if let Some(def) = self
                     .package
@@ -3636,7 +3633,7 @@ impl FileResolver<'_> {
 
     // ---- diagnostics -------------------------------------------------------
 
-    /// The qualified `type::label` routing (F9.5): a type-family head
+    /// The qualified `type::label` routing: a type-family head
     /// (tag, case, enum, alias) routes its label to the declaring
     /// declaration the HEAD's own file names — the escape hatch the bare
     /// label's ambiguity refusal points at. Membership in the head's set

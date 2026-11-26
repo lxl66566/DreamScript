@@ -5,12 +5,12 @@
 //! with occasional wrong splices), and the full pipeline (parse, effects
 //! walk over the generator's declared rows, bidirectional check with the
 //! affine pass, both diag renderers) never panics. The census asserts
-//! the pattern rounds' landed vocabulary stays in the draw set:
+//! the landed vocabulary stays in the draw set:
 //! value-level or-patterns, struct patterns over struct-typed
 //! scrutinees, case constructor payload tests, guards over dispatch,
 //! nested struct sub-patterns, whole-span union equality, and unions
-//! over heap-ref applications, plus the CALL_GENERIC round's
-//! vocabulary: free generic call sites over declared bounds, serving
+//! over heap-ref applications, plus the CALL_GENERIC vocabulary: free
+//! generic call sites over declared bounds, serving
 //! impl bodies, nested runtime forms, the honest doors, inert
 //! uncalled declarations, the impl-completeness shapes, and
 //! two-level instantiations, plus the parser-budget shapes: type
@@ -138,8 +138,8 @@ fn generated_programs_never_panic() {
         rowed > 0,
         "the effects walk must see declared rows somewhere in the sweep"
     );
-    // the span-surface draw census: the span rework's landed shapes must
-    // stay in the vocabulary (a weighting regression fails loudly)
+    // the span-surface draw census: the landed span shapes must stay in
+    // the vocabulary (a weighting regression fails loudly)
     assert!(
         record_lists > 0,
         "record-typed list elements are drawn somewhere in the sweep"
@@ -152,8 +152,8 @@ fn generated_programs_never_panic() {
         span_fields > 0,
         "struct-typed fields are drawn somewhere in the sweep"
     );
-    // the pattern rounds' landed vocabulary stays in the generator's
-    // draw set (a weighting regression fails loudly)
+    // the landed vocabulary stays in the generator's draw set (a
+    // weighting regression fails loudly)
     assert!(
         heap_ref_unions > 0,
         "unions over heap-ref applications are drawn somewhere in the sweep"
@@ -182,8 +182,8 @@ fn generated_programs_never_panic() {
         union_equality > 0,
         "whole-span equality over union operands is drawn somewhere in the sweep"
     );
-    // the CALL_GENERIC round's landed vocabulary stays in the
-    // generator's draw set (a weighting regression fails loudly)
+    // the CALL_GENERIC landed vocabulary stays in the generator's draw
+    // set (a weighting regression fails loudly)
     assert!(
         generic_calls > 0,
         "free generic call sites are drawn somewhere in the sweep"

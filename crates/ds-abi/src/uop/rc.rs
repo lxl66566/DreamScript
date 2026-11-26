@@ -1,5 +1,5 @@
-//! The M4 reference-counting ops (C4): RCINC/RCDEC in the reserved major
-//! 0xE of the fixed 32-bit format `[BL-1]`.
+//! The reference-counting ops: RCINC/RCDEC in the reserved major
+//! 0xE of the fixed 32-bit format.
 //!
 //! These live beside [`super::Uop`](crate::uop::Uop) instead of inside it
 //! on purpose: the tier-1 dispatch match stays exhaustive over `Uop`, and
@@ -9,21 +9,21 @@
 //! [`RcOp::decode`] over its counted heap blocks. The streams never
 //! renumber (the majors below 0xE are untouched).
 //!
-//! Semantics (C4, over the counted heap blocks of `ds-vm/src/object.rs`,
+//! Semantics (over the counted heap blocks of `ds-vm/src/object.rs`,
 //! the consumed implementation):
 //!
 //! - `Inc { src }` — `rc_inc`: the reference in `slots[src]` gains one owner. Placed at every
 //!   duplication edge (a copy into a second slot, a call staging the caller keeps alive).
 //! - `Dec { src }` — `rc_dec`: one owner drops. A unique death runs the block's static `deinit`
-//!   hook exactly once (C5) and threads the block into the reuse pool (the next compatible
-//!   allocation claims it — the runtime pairs dec-to-alloc internally, so no alloc-at uop exists).
+//!   hook exactly once and threads the block into the reuse pool (the next compatible allocation
+//!   claims it — the runtime pairs dec-to-alloc internally, so no alloc-at uop exists).
 //!
 //! Both read `slots[src]` and write no slot (the count lives in the heap
 //! header), so they are impure for the same reason the allocating ops are:
 //! reordering or duplicating one breaks the dup/drop balance.
 
 /// The reference-counting major: the growth slot the module docs reserved
-/// for the M4 RC ops. Bytes `0xE0` (RCINC) and `0xE1` (RCDEC) are the only
+/// for the RC ops. Bytes `0xE0` (RCINC) and `0xE1` (RCDEC) are the only
 /// assigned minors; the rest of 0xE stays reserved.
 pub const RC_MAJOR: u8 = 0xe;
 
@@ -36,19 +36,19 @@ pub enum RcDecodeError {
     ReservedField,
 }
 
-/// One reference-counting micro-operation (C4). Slot operands address the
+/// One reference-counting micro-operation. Slot operands address the
 /// frame word holding the reference; the count itself is heap state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RcOp {
     /// `0xE.0` — `rc_inc`: one more owner for the reference in `slots[src]`.
     Inc { src: u8 },
     /// `0xE.1` — `rc_dec`: drop one owner; a unique death runs `deinit`
-    /// (C5) and pools the block for reuse.
+    /// and pools the block for reuse.
     Dec { src: u8 },
 }
 
 impl RcOp {
-    /// The opcode byte: `major << 4 | minor`, matching the `[BL-1]` pair the
+    /// The opcode byte: `major << 4 | minor`, matching the pair the
     /// `Uop` encoding uses.
     #[must_use]
     pub fn opcode(&self) -> u8 {

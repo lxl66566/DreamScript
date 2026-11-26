@@ -1,7 +1,6 @@
 //! End-to-end `ds check` through the binary: the conformance corpus checks
-//! clean as-is under the stdlib ambient (the M3 checked-declaration layer),
-//! the plain fixtures stay self-contained under `--no-ambient`, and the
-//! negative fixture reports its overlap and moved-then-used pair with
+//! clean as-is under the stdlib ambient, the plain fixtures stay self-contained under
+//! `--no-ambient`, and the negative fixture reports its overlap and moved-then-used pair with
 //! golden renderings.
 
 use std::{
@@ -23,7 +22,7 @@ fn ds_check(args: &[&str]) -> Output {
 
 /// One corpus file's documented noise: the file checks with the ambient
 /// (exit 0), stdout stays empty, and stderr prints exactly the staged
-/// leftovers the corpus README's stage vocabulary owns — the printed
+/// leftovers the corpus stage vocabulary owns — the printed
 /// count is the pin; every diagnostic must name an item staged away from
 /// `typecheck`, or the command would have failed.
 fn assert_corpus_clean(file: &str, noise: usize) {
@@ -39,7 +38,7 @@ fn assert_corpus_clean(file: &str, noise: usize) {
     );
 }
 
-/// The M3 acceptance: the corpus files check clean as-is, the stdlib
+/// The corpus acceptance: the corpus files check clean as-is, the stdlib
 /// ambient arriving as the package's first member. The documented noise
 /// per file, all confined to items the header stages away from
 /// `typecheck`:
@@ -59,9 +58,8 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 /// * linearity_modes_rc: run items only — the ambient's `open_file` is named apart from the file's
 ///   own `open` (the unknown-name pair), its `read_exact` answering the dot call over the file's
 ///   `file`-typed receiver with the `not contained` item (the file's face predates the ambient's;
-///   `to_u32_le` still refuses at lowering as before) and `u32`'s distinct width [B7] (the `.err`
-///   fallback meets `lens.len()`'s int — the retired `or` hid that width meeting); the epoch
-///   suppresses the `empty`-typed follow-ons those roots used to print.
+///   `to_u32_le` refuses at lowering) and `u32`'s distinct width (the `.err` fallback meets
+///   `lens.len()`'s int); the epoch suppresses the `empty`-typed follow-ons.
 /// * effects_nursery: zero noise — `urls` and the net failure taxonomy are ambient, and the
 ///   fetch/retry matches use member-test arms plus the leftover page binder.
 /// * range_for: zero noise — the for-over-range and `in` membership items are self-contained under
@@ -69,7 +67,7 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 /// * pattern_dispatch: zero noise — the tutorial-pass regressions check clean against the
 ///   ambient-owned io_err (the tail `?` over the contained union included).
 /// * while_cond_refs: zero noise — the dying string/list/deinit-claim while conditions are
-///   self-contained under the ambient (the corpus README's run stage documents their placement).
+///   self-contained under the ambient.
 /// * nursery_surface: zero noise — the nursery items are self-contained under the ambient (the net
 ///   failure taxonomy and the cancel seam are ambient-owned).
 /// * tutorial_surface: zero noise — the interpolation and receiverless-default items are
@@ -111,44 +109,41 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // consumption shapes ride the gate's two-file harness
     assert_corpus_clean("toplevel_consumption.ds", 1);
     // zero noise — the deinit surface runs self-contained under the
-    // ambient (record C5, the deinit wiring round)
+    // ambient
     assert_corpus_clean("deinit_surface.ds", 0);
     // zero noise — the while-cond Ref operands are loop-carried, so the
     // dying-string/list/deinit-claim items are self-contained under the
-    // ambient (record C4, the while-cond placement round)
+    // ambient
     assert_corpus_clean("while_cond_refs.ds", 0);
     // zero noise — the spawn/join/cancel/unioning items are
-    // self-contained under the ambient (M5, the nursery surface round)
+    // self-contained under the ambient
     assert_corpus_clean("nursery_surface.ds", 0);
     // zero noise — the defaulted-parameter spellings are self-contained
-    // under the ambient (F7, the trait-default authority round)
+    // under the ambient
     assert_corpus_clean("trait_defaults.ds", 0);
     // zero noise — the list[record] items ride the ambient list surface
-    // (the native result span channel round)
     assert_corpus_clean("records_lists.ds", 0);
     // zero noise — the generic impl heads and their nested dispatch are
-    // self-contained under the ambient (H3, the transitive evidence round)
+    // self-contained under the ambient
     assert_corpus_clean("transitive_dispatch.ds", 0);
     // zero noise — the nursery teardown items are self-contained under
-    // the ambient (E5, the drain-doors round)
+    // the ambient
     assert_corpus_clean("teardown_deinit.ds", 0);
-    // zero noise — the tutorial's recently landed interpolation and
+    // zero noise — the tutorial's interpolation and
     // receiverless-default items are self-contained under the ambient
     assert_corpus_clean("tutorial_surface.ds", 0);
     // the one error is the file's own reject item (the float `&`
     // operand the integer table refuses)
     assert_corpus_clean("shift_bitwise.ds", 1);
     // zero noise — the annotated member's default() spellings and the
-    // defaulting struct field are self-contained under the ambient (the
-    // union-default member annotation round)
+    // defaulting struct field are self-contained under the ambient
     assert_corpus_clean("derive_default_union.ds", 0);
     // zero noise — the pure-row helper admits at the comptime fence, and
-    // `ds check` never runs the fence (the comptime pure-fn admission round)
+    // `ds check` never runs the fence
     assert_corpus_clean("comptime_admission.ds", 0);
     // the three errors are the file's own reject items (the `pub import`
     // re-export, the `pub impl`, the missing `@std` selection); the tier
-    // spellings and the clean `@std` selection check clean (the G4
-    // visibility round)
+    // spellings and the clean `@std` selection check clean
     assert_corpus_clean("visibility_surface.ds", 3);
     // the nine errors are the file's own reject items (the eight
     // none-typed field spellings and the none-headed application); the
@@ -169,8 +164,7 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // the ambiguous label naming both declarations, and the same-file
     // redeclaration — the call form, the directed spellings, and the
     // qualified timeout escape check clean beside the shadowing
-    // declaration (the F9.5 phase-1 round, reworked at the timer race's
-    // landing)
+    // declaration
     assert_corpus_clean("tag_resolution.ds", 7);
 }
 
@@ -226,8 +220,8 @@ fn without_the_ambient_the_corpus_names_stay_unresolved() {
 }
 
 /// A self-contained package under the ambient collides with the shared
-/// namespace [G3]: tag declarations shadow across files [F9.5], so the
-/// residual duplicate class is the other families — the file's own
+/// namespace: tag declarations shadow across files, so the
+/// duplicate class is the other families — the file's own
 /// struct redefines the ambient's.
 #[test]
 fn a_package_redeclaring_an_ambient_name_reports_the_duplicate() {
@@ -258,8 +252,8 @@ fn a_clean_single_file_package_is_silent() {
     }
 }
 
-/// The negative fixture: the intended overlap rejection [B6] and
-/// moved-then-used pair [C1] are fatal and render golden in both formats.
+/// The negative fixture: the intended overlap rejection and
+/// moved-then-used pair are fatal and render golden in both formats.
 #[test]
 fn the_negative_fixture_renders_golden_human_diagnostics() {
     let out = ds_check(&["check", "--no-ambient", "tests/fixtures/moved_overlap.ds"]);

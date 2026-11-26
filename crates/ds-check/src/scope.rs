@@ -13,7 +13,7 @@
 //! block is invisible at a later binding's initializer. The walk reads
 //! the package's declared types to bind arm patterns exactly as the
 //! resolver binds them: a bare arm identifier naming a constructor type
-//! or the predeclared `none` is a member test that binds nothing (F9).
+//! or the predeclared `none` is a member test that binds nothing.
 //! Derive-synthesized items mint their spans inside the attributed
 //! declaration, so the walk skips them: a cursor there names the
 //! declaration, never the minted body.
@@ -24,11 +24,11 @@
 //! mirrors resolution: an inner local hides an outer local and any
 //! package value declaration of the same name, while a type-namespace
 //! declaration of the name stays visible — constructor positions still
-//! resolve it (F9).
+//! resolve it.
 //!
 //! Type-variable scopes (generic parameters, `Self`) bind in the
 //! resolver's type stacks and stay outside this slice; member completion
-//! and imports (G4) are later work.
+//! and imports are later work.
 
 use ds_diag::{FileId, Span};
 use ds_parse::{
@@ -153,7 +153,7 @@ fn pattern_bindings(pat: &Pattern, visible_from: u32) -> Vec<ScopeBinding> {
 
 /// The binder entries of one match-arm pattern, all turning visible at
 /// `visible_from`: a bare identifier naming a member test (`arm_tests`)
-/// binds nothing (F9); every other arm shape binds like a declaration
+/// binds nothing; every other arm shape binds like a declaration
 /// pattern.
 fn arm_bindings(
     pat: &Pattern,
@@ -171,7 +171,7 @@ fn arm_bindings(
         .collect()
 }
 
-/// The names a bare match-arm identifier tests instead of binding (F9):
+/// The names a bare match-arm identifier tests instead of binding:
 /// the package's constructor types, plus the predeclared `none` while no
 /// package declaration claims it — the resolver's arm-tag rule, so the
 /// walk binds what resolution binds.
@@ -204,7 +204,7 @@ fn param_bindings(params: &[ds_parse::Param]) -> Vec<ScopeBinding> {
 
 /// Collects a file's scope frames by walking its tree, mirroring the
 /// resolver's scoping decisions scope for scope. `package` supplies the
-/// declared types behind the arm member-test rule (F9).
+/// declared types behind the arm member-test rule.
 #[must_use]
 pub fn scope_frames(ast: &Ast, package: &Package) -> Vec<ScopeFrame> {
     let mut walker = Walker {
@@ -253,7 +253,7 @@ impl Walker<'_> {
             return;
         }
         match &item.kind {
-            // A top-level binding declares a package def (G3): its name
+            // A top-level binding declares a package def: its name
             // reaches uses through the package table, so only the
             // initializer's own scopes walk here.
             ItemKind::Local(local) => self.expr(&local.init),
@@ -467,7 +467,7 @@ impl Walker<'_> {
 /// declarations first, the package's other declarations next, then the
 /// enclosing local scopes innermost-first. `frames` are the file's
 /// [`scope_frames`] value and `package` the resolver's collected tables,
-/// so the answer and name resolution read the same namespace (F9: a
+/// so the answer and name resolution read the same namespace (a
 /// local shadows a package value declaration of its name, while a
 /// type-namespace declaration of the name stays visible). Collection
 /// keeps one def per name and namespace, so the package entries need no
@@ -511,7 +511,7 @@ pub fn visible_at(
                 continue;
             }
             // A local hides a package value declaration of the same name;
-            // a type-namespace declaration stays visible (F9).
+            // a type-namespace declaration stays visible.
             if !def.kind.in_type_namespace() && local_names.contains(&def.name) {
                 continue;
             }

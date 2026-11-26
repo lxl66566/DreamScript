@@ -1,15 +1,16 @@
 //! The conformance corpus's stage expectations: the `// items:` header
 //! every corpus file carries, mapping each item to the milestone that
-//! owns it (the vocabulary conformance/README.md defines).
+//! owns it.
 //!
-//! The stages: `typecheck` (the M2 checker must accept the item clean),
-//! `run` (M2 checks it, and the M3 stdlib types what the M2 story leaves,
-//! so a run item may carry its documented leftovers), `reject <what>`
-//! (exactly one named rejection is expected), `m<phase>` (the construct
-//! lands at that milestone; the M2 checker does not model it), and
-//! `unresolved` (commented out in the body, aligning with no live item).
+//! The stages: `typecheck` (the checker must accept the item clean),
+//! `run` (the checker accepts it, and the stdlib types what the static
+//! check leaves, so a run item may carry its documented leftovers),
+//! `reject <what>` (exactly one named rejection is expected), `m<phase>`
+//! (the construct lands at that milestone; the checker does not model
+//! it), and `unresolved` (commented out in the body, aligning with no
+//! live item).
 //!
-//! One scoping rule serves every consumer: only `typecheck` items gate M2
+//! One scoping rule serves every consumer: only `typecheck` items gate
 //! checking. Diagnostics confined to items staged anything else are
 //! corpus-owned noise — the conformance gate pins which and why per
 //! file, and the `ds check` driver treats them as non-fatal, so a corpus

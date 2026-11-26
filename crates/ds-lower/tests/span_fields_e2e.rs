@@ -222,9 +222,9 @@ fn the_refusal_openings_keep_their_honest_names() {
         "a multi-word tuple element",
         "tuple elements lower as one plain frame word",
     );
-    // the wider map value opening landed with the map value channel
-    // round (map_set stages the value's whole word span); its run
-    // pins live in map_value_channel_e2e
+    // the wider map value opening the map value channel owns (map_set
+    // stages the value's whole word span); its run pins live in
+    // map_value_channel_e2e
     // a deinit-carrying field type: the inline span has no claim of its
     // own, so the hook would run at the wrong death
     refuses(

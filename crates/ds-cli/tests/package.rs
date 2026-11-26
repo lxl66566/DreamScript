@@ -615,7 +615,7 @@ fn an_undeclared_import_refuses() {
 }
 
 /// A package whose bundle carries more than one source member composes
-/// one module under its link name (G3): each member file joins one
+/// one module under its link name: each member file joins one
 /// compile unit, an import's member segment selects the member file's
 /// grain, and the root calls functions from two members through one
 /// link. The built artifact pins the package at the composed identity —
@@ -712,8 +712,8 @@ fn ds_caches_debug(cache: &Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// A multi-member package root composes one namespace at the root
-/// (G3): `ds run` and `ds build` compile the entry member and every
+/// A multi-member package root composes one namespace at the root:
+/// `ds run` and `ds build` compile the entry member and every
 /// sibling below the root into one module — the same member walk a
 /// dep-side compile rides — so the root that resolves when it is a dep
 /// resolves when it runs. Both script-mode caches key on the composed
@@ -845,7 +845,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
 
 /// A three-member root binds a cross-member impl: the struct lives in
 /// one member, its trait impl in a second, and the entry calls through
-/// the trait's dispatch from the third — one namespace (G3), the members
+/// the trait's dispatch from the third — one namespace, the members
 /// composing exactly as `ds check` over the same three files checks.
 #[test]
 fn a_three_member_root_binds_a_cross_member_impl() {
@@ -879,7 +879,7 @@ fn a_three_member_root_binds_a_cross_member_impl() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A whole-package import and a module alias bind (G4): `import @wide`
+/// A whole-package import and a module alias bind: `import @wide`
 /// selects from every member's exports, and `as` binds a reference the
 /// dotted call sites resolve through the linked member surface.
 #[test]
@@ -917,7 +917,7 @@ fn a_whole_package_import_and_an_alias_bind() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The import selection tiers refuse at the use they fail (G4): a
+/// The import selection tiers refuse at the use they fail: a
 /// private name, an unexported name, a generic function, a duplicate
 /// binding, and a member segment naming no member file each exit
 /// nonzero with their own diagnostic wording.
@@ -1042,8 +1042,8 @@ version = \"1.0.0\"
     (work, pkg_id)
 }
 
-/// A linked package's plain-literal and computed consts bind and run
-/// (G4): the value is the per-target link fact — a plain initializer's
+/// A linked package's plain-literal and computed consts bind and run:
+/// the value is the per-target link fact — a plain initializer's
 /// literal, a computed initializer's dep-side evaluation answer — so
 /// every root use embeds it exactly as the literal a user would have
 /// written, over every scalar shape (int with a negation, string,
@@ -1102,8 +1102,8 @@ computed = 42 shout = dream
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A linked package's alias-qualified const reads in value position
-/// (G4): the qualified spelling binds through the same value fact the
+/// A linked package's alias-qualified const reads in value position:
+/// the qualified spelling binds through the same value fact the
 /// selection embeds — plain and computed alike, over every scalar shape
 /// and the nested contexts (an argument, a list element, an
 /// interpolation hole, an `if` condition) — so the run answers exactly
@@ -1163,7 +1163,7 @@ computed = 42 shout = dream
 }
 
 /// The const shapes with no value fact keep their refusals at the same
-/// walk (G4): a mutable binding and the alias-qualified spellings — the
+/// walk: a mutable binding and the alias-qualified spellings — the
 /// const's call form, a private const, a missing name, a function
 /// value, and a type name in value position.
 #[test]
@@ -1339,7 +1339,7 @@ version = \"0.1.0\"
 }
 
 /// A linked package's exported const whose initializer traps refuses
-/// the producer's own artifact build (G4): the dep-side evaluation runs
+/// the producer's own artifact build: the dep-side evaluation runs
 /// on the producer's compile, and a trapping initializer means the
 /// value a dependent would read does not exist — the refusal names the
 /// const and its initializer with the const's own code, never a silent
@@ -1375,7 +1375,7 @@ fn a_trapping_exported_const_refuses_the_producer_build() {
 }
 
 /// A linked package's exported const whose initializer touches the
-/// world surface refuses at the same producer-side build (G4): the
+/// world surface refuses at the same producer-side build: the
 /// evaluation fence admits only pure and trap-only reaches, so a world
 /// call inside an initializer is a compile error naming the capability.
 #[test]
@@ -1650,7 +1650,7 @@ version = \"0.1.0\"
     )
 }
 
-/// A linked flat struct binds through its structural fact (G4): the
+/// A linked flat struct binds through its structural fact: the
 /// word layout is the per-target fact, so the link walk registers a
 /// struct def the file's type positions reach, the consumer constructs,
 /// reads, and narrows over it exactly like a local declaration, and a
@@ -1719,7 +1719,7 @@ fn linked_struct_facts_bind_and_run() {
 }
 
 /// A linked struct whose fields ride the word vocabulary's own closure
-/// binds and runs across the boundary (G4): an optional over a list, a
+/// binds and runs across the boundary: an optional over a list, a
 /// nested list, and a map over scalars all mint exactly the local
 /// spelling's declaration products, so the consumer constructs each
 /// field (the optional's `none` side included), reads them through the
@@ -1760,7 +1760,7 @@ fn linked_container_word_fields_bind_and_run() {
 }
 
 /// A linked struct whose fields name another linked declared type of
-/// the same member binds and runs across the boundary (G4): the Named
+/// the same member binds and runs across the boundary: the Named
 /// word — a direct nested field, a `list[cell]`, a `cell?`, a
 /// `map[string, cell]`, and a field naming the member's enum — resolves
 /// onto the consumer's own mint for that same declaration, so the
@@ -1899,7 +1899,7 @@ fn blobs_root_manifest(pkg_id: &str) -> String {
 }
 
 /// A linked struct with a `bytes` field binds through its word-layout
-/// fact (G4): the field is one Ref word like a string field, so it joins
+/// fact: the field is one Ref word like a string field, so it joins
 /// the linked word vocabulary and the consumer constructs it through the
 /// utf8 bridge, matches, `is`-narrows, and structurally `==`-compares
 /// across the boundary, the value flowing into the ambient bytes natives
@@ -1970,7 +1970,7 @@ fn linked_bytes_field_facts_bind_and_run() {
 }
 
 /// A linked struct's tuple field binds through its word-layout fact
-/// (G4): the positional product is one plain word per member, so it
+/// fact: the positional product is one plain word per member, so it
 /// joins the linked word vocabulary and the consumer constructs,
 /// destructures in place, and passes values through the producer's own
 /// tuple-taking functions — a scalar pair and a pair over the Ref
@@ -2012,7 +2012,7 @@ fn the_tuple_fields_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A producer's trait impls cross the link seam (G4): the trait's
+/// A producer's trait impls cross the link seam: the trait's
 /// member rows bind as foreign method-registry rows, the impl's
 /// owner-keyed member links declare the instance over the minted head,
 /// and the consumer's dot-call dispatches through CALLG to the linked
@@ -2052,8 +2052,8 @@ fn the_trait_impls_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A producer's named impls cross the link seam with their vocabulary
-/// (the B6 two-impls escape): the linked row declares into its slot, a
+/// A producer's named impls cross the link seam with their vocabulary:
+/// the linked row declares into its slot, a
 /// consumer call site's `as` selection resolves and dispatches the named
 /// body through the same CALLG machinery, the qualified spelling selects
 /// the same instance, and the unnamed row keeps answering the plain
@@ -2200,7 +2200,7 @@ fn the_qualified_trait_spelling_dispatches_over_the_link() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A producer's trait default bodies cross the link seam (G4): the
+/// A producer's trait default bodies cross the link seam: the
 /// member's row carries the declared body's table index, the mint
 /// marks the member omittable, and a consumer's dispatch whose solving
 /// impl spells no member — the producer's own omitting impl or the
@@ -2240,8 +2240,8 @@ fn the_trait_default_bodies_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A default body the round cannot carry refuses at the producer's own
-/// walk (G4), naming the member at its declaration: a body dispatching
+/// A default body the link walk cannot carry refuses at the producer's
+/// own walk, naming the member at its declaration: a body dispatching
 /// on `self` stages runtime evidence a consumer cannot build, and a
 /// body carrying an effect row unions nothing at the consumer's
 /// dispatch — both fail the producer's compile before any consumer
@@ -2304,7 +2304,7 @@ fn the_uncarriable_default_bodies_refuse_at_the_producer() {
 
 /// A linked default body's receiver claims its `Self` variable's single
 /// Raw word, so a consumer dispatch over a multi-word head keeps the
-/// local one-word instantiation boundary's own refusal (G4): the
+/// local one-word instantiation boundary's own refusal: the
 /// consumer's omitting impl over a two-word linked struct refuses at
 /// the lowering, naming the linked default body's receiver.
 #[test]
@@ -2488,7 +2488,8 @@ fn the_unplanned_inherent_members_keep_their_call_refusals() {
         ("make", "  pair.make(3, 4)\n"),
     ] {
         let body = format!(
-            "import @lib (pair)\n\nfn main() -> int {{\n  const made = pair {{ a: 1, b: 2 }}\n{spelling}}}\n"
+            "import @lib (pair)\n\nfn main() -> int {{\n  const made = pair {{ a: 1, b: 2 \
+             }}\n{spelling}}}\n"
         );
         let (ok, out, err) = bespoke_run(&work, &pkg_id, &body);
         assert!(!ok, "the `{member}` call refuses cross-link");
@@ -2507,7 +2508,7 @@ fn the_unplanned_inherent_members_keep_their_call_refusals() {
 }
 
 /// A linked fn's signature binds over its own type without the type's
-/// selection (G4): the fact registers from the member's surface alone,
+/// selection: the fact registers from the member's surface alone,
 /// so values of the type flow between linked calls — the consumer never
 /// spelling the name, field access keyed on the minted atom.
 #[test]
@@ -2536,7 +2537,7 @@ fn linked_signatures_bind_over_an_unselected_type() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A linked enum binds through its tag rows (G4): the fact registers the
+/// A linked enum binds through its tag rows: the fact registers the
 /// enum and each case exactly like a local declaration, so the consumer
 /// constructs, matches, and `is`-narrows over the type — and the shared
 /// tag mapping (the linked module's own table rows seeded into the
@@ -2610,10 +2611,9 @@ fn linked_enum_facts_bind_and_run() {
 }
 
 /// A linked enum's tuple payload binds through its positional-word
-/// fact (G4): the consumer constructs by call form, matches
-/// positionally, and hands values to the producer's own functions over
-/// the same positional shape — the 2026-11-20 vocabulary round's
-/// refused shape, lifted with the richer fact encoding.
+/// fact: the consumer constructs by call form, matches positionally,
+/// and hands values to the producer's own functions over the same
+/// positional shape the richer fact encoding spells.
 #[test]
 fn linked_tuple_payloads_bind_and_run() {
     let (work, pkg_id) = shapes_fixtures("shapes-trip");
@@ -2645,11 +2645,10 @@ fn linked_tuple_payloads_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A linked linear struct binds with its move-discipline bit (G4):
+/// A linked linear struct binds with its move-discipline bit:
 /// the consumer constructs the linked linear shape, moves it into the
 /// producer's consuming function, and the linearity discipline holds
-/// exactly like a local declaration — the fact carrying the bit that
-/// the pre-widening round refused whole.
+/// exactly like a local declaration — the fact carrying the bit.
 #[test]
 fn linked_linear_structs_bind_and_run() {
     let (work, pkg_id) = shapes_fixtures("shapes-linear");
@@ -2676,7 +2675,7 @@ fn linked_linear_structs_bind_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// A lone tag binds through its unit-atom fact (G4): the link walk
+/// A lone tag binds through its unit-atom fact: the link walk
 /// registers the tag def exactly like a local `tag` declaration, so
 /// the consumer constructs, annotates, narrows, and matches over
 /// unions of linked tags, and a linked fn's union-typed signature
@@ -2758,7 +2757,7 @@ fn an_empty_linked_enum_binds_its_name() {
 
 /// The type shapes the vocabulary cannot spell and the names a local
 /// declaration or the consumer itself owns keep their refusals at the
-/// same walk (G4): a deinit-carrying struct, a generic enum, a generic
+/// same walk: a deinit-carrying struct, a generic enum, a generic
 /// struct, and a struct with a field outside the word
 /// vocabulary each carry no fact; a generic alias — a declaration
 /// resolving through use-site arguments — carries none the same way;
@@ -2876,11 +2875,11 @@ fn the_uncarried_type_shapes_refuse() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// An inherent impl over a linked type binds and dispatches (G4): the
+/// An inherent impl over a linked type binds and dispatches: the
 /// minted def answers the layout seams, so the consumer's own impl
 /// members register under the linked name and select against the
 /// minted atom exactly like a local impl — the body compiling in this
-/// package, the declaration-site refusal the linking round retired.
+/// package.
 #[test]
 fn an_impl_over_a_linked_type_dispatches() {
     let (work, pkg_id) = shapes_fixtures("shapes-impl");
@@ -2913,7 +2912,7 @@ fn an_impl_over_a_linked_type_dispatches() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The artifact round's richer alias and union words cross (G4): a
+/// The richer alias and union words cross: a
 /// linked alias whose body names a declared type of the same member
 /// (`cells = list[cell]`), an alias chain expanding through another
 /// alias (`chain = words`), a union-body alias (`either = int |
@@ -2967,7 +2966,7 @@ fn the_alias_bodies_and_the_subset_union_cross() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// Comptime reflection reads a linked type (G1, G4): the mint's
+/// Comptime reflection reads a linked type: the mint's
 /// declaration products are the consuming compile's own, so `fields`
 /// and `type_name` answer over a linked struct and a linked enum's
 /// cases — the reflection projection consulting the foreign name
@@ -3014,7 +3013,7 @@ fn comptime_reflection_reads_a_linked_type() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The linked type's remaining receiver seam refuses at the check (G4):
+/// The linked type's remaining receiver seam refuses at the check:
 /// a bare linked type name as a dot-call receiver enters the type-keyed
 /// tier, so a member the type does not carry answers the checker's own
 /// refusal — the same wording the local spelling meets — instead of
@@ -3466,8 +3465,7 @@ fn ds_both_debug(cache: &Path, args: &[&str]) -> (bool, String, String) {
 
 /// Every `.dsi` prefix artifact below the cache root's prefix tier: the
 /// composed-prefix family under `dsi/` alone — each linked member's own
-/// `.dsi` lands beside its dsmod under `ir/bytecode/` (its own family,
-/// the surface round's), not here.
+/// `.dsi` lands beside its dsmod under `ir/bytecode/` (its own family), not here.
 fn dsi_artifacts(cache: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![cache.join("dsi")];
@@ -3853,7 +3851,7 @@ const ARTIFACT_SOURCE: &str = concat!(
 );
 
 /// The root manifest declaring one per-target, content-hashed artifact.
-/// The triple is arbitrary data this round — install validates presence
+/// The triple is arbitrary data: install validates presence
 /// and content, nothing host-filters yet.
 fn artifact_manifest(identity: Hash128) -> String {
     format!(
@@ -4011,8 +4009,8 @@ fn a_declared_std_dep_serves_the_default_install() {
     );
 
     // the built artifact pins @std at the bundle's member identity — the
-    // ambient's source hash no longer coincides with it since the members
-    // migrated into the package's own source
+    // ambient's source hash differs from it, the members living in the
+    // package's own source
     let out_path = work.join("app.dsmod");
     let (ok, _, err) = ds_env(&cache, None, &[
         "build",
@@ -4044,7 +4042,7 @@ fn a_declared_std_dep_serves_the_default_install() {
 /// the presence-tag word, the list-literal const embeds its elements
 /// over the same `list_new`/`list_push` seam a local literal lowers
 /// through, and the opaque bodiless struct binds its name in the type
-/// namespace while every value use keeps the local spelling's own M3
+/// namespace while every value use keeps the local spelling's own
 /// contract refusal (no construction lowers, no witness exists).
 #[test]
 fn a_declared_std_dep_compiles_over_the_shrunk_core() {
@@ -4147,7 +4145,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     );
 
     // the opaque shape's honest boundary: the name binds, but every
-    // value use keeps the local spelling's own M3 contract refusal —
+    // value use keeps the local spelling's own contract refusal —
     // the parameter spelling here, the construction spelling below
     let root = write_root(
         &work,
@@ -4177,7 +4175,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     // the construction spelling splits the same way: the checker
     // accepts the part-less construction (resolve's zero-field rows
     // assert the walk clean), while the lowerer refuses it through
-    // the M3 arm — no construction lowers, no witness exists
+    // the lowerer arm — no construction lowers, no witness exists
     let root = write_root(
         &work,
         &std_root_manifest(&ver, &std_id.to_string()),
@@ -4304,7 +4302,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
     assert_eq!(warm, expected, "the warm run answers the same bytes");
 
     // the opaque shape's honest boundary: the name binds through the
-    // link, but every value use keeps the local spelling's M3 contract
+    // link, but every value use keeps the local spelling's contract
     // refusal
     let opq = script_dir.join("opq.ds");
     fs::write(
@@ -4638,8 +4636,7 @@ fn reexport_fixtures(tag: &str) -> (PathBuf, Hash128) {
     (work, lib_id)
 }
 
-/// A `pub import` re-export crosses the middle package (todo item 58's
-/// transitive surface closure): the middle package's `pub import` row
+/// A `pub import` re-export crosses the middle package: the middle package's `pub import` row
 /// joins the deepest member onto its own export surface, so the root —
 /// importing the middle package alone — selects and calls the re-exported
 /// member through the ordinary linked surface; the call's FuncRef
@@ -4884,9 +4881,9 @@ fn a_privately_imported_type_field_keeps_its_refusal() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-// ---- the cross-module tail transfer (H2 over the linked surface) ------------
+// ---- the cross-module tail transfer over the linked surface ------------
 
-/// The linked tail-loop package's member: the M0 mutual pair (ping/pong)
+/// The linked tail-loop package's member: the mutual pair (ping/pong)
 /// inside one linked module — the deepest loop shape the acyclic package
 /// graph permits the cross-module mirror, since a cycle between two
 /// packages refuses at resolve, so the pair lives in the linked module
@@ -4955,8 +4952,8 @@ fn repr_op(uop: ds_vm::abi::uop::Uop) -> String {
     repr.chars().take_while(char::is_ascii_alphabetic).collect()
 }
 
-/// The cross-module tail transfer's acceptance (H2 over the linked
-/// surface): the root's tail call into the linked package's function
+/// The cross-module tail transfer's acceptance over the linked
+/// surface: the root's tail call into the linked package's function
 /// lowers to CALLT — the frame-reuse transfer across the dsmod seam —
 /// and the ten-million-hop mutual loop it enters runs to completion on
 /// the constant stack the transfer leaves (a stacked 10^7-deep chain
@@ -5410,7 +5407,7 @@ fn a_transitive_path_dep_cycle_refuses() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-// ---- the B6 link layering (the four layers over one trait's head) ----
+// ---- the link layering (the four layers over one trait's head) ----
 
 /// The layering fixture's trait and type: one trait, one struct, one
 /// head every impl of the face declares over.

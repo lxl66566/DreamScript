@@ -1,4 +1,4 @@
-//! CALLS fixtures (the callable-word call form, F2): the callee operand is
+//! CALLS fixtures (the callable-word call form): the callee operand is
 //! a frame slot — a `Fn` slot holds the copyable scalar FuncRef word
 //! (module id + function index, the registry's id space), a `Ref` slot
 //! holds a closure object whose header word is the FuncRef and whose
@@ -472,7 +472,7 @@ fn same_module_returns_take_back_rows_without_leaking() {
 
 /// CALLS has no tail variant: every recursion is an ordinary frame push,
 /// so deep CALLS recursion is bounded by the per-entry stack-limit
-/// compare [H1] exactly like CALL — the trap, not a segfault. Frames are
+/// compare exactly like CALL — the trap, not a segfault. Frames are
 /// 8 words netting 5 (the callee's params overlay the caller's arg area):
 /// a 64-word limit admits 12 frames, and the 13th needs 68.
 #[test]
@@ -539,7 +539,7 @@ fn a_closure_call_receives_its_captures() {
 }
 
 /// A closure word in a Fn-classified slot (the callable-defaulted
-/// parameter, F2): CALLS resolves the callee word by its runtime kind —
+/// parameter): CALLS resolves the callee word by its runtime kind —
 /// the closure's header FuncRef and capture block behind the Ref word —
 /// exactly like the scalar word in the same slot classification.
 #[test]
@@ -572,7 +572,7 @@ fn a_closure_word_in_a_fn_slot_calls_through_calls() {
     );
     let mut vm = Vm::new(reg);
     // the closure word rides the Fn-classified parameter slot; the scalar
-    // word in the same classification is the R11 CALLS shape (the
+    // word in the same classification is the CALLS word shape (the
     // lambda-value probes pin it)
     let closure = vm.alloc_closure(
         FuncRef::new(vm.registry().module_id("cd").expect("installed"), 0),
@@ -842,7 +842,7 @@ fn call_site_cache_keys_the_site_on_the_function_not_the_module() {
     );
 }
 
-// CALLTG fixtures (the dispatch tail call, H2's guarantee closure): the
+// CALLTG fixtures (the dispatch tail call): the
 // dispatch resolution is CALLG's own and the transfer is CALLT's — the
 // staged words slide into the reused frame, the evidence/instance words
 // riding past the callee's parameters as count-free dead words.

@@ -8,8 +8,8 @@
 //! API surface, `ds doc` renders the deterministic surface dumper — the
 //! toolchain's language and @std reference, one target's documented
 //! surface, or the error-code table —, `ds bind` binds an installed
-//! package artifact's native library and reports its exported C symbols
-//! (H5), `ds repl` reads-eval-prints against the in-process pipeline
+//! package artifact's native library and reports its exported C symbols,
+//! `ds repl` reads-eval-prints against the in-process pipeline
 //! with a persistent session, `ds lsp` serves the language-server
 //! protocol on stdin/stdout, `ds dev` drives the hot-reload loop
 //! (compile, watch, swap), and `ds test` runs a package root's `tests/`
@@ -53,7 +53,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Check .ds sources with the M2 static story
+    /// Check .ds sources statically
     Check(check::CheckArgs),
     /// Execute a dsmod module or a .ds source
     Run(run::RunArgs),
@@ -63,13 +63,13 @@ enum Command {
     Build(build::BuildArgs),
     /// Install a working-tree package into the content-addressed store
     Save(save::SaveArgs),
-    /// Render a package's `.dsi` API surface (G4)
+    /// Render a package's `.dsi` API surface
     Info(info::InfoArgs),
     /// Render the language and @std reference, a target's documented surface, or the error-code
     /// table
     Doc(doc::DocArgs),
     /// Bind an installed package artifact's native library and report
-    /// its exported C symbols (H5)
+    /// its exported C symbols
     Bind(bind::BindArgs),
     /// Format .ds sources in place (zero style options)
     Fmt(fmt::FmtArgs),

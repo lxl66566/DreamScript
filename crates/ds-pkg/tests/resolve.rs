@@ -640,7 +640,7 @@ fn artifacts_fold_from_the_root_and_deps_under_one_name() {
 #[test]
 fn a_second_artifact_identity_under_one_name_refuses() {
     // lib pins `mymath` at one hash, the root at another: one version
-    // per name this round, the refusal naming both declarers
+    // per name, the refusal naming both declarers
     let pinned = Hash128::new([0x44; 16]);
     let found = Hash128::new([0x55; 16]);
     let lib = package_of(&manifest_with_artifact(

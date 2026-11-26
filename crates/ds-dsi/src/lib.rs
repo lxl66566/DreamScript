@@ -32,8 +32,8 @@
 //! * the effects half's solved rows — the definitions' and registered methods' fixpoint rows — so a
 //!   served run walks only the fresh trees and seeds the served subgraph as fixed inputs.
 //!
-//! Everything the artifact serves stays fresh somewhere by ruling or by
-//! reach: the checked body facts stay fresh by G3.5's ruling, and the
+//! Everything the artifact serves stays fresh somewhere by scope or by
+//! reach: the checked body facts stay fresh by the format contract, and the
 //! solved span-keyed records (`trait_impl_args`, `inherent_impl_bounds`,
 //! `impl_fn_rets`) rebuild over the served trees (ds-check's
 //! declaration-pass rebuild; `impl_fn_rets` in the body pass the fresh

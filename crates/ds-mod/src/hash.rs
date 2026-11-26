@@ -3,7 +3,7 @@
 use core::fmt;
 
 /// A 16-byte blake3 digest (blake3-128): the source hash of a module, the
-/// content hash of a dependency, or a cache key (G3.5).
+/// content hash of a dependency, or a cache key.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct Hash128([u8; 16]);
 

@@ -1,4 +1,4 @@
-//! The comptime reflection native module (G1, G2): the two builtins the
+//! The comptime reflection native module: the two builtins the
 //! comptime evaluator's fenced VM serves — `fields`, answering one field
 //! record per declared field of a reflected type, and `type_name`,
 //! answering a reflected type's name. The module is installed under the
@@ -31,12 +31,12 @@ use crate::{
 /// The reserved native module name the comptime builtins' pool FuncRefs
 /// address; `$`-free but outside the identifier charset's keywords, and
 /// a user package cannot collide with it because the checker wires the
-/// builtins by name alone (H5.5) and refuses their calls outside
+/// builtins by name alone and refuses their calls outside
 /// comptime functions.
 pub const COMPTIME_MODULE: &str = "comptime";
 
-/// One reflected field record, the 2026-11-14 derive-extension ruling's
-/// (name, type, tag) triple over declared data. Over a struct's fields:
+/// One reflected field record: the (name, type, tag) triple over
+/// declared data. Over a struct's fields:
 /// the field's name, the reflection index of its type, and the field's
 /// nominal tag name (the type's own name when the field type is a bare
 /// atom, empty for composite field types). Over an enum's cases (the

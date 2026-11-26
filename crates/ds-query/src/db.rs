@@ -90,7 +90,7 @@ impl Deps {
 
 /// The query database: the only owner of inputs and memos, and the only path
 /// to compiler data for every consumer (CLI, LSP, REPL, hot reload,
-/// formatter) (H6 item 1).
+/// formatter).
 ///
 /// File inputs live in a [`Files`] registry whose ids are the engine's
 /// `FileId`s, so every span produced by a query addresses this registry
@@ -123,18 +123,18 @@ pub struct Db {
     /// test introspection, so a release build does not pay a map write per
     /// compute and reads zero from an empty table.
     compute_counts: FxHashMap<QueryKey, usize>,
-    /// The declared effect rows the effects pass reads (E1): the ambient
+    /// The declared effect rows the effects pass reads: the ambient
     /// stdlib table. Fixed for the database's life, so no memo can go
     /// stale against it.
     declared_rows: ds_check::DeclaredRows,
     /// The world functions' capability attribution the effects pass reads
-    /// beside the rows (H5): the ambient stdlib table, licensing the
+    /// beside the rows: the ambient stdlib table, licensing the
     /// package's world usage per capability. Fixed like the rows.
     world_caps: ds_check::WorldCaps,
 }
 
 impl Db {
-    /// The declared effect rows the database's passes read (E1): the
+    /// The declared effect rows the database's passes read: the
     /// ambient table fixed at construction.
     #[must_use]
     pub fn declared_rows(&self) -> &ds_check::DeclaredRows {
@@ -152,12 +152,12 @@ impl Db {
     /// [`QueryKey::PooledCheck`] registered: `ds-parse` for the tree and
     /// diagnostics, the tree's block spans for the index, the block-text
     /// seam for sources, the ds-check scope walk for the local frames, the
-    /// ds-check derive expansion of every parse (G1), the ds-check
-    /// collection and resolution passes over the expanded trees (G3), the
-    /// bidirectional check (B2) once, in the checked package whose bundle
+    /// ds-check derive expansion of every parse, the ds-check
+    /// collection and resolution passes over the expanded trees, the
+    /// bidirectional check once, in the checked package whose bundle
     /// the analyzed query slices — the value the run path lowers from —
-    /// the M2 affine pass (C1, C5) over the expanded trees, the ds-check
-    /// effects pass over the expanded trees (E1), the platform and
+    /// the affine pass over the expanded trees, the ds-check
+    /// effects pass over the expanded trees, the platform and
     /// pooled-body checks over the same trees, and the per-definition
     /// slices of the check and linearity passes (see the crate docs).
     #[must_use]
@@ -184,7 +184,7 @@ impl Db {
         db
     }
 
-    /// A database whose effects pass reads `rows` (E1): the stdlib ambient
+    /// A database whose effects pass reads `rows`: the stdlib ambient
     /// registers its world-touching functions' rows here. The table is an
     /// immutable input — set it before the first query; [`Db::new`] gives
     /// every ambient name the pure row.
@@ -195,7 +195,7 @@ impl Db {
         db
     }
 
-    /// A database whose effects pass also reads `caps` (H5): the ambient's
+    /// A database whose effects pass also reads `caps`: the ambient's
     /// world functions' capability attribution, licensing world usage per
     /// capability against the package's platform declaration. Set before
     /// the first query, like [`Db::with_declared_rows`].
@@ -396,7 +396,7 @@ impl Ctx<'_> {
     }
 
     /// Reads the file-set input — the number of registered files, the
-    /// package grain of the M2 checker queries (G3) — recording a
+    /// package grain of the checker queries — recording a
     /// dependency like every input read: registering another file
     /// invalidates the caller.
     pub fn file_count(&mut self) -> usize {
@@ -404,7 +404,7 @@ impl Ctx<'_> {
         self.db.changed_at.len()
     }
 
-    /// The declared effect rows the effects pass reads (E1): the
+    /// The declared effect rows the effects pass reads: the
     /// database's ambient row table.
     #[must_use]
     pub fn declared_rows(&self) -> &ds_check::DeclaredRows {
@@ -412,7 +412,7 @@ impl Ctx<'_> {
     }
 
     /// The world functions' capability attribution the effects pass reads
-    /// beside the rows (H5): the database's ambient table.
+    /// beside the rows: the database's ambient table.
     #[must_use]
     pub fn world_caps(&self) -> &ds_check::WorldCaps {
         &self.db.world_caps

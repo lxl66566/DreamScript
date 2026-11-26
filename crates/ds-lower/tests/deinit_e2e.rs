@@ -1,4 +1,4 @@
-//! The deinit wiring (C5): a `~Copyable` struct's declared `deinit`
+//! The deinit wiring: a `~Copyable` struct's declared `deinit`
 //! block lowers as a synthesized module function — one borrowed `self`
 //! parameter, the declared block as its body — and the RC placement
 //! claims it at every value's binding, firing the hook at the value's
@@ -181,7 +181,7 @@ fn declared_deinits_fire_at_every_exit_path() {
 
 /// A deinit value whose base word carries a `Ref` count (a string field)
 /// fires the hook off the count word, and a borrowed read of the field
-/// before the death keeps the string alive for the hook — the C5
+/// before the death keeps the string alive for the hook — the
 /// discipline pins the value's words, so no use kills the count early.
 #[test]
 fn a_ref_word_deinit_value_reads_its_fields_at_the_hook() {

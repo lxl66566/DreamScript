@@ -1,4 +1,4 @@
-//! The platform handler (H5.5, E1): the world surface as an installed
+//! The platform handler: the world surface as an installed
 //! handler behind the platform declaration — the effect-handler form the
 //! world-touching natives migrated to out of the native registry's
 //! two-module split.
@@ -15,14 +15,14 @@
 //! installs, so a console-only platform hosting a `read_file` call site
 //! is a structured install error, never a runtime surprise.
 //!
-//! The capability idiom (E1): the `ds` CLI installs [`Platform::std`]
+//! The capability idiom: the `ds` CLI installs [`Platform::std`]
 //! as the ambient default for scripts and [`Platform::embed`] beside it
 //! under its own name, so a source declaring `platform "embed"` runs
 //! against the console-only face; a library embedder constructs a bare
 //! VM and installs nothing — no platform means no world surface — and
 //! a test embedder installs the subset it wants to serve. The `time`
 //! capability answers the wall clock, the monotonic clock, and the
-//! parking sleep (the 2026-11-21 timer ruling).
+//! parking sleep.
 
 use crate::{
     native::{NativeFn, NativeFunction, NativeResult, OutputSink},
@@ -32,7 +32,7 @@ use crate::{
     vm::Trap,
 };
 
-/// One world capability of a platform (H5's provides list).
+/// One world capability a platform can serve.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capability {
     /// The printing surface: `println`, `print`, the stderr twins
@@ -45,16 +45,16 @@ pub enum Capability {
     /// (listen/accept/listener-close), `http_get`.
     Net,
     /// The clock surface: the wall clock, the monotonic clock, the
-    /// parking sleep (the 2026-11-21 timer ruling), and the local UTC
+    /// parking sleep, and the local UTC
     /// offset read (the datetime face's one world touch).
     Time,
-    /// The TLS surface (H5.5's 2026-11-17 ruling): https over rustls,
+    /// The TLS surface: https over rustls,
     /// selected or omitted per host — the `https_get` op, the
     /// https-routing `http_get` body, and the server half's
     /// `net_accept_tls` (the accepted connection's upgrade over the
-    /// host-pinned identity, ruled 2026-11-23).
+    /// host-pinned identity).
     Tls,
-    /// The process surface (the CLI process surface, ruled 2026-11-21):
+    /// The process surface:
     /// string argv, the environment read, process spawn (the piped
     /// capture half and its linear `proc_handle`), and the
     /// deliberate-status `exit(code)` row.
@@ -95,7 +95,7 @@ impl Capability {
 /// platform of its own addresses.
 pub const STD_NAME: &str = ds_abi::native::STD_PLATFORM_NAME;
 
-/// The embed platform's name (H5): the minimal host-facing surface a bare deployment declares,
+/// The embed platform's name: the minimal host-facing surface a bare deployment declares,
 /// served beside the default platform.
 pub const EMBED_NAME: &str = "embed";
 
@@ -249,7 +249,7 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// The default platform (H5, E1): `std`, every capability (the tls
+    /// The default platform: `std`, every capability (the tls
     /// tier included — the `ds` CLI host selects it, an embedding host
     /// omits it), the surface the `ds` CLI provides for scripts.
     #[must_use]
@@ -264,7 +264,7 @@ impl Platform {
         ])
     }
 
-    /// The embed platform (H5): the minimal host-facing surface — the
+    /// The embed platform: the minimal host-facing surface — the
     /// console face alone, so a deployment embedding the VM serves
     /// exactly print/println; every world op beyond it stays a reserved
     /// trap and install-time validation refuses its call sites as
@@ -275,7 +275,7 @@ impl Platform {
     }
 
     /// A platform named `name` serving exactly `capabilities` — the
-    /// test and embedding entrance (E1's capability idiom): install the
+    /// test and embedding entrance (the capability idiom): install the
     /// subset to serve, nothing more.
     #[must_use]
     pub fn new(name: impl Into<String>, capabilities: &[Capability]) -> Self {
@@ -323,8 +323,7 @@ pub fn platform_module(platform: &Platform) -> Vec<NativeFunction> {
         .zip(UNSERVED)
         .map(|((row, op), unserved)| {
             let index = row.index;
-            // the tls capability's host-level selection (H5.5's
-            // 2026-11-17 ruling): the net face's `http_get` slot carries
+            // the tls capability's host-level selection: the net face's `http_get` slot carries
             // the https-routing body only where the platform provides
             // the tls capability — the https op's own serving check — so
             // an omitting host keeps the plain body that refuses https

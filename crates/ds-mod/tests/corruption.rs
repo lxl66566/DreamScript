@@ -1,5 +1,5 @@
 //! Reader rejection: every corruption class fails with the right
-//! diagnostic `[G3.5 acceptance]`.
+//! diagnostic.
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{
@@ -64,7 +64,7 @@ fn bad_version_rejected() {
     let error = read(&bytes).expect_err("bad version");
     assert_eq!(error, ReadError::UnsupportedVersion { found: 9 });
     assert_diagnostic(&error, ErrorCode::ModuleVersionUnsupported);
-    // Format versions 1 (pre BL-7 header fields), 2 (pre FuncRef
+    // Format versions 1 (before the module-level scalars), 2 (before the FuncRef
     // constants kind), 3 (pre selector-led FuncRef keys), and 4 (pre
     // entry-table retirement) are rejected too.
     for version in 1..=4 {

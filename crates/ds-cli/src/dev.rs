@@ -1,4 +1,4 @@
-//! The `ds dev` subcommand: the hot-reload dev loop [H6 item 5].
+//! The `ds dev` subcommand: the hot-reload dev loop.
 //!
 //! One .ds source compiles through one query database and drives on one
 //! VM; a poller watches the file, and every changed round recompiles
@@ -29,7 +29,7 @@
 //! watched bytes compose every member below the root (the entry among
 //! them) and the manifest, every changed round re-resolving the manifest
 //! graph and recompiling the root through the same compile `ds run`
-//! drives — the root's whole member set composing one namespace (G3), so
+//! drives — the root's whole member set composing one namespace, so
 //! a sibling member's edit reloads like the entry's own — the swap
 //! installing through the deps-first load walk — an
 //! already-installed dep validates at its recorded identity and skips,
@@ -55,7 +55,7 @@
 //! dep name the registry never held installs through the walk as
 //! ever. One module's dep list linking one name at two hashes stays
 //! refused (the walk's link-table rule; same-name multi-hash
-//! coexistence stays refused per G3.5). `--args` carries the verbatim
+//! coexistence stays refused). `--args` carries the verbatim
 //! process arguments the program reads through `args()`, staged once
 //! on the session VM, so a restart reads exactly what a fresh run of
 //! the same version would.
@@ -168,7 +168,7 @@ struct DevSession {
     /// Bumped whenever a round moved the path dep directory set: the
     /// loop's cue to rebuild the signal and re-baseline the watch gate.
     dir_epoch: u64,
-    /// Whether the last round's reload installed a version.
+    /// Whether the last reload installed a version.
     clean: bool,
     /// Whether the last drive ended trapped or on an unhandled world
     /// failure — the single-shot mode's exit code.
@@ -194,7 +194,7 @@ impl DevSession {
             if !args.no_ambient {
                 let _ambient = db.add_file(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
                 // the die provision rides the dev session beside the
-                // ambient (the 2026-11-17 split)
+                // ambient
                 let _host = db.add_file(source::HOST_FILE, source::HOST_SOURCE);
             }
             let file = db.add_file(args.file.to_string_lossy().into_owned(), initial);
@@ -399,8 +399,8 @@ impl DevSession {
                 return None;
             },
         };
-        // the round's graph binds its artifacts into the session's VM
-        // (H5) ahead of the compile and the walk: the same install the
+        // the reload's graph binds its artifacts into the session's VM
+        // ahead of the compile and the walk: the same install the
         // run path performs, so a bound extern dev-sessions like it runs.
         // A load that refused leaves the artifact uninstalled and a
         // binding module answers the standard install refusal per round
@@ -539,7 +539,7 @@ impl DevSession {
     }
 
     /// Spawns the entry fiber: resolves through the current slot, so a
-    /// restart runs the version this round installed. The entry binds no
+    /// restart runs the version this reload installed. The entry binds no
     /// parameters — the program reads `args()` off the process surface.
     fn spawn_entry(&mut self) -> Option<FiberId> {
         match self.vm.spawn_fiber(&self.name, &self.entry, &[]) {
@@ -794,7 +794,7 @@ pub fn dev(args: &DevArgs) -> Result<ExitCode> {
         return Ok(code);
     }
     // the signal over the whole watch set — the package tree plus every
-    // resolved path dep directory (the first round's resolution grew the
+    // resolved path dep directory (the first resolution grew the
     // set), or the script file alone — then one reconcile read: the read
     // lands after the watch exists, and a difference from the loaded
     // bytes rides the pending slot into the next window's ordinary round

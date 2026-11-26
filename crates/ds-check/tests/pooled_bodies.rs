@@ -1,9 +1,9 @@
-//! The pooled-body refusal pins [E3, the 2026-11-15 per-fiber sendability
-//! ruling]: the fork-join combinators' element bodies refuse the members
-//! a pooled drive cannot serve on a worker — the sibling-addressing
-//! fiber control natives and the world surface — unconditionally, so
-//! legality never depends on the host's pool opt-in and the worker-side
-//! divergences are unreachable from the source surface. Every case rides
+//! The pooled-body refusal pins: the fork-join combinators' element bodies
+//! refuse the members a pooled drive cannot serve on a worker — the
+//! sibling-addressing fiber control natives and the world surface —
+//! unconditionally, so legality never depends on the host's pool opt-in
+//! and the worker-side divergences are unreachable from the source
+//! surface. Every case rides
 //! the real ambient (its `par_map`/`par_reduce` declarations and effect
 //! rows), exactly the bundle the CLI compiles.
 
@@ -26,7 +26,7 @@ fn pooled_of(source: &str) -> Vec<ds_diag::Diagnostic> {
 }
 
 /// Analyzes the ambient plus one test member whose import binds a
-/// hand-built linked surface (G4) — one entry per (name, parameter
+/// hand-built linked surface — one entry per (name, parameter
 /// names, solved row) fixture — and returns the pooled refusal's
 /// diagnostics: a linked callee's carried row is the only fact the hunt
 /// holds.
@@ -54,7 +54,7 @@ fn pooled_linked_of(
                 ds_check::ImportSurface::Linked(ds_check::MemberSurface {
                     tags: Vec::new(),
                     impls: Vec::new(),
-            inherent: Vec::new(),
+                    inherent: Vec::new(),
                     entries: entries.clone(),
                 }),
             );

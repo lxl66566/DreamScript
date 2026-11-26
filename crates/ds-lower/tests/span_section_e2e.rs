@@ -1,4 +1,4 @@
-//! The strippable pc-to-span section end to end [H7]: the lowered
+//! The strippable pc-to-span section end to end: the lowered
 //! module's span table names file, line, and column per instruction
 //! region; the trap renderer's backtrace frames, the `?` error leg's
 //! fiber-local ring, the debugger's breakpoints, and the sampling

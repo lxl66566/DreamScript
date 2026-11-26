@@ -244,7 +244,7 @@ fn bench_even_odd_callt(c: &mut Criterion) {
     // The 1e7 chain runs long enough per iteration that Auto's batched
     // sampling would dominate the whole bench run: Flat takes one
     // measurement per sample, and 10 samples suffice for a smoke-grade
-    // harness (no formal gate before the M3 C-baseline comparison).
+    // harness (no formal gate before the C-baseline comparison).
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(10);
     for (label, depth) in [("1e5", 100_000_i64), ("1e7", 10_000_000_i64)] {

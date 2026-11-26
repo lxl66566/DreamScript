@@ -385,7 +385,7 @@ fn combinators_take_wider_elements_each_way() {
 }
 
 /// The refusal openings that stay, each naming the seam that owns it —
-/// never reboxing, never the landed channel.
+/// never reboxing, never the map value channel.
 #[test]
 fn the_remaining_openings_keep_honest_names() {
     // a deinit-carrying element: the list's edge retention owns counts,
@@ -448,10 +448,10 @@ fn the_remaining_openings_keep_honest_names() {
         "a deinit-carrying argument",
         "the value's deinit runs only at its binding's death",
     );
-    // the union-element iteration opening landed with the map value
-    // channel round (an empty list[union] iterates zero times, the
-    // fetch's whole-span hand-back the checked read's own multi-atom
-    // shape); its run pin lives in map_value_channel_e2e
+    // the union-element iteration opening the map value channel owns (an
+    // empty list[union] iterates zero times, the fetch's whole-span
+    // hand-back the checked read's own multi-atom shape); its run pin lives
+    // in map_value_channel_e2e
 }
 
 /// The tuple-element story: a literal and direct pushes store whole
@@ -601,9 +601,8 @@ fn combinators_take_tuple_elements_each_way() {
     assert_eq!(out, FrameAnswer::one(Value::I64(31 + 2 + 6)));
 }
 
-/// The root drive's host seam answers whole spans (the 2026-11-15
-/// span-answer ruling): a tuple-answering entry crosses with every word,
-/// never the head word alone.
+/// The root drive's host seam answers whole spans: a tuple-answering
+/// entry crosses with every word, never the head word alone.
 #[test]
 fn a_tuple_answering_entry_surfaces_whole_at_the_host() {
     let out = runs(

@@ -1,4 +1,4 @@
-//! Impl-member signature agreement (B6): a trait impl's member must
+//! Impl-member signature agreement: a trait impl's member must
 //! declare what its trait member declares — same arity, same receiver
 //! spelling, same passing modes, same parameter types, same return, and
 //! no parameter defaults of its own (a re-declared default would mint a

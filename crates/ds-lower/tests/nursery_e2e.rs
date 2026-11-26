@@ -1,4 +1,4 @@
-//! The in-language nursery/spawn surface end to end [E2, E5]: the
+//! The in-language nursery/spawn surface end to end: the
 //! `nursery` block opens a fresh pool nursery through the seam, its
 //! `spawn` expressions become synthesized child functions (the lambda
 //! construction's capture list, staged through a closure word), and
@@ -160,8 +160,8 @@ fn check_refused(source: &str, needle: &str) {
 
 /// Three spawns into one nursery answer through the join channel: the
 /// children's answer spans collect into one list in spawn order (1, 2,
-/// 3) — the 2026-11-21 ruling's nursery result channel — and the heap
-/// drains when the run ends, the collected list's own count included.
+/// 3) through the nursery's result channel — and the heap drains when the
+/// run ends, the collected list's own count included.
 #[test]
 fn spawns_join_collecting_answers_in_spawn_order() {
     let (vm, out) = run_main(
@@ -274,7 +274,7 @@ fn main() -> () {
 }
 
 /// A deep tail-looping child runs unbounded self-recursion at a constant
-/// segment [H2: per-fiber TCO] and the join still completes; a
+/// segment [: per-fiber TCO] and the join still completes; a
 /// straight-line child under the raised flag finishes its in-flight work
 /// and lands cooperatively.
 #[test]
@@ -315,7 +315,7 @@ fn main() -> () {
 }
 
 /// A completing child fires its frame's deinit claim exactly once at its
-/// own frame exit [C5 composes with E2]: the child's declared value dies
+/// own frame exit [composes with ]: the child's declared value dies
 /// with its fiber, and the run's heap drains.
 #[test]
 fn a_completing_child_fires_its_deinit_claim_once() {
@@ -381,7 +381,7 @@ fn main() -> () {
 }
 
 /// A spawned child answering a non-`~Copyable` reference or a scalar
-/// keeps the balanced answer discipline [E2]: the reference's one dec
+/// keeps the balanced answer discipline: the reference's one dec
 /// runs at the child's own completion instead of riding the join, the
 /// scalar answers nothing, and the run's heap drains with the same
 /// single dec the seam used to owe.
@@ -502,9 +502,8 @@ fn main() -> () {
     );
 }
 
-/// Bare `spawn` outside any nursery refuses at lowering, naming the
-/// ruled surface [E2]: bare detach requires an explicit root nursery or
-/// supervisor.
+/// Bare `spawn` outside any nursery refuses at lowering: bare detach
+/// requires an explicit root nursery or supervisor.
 #[test]
 fn a_bare_spawn_refuses_naming_the_root_nursery_story() {
     refused(

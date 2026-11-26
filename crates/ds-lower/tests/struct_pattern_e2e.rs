@@ -1,5 +1,5 @@
-//! Struct patterns over non-union values (todo 14's width-slice clause):
-//! a struct-pattern arm on a value chain tests each literal field in
+//! Struct patterns over non-union values: a struct-pattern arm on a value
+//! chain tests each literal field in
 //! place (the or-ladder's slide-and-skip per field, the tuple arm's
 //! short-circuit discipline), binds its fields at the struct's own
 //! consecutive words — punning, plain-name sub-patterns, or-ladders

@@ -294,7 +294,7 @@ fn main() -> bool {
 
 /// The class mapping rides the ambient member names the checked
 /// call-site union carries: a hermetic host spelling its own extern row
-/// over the class set (its own declarations of the ruled names) gets
+/// over the class set (its own declarations of the admitted names) gets
 /// each discriminant's member constructed — while a row naming none of
 /// them has no mapping (the malformed-union test's third case). The
 /// run pins the hermetic class set end to end.

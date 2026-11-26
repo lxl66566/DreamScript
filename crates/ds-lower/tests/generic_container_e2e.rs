@@ -1,4 +1,4 @@
-//! The generic container natives end to end [H3, phase 2]: `list_len`,
+//! The generic container natives end to end [, phase 2]: `list_len`,
 //! `list_get`, `list_concat` over list[int] and list[string] receivers,
 //! `map_len`, `map_get`, and the free `len` over map[string, int] and
 //! map[int, string] receivers,

@@ -1,4 +1,4 @@
-//! The byte word end to end [F6]: `b'x'` types through a declared
+//! The byte word end to end: `b'x'` types through a declared
 //! `byte` atom and lowers as its 0-255 integer value through the
 //! integer slot encoding — its own atom in the u8 width class, outside
 //! the int conversion family, so mixed arithmetic refuses at the

@@ -1,10 +1,10 @@
-//! The platform seam's checker half (H5, E1): the `platform "..."`
+//! The platform seam's checker half: the `platform "..."`
 //! declaration a package is checked against.
 //!
 //! A platform declaration names a platform and the world capabilities it
 //! provides — `platform "std" provides <console, fsys, net, time>`, an
 //! absent provides list providing nothing (the embed target). The check
-//! is the record's subset rule: the package's effect usage must be a
+//! is a subset rule: the package's effect usage must be a
 //! subset of the platform's declared row. The row vocabulary carries one
 //! world effect, so the row check reduces to its finer grain — a
 //! definition's world usage names the capabilities whose functions it
@@ -27,7 +27,7 @@ use ds_parse::{Ast, ItemKind, PlatformDecl};
 
 use crate::effects::{Effect, Effects};
 
-/// The world capability vocabulary (H5's provides list), in bit order.
+/// The world capability vocabulary (the provides list), in bit order.
 pub const CAPABILITIES: [&str; 5] = ["console", "fsys", "net", "time", "proc"];
 
 /// One capability's bit in a `[Caps]` set.
@@ -84,8 +84,8 @@ impl WorldCaps {
     }
 }
 
-/// Verifies the package's effect usage against its platform declaration
-/// (H5): every capability a definition's world usage needs must be
+/// Verifies the package's effect usage against its platform declaration:
+/// every capability a definition's world usage needs must be
 /// provided, world usage with no declaration refuses, a second
 /// declaration refuses, and an unknown capability name refuses. Pure
 /// over the computed rows — no diagnostics are consumed, only emitted.

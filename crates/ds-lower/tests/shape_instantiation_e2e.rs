@@ -1,4 +1,4 @@
-//! The per-shape instantiation surface end to end [H3.5]: every call
+//! The per-shape instantiation surface end to end: every call
 //! site entering a free generic fn plans the body it needs before
 //! anything lowers — an instance over the types the checker solved for
 //! the site's generic arguments, equal argument shapes sharing one body,
@@ -375,8 +375,8 @@ fn equal_shapes_share_one_body_and_a_union_answer_stays_unshared() {
 
 /// A call from a generic impl member's body still enters the ONE body:
 /// the member's site names the impl's own variable, so no instance
-/// plans and the runtime-evidence form rides the frame's slot — the
-/// Raw-word body this round keeps.
+/// plans and the runtime-evidence form rides the frame's slot, the
+/// Raw-word body.
 #[test]
 fn a_call_from_a_generic_impl_member_enters_the_one_body() {
     let source = concat!(

@@ -1,4 +1,4 @@
-//! The VM-side heap object store [BL-2]: the objects raw `Ref` words name.
+//! The VM-side heap object store: the objects raw `Ref` words name.
 //!
 //! Identity is the id table: a `Value::Ref` word's id part is an index
 //! into `table`, and every live entry names one counted block of the ds-rt heap —
@@ -13,9 +13,8 @@
 //! happen in program order, and both free lists are
 //! last-freed-first-reused.
 //!
-//! A list is one object with its element words inline — the ruled shape;
-//! see `[Object::List]`. The element words are plain [`Value`]s, so one
-//! kind serves every element type. Ownership of `Ref` elements is exact:
+//! A list is one object with its element words inline; see `[Object::List]`. The element words are
+//! plain [`Value`]s, so one kind serves every element type. Ownership of `Ref` elements is exact:
 //! storing one into a list (the `list_push` construction append, the
 //! `list_concat` shared-element copies, the `list_get` checked read-out)
 //! acquires a count, and freeing a list drops one count per `Ref`
@@ -41,7 +40,7 @@
 //! the next sibling).
 //!
 //! Counts are non-atomic: one `Objects` store belongs to one fiber on
-//! one thread [C4]. Words self-describe their owner, so a store can
+//! one thread. Words self-describe their owner, so a store can
 //! hold a foreign word — a list on one heap owning a count on another —
 //! and the count mutations that reach past the store's own heap are
 //! the bracketed delivery classes plus the death cascade, which route
@@ -84,15 +83,15 @@ use map::*;
 /// The free-list end sentinel: no `Free` word points past it.
 const NO_FREE: u32 = u32::MAX;
 
-/// A capturing lambda's closure object (F2): the header word is the
+/// A capturing lambda's closure object: the header word is the
 /// body's FuncRef, then the capture block inline. The object owns the
 /// moved-in capture words' counts (affine words move at construction,
 /// copyable words copy), so a unique death drops one count per `Ref`
 /// capture — the same retain contract a list carries over its elements.
 #[derive(Debug)]
 struct Closure {
-    /// The header word: the body's FuncRef, resolved through the
-    /// two-slot module table at call time [H6 item 5].
+    /// The header word: the body's FuncRef, resolved through the two-slot
+    /// module table at call time.
     func: FuncRef,
     /// The capture block: the moved-in binding words.
     captures: Vec<Value>,
@@ -148,7 +147,7 @@ enum Object {
     /// whole payload, never a produced arena temporary. Owns no `Ref`
     /// words, so its death is the plain dec.
     Bytes(Box<[u8]>),
-    /// A closure object: one heap object behind one `Ref` word (F2) —
+    /// A closure object: one heap object behind one `Ref` word —
     /// the value a capturing lambda's slot holds.
     Closure(Closure),
     /// A list: one heap object — len, capacity, and the element words
@@ -172,15 +171,12 @@ enum Object {
     /// dense index words and loads a candidate key's payload only on a
     /// filter hit.
     Map(MapData),
-    /// A bounded channel (the 2026-11-21 shared-state ruling): one heap
-    /// object behind one `Ref` word on the creating fiber's store — the
-    /// one owning heap the ruling names — whose payload is the FIFO
-    /// buffer plus the scheduler's waiter queues. The buffered payload
-    /// words own one edge count each exactly like list elements (a
-    /// foreign element's inc posts through the pending queue); a parked
-    /// sender's staged payload owns none (the parked frame keeps its own
-    /// count, the parked-send discipline the net send wait set), so the
-    /// death cascade decs the buffer alone.
+    /// A bounded channel: one heap object behind one `Ref` word on the creating fiber's store (its
+    /// one owning heap), whose payload is the FIFO buffer plus the scheduler's waiter queues. The
+    /// buffered payload words own one edge count each exactly like list elements (a foreign
+    /// element's inc posts through the pending queue); a parked sender's staged payload owns none
+    /// (the parked frame keeps its own count, the parked-send discipline the net send wait set), so
+    /// the death cascade decs the buffer alone.
     Chan(ChanData),
     /// The read-side aliasing container: one heap object behind one
     /// `Ref` word on the owning fiber's store, the slot array with its
@@ -192,7 +188,7 @@ enum Object {
 }
 
 /// A channel's payload: the bound, the FIFO buffer, and the fibers
-/// parked on full and empty (the 2026-11-21 shared-state ruling). The
+/// parked on full and empty. The
 /// waiter queues are scheduler state the channel itself owns — a send
 /// with room wakes the head receiver, a receive with stock wakes the
 /// head sender — so a wake needs no reactor interest and no deadline:
@@ -405,10 +401,9 @@ impl Hasher for InternHasher {
 /// The heap: the id table over ds-rt's counted blocks, the table's free
 /// list threading freed ids, and the string intern map.
 ///
-/// `Send` (moves whole with its fiber under the fork-join ownership
-/// transfer, E3's 2026-11-15 ruling) but not `Sync`: the block headers
-/// and counts are confined state, sound only while exactly one thread
-/// holds the store — the same contract ds-rt's `Heap` carries.
+/// `Send` (it moves whole with its fiber under the fork-join ownership transfer) but not `Sync`:
+/// the block headers and counts are confined state, sound only while exactly one thread holds the
+/// store — the same contract ds-rt's `Heap` carries.
 pub struct Objects {
     /// The owning fiber: the local/foreign test every count mutation on
     /// a stored word runs against (the pool index is the word's owner
@@ -486,7 +481,7 @@ mod tests {
         );
     }
 
-    /// The structural content compare [B9]: equal content answers true
+    /// The structural content compare: equal content answers true
     /// behind distinct objects — nested lists, a map's rows through the
     /// lookup face (string keys by content), strings and bytes by payload
     /// — a mismatch at any depth answers false, mixed object kinds never
@@ -1901,7 +1896,7 @@ mod tests {
         // a string is not a closure
         let s = objects.intern("cap");
         assert_eq!(objects.closure_at(s), Err(Trap::UnknownObject { obj: s }));
-        // the shared copy is one count on the closure itself [C4]
+        // the shared copy is one count on the closure itself
         objects.inc(id).expect("a shared lambda copy incs once");
         assert_eq!(objects.rc_at(id), Ok(2));
         objects.dec(id).expect("the shared copy drops");

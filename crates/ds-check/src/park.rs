@@ -17,7 +17,7 @@
 //!   a minted atom shifts with the compiled files' mint landings, so a shared row naming one would
 //!   address an id no later compile reproduces; and
 //! * the rows live in process memory only, rebuilt by whatever process runs the compile and never
-//!   serialized — no checked body fact rides an artifact (G3.5).
+//!   serialized — no checked body fact rides an artifact.
 
 use std::sync::OnceLock;
 

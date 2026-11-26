@@ -1,13 +1,12 @@
-//! The M2 conformance gate over the corpus's stage expectations: every
+//! The conformance gate over the corpus's stage expectations: every
 //! `stage: typecheck` item typechecks clean under `type_check`, `reject`
 //! items produce exactly their described diagnostic, and the remaining
 //! diagnostics land only in items staged for later milestones (their
-//! constructs — comptime, derives, stdlib execution — do not check at M2
-//! per the corpus README's cumulation rules). The affine pass [C1, C5]
-//! joins the gate: `typecheck`/`run` items must also linearity-check
-//! clean, the linearity negative suite must produce exactly its described
-//! DS3xxx diagnostics, and no DS3xxx diagnostic may land outside
-//! `reject`/later-milestone items in any corpus file.
+//! constructs — comptime, derives, stdlib execution — do not check yet).
+//! The affine pass joins the gate: `typecheck`/`run` items must also
+//! linearity-check clean, the linearity negative suite must produce exactly
+//! its described DS3xxx diagnostics, and no DS3xxx diagnostic may land
+//! outside `reject`/later-milestone items in any corpus file.
 
 use std::path::PathBuf;
 
@@ -18,12 +17,10 @@ use ds_check::{
 use ds_diag::{Files, Span};
 use ds_parse::{Ast, Item, ItemKind, parse};
 
-/// Ambient stdlib stubs per conformance/README.md's types_hybrid list:
-/// signatures only (extern), the M3 stdlib owns the bodies. The failure
-/// taxonomy (io_err) mirrors the shared ambient's ownership of it; the
-/// config type and the log/default_config/get externs are the corpus
-/// file's own (the ambient shed its dead declarations and its demo
-/// residue).
+/// Ambient stdlib stubs for types_hybrid.ds: signatures only (extern), the
+/// stdlib owns the bodies. The failure taxonomy (io_err) mirrors the shared
+/// ambient's ownership of it; the config type and the log/default_config/get
+/// externs are the corpus file's own.
 const TYPES_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag float\n",
@@ -51,11 +48,10 @@ const TYPES_AMBIENT: &str = concat!(
     "pub extern fn str[t] (v: t) -> string\n",
 );
 
-/// Ambient stdlib stubs per the linearity_modes_rc list: modes included,
-/// since C2 consumption is what the affine pass reads at call sites. The
-/// close/to_u32_le externs are the corpus file's own (the ambient shed
-/// its dead declarations); open/read_exact stay stub-only absence
-/// stand-ins so the affine pass sees the moves they stage.
+/// Ambient stdlib stubs for the linearity_modes_rc list: modes included,
+/// since a consuming call is what the affine pass reads at call sites. The
+/// close/to_u32_le externs are the corpus file's own; open/read_exact stay
+/// stub-only absence stand-ins so the affine pass sees the moves they stage.
 const LINEARITY_AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag char\n",
@@ -438,7 +434,7 @@ fn gate(corpus: &str, ambient: &str) -> Vec<(String, String, ds_diag::Diagnostic
             );
             out.push((stage.id.clone(), what.to_owned(), item_diags[0].clone()));
         }
-        // Later-milestone and run items may carry diagnostics at M2; the
+        // Later-milestone and run items may carry diagnostics; the
         // per-file tests below pin exactly which and why.
     }
     out
@@ -448,15 +444,15 @@ fn gate(corpus: &str, ambient: &str) -> Vec<(String, String, ds_diag::Diagnostic
 fn types_hybrid_typecheck_items_pass() {
     // 12 typecheck-stage items; no diagnostics may fall outside get_port
     // (stage run) — the json value atoms do not include `int`, so
-    // `pv is int` narrows to empty inside get_port until the M3 stdlib
-    // types `map.get`; that tension is the recorded leftover, everything
+    // `pv is int` narrows to empty inside get_port until the stdlib types
+    // `map.get`; that tension is the recorded leftover, everything
     // else (load, cfg's `.err` handler, kv, same) checks clean.
     let rejects = gate("../../conformance/types_hybrid.ds", TYPES_AMBIENT);
     assert_eq!(rejects, [] as [(String, String, ds_diag::Diagnostic); 0]);
 }
 
 /// The tutorial-pass regressions: every item (typecheck and run) checks
-/// clean under the record-shaped ambient — the bare-tag arms credit
+/// clean under the pattern-dispatch ambient — the bare-tag arms credit
 /// exhaustiveness, the or-pattern of unit tags is one member set, and
 /// the tail `?` over the contained parse union is the return itself.
 #[test]
@@ -485,7 +481,7 @@ fn pattern_dispatch_items_check_clean() {
     );
 }
 
-/// The extraction-family round [E4]: the typecheck-stage items (the
+/// The extraction-family surface: the typecheck-stage items (the
 /// b14/b15 spellings over the struct field and the row read included)
 /// and every run item check clean under the family ambient; the one
 /// rejection is the file's own reject item.
@@ -549,7 +545,7 @@ fn generics_reject_item_is_the_overlap_witness() {
 fn generics_diagnostics_stay_in_later_milestone_items() {
     // The generics file's other diagnostics all sit in m6 items (comptime
     // `fields`/`type_name` builtins, the `ord`-derived `max`, and the
-    // derive-driven execution items), which the M2 gate exempts.
+    // derive-driven execution items), which the gate exempts.
     let path = ds_corpus_path::resolve("../../conformance/generics_coherent_traits.ds");
     let source = std::fs::read_to_string(&path).unwrap();
     let stages = stages(&source);
@@ -592,7 +588,7 @@ fn gate_full(
     let path = ds_corpus_path::resolve(corpus);
     let source = std::fs::read_to_string(&path).unwrap();
     // Unresolved items are commented out in the body and skipped by every
-    // runner (corpus README), so they align with no live item.
+    // runner, so they align with no live item.
     let stages: Vec<Stage> = stages(&source)
         .into_iter()
         .filter(|stage| !stage.stage.starts_with("unresolved"))
@@ -639,10 +635,10 @@ fn gate_full(
     (rejects, all, lin, source)
 }
 
-/// linearity_modes_rc.ds checks fully clean: typecheck and run items (which must
-/// typecheck from M2 per the cumulation rules) produce no diagnostic of
-/// either pass, and the recorded facts match the record's own annotations
-/// ("b consumed here", "f dies here: deinit closes fd").
+/// linearity_modes_rc.ds checks fully clean: typecheck and run items produce
+/// no diagnostic of either pass, and the recorded facts match the corpus
+/// file's own annotations ("b consumed here", "f dies here: deinit closes
+/// fd").
 #[test]
 fn linearity_modes_rc_items_pass_with_expected_facts() {
     let (rejects, all, lin, source) =
@@ -650,7 +646,7 @@ fn linearity_modes_rc_items_pass_with_expected_facts() {
     assert_eq!(rejects.len(), 0, "no reject items in the file header");
     assert!(all.is_empty(), "items carry diagnostics: {all:#?}");
     let text = |span: Span| source[span.start as usize..span.end as usize].to_owned();
-    // `b` moves into `to_u32_le` (the record's affine move at b.to_u32_le()):
+    // `b` moves into `to_u32_le` (the affine move at `b.to_u32_le()`):
     // the use span is the `b` occurrence inside the call, past its binder.
     assert_eq!(lin.moves.len(), 1, "exactly one move: b into to_u32_le");
     assert_eq!(text(lin.moves[0].binder), "b");
@@ -759,9 +755,10 @@ fn linearity_negative_rejects_render_recorded_shapes() {
     assert_eq!(diag.labels[1].label, "used again here after move");
 }
 
-/// lists_surface.ds: the list-literal and `list[t]()` constructor round —
-/// every typecheck and run item checks clean under the list ambient
-/// stubs, and the reject item reports exactly its mixed-element error.
+/// lists_surface.ds: the list-literal and `list[t]()` constructor
+/// surface — every typecheck and run item checks clean under the list
+/// ambient stubs, and the reject item reports exactly its mixed-element
+/// error.
 #[test]
 fn lists_surface_items_check_with_the_mixed_rejection() {
     let rejects = gate("../../conformance/lists_surface.ds", LISTS_AMBIENT);
@@ -802,10 +799,10 @@ fn lists_surface_items_check_with_the_mixed_rejection() {
     }
 }
 
-/// maps_surface.ds: the map constructor round — every typecheck and run
+/// maps_surface.ds: the map constructor surface — every typecheck and run
 /// item checks clean under the map ambient stubs (the `get` spelling item
-/// typechecks; its generic dispatch waits for the M6 seam), and the reject
-/// item reports exactly its constructor-arguments error.
+/// typechecks; its generic dispatch has no seam yet), and the reject item
+/// reports exactly its constructor-arguments error.
 #[test]
 fn maps_surface_items_check_with_the_constructor_rejection() {
     let rejects = gate("../../conformance/maps_surface.ds", MAPS_AMBIENT);
@@ -847,11 +844,11 @@ fn maps_surface_items_check_with_the_constructor_rejection() {
     }
 }
 
-/// tuples_surface.ds: the anonymous-tuple round — every typecheck and
+/// tuples_surface.ds: the anonymous-tuple surface — every typecheck and
 /// run item checks clean under the tuple ambient stubs, and the reject
 /// item reports exactly its unproven-member rejection: a declaration
 /// destructuring over a union would bind one member's types with no
-/// coverage proof [B3, F4].
+/// coverage proof.
 #[test]
 fn tuples_surface_items_check_with_the_union_destructure_rejection() {
     let rejects = gate("../../conformance/tuples_surface.ds", TUPLES_AMBIENT);
@@ -1001,8 +998,8 @@ fn item_declares(item: &Item) -> Option<String> {
 
 /// closures_surface.ds: lambda values in every argument shape —
 /// fn-typed parameters, trailing block and parenthesized arguments,
-/// let-stored and passed lambdas, a capturing lambda — all check clean
-/// [F2, F7]; every item lowers (the trailing block staging exactly like
+/// let-stored and passed lambdas, a capturing lambda — all check clean,
+/// every item lowers (the trailing block staging exactly like
 /// the written trailing lambda), and the runs live in the ds-lower
 /// block_arg e2e suite.
 #[test]
@@ -1017,7 +1014,7 @@ fn closures_surface_items_check_clean() {
 /// nursery_surface.ds: the in-language nursery surface — spawn-in-scope,
 /// join at scope exit in spawn order, first-failure cancellation, child
 /// error unioning out through the boundary, and a completing child's
-/// deinit claim — every item checks clean [E2, E5]; the runs live in the
+/// deinit claim — every item checks clean; the runs live in the
 /// ds-lower nursery e2e suite and examples/nursery.ds.
 #[test]
 fn nursery_surface_items_check_clean() {
@@ -1121,7 +1118,7 @@ fn toplevel_consumption_checks_with_cross_file_consumer_clean() {
     assert_eq!(only.code.as_str(), "DS3001");
 }
 
-/// trait_defaults.ds: the trait-member default authority round — every
+/// trait_defaults.ds: the trait-member default authority — every
 /// item (the trait's defaulted signature, the omitting impls, and the
 /// inherent member's own body default included) checks clean; the run
 /// goldens live in the CLI conformance gate.
@@ -1137,7 +1134,7 @@ fn trait_defaults_items_check_clean() {
     );
 }
 
-/// records_lists.ds: the list[record] round — every item checks clean
+/// records_lists.ds: the list[record] surface — every item checks clean
 /// under the ambient list surface (the `.ok`/`.err` extraction chains
 /// over the checked `list_get` read included); the run goldens live in
 /// the CLI conformance gate.
@@ -1150,7 +1147,7 @@ fn records_lists_items_check_clean() {
     );
 }
 
-/// frozen_iteration.ds: the D3 iteration ruling and its borrow-conflict
+/// frozen_iteration.ds: the frozen iteration count and its borrow-conflict
 /// refinement — the body's direct `mut` window over the iterated
 /// binding is the file's one reject (DS3007), while the aliased-var run
 /// item (the runtime guarantee: the frozen entry count bounds the walk)
@@ -1196,7 +1193,7 @@ fn frozen_iteration_rejects_the_iterated_mut_window() {
     }
 }
 
-/// transitive_dispatch.ds: the transitive evidence round — every item
+/// transitive_dispatch.ds: the transitive evidence surface — every item
 /// (the generic impl heads over `list[t]` and the nested dispatch inside
 /// the serving body included) checks clean; the run goldens live in the
 /// CLI conformance gate.
@@ -1212,10 +1209,10 @@ fn transitive_dispatch_items_check_clean() {
     );
 }
 
-/// shift_bitwise.ds: the shift and bitwise round — every item (the
+/// shift_bitwise.ds: the shift and bitwise surface — every item (the
 /// value, sign, precedence, compound-store, and union-beside-bits rows
 /// and the trap-edge functions) checks clean, and the one rejection is
-/// the float `&` operand the integer table refuses [B7]; the runs and
+/// the float `&` operand the integer table refuses; the runs and
 /// the oversized-shift traps live in the ds-lower shift_bitwise e2e
 /// suite.
 #[test]
@@ -1261,7 +1258,7 @@ fn shift_bitwise_items_check_with_the_float_rejection() {
     }
 }
 
-/// teardown_deinit.ds: the E5 teardown round — every item (the
+/// teardown_deinit.ds: the teardown deinit surface — every item (the
 /// deinit-carrying `resource`, the nursery passes, and the boundary
 /// matches) checks clean under the nursery-shaped ambient; the run
 /// goldens live in the CLI conformance gate.
@@ -1274,8 +1271,8 @@ fn teardown_deinit_items_check_clean() {
     );
 }
 
-/// none_fields.ds: the item 104 none-typed field honesty round — a
-/// field whose written type solves to the none atom alone refuses at
+/// none_fields.ds: the none-typed field honesty — a field whose written
+/// type solves to the none atom alone refuses at
 /// its own span in every spelling (the eight DS2042 rejects, each
 /// exactly one diagnostic at its own item), a none-headed application
 /// hears the tag's own refusal (the DS2040 reject), and the two
@@ -1306,7 +1303,7 @@ fn none_fields_items_check_with_the_none_only_rejections() {
     }
 }
 
-/// fn_return_inference.ds: the B2 first-order return unification — a
+/// fn_return_inference.ds: the first-order return unification — a
 /// lambda literal or named fn argument's inferred answer binds the
 /// written return's variables (the typecheck items, the un-annotated
 /// retry spelling among them), and the rejects pin the refusals: the
@@ -1389,9 +1386,8 @@ const TAG_RESOLUTION_AMBIENT: &str = concat!(
     "pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out\n",
 );
 
-/// tag_resolution.ds: the F9.5 phase-1 re-key round — reworked at the
-/// timer race's landing (the ambient's own `timeout` fn beside its tag):
-/// the call form means the fn, the directed spellings and the qualified
+/// tag_resolution.ds: the tag re-key beside the ambient's own `timeout`
+/// fn: the call form means the fn, the directed spellings and the qualified
 /// timeout escape check clean beside the shadowing declaration, the
 /// three unknown-member refusals and the ambiguity refusal land at their
 /// own items, and the same-file redeclaration, the same-package fn

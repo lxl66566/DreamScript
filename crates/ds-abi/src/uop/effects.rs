@@ -1,5 +1,5 @@
-//! Slot effects and purity metadata (BL-5): the tables that make uop fusion
-//! safe (BL-4) and that drive stencil generation (one stencil per uop, the
+//! Slot effects and purity metadata: the tables that make uop fusion
+//! safe and that drive stencil generation (one stencil per uop, the
 //! read/write sets become the holes' dependencies).
 
 use super::{
@@ -16,7 +16,7 @@ use super::{
 
 /// An operation class: the opcode byte's major nibble. The class fixes the
 /// operand shape (which fields mean what); the minor selects the variant.
-/// 14 of 16 codes are assigned. Major 0xE belongs to the M4
+/// 14 of 16 codes are assigned. Major 0xE belongs to the
 /// reference-counting pair RCINC/RCDEC, which lives beside `Uop` as
 /// [`super::RcOp`] (body words of both majors decode through
 /// [`super::Inst`]); 0xF stays reserved.
@@ -26,8 +26,8 @@ pub enum Major {
     /// 0x0 — constant loads: KIMM, KCONST (`a` = dst, `d` = pool index).
     Const = 0x0,
     /// 0x1 — i64 arithmetic: ADDI64 .. MODI64 trapping, WRAPADDI64 ..
-    /// WRAPMULI64 wrapping (B7's wrap set), SHLI64/SHRI64 trapping past
-    /// the bit width, BITAND/BITXOR/BITOR total (B7).
+    /// WRAPMULI64 wrapping, SHLI64/SHRI64 trapping past
+    /// the bit width, BITAND/BITXOR/BITOR total.
     IntArith = 0x1,
     /// 0x2 — f64 arithmetic: ADDF64, SUBF64, MULF64, DIVF64.
     FloatArith = 0x2,
@@ -42,9 +42,9 @@ pub enum Major {
     /// STRCAT_ARENA building an arena temporary, CAPTURE_STORE replacing
     /// one of a closure object's own capture words (the mut window).
     Ref = 0xd,
-    /// 0x6 — tag words (BL-2): TAG_TEST(_NOT), TAG_NEW.
+    /// 0x6 — tag words: TAG_TEST(_NOT), TAG_NEW.
     Tag = 0x6,
-    /// 0x7 — conversions: CVTI2F, CVTF2I (B7 explicit conversions).
+    /// 0x7 — conversions: CVTI2F, CVTF2I.
     Cvt = 0x7,
     /// 0x8 — slot moves: MOV.
     Mov = 0x8,
@@ -87,7 +87,7 @@ impl Major {
 }
 
 /// A by-value list of at most three slot indices: effect queries never
-/// allocate (BL-5). Constructed only by [`Uop::reads`] and [`Uop::writes`].
+/// allocate. Constructed only by [`Uop::reads`] and [`Uop::writes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotList {
     slots: [u8; 3],
@@ -343,11 +343,11 @@ impl Uop {
     /// Whether the uop only reads its read-set and writes its write-set:
     /// no control transfer and no frame-boundary effect, so reordering,
     /// duplicating, or fusing it inside a dataflow window preserves
-    /// semantics (BL-4). Pure uops may still trap — the B7 cold overflow
+    /// semantics. Pure uops may still trap — the cold overflow
     /// edge — and traps compose under fusion. Calls, jumps, returns, the
     /// FUNCF entry protocol, and HALT are impure. So are the allocating
     /// ops (KSTR, STRCAT, CLOSURE_NEW): reordering or duplicating an
-    /// allocation breaks M4's dup/drop balance, and interning touches
+    /// allocation breaks dup/drop balance, and interning touches
     /// shared heap state. CAPTURE_STORE is impure the same way: its
     /// count mutations and possible free are heap effects a dataflow
     /// window may not reorder or duplicate.
@@ -380,7 +380,7 @@ impl Uop {
     }
 
     /// The XOR-negated counterpart of a comparison, if this is one:
-    /// `opcode ^ 1` is the negation's opcode (BL-1). Conditional jumps are
+    /// `opcode ^ 1` is the negation's opcode. Conditional jumps are
     /// adjacent too (JMPIF^1 == JMPIF_NOT) but negate is about
     /// value-producing comparisons; flipping branch sense is a one-bit
     /// opcode rewrite performed directly by rewriters.

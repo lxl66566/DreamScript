@@ -177,7 +177,7 @@ fn write_param(ctx: &Ctx, out: &mut String, p: &Param) {
         out.push_str(": ");
         write_ty(ctx, out, t);
     }
-    // Literal-only signature defaults [F7]; conversion guarantees a `Some`
+    // Literal-only signature defaults; conversion guarantees a `Some`
     // value is a literal shape, so the base indent never matters.
     if let Some(d) = &p.default {
         out.push_str(" = ");

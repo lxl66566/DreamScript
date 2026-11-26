@@ -23,7 +23,7 @@ impl Objects {
     /// words and acquires one edge count per `Ref` word exactly like
     /// list elements — a local word through the store's own inc, a
     /// foreign word by posting the inc to the pending queue for the
-    /// router to drain (C4's foreign-post funnel, the channel's
+    /// router to drain (the foreign-post funnel, the channel's
     /// cross-heap seam). The first deposit fixes the buffer's element
     /// stride; a later deposit must repeat it exactly, so a
     /// hand-assembled mismatch traps instead of misaligning the FIFO.

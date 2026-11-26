@@ -1,4 +1,4 @@
-//! The Perceus dup/drop placement contract (C4): the placed op sequence —
+//! The Perceus dup/drop placement contract: the placed op sequence —
 //! uops plus RC ops at their exact walk positions — pins where dup and drop
 //! go, and the runnable module body carries the same words (the 0xE pair
 //! rides beside the uops and the VM executes it over counted heap blocks).

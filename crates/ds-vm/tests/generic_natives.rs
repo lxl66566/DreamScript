@@ -282,7 +282,7 @@ fn cons_prepends_into_a_fresh_list_over_int_and_string() {
 fn first_answers_the_checked_first_element() {
     let mut vm = Vm::new(gn_registry());
     // the empty cases first: list_push mutates in place, so a list bound
-    // before the pushes would no longer be empty after them
+    // before the pushes is non-empty after them
     let empty = run_value(&mut vm, "empty", &[]);
     assert_eq!(
         run_value(&mut vm, "first", &[empty]),

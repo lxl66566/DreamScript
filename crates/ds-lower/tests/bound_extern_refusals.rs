@@ -1,4 +1,4 @@
-//! The bound extern's C-ABI seam (H5): a call into a bound artifact
+//! The bound extern's C-ABI seam: a call into a bound artifact
 //! resolves through the package graph's artifacts fold — the exported
 //! symbol tables the lowering validates against — with every out-of-slice
 //! shape refusing at the seam and naming it: a missing artifact entry,

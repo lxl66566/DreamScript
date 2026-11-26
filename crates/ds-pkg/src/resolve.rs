@@ -6,7 +6,7 @@
 //! — the key a store-backed provider resolves straight from, no name-keyed
 //! index needed beside the content-addressed files — the same pin
 //! validating the fetched content, and the resolved graph — one version
-//! per name this round — serializing as the byte-stable lock. The graph's
+//! per name — serializing as the byte-stable lock. The graph's
 //! native artifacts fold the same way: one identity per artifact name,
 //! every declarer's pin agreeing, the manifest texts (artifacts inside)
 //! carrying them into the lock.
@@ -147,8 +147,8 @@ pub enum ResolveError {
         cycle: Vec<String>,
     },
     /// One artifact name pinned at two identities across the graph —
-    /// one version per name this round, multi-version coexistence a
-    /// listed residual.
+    /// One artifact name pinned at two identities across the graph —
+    /// one version per name; multi-version coexistence is not served.
     ArtifactConflict {
         /// The conflicting artifact name.
         name: String,
@@ -599,7 +599,7 @@ pub fn resolve(
 /// name order — only the versions the final graph resolved, so a
 /// version a later demand retired never pins. The first declarer of a
 /// name records it, and a later declarer's disagreement refuses — one
-/// version per name this round, the dep walk's one-slot rule over
+/// version per name, the dep walk's one-slot rule over
 /// exact pins instead of declared minima.
 #[allow(clippy::result_large_err)]
 fn fold_artifacts(
@@ -801,8 +801,8 @@ impl Walk {
     /// neighbors in name order, an explicit stack (a long dep chain grows
     /// the heap, not the call stack). The root itself is a node like any
     /// other, so a dep naming it (from the root's own list or a resolved
-    /// manifest's) closes a cycle here; a superseded manifest's root-dep
-    /// retired with it.
+    /// manifest's) closes a cycle here; the root-dep of an unselected manifest
+    /// of a manifest the resolution did not select is not walked.
     #[allow(clippy::result_large_err)]
     fn refuse_cycles(&self, root: &Manifest) -> Result<(), ResolveError> {
         let deps_of = |name: &str| -> Option<&BTreeMap<String, DepBound>> {

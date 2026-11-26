@@ -1,4 +1,4 @@
-//! The platform check (H5, E1): the package's world usage verified
+//! The platform check: the package's world usage verified
 //! inside what its platform declaration provides. The check is the
 //! record's subset rule at its finer grain — each definition's world
 //! usage names the capabilities whose ambient functions it calls, and

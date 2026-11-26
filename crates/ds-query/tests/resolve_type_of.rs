@@ -1,6 +1,6 @@
 //! The real `resolve` and `type_of` computes: package-level resolution
 //! and the per-definition typed story, memoized through the engine and
-//! recomputed when the file's parse changes `[B2, G3]`.
+//! recomputed when the file's parse changes.
 
 use std::fmt::Write;
 
@@ -36,7 +36,7 @@ fn resolve_reports_duplicates_and_slices_per_block() {
     assert_eq!(file.as_u32(), 0);
 
     // The resolve query carries the whole package's collection and
-    // resolution diagnostics [G3].
+    // resolution diagnostics.
     let resolved = db.get::<Resolve>(PackageId::new(0)).unwrap();
     assert_eq!(resolved.diags.len(), 1);
     assert_eq!(resolved.diags[0].message, "`size` is already defined");
@@ -140,8 +140,7 @@ fn registering_a_file_invalidates_the_package_queries() {
     assert_eq!(story.types[0].0, "size");
 
     // A file registered mid-session changes the file-set input: the
-    // package memos go dirty and the next reads see the new declaration
-    // (previously the stale memos hid it, with no diagnostic).
+    // package memos go dirty and the next reads see the new declaration.
     let second = db.add_file("second.ds", "const later = 2\n");
     assert_eq!(second.as_u32(), 1);
     assert!(!db.is_fresh(&QueryKey::Resolve(PackageId::new(0))));

@@ -2,9 +2,9 @@
 //! file whose items are all run-stage (no reject item, nothing staged
 //! for a later milestone) executes end to end through the `ds` binary in
 //! source mode, and the golden stdout — pinned from live runs — carries
-//! the observable behavior the M8 differential corpus must keep
+//! the observable behavior the differential corpus must keep
 //! identical across tiers: the defaulted-parameter spellings, the
-//! list[record] checked reads, the transitive dispatch chain, the E5
+//! list[record] checked reads, the transitive dispatch chain, the
 //! teardown deinit prints (their order deterministic across runs), and
 //! the tutorial's show-interpolation and receiverless-default answers.
 //!
@@ -157,9 +157,8 @@ fn the_comptime_fence_admits_pure_row_helpers() {
 
 #[test]
 fn the_comptime_fence_admits_trap_row_helpers() {
-    // a callee whose solved row is `trap` alone admits (the 2026-11-17
-    // amendment): the int-arithmetic helper and the string-concat helper
-    // (its row the effects pass's unsolved-type over-approximation) join
+    // a callee whose solved row is `trap` alone admits: the int-arithmetic helper and the
+    // string-concat helper (its row the effects pass's unsolved-type over-approximation) join
     // the fenced evaluation with their answers embedding, and both still
     // run on the runtime path
     run_golden("comptime_trap_row.ds", "page!\n42\n0\n");
@@ -316,7 +315,7 @@ fn the_fallible_io_spellings_answer_the_io_err_union() {
     );
 }
 
-/// The B2 inference round over the difference-typed handlers: a handler
+/// The inference over the difference-typed handlers: a handler
 /// using its parameter at the handled type checks un-annotated (`e`
 /// lands at io_err), a bare case label resolves inside the handler body
 /// against the narrowed parameter, and the identity `.ok` handler
@@ -346,7 +345,7 @@ fn handler_parameters_take_the_handled_members() {
 /// runs through `ds run` and byte-pins it exactly like the single-file
 /// corpus does; a fixture without a golden stays on the check leg alone
 /// (a reject-staged fixture the run would refuse, or a check-only one
-/// whose surface sits outside the M3 lowering contract). A
+/// whose surface sits outside the lowering contract). A
 /// cross-package fixture's run is its own check — the consumer's
 /// compile types against the linked surface the resolution serves — so
 /// the linked members the single-file corpus cannot carry gate here.
@@ -432,7 +431,7 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
         // composed run, byte-pinned exactly like the single-file corpus;
         // its absence keeps the fixture on the check leg alone — a
         // reject-staged fixture (the run would refuse) or a check-only
-        // one whose surface sits outside the M3 lowering contract
+        // one whose surface sits outside the lowering contract
         let golden_path = fixture.join("run.golden");
         if golden_path.exists() {
             assert!(

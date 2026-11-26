@@ -1,5 +1,4 @@
-//! The net face's resolver helper (item 79's parked DNS twin, ruled
-//! 2026-11-24): std's `to_socket_addrs` is a blocking getaddrinfo with
+//! The net face's resolver helper: std's `to_socket_addrs` is a blocking getaddrinfo with
 //! no non-blocking shape and no epoll-integrable twin (getaddrinfo_a
 //! does not exist on musl), so under an installed reactor the staged
 //! connect machine's step 0 runs the resolution on a dedicated helper
@@ -98,7 +97,7 @@ impl ResolveCell {
 
 /// The eventfd binding: exec-closed, non-blocking, one 8-byte counter
 /// write per completion and one drain per readable wake — libc's own
-/// symbols, the raw-socket ruling's OS-own-symbols discipline.
+/// symbols, no wrapper re-implementing the wait.
 #[derive(Debug)]
 struct EventFd {
     fd: OwnedFd,

@@ -57,7 +57,7 @@ macro_rules! parses {
     )+};
 }
 
-// ===== F1: braces, newline termination, trailing commas =====
+// ===== braces, newline termination, trailing commas =====
 
 parses! {
     empty_file => "",
@@ -79,7 +79,7 @@ parses! {
 
 #[test]
 fn separator_is_line_initial_only() {
-    // G3: `##` separates only at column 0 — mid-line or indented `##` is
+    // `##` separates only at column 0 — mid-line or indented `##` is
     // an error, never a separator or a comment.
     let (code, locs, ..) = err("const a = 1 ## mid\nconst b = 2\n");
     assert_eq!(code, ErrorCode::InvalidChar);
@@ -113,7 +113,7 @@ fn doc_comment_prefix_is_reserved_trivia() {
 
 #[test]
 fn imports_take_the_sigil_or_plain_path_form() {
-    // G4: `@std/...` registry paths and plain package paths; the quoted
+    // `@std/...` registry paths and plain package paths; the quoted
     // form is retired and must never parse in another role.
     let ast = ok("import @std/csv (reader)\nimport acme/pipeline/schema (row, parse_row)\n");
     assert_eq!(ast.blocks[0].items.len(), 2);
@@ -155,7 +155,7 @@ fn dot_continuation_crosses_newlines_but_calls_do_not() {
     assert_eq!(fn_body(&ast).stmts.len(), 3);
 }
 
-// ===== F2: bindings, const-arrow functions, annotations, returns =====
+// ===== bindings, const-arrow functions, annotations, returns =====
 
 parses! {
     const_binding => "const one = 1\n",
@@ -203,7 +203,7 @@ fn lambda_and_arrow_shapes() {
     };
 }
 
-// ===== F3: UFCS and paths =====
+// ===== UFCS and paths =====
 
 parses! {
     trait_qualified_call => "fn f() { ord::compare(a, b)\n}\n",
@@ -216,7 +216,7 @@ parses! {
 
 #[test]
 fn dot_call_is_field_then_call() {
-    // `x.f(a)` parses as Call(Field(x, f), [a]) — UFCS resolves in M2.
+    // `x.f(a)` parses as Call(Field(x, f), [a]) — UFCS resolves in the checker.
     let ast = ok("fn f() { x.g(1)\n}\n");
     let Expr::Call { callee, args, .. } = first_stmt_expr(&ast) else {
         panic!("call");
@@ -225,7 +225,7 @@ fn dot_call_is_field_then_call() {
     assert!(matches!(**callee, Expr::Field { .. }));
 }
 
-// ===== F4: pattern matching =====
+// ===== pattern matching =====
 
 parses! {
     match_guard_or => "fn f() {\nmatch x { a | b if g(x) => 1, _ => 2, }\n}\n",
@@ -262,7 +262,7 @@ fn newline_separates_expression_bodied_arms() {
     assert!(matches!(arms[1].body, Expr::Literal { .. }));
 }
 
-// ===== guard-tail collision (the section-6 quirk, ruled 2026-11-12) =====
+// ===== guard-tail collision =====
 
 parses! {
     guard_parenthesized_expression_parses => "fn f(x: int, m: int) -> int {\nmatch x { _ if (x > m) => 1, _ => 2 }\n}\n",
@@ -345,7 +345,7 @@ fn guard_tail_suggestion_repairs_the_parse() {
 #[test]
 fn paren_lambda_guard_tail_stays_generic() {
     // The paren-parameter shape is the same arrow-greediness family without
-    // a bare lambda: parked behind the F1 escalation, not this diagnostic.
+    // a bare lambda: the generic error stands, not the collision diagnostic.
     let (code, ..) =
         err("fn f(x: int, m: int) -> int {\nmatch x { _ if x > (m) => 1, _ => 2 }\n}\n");
     assert_eq!(code, ErrorCode::UnexpectedToken);
@@ -407,7 +407,7 @@ fn pattern_negation_on_non_numeric_literal_is_a_diagnostic() {
     }
 }
 
-// ===== F7: named arguments and literal-only defaults =====
+// ===== named arguments and literal-only defaults =====
 
 #[test]
 fn named_arguments_parse_after_positional() {
@@ -537,7 +537,7 @@ fn kw_blocks_keep_their_statements() {
     assert_eq!(db.stmts.len(), 1, "defer body kept its statement");
 }
 
-// ===== F5: frozen operator set =====
+// ===== frozen operator set =====
 
 parses! {
     arithmetic_ops => "fn f() { a + b +% c - d -% e * f *% g / h % i\n}\n",
@@ -570,7 +570,7 @@ fn precedence_mul_over_add() {
 
 #[test]
 fn in_binds_at_comparison_level() {
-    // F5: `in` sits with the comparisons, tighter than `&&`, so `x in xs
+    // `in` sits with the comparisons, tighter than `&&`, so `x in xs
     // && flag` reads `(x in xs) && flag` — never `x in (xs && flag)`.
     let ast = ok("fn f() { x in xs && flag\n}\n");
     let Expr::Binary {
@@ -681,7 +681,7 @@ fn stacked_try_spans_are_exact() {
     assert_eq!((inner.start, inner.end), (9, 11), "`x?`");
 }
 
-// ===== F6: strings, chars, numbers =====
+// ===== strings, chars, numbers =====
 
 parses! {
     interpolation_holes => "const s = \"a ${1 + 2} $name b\"\n",
@@ -863,7 +863,7 @@ fn byte_literals_cook_to_single_bytes() {
     else {
         panic!("byte");
     };
-    // the char/byte distinction [F6]: 'x' stays a Unicode scalar char
+    // the char/byte distinction: 'x' stays a Unicode scalar char
     let ast = ok("const c = 'x'\n");
     assert!(matches!(init_expr(&ast), Expr::Literal {
         lit: Literal::Char('x'),
@@ -1007,7 +1007,7 @@ fn bad_number_forms_rejected() {
     }
 }
 
-// ===== B4/B7: optionals and type expressions =====
+// ===== optionals and type expressions =====
 
 parses! {
     optional_annotations => "fn f(a: int?, b: list<int>?, c: (a | b)?) -> t? { a }\n",
@@ -1082,7 +1082,7 @@ fn named_impl_and_call_selection_convert() {
     };
     assert!(imp.name.is_none());
 
-    // A top-level bodied fn converts onto the const-of-lambda item (F2),
+    // A top-level bodied fn converts onto the const-of-lambda item,
     // so the calls read through an impl member body here.
     let ast = ok("impl ord for int { fn f() { x.show() as fast\n}\n}\n");
     let ItemKind::Impl(imp) = &ast.blocks[0].items[0].kind else {
@@ -1128,7 +1128,7 @@ fn impl_plain_value_member_is_a_diagnostic() {
 
 #[test]
 fn const_arrow_members_retire_as_fn_only() {
-    // F2: members are `fn` declarations; the const-arrow member spellings
+    // Members are `fn` declarations; the const-arrow member spellings
     // record DS1010 on both sides (trait signature and impl body).
     let (code, ..) = err("trait t {\nconst g = (a: int) -> int\n}\n");
     assert_eq!(code, ErrorCode::InvalidImplMember);
@@ -1138,7 +1138,7 @@ fn const_arrow_members_retire_as_fn_only() {
 
 #[test]
 fn top_level_named_const_lambdas_retire() {
-    // F2: `fn` is the only named-function declaration; naming a lambda at
+    // `fn` is the only named-function declaration; naming a lambda at
     // the top level suggests the spelling (arrow and block forms, const
     // and var alike). Inside a body the same binding stays legal.
     let (code, ..) = err("const f = (x: int) -> int { x }\n");
@@ -1159,7 +1159,7 @@ fn receivers_parse_bare_and_annotated() {
     let _ = ok("impl t for int {\nfn f(mut self, other: Self) -> int { 0 }\n}\n");
 }
 
-// ===== G3: file structure, trivia, spans =====
+// ===== file structure, trivia, spans =====
 
 #[test]
 fn file_without_separators_is_one_block() {
@@ -1873,7 +1873,7 @@ fn name_headed_patterns_split_binding_call_and_struct() {
     );
 }
 
-/// The tuple corners `[B3]`: `(e)` is grouping, `(e,)` a 1-tuple, `()` the
+/// The tuple corners: `(e)` is grouping, `(e,)` a 1-tuple, `()` the
 /// unit construction; the trailing comma is the only disambiguator, and
 /// both layers keep the distinction (the formatter re-emits the comma).
 #[test]
@@ -1955,10 +1955,9 @@ fn expected_phrases_dedup_preserving_report_order() {
 }
 
 /// Grammar-internal rule names never reach the message: the fallback is a
-/// natural phrase, never a variant name like `postfix_op`. (The raw-string
-/// hash-mismatch shape this test once rode no longer reaches the grammar:
-/// the pre-scan ends the string at the opening hash count and answers the
-/// surplus hashes itself.)
+/// natural phrase, never a variant name like `postfix_op`. (A raw-string
+/// hash-mismatch shape never reaches the grammar: the pre-scan ends the
+/// string at the opening hash count and answers the surplus hashes itself.)
 #[test]
 fn internal_rule_names_never_reach_error_messages() {
     let (code, message, ..) = first_diag("const s = r#\"a\"#1\n");

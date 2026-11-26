@@ -416,7 +416,7 @@ impl FnLower<'_, '_, '_> {
         self.bind_label(ok);
         // the payload words move into the element temp, each `Ref` word
         // under the count the read handed out (the collection keeps its
-        // own, C4)
+        // own)
         for (index, slot) in elem_words.iter().enumerate() {
             let word = base + u8::try_from(index).expect("span width fits u8");
             self.emit(Op::Mov {

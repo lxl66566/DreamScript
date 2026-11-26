@@ -1,4 +1,4 @@
-//! The platform declaration's parse surface (H5): `platform "std"
+//! The platform declaration's parse surface: `platform "std"
 //! provides <console, fsys, net, time>`, the provides clause optional
 //! (an absent list is the embed target), the name one plain string
 //! literal — escapes and interpolation holes are parse errors.

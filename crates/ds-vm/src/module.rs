@@ -1,4 +1,4 @@
-//! The two-slot module table [H6 item 5]: versioned module slots and
+//! The two-slot module table: versioned module slots and
 //! fully-qualified function resolution.
 
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
@@ -89,7 +89,7 @@ pub enum ModuleBuildError {
     },
 }
 
-/// A loaded function: definition plus its two-word entry descriptor [H2].
+/// A loaded function: definition plus its two-word entry descriptor.
 /// The tier-2 word is null until the JIT exists, so
 /// [`EntryDescriptor::resolve`] answers with word 0: this function's index
 /// in the module version's function table.
@@ -97,11 +97,11 @@ pub enum ModuleBuildError {
 pub struct Function {
     /// The function's name within its module.
     pub name: String,
-    /// The function's static frame layout [BL-6].
+    /// The function's static frame layout.
     pub layout: ds_abi::FrameLayout,
     /// The function's constant pool (the dsmod blocks-payload granularity).
     pub pool: Vec<Const>,
-    /// The encoded uop body [BL-1].
+    /// The encoded uop body.
     pub code: Vec<u32>,
     /// The function's content identity — the body (code words and pool
     /// constants) plus the frame layout, whose parameter words carry a
@@ -197,7 +197,7 @@ fn content_hash(def: &FunctionDef) -> u64 {
 pub struct ModuleVersion {
     name: String,
     functions: Vec<Function>,
-    /// The evidence-chain table [H3]: one entry per chain object the
+    /// The evidence-chain table: one entry per chain object the
     /// staged evidence words index. Module-local — a chain's `func` and
     /// `next` indexes address this version's own tables, resolved at
     /// dispatch like the sentinel slot word, so no install-time rewrite
@@ -205,11 +205,11 @@ pub struct ModuleVersion {
     chains: Vec<ds_mod::EvidenceChain>,
     index: BTreeMap<String, u32>,
     /// The content identity the load protocol validates dependency
-    /// links against (a dsmod module's content hash is its source hash
-    /// this round); `None` for a directly built version, which carries
+    /// links against (a dsmod module's content hash is its source hash);
+    /// `None` for a directly built version, which carries
     /// no content identity.
     content_hash: Option<ds_mod::Hash128>,
-    /// The strippable pc-to-span table (H7): the one source channel the
+    /// The strippable pc-to-span table: the one source channel the
     /// trap renderer, the debugger breakpoints, and the sampling
     /// profiler name positions through. `None` when the module was
     /// stripped or built directly.
@@ -222,7 +222,7 @@ impl ModuleVersion {
     /// each `FUNCF` against its layout, validates every pool access, and
     /// assigns function-table indices (which become entry descriptor word
     /// 0). The tier-2 word stays null; it flips exactly once when the JIT
-    /// compiles the function [H2].
+    /// compiles the function.
     pub fn new(name: impl Into<String>, defs: Vec<FunctionDef>) -> Result<Self, ModuleBuildError> {
         let mut functions = Vec::with_capacity(defs.len());
         let mut index = BTreeMap::new();
@@ -251,7 +251,7 @@ impl ModuleVersion {
         })
     }
 
-    /// Attaches the module's evidence-chain table [H3], validating every
+    /// Attaches the module's evidence-chain table, validating every
     /// entry's function index against the function table and every tail
     /// index against the chain table itself.
     ///
@@ -340,7 +340,7 @@ impl ModuleVersion {
         &self.functions
     }
 
-    /// The evidence-chain table the staged evidence words index [H3].
+    /// The evidence-chain table the staged evidence words index.
     #[must_use]
     pub fn chains(&self) -> &[ds_mod::EvidenceChain] {
         &self.chains
@@ -394,7 +394,7 @@ impl ModuleVersion {
 }
 
 /// Load-time body validation: canonical decode, FUNCF-vs-layout agreement,
-/// and pool-index/kind agreement [BL-5, BL-6].
+/// and pool-index/kind agreement.
 fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
     if def.pool.len() > usize::from(u16::MAX) + 1 {
         return Err(ModuleBuildError::PoolTooLarge {
@@ -419,7 +419,7 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
         })?;
         let op = match inst {
             Inst::Uop(op) => op,
-            // the 0xE RC pair (C4): no pool, no layout fact to check —
+            // the 0xE RC pair: no pool, no layout fact to check —
             // the slot addressing traps at run time like every other
             // operand
             Inst::Rc(_) => continue,
@@ -497,7 +497,7 @@ pub struct VersionIdx(pub(crate) u32);
 
 #[derive(Clone, Debug)]
 pub struct ModuleSlots {
-    /// The module id a scalar FuncRef word addresses (F2): this name's
+    /// The module id a scalar FuncRef word addresses: this name's
     /// first-install position in the registry's id space.
     id: u32,
     current: VersionIdx,
@@ -526,8 +526,8 @@ impl ModuleSlots {
 /// subsequent calls immediately; frames already running a retiring version
 /// keep their code and pool until nothing references them — every frame
 /// carries a [`VersionIdx`], and the table owns each version's survival
-/// until an install-time sweep proves nothing references its row [H6
-/// item 5]; a swept row's index reuses at a later install, so the table's
+/// until an install-time sweep proves nothing references its row; a swept
+/// row's index reuses at a later install, so the table's
 /// width tracks live rows, never install count. Native modules ([`NativeFunction`] tables, the
 /// builtin mechanism) live in the same name space: a pool FuncRef resolves through
 /// the uop tables first, the native tables second, so `CALL` has one
@@ -536,24 +536,23 @@ impl ModuleSlots {
 pub struct ModuleRegistry {
     modules: BTreeMap<String, ModuleSlots>,
     natives: BTreeMap<String, Arc<Vec<NativeFunction>>>,
-    /// The installed platform handlers, by name (H5.5, E1): the world
+    /// The installed platform handlers, by name: the world
     /// surface's capability gate — a world call site's FuncRef resolves
     /// through the platform's table only when the platform serves the
     /// op's capability.
     platforms: BTreeMap<String, Arc<Platform>>,
-    /// The installed bound-artifact modules, by manifest artifact name
-    /// (H5): each `[artifacts]` library the run's graph resolved, its
+    /// The installed bound-artifact modules, by manifest artifact name:
+    /// one per `[artifacts]` library the run's graph resolved, holding the
     /// exported symbols in enumeration order — the tables pool
     /// `Constant::Bound` callees address. Host-side like the platforms:
     /// the workers' code snapshot never carries them, so a foreign call
     /// inside a pooled child refuses with the standard unresolved-callee
     /// trap.
     bound: BTreeMap<String, Arc<BoundModule>>,
-    /// The module-id space scalar FuncRef words address (F2): one id per
+    /// The module-id space scalar FuncRef words address: one id per
     /// module name, assigned at first install and stable across swaps.
-    /// Name-keyed modules are the interim until the M7 loading round's
-    /// link table assigns module indices, mirroring the pool FuncRef's
-    /// name-keyed interim. This vector is the id-to-name direction; the
+    /// Module ids are name-keyed like the pool FuncRef's: a name assigns one
+    /// at first install. This vector is the id-to-name direction; the
     /// name-to-id direction rides each slot's own `id`, so a name lookup
     /// is one `modules` descent.
     id_names: Vec<String>,
@@ -602,8 +601,8 @@ struct ResolvedEntry {
     func_id: u32,
 }
 
-/// The `Send + Sync` code snapshot a fork-join drive hands its workers
-/// (E3's 2026-11-15 sendability ruling): the registry's read face — the
+/// The `Send + Sync` code snapshot a fork-join drive hands its workers:
+/// the registry's read face — the
 /// module slots, the native tables, the id space, and `Arc` clones of
 /// every version-table row — with the platform handlers stripped, so a
 /// pooled child's world call refuses with the standard unresolved-callee
@@ -699,7 +698,7 @@ impl ModuleRegistry {
         self.generation
     }
 
-    /// The module id a scalar FuncRef word addresses (F2): assigned at
+    /// The module id a scalar FuncRef word addresses: assigned at
     /// first install, kept across hot-reload swaps, and answered by the
     /// module's own slot.
     #[must_use]
@@ -841,8 +840,8 @@ impl ModuleRegistry {
         Some((version, func_id))
     }
 
-    /// Resolves a pool FuncRef through the target module's current slot
-    /// [H6 item 5]: `func` is the function-table index (entry word 0). A
+    /// Resolves a pool FuncRef through the target module's current slot:
+    /// `func` is the function-table index (entry word 0). A
     /// swap between a call's issue and its resolution redirects here, and
     /// the answer names a table row, so the resolution mints no handle.
     #[must_use]
@@ -909,7 +908,7 @@ impl ModuleRegistry {
             .and_then(|slots| self.version(slots.retiring?))
     }
 
-    /// Installs a platform handler (H5.5, E1): the world surface `platform`
+    /// Installs a platform handler: the world surface `platform`
     /// serves, under its own name — the module name the source's platform
     /// declaration bakes into the lowered world calls' pool FuncRefs. The
     /// platform's op table installs as a native table (served ops' bodies,
@@ -963,8 +962,8 @@ impl ModuleRegistry {
         self.natives.get(module)
     }
 
-    /// Installs a bound-artifact module under its manifest artifact name
-    /// (H5): the loaded library's exported symbols in enumeration order,
+    /// Installs a bound-artifact module under its manifest artifact name,
+    /// holding the loaded library's exported symbols in enumeration order —
     /// the table a pool `Constant::Bound` callee resolves its symbol
     /// through. A same-named prior module replaces it, the same
     /// replacement discipline a native table takes.
@@ -1113,7 +1112,7 @@ mod tests {
         assert_eq!(v4_row, v1_row);
     }
 
-    /// The bounded-row regression the item-39 landing owns: deep install
+    /// The bounded-row regression: deep install
     /// churn with nothing naming the outgoing rows recycles swept slots,
     /// so the table's width stays a small constant instead of growing one
     /// row per install.
@@ -1142,7 +1141,7 @@ mod tests {
     }
 
     /// The code snapshot a pool drive hands its workers carries the same
-    /// `Send + Sync` contract (E3's 2026-11-15 sendability ruling), so the
+    /// `Send + Sync` contract, so the
     /// shared-read half of the ownership-transfer design is
     /// compiler-proved.
     #[test]
@@ -1243,7 +1242,7 @@ mod tests {
 
     #[test]
     fn canonical_rc_words_load_beside_the_uops() {
-        // the 0xE pair loads as part of the body (C4): no pool operand,
+        // the 0xE pair loads as part of the body: no pool operand,
         // no layout fact; the word stream carries both majors
         let mut def = empty_def("rc");
         def.layout = ds_abi::FrameLayout::new(vec![SlotType::Ref], 0, 0).expect("valid layout");
