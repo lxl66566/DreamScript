@@ -1,4 +1,4 @@
-//! The pooled-body static refusal: a `par_map`/`par_reduce` element body
+//! The pooled-body static refusal: a pooled combinator's element body
 //! runs on a worker that owns whole fibers but no siblings — the fiber
 //! pool, the nurseries, and the platform tables stay host-side — so two
 //! member classes diverge worker-side and refuse here, inside the callable
@@ -14,11 +14,12 @@
 //! runtime host flag (`Vm::enable_fork_pool`), so a pooled body refuses
 //! under the sequential drive too: the pool is an execution detail of
 //! one drive, not a second semantics. A pooled site is recognized by resolved identity, never
-//! by the user-facing spelling: the @std library fns (`par_map`/
-//! `par_reduce`) are bodied members whose own bodies enter the private
-//! fork-join engine seams, so a call is pooled exactly when its callee
-//! resolves to such a member (or to a seam itself — the private extern
-//! the stdlib alone can name); a user's same-spelled declaration is
+//! by the user-facing spelling: the pooled library spellings sit off
+//! the user surface (the fork-join admission round returns them), and
+//! the private fork-join engine seams are the bodiless generic externs
+//! the engine routes by name, so a call is pooled exactly when its
+//! callee resolves to a bodied member whose body enters a seam (or to
+//! a seam spelling itself); a user's same-named bodied declaration is
 //! just a fn with no seam in reach and never pools. The hunt follows
 //! the callable's reach: the callable's own
 //! subtree (nested lambdas included — a hosted combinator's element
@@ -56,7 +57,7 @@ use crate::{
 const CONTROL_NATIVES: [&str; 2] = ["fiber_resume", "nursery_join"];
 
 /// The fork-join engine seams' spellings: the private bodiless generic
-/// externs the @std pooled library fns route through, addressed by the
+/// externs the pooled combinators route through, addressed by the
 /// same by-name native routing the lowerer applies to bodiless generic
 /// callees (the key the fiber control natives above hold — an engine
 /// identity, never a user-facing combinator spelling).
@@ -120,7 +121,7 @@ impl Offense {
 }
 
 /// Refuses the worker-diverging members in every pooled body of one
-/// analyzed package: each `par_map`/`par_reduce` call's callable
+/// analyzed package: each pooled combinator call's callable
 /// argument is hunted through its reachable bodies, and the first
 /// offense per site reports. Clean callables (the corpus and every
 /// clean program) answer nothing.
@@ -377,10 +378,10 @@ impl<'a> Index<'a> {
     }
 
     /// The pooled call sites: candidates gated by resolved identity —
-    /// the callee is a pooled seam itself (the private extern only the
-    /// stdlib's own file names) or a bodied member whose body enters
-    /// one, the @std library fns' shape; every other callee (a user's
-    /// same-spelled fn among them) is just a call. The fn-typed slot's
+    /// the callee is a pooled seam itself (the bodiless generic extern
+    /// spelling) or a bodied member whose body enters one, the pooled
+    /// library fns' shape; every other callee (a user's same-named
+    /// bodied fn among them) is just a call. The fn-typed slot's
     /// argument is the callable.
     fn sites(&self) -> Vec<Site<'a>> {
         let mut sites = Vec::new();

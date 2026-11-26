@@ -3,18 +3,25 @@
 //! sibling-addressing fiber control natives and the world surface —
 //! unconditionally, so legality never depends on the host's pool opt-in
 //! and the worker-side divergences are unreachable from the source
-//! surface. Every case rides
-//! the real ambient (its `par_map`/`par_reduce` declarations and effect
-//! rows), exactly the bundle the CLI compiles.
+//! surface. Every probe declares the fork seam externs the engine routes
+//! by name (the pooled library spellings stay off the user surface) and
+//! rides the shrunk ambient core beside them.
 
 use ds_check::{check_pooled_bodies, type_of};
 use ds_diag::{ErrorCode, Files};
 
-/// Analyzes the ambient plus one test member and returns the pooled
+/// The map seam's extern spelling, one probe line.
+const FORK_MAP: &str = "extern fn fork_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]\n";
+
+/// The fold seam's extern spelling, one probe line.
+const FORK_REDUCE: &str =
+    "extern fn fork_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t\n";
+
+/// Analyzes the ambient core plus one test member and returns the pooled
 /// refusal's diagnostics.
 fn pooled_of(source: &str) -> Vec<ds_diag::Diagnostic> {
     let mut files = Files::new();
-    let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+    let ambient = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE);
     let member = files.add_source("pooled_probe.ds", source);
     let ambient = ds_parse::parse(&files, ambient).expect("the ambient parses");
     let member = match ds_parse::parse(&files, member) {
@@ -25,7 +32,7 @@ fn pooled_of(source: &str) -> Vec<ds_diag::Diagnostic> {
     check_pooled_bodies(&analyzed, ds_stdlib::declared_rows())
 }
 
-/// Analyzes the ambient plus one test member whose import binds a
+/// Analyzes the ambient core plus one test member whose import binds a
 /// hand-built linked surface — one entry per (name, parameter
 /// names, solved row) fixture — and returns the pooled refusal's
 /// diagnostics: a linked callee's carried row is the only fact the hunt
@@ -35,7 +42,7 @@ fn pooled_linked_of(
     fixture: &[(&str, &[&str], ds_check::EffectRow)],
 ) -> Vec<ds_diag::Diagnostic> {
     let mut files = Files::new();
-    let ambient_file = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_SOURCE);
+    let ambient_file = files.add_source(ds_stdlib::AMBIENT_FILE, ds_stdlib::AMBIENT_CORE_SOURCE);
     let member_file = files.add_source("pooled_linked_probe.ds", source);
     let ambient = ds_parse::parse(&files, ambient_file).expect("the ambient parses");
     let member = match ds_parse::parse(&files, member_file) {
@@ -144,10 +151,10 @@ fn codes(diags: &[ds_diag::Diagnostic]) -> Vec<ErrorCode> {
 
 #[test]
 fn a_clean_callable_refuses_nothing() {
-    let diags = pooled_of(
-        "fn main() -> list[int] {\n  const xs = [1, 2, 3]\n  const doubled = xs.par_map((x: int) \
-         => x * 2)\n  doubled\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, 2, 3]\n  const doubled = \
+         xs.fork_map((x: int) => x * 2)\n  doubled\n}}\n",
+    ));
     assert!(
         diags.is_empty(),
         "a clean element body checks clean: {diags:?}"
@@ -156,10 +163,10 @@ fn a_clean_callable_refuses_nothing() {
 
 #[test]
 fn a_named_clean_callable_refuses_nothing() {
-    let diags = pooled_of(
-        "fn both(x: int) -> (int, int) {\n  (x * 2, x * 3)\n}\n\nfn main() -> list[(int, int)] \
-         {\n  const xs = [1, 2, 3]\n  xs.par_map(both)\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn both(x: int) -> (int, int) {{\n  (x * 2, x * 3)\n}}\n\nfn main() -> \
+         list[(int, int)] {{\n  const xs = [1, 2, 3]\n  xs.fork_map(both)\n}}\n",
+    ));
     assert!(
         diags.is_empty(),
         "a named clean callable checks clean: {diags:?}"
@@ -168,37 +175,37 @@ fn a_named_clean_callable_refuses_nothing() {
 
 #[test]
 fn a_resume_native_inside_a_pooled_body_refuses() {
-    let diags = pooled_of(
-        "extern fn fiber_resume (id: int, v: int) -> int\n\nfn main() -> list[int] {\n  const xs \
-         = [1, 2]\n  xs.par_map((x: int) => fiber_resume(x, 0))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "extern fn fiber_resume (id: int, v: int) -> int\n{FORK_MAP}\nfn main() -> list[int] \
+         {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => fiber_resume(x, 0))\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
 }
 
 #[test]
 fn a_foreign_nursery_join_inside_a_pooled_body_refuses() {
-    let diags = pooled_of(
-        "extern fn nursery_join (id: int) -> int\n\nfn main() -> list[int] {\n  const xs = [1, \
-         2]\n  xs.par_map((x: int) => nursery_join(x))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "extern fn nursery_join (id: int) -> int\n{FORK_MAP}\nfn main() -> list[int] {{\n  const \
+         xs = [1, 2]\n  xs.fork_map((x: int) => nursery_join(x))\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
 }
 
 #[test]
 fn a_world_call_inside_a_pooled_body_refuses() {
-    let diags = pooled_of(
-        "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => {\n    \
-         println(\"elem\")\n    x\n  })\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => \
+         {{\n    println(\"elem\")\n    x\n  }})\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
 #[test]
 fn the_fold_callable_refuses_like_the_map_callable() {
-    let diags = pooled_of(
-        "fn main() -> int {\n  const xs = [1, 2]\n  xs.par_reduce(0, (a: int, b: int) => {\n    \
-         read_file(\"x\")\n    a + b\n  })\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_REDUCE}\nfn main() -> int {{\n  const xs = [1, 2]\n  xs.fork_reduce(0, (a: int, b: \
+         int) => {{\n    read_file(\"x\")\n    a + b\n  }})\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
@@ -206,29 +213,29 @@ fn the_fold_callable_refuses_like_the_map_callable() {
 fn a_world_call_through_a_helper_fn_refuses() {
     // The offense sits inside the helper's body; the pooled body reaches
     // it through the call.
-    let diags = pooled_of(
-        "fn log(x: int) -> int {\n  println(\"elem\")\n  x\n}\n\nfn main() -> list[int] {\n  \
-         const xs = [1, 2]\n  xs.par_map((x: int) => log(x))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn log(x: int) -> int {{\n  println(\"elem\")\n  x\n}}\n\nfn main() -> \
+         list[int] {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => log(x))\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
 #[test]
 fn a_control_native_through_a_named_callable_refuses() {
-    let diags = pooled_of(
-        "extern fn fiber_resume (id: int, v: int) -> int\n\nfn resumer(x: int) -> int {\n  \
-         fiber_resume(x, 0)\n}\n\nfn main() -> list[int] {\n  const xs = [1, 2]\n  \
-         xs.par_map(resumer)\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "extern fn fiber_resume (id: int, v: int) -> int\n{FORK_MAP}\nfn resumer(x: int) -> int \
+         {{\n  fiber_resume(x, 0)\n}}\n\nfn main() -> list[int] {{\n  const xs = [1, 2]\n  \
+         xs.fork_map(resumer)\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
 }
 
 #[test]
 fn a_control_native_through_a_local_callable_refuses() {
-    let diags = pooled_of(
-        "extern fn nursery_join (id: int) -> int\n\nfn main() -> list[int] {\n  const xs = [1, \
-         2]\n  const g = (x: int) => nursery_join(x)\n  xs.par_map(g)\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "extern fn nursery_join (id: int) -> int\n{FORK_MAP}\nfn main() -> list[int] {{\n  const \
+         xs = [1, 2]\n  const g = (x: int) => nursery_join(x)\n  xs.fork_map(g)\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
 }
 
@@ -236,19 +243,20 @@ fn a_control_native_through_a_local_callable_refuses() {
 fn a_nested_combinator_lambda_inside_a_pooled_body_refuses_the_same() {
     // A hosted combinator's element lambda runs inside the pooled
     // child's extent, so its body hunts with the callable's own.
-    let diags = pooled_of(
-        "extern fn fiber_resume (id: int, v: int) -> int\n\nfn main() -> list[list[int]] {\n  \
-         const xs = [1, 2]\n  xs.par_map((x: int) => [x].map((y: int) => fiber_resume(y, 0)))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "extern fn fiber_resume (id: int, v: int) -> int\n{FORK_MAP}\nfn main() -> \
+         list[list[int]] {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => [x].map((y: int) => \
+         fiber_resume(y, 0)))\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
 }
 
 #[test]
 fn a_parenthesized_call_spelling_refuses_the_same() {
-    let diags = pooled_of(
-        "fn main() -> list[int] {\n  const xs = [1, 2]\n  (par_map(xs, (x: int) => {\n    \
-         write_file(\"p\", \"x\")\n    x\n  }))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, 2]\n  (fork_map(xs, (x: int) => \
+         {{\n    write_file(\"p\", \"x\")\n    x\n  }}))\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
@@ -271,10 +279,10 @@ fn the_same_members_outside_pooled_bodies_stay_legal() {
 fn a_bodied_shadow_of_a_control_native_name_stays_legal() {
     // A bodied fn of the native's name plans local and never routes to
     // the native, so it carries no divergence.
-    let diags = pooled_of(
-        "fn fiber_resume(id: int, v: int) -> int {\n  id + v\n}\n\nfn main() -> list[int] {\n  \
-         const xs = [1, 2]\n  xs.par_map((x: int) => fiber_resume(x, 0))\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn fiber_resume(id: int, v: int) -> int {{\n  id + v\n}}\n\nfn main() -> \
+         list[int] {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => fiber_resume(x, 0))\n}}\n",
+    ));
     assert!(
         diags.is_empty(),
         "a local body of the name pools legally: {diags:?}"
@@ -285,12 +293,25 @@ fn a_bodied_shadow_of_a_control_native_name_stays_legal() {
 fn a_pooled_call_inside_a_struct_deinit_block_refuses() {
     // A deinit block runs at the value's death site, so a pooled call
     // written there is a site the scan must reach.
-    let diags = pooled_of(
-        "struct file: ~Copyable {\n  fd: int\n  deinit {\n    const xs = [1, 2]\n    const ys = \
-         xs.par_map((x: int) => {\n      println(\"teardown\")\n      x\n    })\n    \
-         println(\"${ys.len()}\")\n  }\n}\n\nfn main() -> int {\n  const f = file { fd: 1 }\n  \
-         f.fd\n}\n",
+    let body = concat!(
+        "struct file: ~Copyable {\n",
+        "  fd: int\n",
+        "  deinit {\n",
+        "    const xs = [1, 2]\n",
+        "    const ys = xs.fork_map((x: int) => {\n",
+        "      println(\"teardown\")\n",
+        "      x\n",
+        "    })\n",
+        "    println(\"${ys.len()}\")\n",
+        "  }\n",
+        "}\n",
+        "\n",
+        "fn main() -> int {\n",
+        "  const f = file { fd: 1 }\n",
+        "  f.fd\n",
+        "}\n",
     );
+    let diags = pooled_of(&format!("{FORK_MAP}\n{body}"));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
@@ -299,11 +320,11 @@ fn a_fn_value_passed_to_a_hosted_combinator_refuses_like_the_lambda() {
     // A named helper a hosted combinator receives as a value
     // (`[x].filter(helper)`) runs its body inside the child's extent, so
     // the plain-path spelling refuses exactly like the lambda spelling.
-    let diags = pooled_of(
-        "fn helper(x: int) -> bool {\n  println(\"h\")\n  true\n}\n\nfn main() -> list[int] {\n  \
-         const xs = [1, 2]\n  xs.par_map((x: int) => {\n    const zs = [x].filter(helper)\n    \
-         x\n  })\n}\n",
-    );
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn helper(x: int) -> bool {{\n  println(\"h\")\n  true\n}}\n\nfn main() -> \
+         list[int] {{\n  const xs = [1, 2]\n  xs.fork_map((x: int) => {{\n    const zs = \
+         [x].filter(helper)\n    x\n  }})\n}}\n",
+    ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
 
@@ -312,28 +333,12 @@ fn an_alias_chain_of_any_depth_still_refuses() {
     // The chase follows a local alias chain through a visited set, so no
     // depth truncates the reach (this chain runs past the old cap of
     // eight hops, which once let the world helper escape silently).
-    let diags = pooled_of(concat!(
-        "fn helper(x: int) -> int {\n",
-        "  println(\"h\")\n",
-        "  x\n",
-        "}\n",
-        "\n",
-        "fn main() -> list[int] {\n",
-        "  const a0 = helper\n",
-        "  const a1 = a0\n",
-        "  const a2 = a1\n",
-        "  const a3 = a2\n",
-        "  const a4 = a3\n",
-        "  const a5 = a4\n",
-        "  const a6 = a5\n",
-        "  const a7 = a6\n",
-        "  const a8 = a7\n",
-        "  const a9 = a8\n",
-        "  const a10 = a9\n",
-        "  const a11 = a10\n",
-        "  const xs = [1, 2]\n",
-        "  xs.par_map(a11)\n",
-        "}\n",
+    let diags = pooled_of(&format!(
+        "{FORK_MAP}\nfn helper(x: int) -> int {{\n  println(\"h\")\n  x\n}}\n\nfn main() -> \
+         list[int] {{\n  const a0 = helper\n  const a1 = a0\n  const a2 = a1\n  const a3 = a2\n  \
+         const a4 = a3\n  const a5 = a4\n  const a6 = a5\n  const a7 = a6\n  const a8 = a7\n  \
+         const a9 = a8\n  const a10 = a9\n  const a11 = a10\n  const xs = [1, 2]\n  \
+         xs.fork_map(a11)\n}}\n",
     ));
     assert_eq!(codes(&diags), vec![ErrorCode::PooledWorldCall]);
 }
@@ -344,8 +349,10 @@ fn a_linked_world_callee_inside_a_pooled_body_refuses() {
     // its link surface carries judges it — the same fact the comptime
     // fence reads.
     let diags = pooled_linked_of(
-        "import @dep (shout)\n\nfn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: \
-         int) => shout(x))\n}\n",
+        &format!(
+            "import @dep (shout)\n{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, 2]\n  \
+             xs.fork_map((x: int) => shout(x))\n}}\n",
+        ),
         &[(
             "shout",
             &["n"],
@@ -361,8 +368,10 @@ fn a_linked_control_native_inside_a_pooled_body_refuses() {
     // exactly as a local extern spelling does, so the pooled body
     // refuses it by entry name.
     let diags = pooled_linked_of(
-        "import @dep (fiber_resume)\n\nfn main() -> list[int] {\n  const xs = [1, 2]\n  \
-         xs.par_map((x: int) => fiber_resume(x, 0))\n}\n",
+        &format!(
+            "import @dep (fiber_resume)\n{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, \
+             2]\n  xs.fork_map((x: int) => fiber_resume(x, 0))\n}}\n",
+        ),
         &[("fiber_resume", &["id", "v"], ds_check::EffectRow::PURE)],
     );
     assert_eq!(codes(&diags), vec![ErrorCode::PooledControlNative]);
@@ -373,8 +382,10 @@ fn a_linked_clean_callee_inside_a_pooled_body_stays_legal() {
     // A pure-row linked callee pools legally: the carried row refuses
     // only the diverging members.
     let diags = pooled_linked_of(
-        "import @dep (bump)\n\nfn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: \
-         int) => bump(x))\n}\n",
+        &format!(
+            "import @dep (bump)\n{FORK_MAP}\nfn main() -> list[int] {{\n  const xs = [1, 2]\n  \
+             xs.fork_map((x: int) => bump(x))\n}}\n",
+        ),
         &[("bump", &["n"], ds_check::EffectRow::PURE)],
     );
     assert!(

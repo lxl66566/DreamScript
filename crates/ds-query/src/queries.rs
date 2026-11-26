@@ -512,8 +512,9 @@ pub(crate) fn platform_check(ctx: &mut Ctx<'_>, key: QueryKey) -> Result<QueryVa
 }
 
 /// The package's pooled-body refusal: every pooled call's (the
-/// @std `par_map`/`par_reduce` library fns, recognized by resolved
-/// member identity) callable argument hunted for the worker-diverging
+/// fork-join engine seams and the bodied members entering them,
+/// recognized by resolved member identity) callable argument hunted for
+/// the worker-diverging
 /// members — the sibling-addressing fiber control natives and the
 /// world surface — over the analyzed bundle, with the
 /// declared-row table the effects pass reads (a callee whose declared row

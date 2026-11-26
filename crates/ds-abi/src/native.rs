@@ -196,9 +196,9 @@ pub const BUILTIN_JOIN: u32 = 45;
 /// The generic `partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])`, reentrant and
 /// the tag-less two-word total.
 pub const BUILTIN_PARTITION: u32 = 46;
-/// The generic `fork_map[t, r]`: the fork-join engine seam behind the `par_map` library fn.
+/// The generic `fork_map[t, r]`: the pooled fork-join engine seam.
 pub const BUILTIN_PAR_MAP: u32 = 47;
-/// The generic `fork_reduce[t]`: the fork-join engine seam behind the `par_reduce` library fn.
+/// The generic `fork_reduce[t]`: the pooled fold's fork-join engine seam.
 pub const BUILTIN_PAR_REDUCE: u32 = 48;
 /// `total_compare(a: float, b: float) -> int` - the explicit float sort key the `ord` derive orders
 /// float parts through : the IEEE-754 total order over f64 (negative NaN least, positive NaN
@@ -2235,9 +2235,9 @@ pub const GENERIC_NATIVES: &[GenericNative] = &[
         shape: NativeShape::TotalByResultType,
         instances: &[BuiltinInstance::List],
     },
-    // the fork-join engine seam behind the @std `par_map` library
-    // fn (its bodied member calls this seam; the combinator's
-    // user-facing spelling lives in the ds-source package); the
+    // the pooled fork-join engine seam (the combinator's
+    // user-facing spelling is retired from the ds-source package
+    // until the fork-join admission round); the
     // constraint list is [t, r] like `map`'s — two evidence words
     // recording the receiver's list instance — and the callable is
     // the callable-defaulted `Fn` word like the hosted
@@ -2271,8 +2271,8 @@ pub const GENERIC_NATIVES: &[GenericNative] = &[
         shape: NativeShape::TaglessTotal,
         instances: &[BuiltinInstance::List],
     },
-    // the fork-join fold's engine seam behind the @std `par_reduce`
-    // library fn; reduce's interior staging over the fork: the
+    // the pooled fold's fork-join engine seam;
+    // reduce's interior staging over the fork: the
     // init's whole word span stages between the leading list `Ref`
     // and the trailing callable word, the fold chains one spawned
     // child per element answering the next accumulator whole (the

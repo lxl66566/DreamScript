@@ -934,8 +934,8 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::NurseryUncontained { .. } => {
             "a nursery child failed with an error outside the boundary's return union".to_owned()
         },
-        Trap::TailForkJoin => "a fork-join combinator (par_map, par_reduce) at a tail dispatch \
-                               site; the join parks through the drive, which needs the CALLG site"
+        Trap::TailForkJoin => "a fork-join combinator at a tail dispatch site; the join parks \
+                               through the drive, which needs the CALLG site"
             .to_owned(),
         Trap::OutOfFuel => "a budgeted drive ran past its step limit (the comptime fence's cap; a \
                             run drive carries none)"

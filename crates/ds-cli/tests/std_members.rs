@@ -11,13 +11,11 @@
 //! the same file, so the bare spellings run through a script session
 //! while the linked import keeps the generic-head refusal (the take,
 //! drop, and flat_map shapes refuse at the ambient splice's
-//! lowering-time-records seam). `par_map`/`par_reduce` pin the same way:
-//! bodied members over the private fork-join engine seams, so the bare
-//! spellings keep the sequential contract (the pooled drive's
-//! byte-identical answers pinned at the VM level) while the fold's init
-//! parameter reads the library spelling's one-word instantiation
-//! boundary (the multi-word fold keeps its seam-level pin in the
-//! lowerer's e2e).
+//! lowering-time-records seam). The fork-join engine seams keep their
+//! private externs in the same file with the pooled library spellings
+//! retired from the surface, the VM level pinning the pooled drive's
+//! byte-identical answers and the multi-word fold keeping its seam-level
+//! pin in the lowerer's e2e.
 
 use std::{
     env, fs,
@@ -418,83 +416,22 @@ fn the_bare_list_pair_runs_through_a_bare_script() {
 /// import keeps the generic-head refusal (a type-argumented signature
 /// rides the entry faces alone until its crossing round) — the same
 /// seam the string face's list-returning pair keeps.
-/// The pooled pair's program text through the @std library spelling:
-/// the fork-join combinators as bodied members over the engine seams —
-/// the sequential contract the pooled drive answers byte-identically.
-const POOLED_MAIN: &str = concat!(
-    "fn at(xs: list[int], i: int) -> int {\n",
-    "  const cell = xs.get(i)\n",
-    "  cell.ok((x: int) => x).err((_: none) => -1)\n",
-    "}\n",
-    "\n",
-    "fn main() -> int {\n",
-    "  const xs = [1, 2, 3, 4, 5]\n",
-    "  const bias = 10\n",
-    "  const doubled = xs.par_map((x: int) => x * 2)\n",
-    "  const shifted = par_map(xs, (x: int) => x + bias)\n",
-    "  println(\"map ${at(doubled, 0)} ${at(doubled, 4)} ${len(shifted)}\")\n",
-    "  const sum = xs.par_reduce(0, (a: int, b: int) => a + b)\n",
-    "  const words = [\"alpha\", \"beta\", \"gamma\"]\n",
-    "  const joined = words.par_reduce(\"\", (a: string, b: string) => a + b)\n",
-    "  const empty = xs.par_reduce(100, (a: int, b: int) => a * b)\n",
-    "  println(\"fold ${sum} ${joined} ${empty}\")\n",
-    "  println(\"edge ${len(list[int]().par_map((x: int) => x))} ${list[int]().par_reduce(7, (a: \
-     int, b: int) => a + b)}\")\n",
-    "  0\n",
-    "}\n",
-);
-const POOLED_OUT: &str = concat!(
-    "map 2 10 5\n",
-    "fold 15 alphabetagamma 12000\n",
-    "edge 0 7\n",
-    "0\n",
-);
-
-/// The pooled pair runs cold and serves warm under the same answer
-/// through the @std library spelling: the script session composes the
-/// bodied file back beside the shrunk core, the generic body's seam
-/// call lowering to the parked-CALLG drive the sequential interlock
-/// answers (the pool's byte-identical other half pinned at the VM
-/// level).
+/// The retired pooled spellings answer the unknown-dot refusal through
+/// the surface: the pair waits on the fork-join admission round, the
+/// seams staying private to the @std bodied file.
 #[test]
-fn the_pooled_pair_runs_through_the_bare_script() {
-    let file = script("pooled", POOLED_MAIN);
-    let entry = file.to_str().expect("temp path is UTF-8");
-    let cold = run(&["run", entry]);
-    assert_eq!(
-        cold.status.code(),
-        Some(0),
-        "the cold run exits 0: {}",
-        text(&cold.stderr)
-    );
-    assert_eq!(text(&cold.stdout), POOLED_OUT, "the cold run answers");
-    let warm = run(&["run", entry]);
-    assert_eq!(warm.status.code(), Some(0), "the warm run exits 0");
-    assert_eq!(
-        text(&warm.stdout),
-        POOLED_OUT,
-        "the warm run answers identically"
-    );
-    fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
-}
-
-/// A diverging element body refuses through the @std library spelling
-/// exactly as through the retired extern spelling: the refusal rides
-/// the resolved member's identity, never the call's spelling.
-#[test]
-fn the_pooled_pair_refuses_diverging_element_bodies() {
+fn the_retired_pooled_spellings_answer_the_unknown_dot() {
     let file = script(
-        "pooled-refusal",
-        "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => {\n    \
-         println(\"elem\")\n    x\n  })\n}\n",
+        "pooled-retired",
+        "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => x * 2)\n}\n",
     );
     let entry = file.to_str().expect("temp path is UTF-8");
     let out = run(&["run", entry]);
-    assert_eq!(out.status.code(), Some(1), "the world call inside refuses");
+    assert_eq!(out.status.code(), Some(1), "the retired spelling refuses");
+    let err = text(&out.stderr);
     assert!(
-        text(&out.stderr).contains("DS2036"),
-        "the refusal is the pooled world call: {}",
-        text(&out.stderr)
+        err.contains("DS2004") && err.contains("`par_map`"),
+        "the refusal is the unknown dot: {err}"
     );
     fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
 }

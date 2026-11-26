@@ -19,8 +19,8 @@
 //! values against the union from either side, a unit-tag mirror, and a
 //! match binder comparing its member's value), and the fork-join
 //! combinators: the fork-join engine seams `fork_map`/`fork_reduce`
-//! (the spellings the @std `par_map`/`par_reduce` library fns call):
-//! `fork_map` (a capturing closure callable and a named
+//! (the bodiless generic externs a program declares over the engine's
+//! by-name route): `fork_map` (a capturing closure callable and a named
 //! multi-word-answer callable, an empty-list leg) and `fork_reduce`
 //! (a scalar closure fold, a string fold, the whole-span accumulator
 //! fold over a struct-typed init, and an empty-input init
@@ -130,7 +130,7 @@
 //! combinator inputs are
 //! fixed-length lists (at most four elements, folded or mapped by the
 //! VM's own bounded single-thread drive), and the spawn tree stays
-//! depth one — every `par_map`/`par_reduce` call site sits in main, and
+//! depth one — every `fork_map`/`fork_reduce` call site sits in main, and
 //! no callable body (closure or named) contains a combinator call, so
 //! no spawned child can reach another combinator site.
 //!
@@ -208,13 +208,13 @@ pub struct Drawn {
     /// beside the list and map collection words riding the same
     /// per-word chains (fields, nesting, membership, the map's rows).
     pub bytes_equality: u32,
-    /// `par_map` call sites.
-    pub par_map: u32,
-    /// `par_reduce` call sites.
-    pub par_reduce: u32,
+    /// `fork_map` call sites.
+    pub fork_map: u32,
+    /// `fork_reduce` call sites.
+    pub fork_reduce: u32,
     /// Closure callables staged at combinator sites.
     pub closures: u32,
-    /// Multi-word answers: struct-typed `par_map` results and
+    /// Multi-word answers: struct-typed `fork_map` results and
     /// whole-span accumulator folds.
     pub multiword: u32,
     /// Free generic fn call sites into the ONE bodies.
@@ -987,9 +987,9 @@ impl Gen<'_> {
         self.answer("pt same");
     }
 
-    /// The fork-join episodes: `par_map` over the drawn int list (a
+    /// The fork-join episodes: `fork_map` over the drawn int list (a
     /// capturing closure callable, a named multi-word-answer callable,
-    /// an empty-list leg) and `par_reduce` (a scalar closure fold, a
+    /// an empty-list leg) and `fork_reduce` (a scalar closure fold, a
     /// string fold, the whole-span accumulator fold over a struct-typed
     /// init, an empty-input init passthrough), all driven by the VM's
     /// bounded single-thread map and fold.
@@ -1004,7 +1004,7 @@ impl Gen<'_> {
             .join(", ");
         self.line(&format!("const {xs} = [{list}]"));
         self.line(&format!("const {bias_name} = {bias}"));
-        // par_map with a capturing closure callable
+        // fork_map with a capturing closure callable
         let shifted = self.name("shifted");
         self.line(&format!(
             "const {shifted} = {xs}.fork_map((x: int) => x * {k} + {bias_name})"
@@ -1012,10 +1012,10 @@ impl Gen<'_> {
         self.line(&format!(
             "println(\"head ${{at_int({shifted}, 0)}} len ${{len({shifted})}}\")"
         ));
-        self.drawn.par_map += 1;
+        self.drawn.fork_map += 1;
         self.drawn.closures += 1;
         self.answer(&format!("head {} len 4", elems[0] * k + bias));
-        // par_map with a named callable answering a struct-typed span
+        // fork_map with a named callable answering a struct-typed span
         let (wide, first) = (self.name("wide"), self.name("first"));
         let idx = self.s.below(4);
         self.line(&format!("const {wide} = {xs}.fork_map(both)"));
@@ -1023,7 +1023,7 @@ impl Gen<'_> {
         self.line(&format!(
             "println(\"first ${{{first}.left}} ${{{first}.right}} len ${{len({wide})}}\")"
         ));
-        self.drawn.par_map += 1;
+        self.drawn.fork_map += 1;
         self.drawn.multiword += 1;
         self.answer(&format!(
             "first {} {} len 4",
@@ -1032,24 +1032,24 @@ impl Gen<'_> {
         ));
         if self.s.roll(2) {
             self.line("println(\"empty ${len(list[int]().fork_map(both))}\")");
-            self.drawn.par_map += 1;
+            self.drawn.fork_map += 1;
             self.answer("empty 0");
         }
-        // par_reduce with a scalar closure fold, in input order
+        // fork_reduce with a scalar closure fold, in input order
         let init = self.lit(100);
         let sum = self.name("sum");
         self.line(&format!(
             "const {sum} = {xs}.fork_reduce({init}, (a: int, b: int) => a + b + {bias_name})"
         ));
         self.line(&format!("println(\"sum ${{{sum}}}\")"));
-        self.drawn.par_reduce += 1;
+        self.drawn.fork_reduce += 1;
         self.drawn.closures += 1;
         let mut acc = init;
         for &e in &elems {
             acc += e + bias;
         }
         self.answer(&format!("sum {acc}"));
-        // par_reduce over strings
+        // fork_reduce over strings
         let words: Vec<&str> = (0..3).map(|_| SHORTS[self.s.below(SHORTS.len())]).collect();
         let (words_name, joined) = (self.name("words"), self.name("joined"));
         self.line(&format!(
@@ -1060,7 +1060,7 @@ impl Gen<'_> {
             "const {joined} = {words_name}.fork_reduce(\"\", (a: string, b: string) => a + b)"
         ));
         self.line(&format!("println(\"joined ${{{joined}}}\")"));
-        self.drawn.par_reduce += 1;
+        self.drawn.fork_reduce += 1;
         self.drawn.closures += 1;
         self.answer(&format!("joined {}{}{}", words[0], words[1], words[2]));
         if self.s.roll(2) {
@@ -1069,10 +1069,10 @@ impl Gen<'_> {
                 "println(\"passthru ${{list[int]().fork_reduce({passthru}, (a: int, b: int) => a \
                  + b)}}\")"
             ));
-            self.drawn.par_reduce += 1;
+            self.drawn.fork_reduce += 1;
             self.answer(&format!("passthru {passthru}"));
         }
-        // par_reduce chaining a whole-span struct accumulator
+        // fork_reduce chaining a whole-span struct accumulator
         let pairs: Vec<(i64, i64)> = (0..3).map(|_| (self.lit(9), self.lit(9))).collect();
         let (pairs_name, folded) = (self.name("pairs"), self.name("folded"));
         let rows = pairs
@@ -1089,7 +1089,7 @@ impl Gen<'_> {
         self.line(&format!(
             "println(\"folded ${{{folded}.left}} ${{{folded}.right}}\")"
         ));
-        self.drawn.par_reduce += 1;
+        self.drawn.fork_reduce += 1;
         self.drawn.closures += 1;
         self.drawn.multiword += 1;
         let (mut left, mut right) = (0, 0);

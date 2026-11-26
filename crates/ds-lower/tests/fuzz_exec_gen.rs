@@ -8,8 +8,8 @@
 //! equal the generator's oracle, and the heap drains at run end. The
 //! census asserts the vocabulary stays in the draw set: or-patterns,
 //! struct patterns, case payload tests, guards over union dispatch,
-//! nested struct sub-patterns, whole-span union equality, par_map and
-//! par_reduce sites, closure callables, multi-word answers, value
+//! nested struct sub-patterns, whole-span union equality, fork_map and
+//! fork_reduce sites, closure callables, multi-word answers, value
 //! blocks whose tail reads a local binder, and
 //! the free generic call vocabulary (call sites into the ONE
 //! bodies, serving impl bodies, the nested runtime form, tail
@@ -98,8 +98,8 @@ fn generated_programs_answer_their_oracle() {
         total.nested_sub_patterns += drawn.nested_sub_patterns;
         total.union_equality += drawn.union_equality;
         total.bytes_equality += drawn.bytes_equality;
-        total.par_map += drawn.par_map;
-        total.par_reduce += drawn.par_reduce;
+        total.fork_map += drawn.fork_map;
+        total.fork_reduce += drawn.fork_reduce;
         total.closures += drawn.closures;
         total.multiword += drawn.multiword;
         total.generic_calls += drawn.generic_calls;
@@ -145,8 +145,8 @@ fn generated_programs_answer_their_oracle() {
         total.bytes_equality > 0,
         "bytes-typed equality chains are drawn"
     );
-    assert!(total.par_map > 0, "par_map sites are drawn");
-    assert!(total.par_reduce > 0, "par_reduce folds are drawn");
+    assert!(total.fork_map > 0, "fork_map sites are drawn");
+    assert!(total.fork_reduce > 0, "fork_reduce folds are drawn");
     assert!(total.closures > 0, "closure callables are drawn");
     assert!(total.multiword > 0, "multi-word answers are drawn");
     assert!(total.generic_calls > 0, "free generic call sites are drawn");

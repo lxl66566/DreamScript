@@ -2035,17 +2035,15 @@ deadlock, and a wider-than-one-word answer refuses at the call's
 one-word instantiation. `sum` is the fold spelling over reduce's
 hosted callable (the CALLG lambda seam).
 
-The pooled pair: par_map/par_reduce are library members over the
-fork-join engine seams, one private bodiless generic extern each
-(fork_map/fork_reduce, the native the engine routes by name — the
-same engine-identity key the collection externs in the core hold)
-whose one-line bodies pass their arguments through, so the pooled
-CALLG dispatch rides inside the library body and the sequential
-contract and the byte-identical pool answers carry over unchanged.
-The free generic body's one-word instantiation boundary binds the
-fold's init parameter to one-word element types through this
-spelling (the multi-word fold keeps its seam-level coverage until the
-generic-body staging seam widens, the same generic-body residuals).
+The fork-join engine seams: fork_map/fork_reduce are private
+bodiless generic externs, the natives the engine routes by name (the
+same engine-identity key the collection externs in the core hold).
+The user surface carries no pooled member today, so every collection
+transform keeps the sequential contract; the free generic body's
+one-word instantiation boundary binds the fold's init parameter to
+one-word element types through this spelling (the multi-word fold
+keeps its seam-level coverage until the generic-body staging seam
+widens, the same generic-body residuals).
 
 The seeded PRNG (splitmix64): the stream state is one int the caller
 holds — `rand_next` the pure state step (one wrapping add), `rand`
@@ -2078,18 +2076,6 @@ pub fn pad_left(s: string, width: int, pad: char) -> string
 
 ```ds
 pub fn pad_right(s: string, width: int, pad: char) -> string
-```
-
-#### `par_map`
-
-```ds
-pub fn par_map[t, r](xs: list[t], f: fn(t) -> r) -> list[r]
-```
-
-#### `par_reduce`
-
-```ds
-pub fn par_reduce[t](xs: list[t], init: t, f: fn(t, t) -> t) -> t
 ```
 
 #### `parse_float`

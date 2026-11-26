@@ -468,11 +468,7 @@ fn fetch_all(urls: list[string]) -> list[string] | fetch_err {
 }
 ```
 
-Parallelism is fork-join over the sendability substrate: a linear value is sendable by construction and an immutable value shareable, so race-freedom is static; `par_map` and `par_reduce` over immutable or linear-partitioned inputs are deterministic, replayable, and lock-free by theorem.
-
-```ts
-const total = pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b)
-```
+Parallelism is fork-join over the sendability substrate: a linear value is sendable by construction and an immutable value shareable, so race-freedom is static. The pooled combinators sit behind their admission round and are absent from the surface meanwhile: every collection transform runs sequentially, mapping and folding in input order on one thread, and a program written against that sequential contract stays deterministic and replayable when the parallel tier returns.
 
 Shared state between fibers is one shape, the bounded channel: no lock, mutex, or atomic exists, the window discipline already making shared mutation unrepresentable. `chan[t](cap)` is the one type application taking a value argument — the bound, a channel being one opaque word — with `send(x)` answering unit and `recv()` the payload; a send onto a full channel and a receive from an empty one park in the channel's own waiter queue, the waking peer the resumer, no reactor interest and no deadline. The payload rides one word (a multi-word or deinit-carrying payload refusing at the send's staging), a negative bound traps, and a zero bound is the rendezvous: a send parks its staged payload until a receive takes it whole, a receive parks until a send pairs directly, the buffer never holding an element. A program whose every fiber waits on a channel no live fiber serves is the honest deadlock the stall guard reports.
 

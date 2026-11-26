@@ -186,8 +186,7 @@ pub const STD_MEMBERS_SOURCE: &str = include_str!("std_members.ds");
 /// migrated declarations whose bodies are plain ds source over
 /// word-shaped atoms — the ordering pair (`max`/`min`) the
 /// library-boundary round landed, the list pair (`enumerate`/`zip`) the
-/// FP surface round, the pooled pair (`par_map`/`par_reduce`) the
-/// fork-join migration over its private engine seams, and the seeded
+/// FP surface round, and the seeded
 /// PRNG family (`rand`/`rand_next`/`rand_seed`, splitmix64) the
 /// scarcity audit's first std gap — the later bodied migrations' home.
 pub const BODIED_FILE: &str = "std/bodied.ds";
@@ -560,8 +559,6 @@ mod tests {
             "parse_json",
             "enumerate",
             "zip",
-            "par_map",
-            "par_reduce",
             "rand",
             "rand_next",
             "rand_seed",
@@ -929,8 +926,9 @@ mod tests {
         }
         for name in ["par_map", "par_reduce"] {
             assert!(
-                pkg_package.lookup_value(name).is_some(),
-                "`{name}` lives in the @std bodied file as the pooled pair"
+                pkg_package.lookup_value(name).is_none(),
+                "`{name}` stays retired from the @std bodied file (the pooled pair waits on the \
+                 fork-join admission round)"
             );
         }
         for name in ["rand", "rand_next", "rand_seed"] {
@@ -992,7 +990,7 @@ mod tests {
         for name in ["par_map", "par_reduce", "fork_map", "fork_reduce"] {
             assert!(
                 core_package.lookup_value(name).is_none(),
-                "`{name}` left the shrunk core (the pooled pair rides the @std bodied file)"
+                "`{name}` left the shrunk core (the fork-join seams ride the @std bodied file)"
             );
         }
         for name in ["rand", "rand_next", "rand_seed"] {
@@ -1085,8 +1083,8 @@ mod tests {
         }
         for name in ["par_map", "par_reduce"] {
             assert!(
-                session_package.lookup_value(name).is_some(),
-                "the session composition keeps the bare pooled `{name}`"
+                session_package.lookup_value(name).is_none(),
+                "the session composition keeps the pooled `{name}` off the surface"
             );
         }
         for name in ["rand", "rand_next", "rand_seed"] {
@@ -1150,8 +1148,8 @@ mod tests {
         }
         for name in ["par_map", "par_reduce"] {
             assert!(
-                merged_package.lookup_value(name).is_some(),
-                "the merged reading keeps the pooled `{name}` (namespace-identical)"
+                merged_package.lookup_value(name).is_none(),
+                "the merged reading keeps the pooled `{name}` off the surface"
             );
         }
         for name in ["rand", "rand_next", "rand_seed"] {

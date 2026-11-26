@@ -107,31 +107,6 @@ zip 3 enum 2 5
 }
 
 #[test]
-fn par_map_forks_one_child_per_element_and_joins_in_input_order() {
-    // the fork-join slice: each element runs as its own spawned child
-    // under a fresh nursery, the boundary join assembles the answers in
-    // input order (spawn order is the drive order), and the sequential
-    // reduce folds them after
-    assert_eq!(
-        run_ok(ds().arg("run").arg(example("par_map.ds"))),
-        "doubled 5 2 10\nsum 30\n0\n"
-    );
-}
-
-#[test]
-fn par_reduce_chains_one_child_per_element_in_input_order() {
-    // the fork-join fold over the @std library spelling: the
-    // non-commutative order witness (a string chain through the native
-    // concat) and the empty-input init answer; the multi-word struct
-    // fold keeps its seam-level pin in the lowerer's e2e (the library
-    // spelling's one-word instantiation boundary)
-    assert_eq!(
-        run_ok(ds().arg("run").arg(example("par_reduce.ds"))),
-        "sum 15\njoined alphabetagamma\nempty 12000\n0\n"
-    );
-}
-
-#[test]
 fn callables_pass_named_fns_closures_and_collections() {
     // the callable words end to end: a named fn value and a capturing
     // closure arrive through the fn-typed parameter (the callable-

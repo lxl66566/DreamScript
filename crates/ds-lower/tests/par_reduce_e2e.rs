@@ -1,5 +1,5 @@
-//! The `fork_reduce` engine-seam lowering end to end (the seam
-//! the @std `par_reduce` library fn's body calls): the fold call site
+//! The `fork_reduce` engine-seam lowering end to end (the fork-join
+//! seam's private extern route): the fold call site
 //! lowers to CALLG — one site staging (list, init, callable) plus the
 //! one List evidence word — and the module round-trips through the
 //! writer and loader and folds on the VM. A capturing closure callable

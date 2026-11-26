@@ -1,8 +1,9 @@
 //! # The fork-join combinators (indices 47-48)
 //!
-//! The engine seams behind the @std `par_map`/`par_reduce` library
-//! fns (the ds-source spellings live in the @std bodied member; these
-//! natives are what their bodies call). `fork_map` (the parked-CALLG
+//! The pooled combinators' engine seams, the ds-source spellings
+//! retired from the user surface until the fork-join admission round
+//! (the private externs in the @std bodied member name these natives).
+//! `fork_map` (the parked-CALLG
 //! fork-join): the combinator body is
 //! spawn-only — fork is one spawned child per element applying the
 //! callable under a fresh nursery, the callable's own function entered

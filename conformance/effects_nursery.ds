@@ -1,5 +1,5 @@
 // source: frozen archive catalog 03-effects-errors-async (seed corpus)
-// purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, par combinators; the nursery and retry shapes lower (nursery_surface.ds and the gate's probes prove them), the fetch-driven items check clean and wait on their non-nursery seams
+// purpose: nursery fetch_all with cancel-on-failure, union errors, retry loop, the hosted map/reduce fold; the nursery and retry shapes lower (nursery_surface.ds and the gate's probes prove them), the fetch-driven items check clean and wait on their non-nursery seams
 // items:
 // url: stage: typecheck
 // page: stage: typecheck
@@ -94,10 +94,10 @@ fn with_retry(n: int, url: url) -> page | net_err {
 }
 
 // main adds the ambient urls const (top-level values do not lower yet)
-// and the par_map/par_reduce combinators, both without natives
+// and the hosted map/reduce members, the sequential contract spelling
 fn main() -> () | net_err {
   const pages = fetch_all(urls).err((e: net_err) => die("all fetches failed"))
-  print("total: ${str(pages.par_map((p) => p.body.len()).par_reduce(0, (a, b) => a + b))}")
+  print("total: ${str(pages.map((p) => p.body.len()).reduce(0, (a, b) => a + b))}")
 }
 
 // v2, additive with no migration, user handlers for final/tail-resumptive effects only [E1]:

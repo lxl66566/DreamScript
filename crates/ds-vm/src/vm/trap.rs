@@ -336,7 +336,7 @@ pub enum Trap {
         /// The payload span the boundary refused.
         payload: Vec<Value>,
     },
-    /// A fork-join combinator (par_map, par_reduce) at a tail dispatch
+    /// A fork-join combinator at a tail dispatch
     /// site (CALLTG): the tail call returns the reused frame at the
     /// call, but the join's answer arrives through the drive's delivery
     /// onto a parked site — the fork combinators need the CALLG site,

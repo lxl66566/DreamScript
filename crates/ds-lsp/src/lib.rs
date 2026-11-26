@@ -627,31 +627,11 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// The pooled-body refusal publishes in the editor like the
-    /// other classes: a `par_map` element body touching the world
-    /// surface answers its diagnostic in the document.
+    /// The retired pooled spellings publish the unknown-dot refusal in
+    /// the editor like the other classes: the surface answers its
+    /// diagnostic in the document.
     #[test]
-    fn a_pooled_body_refusal_publishes_in_the_document() {
-        let mut session = Session::new();
-        let file = open(
-            &mut session,
-            "pooled.ds",
-            "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => {\n    \
-             println(\"elem\")\n    x\n  })\n}\n",
-        );
-        let diags = session.diagnostics(file).expect("the pass runs");
-        assert_eq!(diags.len(), 1, "{diags:?}");
-        assert!(
-            diags[0].message.contains("world surface"),
-            "{}",
-            diags[0].message
-        );
-    }
-
-    /// A clean pooled program publishes nothing: the clean callable's
-    /// walk answers no diagnostic.
-    #[test]
-    fn a_clean_pooled_program_publishes_nothing() {
+    fn a_retired_pooled_spelling_publishes_in_the_document() {
         let mut session = Session::new();
         let file = open(
             &mut session,
@@ -659,7 +639,8 @@ mod tests {
             "fn main() -> list[int] {\n  const xs = [1, 2]\n  xs.par_map((x: int) => x * 2)\n}\n",
         );
         let diags = session.diagnostics(file).expect("the pass runs");
-        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("no name"), "{}", diags[0].message);
     }
 
     /// Two open documents share one package namespace, so a duplicate
