@@ -1,0 +1,14 @@
+// purpose: the local face under a forced POSIX TZ — the harness runs
+// this fixture with TZ=XXX-5 (five hours east, no DST rules over the
+// string), so the offset word and the local calendar spell exactly:
+// the epoch's local morning, the leap day's local spelling, and the
+// field reads off the shifted word.
+
+fn main () -> int {
+  println("offset ${utc_offset(0)}")
+  println(datetime_str(local_datetime(0)))
+  println(datetime_str(local_datetime(951782400)))
+  const t = local_datetime(1795478400)
+  println("local ${t.hour} ${t.weekday}")
+  0
+}

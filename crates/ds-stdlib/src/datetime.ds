@@ -1,0 +1,82 @@
+// The @std datetime face (the todo 101 datetime round): the calendar
+// over unix seconds as pure ds source — the civil-from-days walk over
+// the proleptic Gregorian rules (trunc-division-safe at every step,
+// the era arithmetic sized so no intermediate leaves the i64 range
+// even at the word's far edges) — and the fixed-shape ISO spelling
+// over the parts. The face's one world touch is the ambient's
+// `utc_offset` op (the host's local offset, seconds east); choosing
+// local versus UTC is the caller's composition — `utc_datetime` is
+// row-pure, `local_datetime` adds the one world word. No strftime
+// engine and no locale machinery: every further shape composes over
+// the struct's fields in user source.
+//
+// The `weekday` field is the ISO day: 1 (Monday) through 7 (Sunday).
+// `datetime_str` answers the fixed `YYYY-MM-DDTHH:MM:SS` shape with
+// the year zero-padded to four digits (a pre-year-1 word carrying
+// its minus sign, a past-9999 year answering its own width) and
+// carries no zone designator — the zone is which constructor the
+// caller chose, knowledge the parts keep and the string does not.
+
+pub struct datetime { year: int, month: int, day: int, hour: int, minute: int, second: int, weekday: int }
+
+// The floor of the seconds-over-a-day division: `/` truncates toward
+// zero [B7], so a negative remainder names the day before the
+// truncated one — the same fix the era walk below makes.
+fn day_floor (unix_seconds: int) -> int {
+  var days = unix_seconds / 86400
+  if unix_seconds % 86400 < 0 { days -= 1 }
+  days
+}
+
+pub fn utc_datetime (unix_seconds: int) -> datetime {
+  const days = day_floor(unix_seconds)
+  var sod = unix_seconds % 86400
+  if sod < 0 { sod += 86400 }
+  // The civil walk over the day count: the word shifts to the era's
+  // own origin (0000-03-01, the year whose March the cycle counts
+  // from), the era is the 400-year cycle (146097 days), and the trunc
+  // division's negative side steps down to the floor by one so `doe`
+  // lands in the cycle's own [0, 146096].
+  const shifted = days + 719468
+  var era = shifted / 146097
+  if shifted < 0 && shifted % 146097 != 0 { era -= 1 }
+  const doe = shifted - era * 146097
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  const mp = (5 * doy + 2) / 153
+  const day = doy - (153 * mp + 2) / 5 + 1
+  var month = mp + 3
+  var year = yoe + era * 400
+  if month > 12 { month -= 12 }
+  if month <= 2 { year += 1 }
+  // The weekday: day 0 is a Thursday, so the shifted remainder names
+  // Sunday as 0 — the ISO day spells Sunday as 7.
+  var weekday = (days + 4) % 7
+  if weekday < 0 { weekday += 7 }
+  if weekday == 0 { weekday = 7 }
+  datetime {
+    year: year,
+    month: month,
+    day: day,
+    hour: sod / 3600,
+    minute: (sod % 3600) / 60,
+    second: sod % 60,
+    weekday: weekday
+  }
+}
+
+pub fn local_datetime (unix_seconds: int) -> datetime {
+  utc_datetime(unix_seconds + utc_offset(unix_seconds))
+}
+
+fn pad2 (n: int) -> string {
+  if n < 10 { "0${n}" } else { str(n) }
+}
+
+fn pad4 (n: int) -> string {
+  if n < 0 { str(n) } else if n < 10 { "000${n}" } else if n < 100 { "00${n}" } else if n < 1000 { "0${n}" } else { str(n) }
+}
+
+pub fn datetime_str (t: datetime) -> string {
+  "${pad4(t.year)}-${pad2(t.month)}-${pad2(t.day)}T${pad2(t.hour)}:${pad2(t.minute)}:${pad2(t.second)}"
+}

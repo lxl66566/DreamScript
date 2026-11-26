@@ -691,6 +691,13 @@ impl Vm {
             if let Some((active, pc)) = step.take() {
                 match self.execute_host_step::<false>(active, pc, usize::MAX) {
                     Ok(DriveOutcome::Yielded(_)) => {
+                        // the session fiber's own park serves the prompt
+                        // (the splice's marker, or the host as its
+                        // resumer); a foreign fiber's park belongs to its
+                        // own resumer, and the pump keeps going
+                        if self.current != FIBER_ROOT {
+                            continue;
+                        }
                         if let Some(answer) = self.repl_park.take() {
                             self.host_release();
                             return Ok(ReplOutcome::Parked(answer));
@@ -708,7 +715,13 @@ impl Vm {
                         for value in answer.as_slice() {
                             self.host_delivery(value);
                         }
-                        return Ok(ReplOutcome::Died(answer));
+                        // the session fiber's completion ends the drive;
+                        // a foreign fiber the executor handed this pump
+                        // crossed its answer above, and the pump keeps
+                        // going — the drive answers its own fiber alone
+                        if self.current == FIBER_ROOT {
+                            return Ok(ReplOutcome::Died(answer));
+                        }
                     },
                     Ok(DriveOutcome::WorldPark(req)) => {
                         if let crate::vm::ParkKind::World(wait) = req.kind {

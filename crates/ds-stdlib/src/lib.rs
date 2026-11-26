@@ -115,6 +115,7 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("time", "time")
         .with("mono", "time")
         .with("sleep", "time")
+        .with("utc_offset", "time")
         .with("eprintln", "console")
         .with("eprint", "console")
         .with("read_line", "console")
@@ -137,8 +138,8 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 ///   ds-source `send`/`recv`/`close_conn` handlers over it), the server half (`net_listen`
 ///   answering the `net_listener` handle with the ds-source `accept`/`close_listener` handlers over
 ///   it), and `http_get`.
-/// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read) and the parking
-///   `sleep` (the 2026-11-21 timer ruling).
+/// * `time`: the clock pair (`time` the wall clock, `mono` the monotonic read), the parking `sleep`
+///   (the 2026-11-21 timer ruling), and the local UTC offset read the datetime face composes over.
 /// * `proc`: the CLI process surface — string argv, the environment read, process spawn (the piped
 ///   capture half answering the linear `proc_handle` over the idempotent `proc_close` seam), and
 ///   the `exit(code)` host member's seam.
@@ -240,6 +241,19 @@ pub const CODEC_FILE: &str = "std/codec.ds";
 /// member's own source).
 pub const CODEC_SOURCE: &str = include_str!("codec.ds");
 
+/// The @std datetime face's file name: the calendar over unix seconds
+/// — the pure civil-from-days walk over the proleptic Gregorian rules,
+/// the local composition over the ambient's `utc_offset` op, and the
+/// fixed-shape ISO spelling. Rides as the bundle's own member and
+/// composes last in both ambient readings (a tail append — the mint
+/// order of existing declarations stays untouched).
+pub const DATETIME_FILE: &str = "std/datetime.ds";
+
+/// The @std datetime face's text: the one shape both the linked
+/// surface binds and the session composes back, its only world touch
+/// the ambient-declared `utc_offset` extern.
+pub const DATETIME_SOURCE: &str = include_str!("datetime.ds");
+
 /// The @std bundle's core member: the shrunk core with the json face
 /// and the string face composed after it, the bundle's own
 /// `std/ambient.ds` — the package's self-contained first member (its
@@ -273,7 +287,9 @@ pub const AMBIENT_SESSION_SOURCE: &str = concat!(
     "\n",
     include_str!("bodied.ds"),
     "\n",
-    include_str!("codec.ds")
+    include_str!("codec.ds"),
+    "\n",
+    include_str!("datetime.ds")
 );
 
 /// The ambient package member's text: the declarations of the M3
@@ -293,7 +309,9 @@ pub const AMBIENT_SOURCE: &str = concat!(
     "\n",
     include_str!("bodied.ds"),
     "\n",
-    include_str!("codec.ds")
+    include_str!("codec.ds"),
+    "\n",
+    include_str!("datetime.ds")
 );
 
 /// The reserved `@std` package's name in the package namespace: the
@@ -329,6 +347,10 @@ pub fn std_package() -> ds_pkg::Package {
             BUNDLE_CORE_SOURCE.as_bytes().to_vec(),
         ),
         (CODEC_FILE.to_owned(), CODEC_SOURCE.as_bytes().to_vec()),
+        (
+            DATETIME_FILE.to_owned(),
+            DATETIME_SOURCE.as_bytes().to_vec(),
+        ),
         (BODIED_FILE.to_owned(), BODIED_SOURCE.as_bytes().to_vec()),
         (
             STD_MEMBERS_FILE.to_owned(),
@@ -377,6 +399,7 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("read_raw", error | world)
         .with("close_raw", world)
         .with("time", world)
+        .with("utc_offset", world)
         .with("parse_json", error)
         .with("println", world)
         .with("print", world)
@@ -401,9 +424,9 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 /// * `error`: failure handed to the caller — the parse and IO readers.
 /// * `world`: the world-touching capability surface — IO, the file and net handle faces (the reads
 ///   and connects fallible, the idempotent close seams total — `close_raw`, `net_close`,
-///   `net_listener_close`, `proc_close`, and `proc_close_in`), the clock, printing (stdout, stderr,
-///   stdin), and the process face (argv, the environment read, process spawn, the piped capture
-///   rows).
+///   `net_listener_close`, `proc_close`, and `proc_close_in`), the clock (the pair, the parking
+///   sleep, and the datetime face's local offset read), printing (stdout, stderr, stdin), and the
+///   process face (argv, the environment read, process spawn, the piped capture rows).
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 /// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
 ///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
@@ -662,8 +685,9 @@ mod tests {
             .filter(|(path, _)| path.as_str() != ds_pkg::MANIFEST_MEMBER)
             .count();
         assert_eq!(
-            source_members, 4,
-            "the bundle carries the composed core, the codec face, the members, and the bodied              file"
+            source_members, 5,
+            "the bundle carries the composed core, the codec face, the datetime face, the \
+             members,and the bodied file"
         );
         assert!(
             package.members().iter().any(
@@ -1027,6 +1051,12 @@ mod tests {
                 "the merged reading keeps the PRNG `{name}` (namespace-identical)"
             );
         }
+        for name in ["utc_datetime", "local_datetime", "datetime_str"] {
+            assert!(
+                merged_package.lookup_value(name).is_some(),
+                "the merged reading keeps the datetime `{name}` (namespace-identical)"
+            );
+        }
         assert!(
             merged_package.lookup_value("parse_json").is_some(),
             "the merged reading keeps `parse_json` (namespace-identical)"
@@ -1050,8 +1080,8 @@ mod tests {
         }
         // the composition rules the consts pin: the session text is
         // the core, the json face, the string face, the bodied file,
-        // then the codec face; the merged text the same with the
-        // members' file before the bodied one
+        // the codec face, then the datetime face; the merged text the
+        // same with the members' file before the bodied one
         assert!(
             AMBIENT_SESSION_SOURCE
                 .strip_prefix(AMBIENT_CORE_SOURCE)
@@ -1062,8 +1092,15 @@ mod tests {
                                 rest.strip_prefix(STRINGS_SOURCE).is_some_and(|rest| {
                                     rest.strip_prefix('\n').is_some_and(|rest| {
                                         rest.strip_prefix(BODIED_SOURCE).is_some_and(|rest| {
-                                            rest.strip_prefix('\n')
-                                                .is_some_and(|rest| rest == CODEC_SOURCE)
+                                            rest.strip_prefix('\n').is_some_and(|rest| {
+                                                rest.strip_prefix(CODEC_SOURCE).is_some_and(
+                                                    |rest| {
+                                                        rest.strip_prefix('\n').is_some_and(
+                                                            |rest| rest == DATETIME_SOURCE,
+                                                        )
+                                                    },
+                                                )
+                                            })
                                         })
                                     })
                                 })
@@ -1088,7 +1125,16 @@ mod tests {
                                                 rest.strip_prefix(BODIED_SOURCE).is_some_and(
                                                     |rest| {
                                                         rest.strip_prefix('\n').is_some_and(
-                                                            |rest| rest == CODEC_SOURCE,
+                                                            |rest| {
+                                                                rest.strip_prefix(CODEC_SOURCE)
+                                                                    .is_some_and(|rest| {
+                                                                        rest.strip_prefix('\n')
+                                                                            .is_some_and(|rest| {
+                                                                                rest
+                                                                                    == DATETIME_SOURCE
+                                                                            })
+                                                                    })
+                                                            },
                                                         )
                                                     },
                                                 )

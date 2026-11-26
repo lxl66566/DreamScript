@@ -37,6 +37,13 @@
 //!   its own waits answers the peer's late write exactly `ds run`'s executor would, and the landing
 //!   parks at the splice with the answer staged — while a pump ahead of the wake idles with the
 //!   wait standing.
+//! - the bounced resume's orphaned foreign (item 79): a drive's child resuming a detached fiber
+//!   whose recv then world-parks is bounced with the bare tag (the sweep's preemption-shaped
+//!   bound), the join answers with the foreign still parked and its interest satisfiable — no drive
+//!   waits a foreigner — and the wake lands exactly under the next host executor loop: a pump
+//!   enters no fiber and drains to spent, while an in-flight run or host resume continues on the
+//!   foreign's step and ends at its death by the leftover pattern, the parked fiber a leftover the
+//!   next pump still serves.
 
 use std::{
     io::{Read, Write},
@@ -47,18 +54,21 @@ use std::{
 
 use ds_mod::{Constant, FuncRefKey, Function, Module, TargetClass};
 use ds_vm::{
-    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, ReplOutcome,
-    Value, Vm,
+    Const, ConstFuncRef, FiberState, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion,
+    ReplOutcome, Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{I64, Raw, Ref},
         uop::Uop,
     },
     assemble,
-    native::{BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN},
+    native::{
+        BUILTIN_FIBER_RESUME, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
+        PLATFORM_NONE,
+    },
     platform::{
-        Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform,
-        STD_NAME,
+        Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, OP_SLEEP,
+        Platform, STD_NAME,
     },
     splice_park,
 };
@@ -137,6 +147,7 @@ fn registry(defs: Vec<FunctionDef>) -> ModuleRegistry {
     reg.install_platform(Platform::new("std", &[
         Capability::Net,
         Capability::Console,
+        Capability::Time,
     ]));
     reg.install(ModuleVersion::new("io", defs).expect("valid fixture module"));
     reg
@@ -1076,4 +1087,469 @@ fn a_repl_submission_parks_and_lands_at_the_host_pump() {
     };
     assert_eq!(answer_string(&vm, &answer), "ping");
     vm.repl_teardown();
+}
+
+/// `(conn: int) -> string`: the detached foreign's body — one recv (the
+/// park that orphans it under the drive), then the done signal on the
+/// same connection, the received bytes the answer.
+fn foreign_def() -> FunctionDef {
+    def_pool(
+        "foreign",
+        &[I64, Ref, Raw, Raw],
+        1,
+        2,
+        vec![
+            platform(OP_NET_RECV),     // k0
+            platform(OP_NET_SEND),     // k1
+            Const::I64(4096),          // k2: net_recv max_bytes
+            Const::Str("done".into()), // k3: the signal
+        ],
+        &[
+            Uop::Funcf { frame_slots: 4 },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Kimm { dst: 3, kidx: k(2) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 1, src: 3 },
+            Uop::Mov { dst: 2, src: 0 },
+            Uop::Kstr { dst: 3, kidx: k(3) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// `(f: int, conn: int) -> word`: the child's body is one `fiber_resume`
+/// of the detached foreign (the call the drive's bounce answers), then
+/// the bounced signal on its own connection — the byte that orders the
+/// feeder behind the bounce without a clock.
+fn resume_child_def() -> FunctionDef {
+    def_pool(
+        "resume_child",
+        &[I64, I64, Raw, Raw, Raw],
+        2,
+        2,
+        vec![
+            builtin_ref(BUILTIN_FIBER_RESUME), // k0
+            platform(OP_NET_SEND),             // k1
+            Const::I64(7),                     // k2: the resume payload
+            Const::Str("bounced".into()),      // k3: the signal
+        ],
+        &[
+            Uop::Funcf { frame_slots: 5 },
+            Uop::Mov { dst: 3, src: 0 },
+            Uop::Kimm { dst: 4, kidx: k(2) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 2, src: 3 },
+            Uop::Mov { dst: 3, src: 1 },
+            Uop::Kstr { dst: 4, kidx: k(3) },
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )
+}
+
+/// `(conn: int, f: int, sig: int) -> string`: the in-language orphaning
+/// main — the nursery block's join drives the child (whose resume
+/// bounces under it, the foreign left world-parked), then the main's
+/// own recv parks the drive, the later host executor loop the foreign's
+/// wake waits for; the received bytes the answer.
+fn orphan_main_def(child: u32) -> FunctionDef {
+    def_pool(
+        "orphan_main",
+        &[I64, I64, I64, I64, SlotType::Fn, Ref, Ref, Raw, Raw],
+        3,
+        2,
+        vec![
+            platform(OP_NET_RECV),              // k0
+            Const::I64(4096),                   // k1: net_recv max_bytes
+            builtin_ref(BUILTIN_NURSERY_OPEN),  // k2
+            builtin_ref(BUILTIN_NURSERY_SPAWN), // k3
+            builtin_ref(BUILTIN_NURSERY_JOIN),  // k4
+            Const::FuncRef(ConstFuncRef::Named {
+                module: "io".into(),
+                func: child,
+            }), // k5: the child's function word
+        ],
+        &[
+            Uop::Funcf { frame_slots: 9 },
+            // the open: the nursery id lands on overlay word 7
+            Uop::Call {
+                callee: k(2),
+                nargs: 0,
+            },
+            Uop::Mov { dst: 3, src: 7 },
+            // the child closure over the foreign's id and its signal
+            // connection, then its spawn
+            Uop::Kconst { dst: 4, kidx: k(5) },
+            Uop::Mov { dst: 7, src: 1 },
+            Uop::Mov { dst: 8, src: 2 },
+            Uop::ClosureNew {
+                dst: 5,
+                func: 4,
+                n: 2,
+            },
+            Uop::Mov { dst: 7, src: 3 },
+            Uop::Mov { dst: 8, src: 5 },
+            Uop::Call {
+                callee: k(3),
+                nargs: 2,
+            },
+            // the join: the child's bounce lands under this drive, the
+            // foreign orphaned past it
+            Uop::Mov { dst: 7, src: 3 },
+            Uop::Call {
+                callee: k(4),
+                nargs: 1,
+            },
+            // the main's own recv parks the drive — the later host
+            // executor loop the orphaned foreign wakes under
+            Uop::Mov { dst: 7, src: 0 },
+            Uop::Kimm { dst: 8, kidx: k(1) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 6, src: 8 },
+            Uop::Ret { src: 6 },
+        ],
+    )
+}
+
+/// The bounced resume's orphaned foreign (item 79): the child's
+/// `fiber_resume` parks it over the foreign's recv, the join drive's
+/// preemption-shaped bounce answers the call with the bare tag, and the
+/// join answers with the foreign still world-parked — its wake bytes
+/// already readable, the drive polling nothing for a foreigner. The
+/// wake lands exactly at the next host executor loop: the pump enters
+/// no fiber (the parked foreign is the scheduler's alone), drives it,
+/// and the drained seam answers spent.
+#[test]
+fn a_bounced_resume_wakes_the_orphaned_foreign_only_at_the_host_pump() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def(), foreign_def(), resume_child_def()]);
+    let (conn, mut peer) = connect(&mut vm, &listener, &addr);
+    let (conn_c, mut peer_c) = connect(&mut vm, &listener, &addr);
+    // the foreign, detached (no nursery open yet): its whole life
+    // stands outside every drive's children, and its recv parks — the
+    // socket holds nothing for it
+    let foreign = vm
+        .spawn_fiber("io", "foreign", &[Value::I64(conn)])
+        .expect("the foreign spawns");
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "io", "resume_child", &[
+        Value::I64(i64::from(foreign.0)),
+        Value::I64(conn_c),
+    ])
+    .expect("the child spawns");
+    // the join drive: the child's resume bounces (the checked-read
+    // bounce tag the call's answer), and the join consumes without
+    // waiting on the foreign
+    match vm.join_nursery(nursery) {
+        Ok(ds_vm::JoinOutcome::Joined(answers)) => {
+            assert_eq!(answers.len(), 1, "one child, one answer");
+            assert_eq!(
+                answers[0].as_slice(),
+                &[Value::Tag(PLATFORM_NONE)],
+                "the bounce answered the child's resume call"
+            );
+        },
+        other => panic!("the join landed: {other:?}"),
+    }
+    // the bounce's own signal orders the foreign's wake bytes behind
+    // the join — the parked interest is satisfiable from here on
+    peer_c
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("timeout");
+    let mut bounced = [0; 7];
+    peer_c
+        .read_exact(&mut bounced)
+        .expect("the bounce signal lands");
+    assert_eq!(&bounced, b"bounced");
+    peer.write_all(b"orphan wake").expect("the peer writes");
+    peer.flush().expect("the peer flushes");
+    // nothing runs the foreign: its bytes stand readable and no
+    // executor loop stands over the seam, so the done signal never
+    // lands
+    peer.set_read_timeout(Some(Duration::from_millis(150)))
+        .expect("timeout");
+    match peer.read(&mut [0; 8]) {
+        Err(err)
+            if err.kind() == std::io::ErrorKind::WouldBlock
+                || err.kind() == std::io::ErrorKind::TimedOut => {},
+        other => panic!("the foreign never ran without a host loop: {other:?}"),
+    }
+    // the later host executor loop: the pump enters no fiber (the
+    // parked foreign is the scheduler's alone), wakes it, drives it
+    // under itself, and the drained scheduler answers spent
+    let pumped = vm
+        .pump_io(ds_vm::FIBER_ROOT, Some(Duration::from_secs(1)))
+        .expect("the pump drives the foreign");
+    assert!(matches!(pumped, ds_vm::IoDrive::Parked), "the seam drained");
+    peer.set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("timeout");
+    let mut done = [0; 4];
+    peer.read_exact(&mut done)
+        .expect("the foreign's signal lands");
+    assert_eq!(&done, b"done", "the foreign completed under the pump");
+}
+
+/// The orphaned foreign's wake under an in-flight run (item 79): the
+/// main parks on its own recv after the join, the executor hands the
+/// woken foreign's step to the host drive, and the run ends at the
+/// foreign's death answering its value — the leftover pattern the
+/// ping-pong pin rules (the resumer chain died out under the bounce, so
+/// the host takes the terminal delivery). The parked main is a leftover
+/// the next host executor loop still serves: the pump wakes it and
+/// answers its own bytes. The feeder's read of the foreign's signal
+/// orders the main's wake behind the orphan's whole flight, the sockets
+/// alone sequencing — no clock.
+#[test]
+fn an_orphaned_foreigns_wake_ends_the_run_by_the_leftover_pattern() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![
+        connect_def(),
+        foreign_def(),
+        resume_child_def(),
+        orphan_main_def(2),
+    ]);
+    let (conn_f, mut peer_f) = connect(&mut vm, &listener, &addr);
+    let (conn_c, mut peer_c) = connect(&mut vm, &listener, &addr);
+    let (conn_m, mut peer_m) = connect(&mut vm, &listener, &addr);
+    let foreign = vm
+        .spawn_fiber("io", "foreign", &[Value::I64(conn_f)])
+        .expect("the foreign spawns");
+    let feeder = thread::spawn(move || {
+        // the bounce's own signal orders the foreign's wake bytes
+        // behind the join: the foreign parked on its empty socket, and
+        // only the bounce's aftermath can feed it
+        let mut bounced = [0; 7];
+        peer_c
+            .read_exact(&mut bounced)
+            .expect("the bounce signal lands");
+        assert_eq!(&bounced, b"bounced");
+        peer_f.write_all(b"orphan wake").expect("the feeder writes");
+        peer_f.flush().expect("the feeder flushes");
+        let mut done = [0; 4];
+        peer_f
+            .read_exact(&mut done)
+            .expect("the foreign's signal lands");
+        assert_eq!(&done, b"done", "the foreign ran under the run's drive");
+        peer_m
+            .write_all(b"main wake")
+            .expect("the main's wake writes");
+        peer_m.flush().expect("the main's wake flushes");
+    });
+    let answer = vm
+        .run("io", "orphan_main", &[
+            Value::I64(conn_m),
+            Value::I64(i64::from(foreign.0)),
+            Value::I64(conn_c),
+        ])
+        .expect("the run lands");
+    assert_eq!(
+        answer_string(&vm, &answer),
+        "orphan wake",
+        "the run ended at the orphan's death, the leftover delivery"
+    );
+    // the parked main is a leftover, not a leak: its wait stands for the
+    // next host executor loop
+    assert_eq!(
+        vm.fiber_state(ds_vm::FIBER_ROOT),
+        Some(FiberState::WorldParked),
+        "the main parks past the run's answer"
+    );
+    // the later host executor loop serves the leftover: the pump wakes
+    // the main and answers its own bytes
+    let pumped = vm
+        .pump_io(ds_vm::FIBER_ROOT, Some(Duration::from_secs(30)))
+        .expect("the pump serves the leftover");
+    match pumped {
+        ds_vm::IoDrive::Answer(answer) => {
+            assert_eq!(answer_string(&vm, &answer), "main wake");
+        },
+        ds_vm::IoDrive::Parked => panic!("the leftover completes under the pump"),
+    }
+    feeder.join().expect("the feeder lands");
+}
+
+/// The orphaned foreign's wake under a host-resumed drive (item 79):
+/// the same orphaning main driven by `resume_fiber` — the executor hands
+/// the woken foreign's step to the blocking drive's continuation, the
+/// drive ends at the foreign's death by the same leftover pattern, and
+/// the resumed fiber's own wake lands under the next pump.
+#[test]
+fn an_orphaned_foreigns_wake_ends_a_host_resume_by_the_leftover_pattern() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![
+        connect_def(),
+        foreign_def(),
+        resume_child_def(),
+        orphan_main_def(2),
+    ]);
+    let (conn_f, mut peer_f) = connect(&mut vm, &listener, &addr);
+    let (conn_c, mut peer_c) = connect(&mut vm, &listener, &addr);
+    let (conn_m, mut peer_m) = connect(&mut vm, &listener, &addr);
+    let foreign = vm
+        .spawn_fiber("io", "foreign", &[Value::I64(conn_f)])
+        .expect("the foreign spawns");
+    let main = vm
+        .spawn_fiber("io", "orphan_main", &[
+            Value::I64(conn_m),
+            Value::I64(i64::from(foreign.0)),
+            Value::I64(conn_c),
+        ])
+        .expect("the main spawns");
+    let feeder = thread::spawn(move || {
+        let mut bounced = [0; 7];
+        peer_c
+            .read_exact(&mut bounced)
+            .expect("the bounce signal lands");
+        assert_eq!(&bounced, b"bounced");
+        peer_f.write_all(b"orphan wake").expect("the feeder writes");
+        peer_f.flush().expect("the feeder flushes");
+        let mut done = [0; 4];
+        peer_f
+            .read_exact(&mut done)
+            .expect("the foreign's signal lands");
+        assert_eq!(&done, b"done", "the foreign ran under the resumed drive");
+        peer_m
+            .write_all(b"main wake")
+            .expect("the main's wake writes");
+        peer_m.flush().expect("the main's wake flushes");
+    });
+    let answer = vm
+        .resume_fiber(main, Value::Tag(PLATFORM_NONE))
+        .expect("the drive lands");
+    assert_eq!(
+        answer_string(&vm, &answer),
+        "orphan wake",
+        "the drive ended at the orphan's death, the leftover delivery"
+    );
+    assert_eq!(
+        vm.fiber_state(main),
+        Some(FiberState::WorldParked),
+        "the resumed fiber parks past the drive's answer"
+    );
+    let pumped = vm
+        .pump_io(main, Some(Duration::from_secs(30)))
+        .expect("the pump serves the leftover");
+    match pumped {
+        ds_vm::IoDrive::Answer(answer) => {
+            assert_eq!(answer_string(&vm, &answer), "main wake");
+        },
+        ds_vm::IoDrive::Parked => panic!("the leftover completes under the pump"),
+    }
+    feeder.join().expect("the feeder lands");
+}
+
+/// `(f: int) -> word`: the child's body is one `fiber_resume` of the
+/// detached foreign and nothing else — the call the drive's bounce
+/// answers, no signal send beside it.
+fn resume_only_def() -> FunctionDef {
+    def_pool(
+        "resume_only",
+        &[I64, Raw, Raw],
+        1,
+        2,
+        vec![
+            builtin_ref(BUILTIN_FIBER_RESUME), // k0
+            Const::I64(7),                     // k1: the resume payload
+        ],
+        &[
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Mov { dst: 1, src: 0 },
+            Uop::Kimm { dst: 2, kidx: k(1) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 2,
+            },
+            Uop::Ret { src: 1 },
+        ],
+    )
+}
+
+/// `() -> word`: the sleep-parked orphan's body — one short `sleep`, the
+/// timer-only wait whose wheel row is the whole wake.
+fn sleep_child_def() -> FunctionDef {
+    def_pool(
+        "sleep_child",
+        &[Raw],
+        0,
+        1,
+        vec![
+            platform(OP_SLEEP),     // k0
+            Const::I64(50_000_000), // k1: 50ms in nanos
+        ],
+        &[
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Kimm { dst: 0, kidx: k(1) },
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            },
+            Uop::Ret { src: 0 },
+        ],
+    )
+}
+
+/// The pump that drains the scheduler (item 79): a sleep-parked orphan
+/// — no net rows anywhere, the wheel its only wake — is bounced out of
+/// the join the same way, completes under the pump's executor loop,
+/// and the seam that drained the last wait answers spent instead of
+/// the blocking stall trap: a budgeted host idles by its own pump's
+/// contract, an unbudgeted drive keeps the honest deadlock.
+#[test]
+fn a_pump_that_drains_the_scheduler_answers_spent() {
+    let mut vm = scheduled_vm(vec![sleep_child_def(), resume_only_def()]);
+    let foreign = vm
+        .spawn_fiber("io", "sleep_child", &[])
+        .expect("the foreign spawns");
+    let nursery = vm.open_root_nursery();
+    vm.spawn_fiber_in(nursery, "io", "resume_only", &[Value::I64(i64::from(
+        foreign.0,
+    ))])
+    .expect("the child spawns");
+    // the join drive: the child's resume bounces, and the orphan's
+    // timer stands past the join
+    match vm.join_nursery(nursery) {
+        Ok(ds_vm::JoinOutcome::Joined(answers)) => {
+            assert_eq!(answers.len(), 1, "one child, one answer");
+            assert_eq!(
+                answers[0].as_slice(),
+                &[Value::Tag(PLATFORM_NONE)],
+                "the bounce answered the child's resume call"
+            );
+        },
+        other => panic!("the join landed: {other:?}"),
+    }
+    // the later host executor loop drives the sleep out, and the seam
+    // with nothing left runnable or wakeable answers spent
+    let pumped = vm
+        .pump_io(ds_vm::FIBER_ROOT, Some(Duration::from_secs(30)))
+        .expect("the pump drives the sleep out");
+    assert!(
+        matches!(pumped, ds_vm::IoDrive::Parked),
+        "the drained seam idles: {pumped:?}"
+    );
 }

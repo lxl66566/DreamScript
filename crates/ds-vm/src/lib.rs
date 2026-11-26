@@ -136,6 +136,7 @@ pub mod repl;
 mod resolver;
 pub mod sched;
 mod tls;
+mod tz;
 pub mod value;
 pub mod vm;
 

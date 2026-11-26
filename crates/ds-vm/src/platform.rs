@@ -46,7 +46,9 @@ pub enum Capability {
     /// The TCP surface: connect/send/recv/close, the listener face
     /// (listen/accept/listener-close), `http_get`.
     Net,
-    /// The clock surface (no op exists yet).
+    /// The clock surface: the wall clock, the monotonic clock, the
+    /// parking sleep (the 2026-11-21 timer ruling), and the local UTC
+    /// offset read (the datetime face's one world touch).
     Time,
     /// The TLS surface (H5.5's 2026-11-17 ruling): https over rustls,
     /// selected or omitted per host — the `https_get` op, the
@@ -208,9 +210,13 @@ pub const OP_REMOVE: u32 = 40;
 /// `fs_size`: fsys (the entry's byte count, `file_size`'s fallible
 /// form).
 pub const OP_FS_SIZE: u32 = 41;
+/// `utc_offset`: time (the host's local UTC offset for a timestamp,
+/// seconds east — the datetime face's one world touch; the calendar
+/// math and formatting compose in @std ds source over it).
+pub const OP_UTC_OFFSET: u32 = 42;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 42;
+pub const OP_COUNT: u32 = 43;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -270,6 +276,7 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "mkdir",       capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::mkdir_fn },
     Op { name: "remove",      capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::remove_fn },
     Op { name: "fs_size",     capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::fs_size_fn },
+    Op { name: "utc_offset", capability: Capability::Time,    params: &[SlotType::I64],        result_words: 1, func: crate::tz::utc_offset_fn },
 ];
 
 macro_rules! unserved {
@@ -326,6 +333,7 @@ unserved!(unserved_op_38 at 38);
 unserved!(unserved_op_39 at 39);
 unserved!(unserved_op_40 at 40);
 unserved!(unserved_op_41 at 41);
+unserved!(unserved_op_42 at 42);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -340,7 +348,7 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
     unserved_op_32, unserved_op_33, unserved_op_34, unserved_op_35,
     unserved_op_36, unserved_op_37, unserved_op_38, unserved_op_39,
-    unserved_op_40, unserved_op_41,
+    unserved_op_40, unserved_op_41, unserved_op_42,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -510,6 +518,8 @@ mod tests {
         assert_eq!(OPS[OP_REMOVE as usize].capability, Capability::Fsys);
         assert_eq!(OPS[OP_FS_SIZE as usize].name, "fs_size");
         assert_eq!(OPS[OP_FS_SIZE as usize].capability, Capability::Fsys);
+        assert_eq!(OPS[OP_UTC_OFFSET as usize].name, "utc_offset");
+        assert_eq!(OPS[OP_UTC_OFFSET as usize].capability, Capability::Time);
         assert_eq!(
             OPS[OP_NET_LISTENER_CLOSE as usize].capability,
             Capability::Net
@@ -578,6 +588,10 @@ mod tests {
         assert!(
             !console.serves(OP_SLEEP),
             "a console platform refuses sleep"
+        );
+        assert!(
+            !console.serves(OP_UTC_OFFSET),
+            "a console platform refuses the offset read"
         );
         for index in [OP_ARGS, OP_ENV, OP_PROC_RUN, OP_EXIT] {
             assert!(!console.serves(index), "a console platform refuses proc");
@@ -667,6 +681,7 @@ mod tests {
             OP_MKDIR,
             OP_REMOVE,
             OP_FS_SIZE,
+            OP_UTC_OFFSET,
         ] {
             assert!(
                 !embed.serves(index),

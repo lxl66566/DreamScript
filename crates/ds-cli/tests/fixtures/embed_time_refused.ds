@@ -1,0 +1,20 @@
+// The embed platform's refusal probe for the time capability: the
+// declaration claims time, the checker licenses the usage inside the
+// claim, and the console-only embed handler refuses the offset op's
+// call site at install — the same structured refusal the fsys probe
+// pins, over the datetime face's one world touch.
+
+tag string
+
+tag int
+
+platform "embed" provides <time>
+
+extern fn utc_offset (unix_seconds: int) -> int
+
+fn off (secs: int) -> int {
+  const n = utc_offset(secs)
+  n
+}
+
+fn main () -> () { }

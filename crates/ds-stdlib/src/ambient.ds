@@ -534,6 +534,13 @@ pub extern fn mono () -> int
 // `timeout`/`firstof`/`interleave` combinators layer over this op as
 // ordinary library code.
 pub extern fn sleep (nanos: int) -> ()
+// The local offset read (the datetime face's one world touch): the
+// host's local UTC offset for the timestamp, seconds east of UTC
+// (west negative) — seconds, not the clock pair's nanoseconds, the
+// calendar granularity. Total over the CRT's honest window and
+// clamped past it; the calendar math and the fixed-shape formatting
+// compose in @std ds source over this word.
+pub extern fn utc_offset (unix_seconds: int) -> int
 // The process face (the CLI process surface, 2026-11-21): `args`
 // answers the process arguments the host staged (`ds run`'s `--args`
 // words) as a list of strings, `env` reads one process environment

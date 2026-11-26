@@ -1,0 +1,43 @@
+// purpose: the datetime face end to end through the real ambient — the
+// pure calendar over known timestamps (the epoch edge and its negative
+// neighbor, the day wrap both ways, the leap rules across the 400-year
+// cycle — 2000 and 2024 leap, 1900 and 2100 century non-leap — the
+// four-digit year's edge and the five-digit year past it, the era's
+// far past, and both i64 edges), the field reads, the fixed-shape ISO
+// spelling, and the offset op's bounded word (the local face rides its
+// own fixture under a forced TZ). The script runs through the served
+// ambient artifacts, cold and warm under the same answer.
+
+fn utc (secs: int) -> string {
+  datetime_str(utc_datetime(secs))
+}
+
+fn main () -> int {
+  // the epoch edge and its neighbors
+  println(utc(0))
+  println(utc(-1))
+  println(utc(86399))
+  println(utc(86400))
+  println(utc(-86400))
+  // the leap rules: the 400-year leap, the ordinary leap, and the two
+  // century non-leaps stepping over Feb 29
+  println(utc(951782400))
+  println(utc(1709164800))
+  println(utc(-2203891200))
+  println(utc(4107542400))
+  // the year-width edges: the four-digit ceiling, the five-digit year,
+  // and the era's far past
+  println(utc(253402300799))
+  println(utc(253402300800))
+  println(utc(-62135596800))
+  // both i64 edges: the pure walk stays inside the word at each step
+  println(utc(-9223372036854775808))
+  println(utc(9223372036854775807))
+  // the field reads off one known day (a Tuesday)
+  const t = utc_datetime(1795478400)
+  println("fields ${t.year} ${t.month} ${t.day} ${t.hour} ${t.minute} ${t.second} ${t.weekday}")
+  // the offset word stays inside the day whatever zone the host carries
+  const off = utc_offset(0)
+  if off >= -86400 && off <= 86400 { println("offset bounded") } else { println("offset wild") }
+  0
+}

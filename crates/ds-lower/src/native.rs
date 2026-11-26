@@ -1112,6 +1112,16 @@ pub(crate) const NATIVES: &[Native] = &[
             classes: IO_CLASSES,
         },
     },
+    Native {
+        // the datetime face's one world touch (the time capability):
+        // the host's local UTC offset for the timestamp, seconds east
+        // — total, the calendar math and formatting composing in @std
+        // ds source over the word
+        name: "utc_offset",
+        module: NativeModule::Platform,
+        index: 42,
+        shape: NativeShape::Total(SlotType::I64), // seconds east of UTC
+    },
 ];
 
 /// The covered native a call name addresses, if any.

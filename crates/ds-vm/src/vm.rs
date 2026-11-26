@@ -6374,6 +6374,13 @@ impl Vm {
                 return Ok(true);
             }
             if !self.sched.can_wake() {
+                // a pumping executor loop that drained the scheduler
+                // answers spent, not the blocking stall trap — a
+                // budgeted host idles by its own pump's contract, the
+                // unbudgeted drives keep the honest deadlock
+                if budget.is_some() {
+                    return Ok(false);
+                }
                 return Err(Trap::SchedulerDeadlock);
             }
             if waited && budget.is_some() {
