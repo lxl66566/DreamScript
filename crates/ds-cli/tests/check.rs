@@ -457,3 +457,44 @@ fn many_generic_impls_of_one_trait_check_clean() {
         assert_eq!(stderr, "", "count {count}");
     }
 }
+
+/// A false condition leaves the import out of the merged-ambient
+/// reading too: an `@std` import's selections validate only on the
+/// targets its condition holds, so the same row under a false os word
+/// stays silent where the unconditional row refuses DS4019.
+#[test]
+fn a_false_condition_skips_the_std_selection_validation() {
+    let dir = support::guarded_dir("ds-cli-check-cond-");
+    let path = dir.join("cond.ds");
+    fs::write(
+        &path,
+        concat!(
+            "import @std/nope (x) if os == \"nostros\"\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  7\n",
+            "}\n",
+        ),
+    )
+    .expect("the temp source writes");
+    let out = ds_check(&["check", path.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the excluded import validates nothing"
+    );
+    let held = dir.join("held.ds");
+    fs::write(
+        &held,
+        "import @std/nope (x)\n\nfn main() -> int {\n  7\n}\n",
+    )
+    .expect("the temp source writes");
+    let out = ds_check(&["check", held.to_str().expect("temp path is UTF-8")]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("DS4019"),
+        "the held selection validates: {stderr}"
+    );
+}

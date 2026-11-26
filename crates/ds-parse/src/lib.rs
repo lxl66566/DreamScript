@@ -55,6 +55,7 @@
 
 mod arrowbudget;
 mod ast;
+mod cond;
 mod convert;
 mod guardtail;
 mod lexscan;
@@ -82,6 +83,7 @@ pub use ast::{
     TraitDecl, TraitMember, Trivia, TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp,
     Vis,
 };
+pub use cond::{ImportCond, import_cond};
 pub(crate) use pest_gen::{DsParser, Rule};
 
 /// Parses one registered source file into its blocks, or the syntax

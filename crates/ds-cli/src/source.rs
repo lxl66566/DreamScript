@@ -1194,13 +1194,25 @@ pub(crate) fn script_module_name(path: &Path) -> Result<String> {
 /// stays a within-package selector the load
 /// link does not carry. A bare path links the path as written. Aliases
 /// and selective lists are spellings inside the source; a conditional
-/// import records unconditionally (the artifact may run under the
-/// condition's target). The content hash is the linked module's source
+/// import records by its condition over the compiler's own target words
+/// (the `os` and `arch` keys), so a false condition leaves its name out
+/// and a condition outside the vocabulary joins nothing while the
+/// checker refuses it. The content hash is the linked module's source
 /// hash: the ambient member's for `@std` — the checked-in @std dsmod
 /// serves under exactly that identity — the caller-supplied identity for
 /// a name package resolution pinned, and the zero marker for every name
 /// whose content nothing supplies; a zero link names a dep at no pinned
 /// content, which the load walk's validation refuses.
+/// Whether one import declaration joins this compile: unconditional, or
+/// a condition the compiler's own target satisfies (the `os` and `arch`
+/// keys against lowercase target-triple words). A condition outside the
+/// vocabulary joins nothing here; the checker refuses it, so the link
+/// walks skip the declaration under every answer the condition cannot
+/// hold.
+pub(crate) fn import_held(import: &ds_parse::ImportDecl) -> bool {
+    ds_parse::import_cond(import).held()
+}
+
 /// The link name one import declaration records and links under:
 /// an at-sigil path's package stem with the sigil (later segments are
 /// member selectors), a bare path whole. The dep-list writer, the link
@@ -1246,6 +1258,9 @@ where
                     let ItemKind::Import(import) = &item.kind else {
                         continue;
                     };
+                    if !import_held(import) {
+                        continue;
+                    }
                     let name = import_link_name(import);
                     if !names.contains(&name) {
                         names.push(name);
@@ -1749,15 +1764,18 @@ mod tests {
         ]);
     }
 
-    /// The wider import shapes record their plain linked name: an alias
-    /// and a condition are spellings inside the source (the packages
-    /// round owns their semantics), so the list carries the name each
-    /// declaration links and nothing else.
+    /// The wider import shapes record by their condition: an alias is a
+    /// spelling inside the source, a condition naming the compiler's own
+    /// os word holds its declaration into the list, and a false condition
+    /// leaves its name out entirely.
     #[test]
-    fn aliased_and_conditional_imports_record_their_plain_linked_name() {
-        const APP: &str = "import acme/pipeline/fs as pio\nimport acme/pipeline/io if os == \
-                           \"windows\"\n\nfn main() -> int {\n7\n}\n";
-        let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
+    fn aliased_and_conditional_imports_record_their_linked_name_by_condition() {
+        let app = format!(
+            "import acme/pipeline/fs as pio\nimport acme/pipeline/io if os == \"{os}\"\nimport \
+             acme/pipeline/ghost if os == \"nostros\"\n\nfn main() -> int {{\n7\n}}\n",
+            os = std::env::consts::OS,
+        );
+        let compiled = compile_script(&script_inputs("app"), &app, false, true).expect("compiles");
         assert_eq!(compiled.lowered.module().deps(), [
             ds_mod::Dep {
                 name: "acme/pipeline/fs".to_owned(),

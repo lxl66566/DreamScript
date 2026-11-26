@@ -302,6 +302,8 @@ error_codes! {
     ImportDuplicate => "DS4022", Module,
     /// A file's `##` block index exceeds the checker's DefId block-key budget (256); the block is skipped.
     DefIdBlockOverflow => "DS4023", Module,
+    /// An import's condition spells nothing the target vocabulary evaluates: a condition names the `os` or `arch` key against one lowercase target-triple word.
+    ImportConditionMalformed => "DS4024", Module,
 }
 
 #[cfg(test)]
@@ -424,6 +426,7 @@ mod tests {
             ("ImportUnsupportedShape", "DS4021", ErrorClass::Module),
             ("ImportDuplicate", "DS4022", ErrorClass::Module),
             ("DefIdBlockOverflow", "DS4023", ErrorClass::Module),
+            ("ImportConditionMalformed", "DS4024", ErrorClass::Module),
         ];
         assert_eq!(
             ErrorCode::ALL.len(),
@@ -440,7 +443,7 @@ mod tests {
     /// Machine checks the snapshot cannot express alone: every code string is
     /// a well-formed `DSnnnn`, its number sits inside its class's thousands
     /// range, strings are unique, `ALL` is strictly ascending, and the table
-    /// is terminal at DS4023.
+    /// is terminal at DS4024.
     #[test]
     fn all_codes_well_formed_in_range_unique_and_ascending() {
         let mut prev = 0;
@@ -461,6 +464,6 @@ mod tests {
             assert!(n > prev, "{code} ({n}) breaks ascending order after {prev}");
             prev = n;
         }
-        assert_eq!(prev, 4023, "the table's highest code is DS4023");
+        assert_eq!(prev, 4024, "the table's highest code is DS4024");
     }
 }

@@ -1039,6 +1039,9 @@ impl Graph {
                     let ItemKind::Import(import) = &item.kind else {
                         continue;
                     };
+                    if !source::import_held(import) {
+                        continue;
+                    }
                     let name = source::import_link_name(import);
                     if !positions.contains_key(&name) {
                         let next =
@@ -1055,6 +1058,9 @@ impl Graph {
                     let ItemKind::Import(import) = &item.kind else {
                         continue;
                     };
+                    if !source::import_held(import) {
+                        continue;
+                    }
                     let surface = self.surface_of(
                         files,
                         import,

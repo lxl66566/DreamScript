@@ -5782,7 +5782,7 @@ fn an_origin_impl_over_its_own_sealed_trait_serves_the_link() {
         "the sealed trait's origin compile stands (stderr: {err})"
     );
     assert_eq!(
-        out, "base 3\n0\n",
+        out, "base 3\n",
         "the origin's impl crosses and serves the consumer's dispatch"
     );
     assert!(
@@ -5957,5 +5957,124 @@ fn a_foreign_file_impl_over_a_local_sealed_trait_refuses() {
         err.contains("another file of the same package"),
         "the refusal names the same-package file seam: {err}"
     );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The conditional import's vocabulary (the `os` and `arch` keys over
+/// lowercase target-triple words, evaluated against the compiler's own
+/// target): an import whose condition names the host's own words joins
+/// the member set under both keys, and a false condition leaves the
+/// import out entirely — its name binds nothing and the use refuses.
+#[test]
+fn a_conditional_import_holds_by_the_host_target_and_excludes_under_a_false_condition() {
+    let work = temp_dir("cond-import");
+    let pkg = work.join("cond");
+    let manifest = "name = \"@cond\"\nversion = \"1.0.0\"\n".to_owned();
+    let a_member = "pub fn a() -> int {\n1\n}\n";
+    let b_member = "pub fn b() -> int {\n2\n}\n";
+    let members = [("a.ds", a_member), ("b.ds", b_member)];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the bundle installs (stderr: {err})");
+    let cond_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@cond = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{cond_id}\" }}\n"
+    );
+
+    let root = write_root(
+        &work,
+        &root_manifest,
+        &format!(
+            concat!(
+                "import @cond/a (a) if os == \"{os}\"\n",
+                "import @cond/b (b) if arch == \"{arch}\"\n",
+                "\n",
+                "fn main() -> int {{\n",
+                "a() + b()\n",
+                "}}\n",
+            ),
+            os = env::consts::OS,
+            arch = env::consts::ARCH,
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
+    assert!(ok, "the host's own os and arch words hold (stderr: {err})");
+    assert_eq!(out, "3\n", "both held imports bind their selections");
+
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @cond/b (b) if os == \"nostros\"\n",
+            "\n",
+            "fn main() -> int {\n",
+            "b()\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the false condition leaves the import out");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("unknown name `b`"),
+        "the excluded name binds nothing (stderr: {err})"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A condition outside the vocabulary refuses typed: a key the
+/// vocabulary does not name, a word with uppercase letters, and a
+/// condition that is no key comparison each refuse DS4024.
+#[test]
+fn a_condition_outside_the_vocabulary_refuses() {
+    let work = temp_dir("cond-vocab");
+    let pkg = work.join("cond");
+    let manifest = "name = \"@cond\"\nversion = \"1.0.0\"\n".to_owned();
+    let members = [("a.ds", "pub fn a() -> int {\n1\n}\n")];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the bundle installs (stderr: {err})");
+    let cond_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@cond = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{cond_id}\" }}\n"
+    );
+    for (tag, source, refused) in [
+        (
+            "key",
+            "import @cond/a (a) if cpu == \"x86_64\"\n\nfn main() -> int {\n7\n}\n",
+            "names no condition key",
+        ),
+        (
+            "case",
+            "import @cond/a (a) if os == \"Linux\"\n\nfn main() -> int {\n7\n}\n",
+            "lowercase",
+        ),
+        (
+            "shape",
+            "import @cond/a (a) if os != \"linux\"\n\nfn main() -> int {\n7\n}\n",
+            "not a key comparison",
+        ),
+    ] {
+        let root = write_root(&work, &root_manifest, source);
+        let entry = root.join("app.ds");
+        let entry = entry.to_str().expect("temp path is UTF-8");
+        let (ok, out, err) = ds(&["run", entry]);
+        assert!(!ok, "the {tag} condition refuses");
+        assert_eq!(out, "");
+        assert!(
+            err.contains("DS4024"),
+            "the {tag} refusal types (stderr: {err})"
+        );
+        assert!(
+            err.contains(refused),
+            "the {tag} refusal names its fault (stderr: {err})"
+        );
+    }
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }

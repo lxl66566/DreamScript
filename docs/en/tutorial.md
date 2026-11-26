@@ -414,7 +414,7 @@ import acme/pipeline/fs if os == "windows"
 pub import @deep (base, base as origin, step, unit)
 ```
 
-A pub row's bound selections join the package's export surface under the names the row bound (alias included), a dependent binding them like the package's own exports, while a private row's binding stays internal. Refusals: a selectionless `pub import` re-exports nothing, `pub(pkg)` names nothing on an import, and `pub import @std` refuses — the merged-ambient reading binds the compile's own names, never import-bound ones.
+A pub row's bound selections join the package's export surface under the names the row bound (alias included), a dependent binding them like the package's own exports, while a private row's binding stays internal. A condition names the `os` or `arch` key against one lowercase target-triple word and evaluates against the compiler's own target when the import is read: a false condition leaves the import out on that target (no link, no bindings), a condition outside the vocabulary refuses (DS4024). Refusals: a selectionless `pub import` re-exports nothing, `pub(pkg)` names nothing on an import, and `pub import @std` refuses — the merged-ambient reading binds the compile's own names, never import-bound ones.
 
 Script mode is zero-config: `ds run script.ds` compiles and runs the entry file, and a `ds.pkg` beside it makes the run a package run over the content-addressed store (`$DS_CACHE/pkg`). `$DS_REGISTRY` names a registry, a local index root or a git remote URL (`https://...`, `file://...`), whose verified fetch fills the store's misses; `ds save <pkg-root>` installs a working-tree package into the store.
 

@@ -519,12 +519,30 @@ impl FileResolver<'_> {
     /// (the member surface's own validation, recorded by the link pass)
     /// and every other path (bare or sigiled) stays declarative for the
     /// link walk (the dep-list records it and the graph validates the
-    /// link). A condition is a source-internal spelling the target model
-    /// will evaluate; until then the import records and links as written.
-    /// A `pub import` of `@std` refuses here: the merged-ambient reading
-    /// binds the compile's own names, never import-bound defs, so no
-    /// selection re-exports until the un-merge.
+    /// link). A condition names the `os` or `arch` key against one
+    /// lowercase target-triple word, evaluated against the compiler's own
+    /// target here: a false condition excludes the import (its selections
+    /// validate on the targets that hold it), and a condition outside the
+    /// vocabulary refuses. A `pub import` of `@std` refuses here: the
+    /// merged-ambient reading binds the compile's own names, never
+    /// import-bound defs, so no selection re-exports until the un-merge.
     fn import(&mut self, imp: &ds_parse::ImportDecl, vis: Option<ds_parse::Vis>) {
+        match ds_parse::import_cond(imp) {
+            ds_parse::ImportCond::Absent | ds_parse::ImportCond::Held(true) => {},
+            ds_parse::ImportCond::Held(false) => return,
+            ds_parse::ImportCond::Malformed { span, label } => {
+                self.diags.push(
+                    Diagnostic::error(
+                        ErrorCode::ImportConditionMalformed,
+                        "an import's condition names the `os` or `arch` key against one lowercase \
+                         target-triple word"
+                            .to_owned(),
+                    )
+                    .with_primary(span, label),
+                );
+                return;
+            },
+        }
         if !imp.path.at_sign || imp.path.segments.first().is_none_or(|s| s.name != "std") {
             return;
         }

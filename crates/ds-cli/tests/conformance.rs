@@ -14,7 +14,7 @@
 
 use std::{env, fs, path::PathBuf, process::Command};
 
-use ds_check::corpus::item_stages;
+use ds_check::corpus::{item_stages, stages};
 use ds_diag::Files;
 use ds_parse::parse;
 
@@ -337,7 +337,8 @@ fn handler_parameters_take_the_handled_members() {
 /// `app/` (its `ds.pkg` manifest, the `main.ds` entry carrying the
 /// corpus `// items:` header, and any same-package member files)
 /// beside an optional producer package root the manifest's path dep
-/// names. The gate composes both sides through the real binary paths,
+/// names (the producer sources plain members without headers). The
+/// gate composes both sides through the real binary paths,
 /// in deterministic fixture-name order: every fixture checks through
 /// `ds check` beside its members when it declares no producer root (its
 /// staged rejects are the fixture's own — printed, never fatal, one
@@ -345,10 +346,14 @@ fn handler_parameters_take_the_handled_members() {
 /// runs through `ds run` and byte-pins it exactly like the single-file
 /// corpus does; a fixture without a golden stays on the check leg alone
 /// (a reject-staged fixture the run would refuse, or a check-only one
-/// whose surface sits outside the lowering contract). A
-/// cross-package fixture's run is its own check — the consumer's
-/// compile types against the linked surface the resolution serves — so
-/// the linked members the single-file corpus cannot carry gate here.
+/// whose surface sits outside the lowering contract). The header
+/// stages gate over every consumer-root file — the entry and any
+/// same-package member carrying the items header, the reject count
+/// reading the whole package, a plain member staying fully fatal under
+/// the composed check. A cross-package fixture's run is its own check —
+/// the consumer's compile types against the linked surface the
+/// resolution serves — so the linked members the single-file corpus
+/// cannot carry gate here.
 #[test]
 fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
     let packages = ds_corpus_path::dir().join("packages");
@@ -376,24 +381,58 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
             .to_owned();
         let app = fixture.join("app");
         let entry = app.join("main.ds");
-        let source = fs::read_to_string(&entry).unwrap_or_else(|error| panic!("{name}: {error}"));
-        // the entry's header discipline: the items header aligns with
-        // the parsed items, exactly like the single-file corpus
-        let mut files = Files::new();
-        let id = files.add_source(format!("{name}/app/main.ds"), &source);
-        let ast = parse(&files, id).unwrap_or_else(|diags| panic!("{name}: {diags:?}"));
-        let staged = item_stages(&source, &ast)
-            .unwrap_or_else(|| panic!("{name}: the header and the entry's items disagree"));
-        assert!(
-            staged
+        // the consumer root's files in deterministic order: the entry
+        // and any same-package member, each read once for both the
+        // header staging below and the composed check
+        let mut sources: Vec<(PathBuf, String)> = fs::read_dir(&app)
+            .expect("the consumer root reads")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ds"))
+            .map(|path| {
+                let source =
+                    fs::read_to_string(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
+                (path, source)
+            })
+            .collect();
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        // the header discipline over every consumer-root file: the items
+        // header aligns with the parsed items exactly like the
+        // single-file corpus, the entry carrying the header and a
+        // member keeping the plain-file option, and the reject count
+        // reading the whole package
+        let mut rejects = 0usize;
+        let mut staged_all: Vec<String> = Vec::new();
+        for (path, source) in &sources {
+            let member = path
+                .file_name()
+                .and_then(|member| member.to_str())
+                .expect("the member file names")
+                .to_owned();
+            if stages(source).is_empty() {
+                assert!(
+                    path != &entry,
+                    "{name}: the entry main.ds carries the items header"
+                );
+                continue;
+            }
+            let mut files = Files::new();
+            let id = files.add_source(format!("{name}/app/{member}"), source);
+            let ast =
+                parse(&files, id).unwrap_or_else(|diags| panic!("{name}/{member}: {diags:?}"));
+            let staged = item_stages(source, &ast)
+                .unwrap_or_else(|| panic!("{name}/{member}: the header and the items disagree"));
+            assert!(
+                staged
+                    .iter()
+                    .all(|stage| !stage.stage.starts_with("unresolved")),
+                "{name}/{member}: package fixtures stage no unresolved items"
+            );
+            rejects += staged
                 .iter()
-                .all(|stage| !stage.stage.starts_with("unresolved")),
-            "{name}: package fixtures stage no unresolved items"
-        );
-        let rejects = staged
-            .iter()
-            .filter(|stage| stage.stage.starts_with("reject "))
-            .count();
+                .filter(|stage| stage.stage.starts_with("reject "))
+                .count();
+            staged_all.extend(staged.iter().map(|stage| stage.stage.clone()));
+        }
         // the producer roots: every directory beside app/
         let producers = fs::read_dir(&fixture)
             .expect("the fixture directory reads")
@@ -404,12 +443,7 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
         // the check leg: the one-namespace fixtures gate beside their
         // members; a cross-package fixture's check is its run below
         if producers == 0 {
-            let mut checks: Vec<PathBuf> = fs::read_dir(&app)
-                .expect("the consumer root reads")
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ds"))
-                .collect();
-            checks.sort();
+            let checks: Vec<PathBuf> = sources.iter().map(|(path, _)| path.clone()).collect();
             let out = ds()
                 .arg("check")
                 .args(&checks)
@@ -458,9 +492,9 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
         } else {
             assert!(
                 rejects > 0
-                    || staged
+                    || staged_all
                         .iter()
-                        .all(|stage| stage.stage == "typecheck" || stage.stage.starts_with('m')),
+                        .all(|stage| stage == "typecheck" || stage.starts_with('m')),
                 "{name}: a fixture without a run golden gates through the check leg alone"
             );
         }
