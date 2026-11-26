@@ -225,6 +225,10 @@ error_codes! {
     LinkLayerConflict => "DS2048", Type,
     /// A shadowed impl's declaring package statically exercises its own head (its linked artifact baked a statically-resolved instance word naming it), so the link cannot shadow it without one value answering two behaviors; the link refuses naming the loser.
     ShadowedImplExercised => "DS2049", Type,
+    /// A call site's `as` selection on a call that dispatches through no trait instance: a free function, an inherent member, a constructor, or an indirect callee has no instance vocabulary to select.
+    InstanceSelectionWithoutDispatch => "DS2050", Type,
+    /// A call site's `as` selection names no impl of the dispatched trait for the receiver: no impl of the trait carries the name, or the named impl's head does not serve the receiver. The message names the trait, the receiver, and the selection.
+    UnknownInstanceSelection => "DS2051", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -368,6 +372,12 @@ mod tests {
             ("LinkShadowedImpl", "DS2047", ErrorClass::Type),
             ("LinkLayerConflict", "DS2048", ErrorClass::Type),
             ("ShadowedImplExercised", "DS2049", ErrorClass::Type),
+            (
+                "InstanceSelectionWithoutDispatch",
+                "DS2050",
+                ErrorClass::Type,
+            ),
+            ("UnknownInstanceSelection", "DS2051", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

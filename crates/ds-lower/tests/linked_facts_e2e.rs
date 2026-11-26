@@ -481,6 +481,7 @@ fn build_trait_vm() -> (Vm, Lowered) {
         tags: Vec::new(),
         impls: vec![ds_check::import::ImplFact {
             trait_name: "sizing".to_owned(),
+            name: None,
             head: TypeWord::Named("pair".to_owned()),
             members: vec![ds_check::import::ImplMemberFact {
                 name: "size".to_owned(),
@@ -711,6 +712,7 @@ fn build_default_vm() -> (Vm, Lowered) {
         impls: vec![
             ds_check::import::ImplFact {
                 trait_name: "answering".to_owned(),
+                name: None,
                 head: TypeWord::Scalar(ScalarWord::Int),
                 members: Vec::new(),
                 span: at,
@@ -720,6 +722,7 @@ fn build_default_vm() -> (Vm, Lowered) {
             },
             ds_check::import::ImplFact {
                 trait_name: "answering".to_owned(),
+                name: None,
                 head: TypeWord::Scalar(ScalarWord::Bool),
                 members: vec![ds_check::import::ImplMemberFact {
                     name: "answer".to_owned(),
@@ -979,6 +982,7 @@ fn build_union_vm() -> (Vm, Lowered) {
         tags: Vec::new(),
         impls: vec![ds_check::import::ImplFact {
             trait_name: "boxing".to_owned(),
+            name: None,
             head: TypeWord::Named("pack".to_owned()),
             members: vec![
                 ds_check::import::ImplMemberFact {
@@ -1239,6 +1243,7 @@ fn build_union_default_vm() -> (Vm, Lowered) {
         tags: Vec::new(),
         impls: vec![ds_check::import::ImplFact {
             trait_name: "wording".to_owned(),
+            name: None,
             head: TypeWord::Scalar(ScalarWord::Int),
             members: Vec::new(),
             span: at,

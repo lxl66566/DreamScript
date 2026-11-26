@@ -1,0 +1,7 @@
+error[DS2051]: the `as slow` selection names no impl of `show` for `int`
+ --> tests/fixtures/negative/ds2051_unknown_instance_selection.ds:11:23
+   |
+11 | fn f(x: int) -> int { x.text() as slow }
+   |                       ^^^^^^^^^^^^^^^^ no impl carries this name for this receiver
+   |
+   = note: the named impls of the trait: `as fast`

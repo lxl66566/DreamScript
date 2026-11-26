@@ -319,6 +319,8 @@ An impl member may omit the receiver: `impl gauge { fn make(level: int) -> gauge
 
 Coherence is pairwise disjointness of one trait's instance heads — every pair proves `H1 & H2 = empty` — checked at each declaration, over the package's closed instance set, and at link time; generic heads count through their instantiations, so `impl shows for list[int]` and `impl [t: shows] shows for list[t]` overlap at `list[int]`. Any module may implement for any type, foreign included: no orphan rule, no newtype, no priority machinery. An overlap error names both heads and a witness value type, union heads decompose per branch, and a `& ~trait` bound carves exclusivity where overlap is intended.
 
+An impl may carry a name — `impl renderable for report as compact` — and the name moves it out of the default vocabulary: plain spellings keep answering the unnamed impls exactly as before, and the named instance answers only a call site that selects it, `r.render() as compact` (the qualified spelling selects the same instance, `renderable::render(r) as compact`). Two impls of one trait over one head coexist when their names differ — the escape for two legitimate behaviors one head wants — while the same name twice keeps the overlap refusal; a bound, a nested proof demand, or a generic body's runtime evidence never sees a named instance, and a selection naming no serving impl refuses naming the vocabulary. A selection on a call that dispatches no trait instance refuses too.
+
 Generics carry one clause — `[t: c]` on functions, `[t]` on types — and every generic function exists once in bytecode: call sites pass evidence words (statically resolved instances or runtime slots behind inline caches), and the JIT may specialize lazily. Dispatch comes from types and the set algebra, never declaration order or priority; no HKT, no GATs.
 
 ```ts
@@ -494,6 +496,6 @@ Deliberately absent, each a recorded refusal: truthiness (boolean contexts are b
 
 Also permanently excluded: user-defined operators, `Deref`-style coercions, subscript slicing sugar, vararg/spread packing, and word-form operators beyond `in` and `is`.
 
-Deferred, recorded, not promised — additive valves that enter only after the core is stable and must re-fit this file: `|>`, anonymous record literals (the map literal rides this reservation; builder calls interim), `@` binders, `??` on `t | none`, `?.` desugar, `throws(...)` sugar, user-defined handlers, scoped named instances, labeled break/continue, and `it` shorthand.
+Deferred, recorded, not promised — additive valves that enter only after the core is stable and must re-fit this file: `|>`, anonymous record literals (the map literal rides this reservation; builder calls interim), `@` binders, `??` on `t | none`, `?.` desugar, `throws(...)` sugar, user-defined handlers, labeled break/continue, and `it` shorthand.
 
 That is the whole language. The explainability budget is the contract: any proposal that cannot re-fit this tutorial does not belong in DreamScript.

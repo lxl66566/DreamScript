@@ -67,6 +67,19 @@ impl Fixture {
             &InstanceDecl::new(trait_id, head).with_conditions(conditions),
         )
     }
+
+    fn declare_named(
+        &mut self,
+        trait_id: TraitId,
+        head: TypeExpr,
+        name: Option<&str>,
+    ) -> Result<Vec<ds_check::InstanceId>, Error> {
+        let name = name.map(std::sync::Arc::from);
+        self.env.declare(
+            &mut self.universe,
+            &InstanceDecl::new(trait_id, head).with_name(name),
+        )
+    }
 }
 
 #[test]
@@ -98,6 +111,67 @@ fn union_heads_decompose_into_per_branch_instances() {
     let err = f.declare(f.eq, dup).unwrap_err();
     assert!(matches!(err, Error::InstanceOverlap { .. }));
     assert_eq!(f.env.len(), 5, "failed declarations insert nothing");
+}
+
+/// The named-instance vocabulary (the B6 two-impls escape): a named impl
+/// coexists with an unnamed one over the same trait and head, each
+/// answering its own slot alone — the default slot keeps the unnamed
+/// resolution, the named row answers only its selected call, and a
+/// missing name answers nothing.
+#[test]
+fn named_impls_answer_only_their_slot_selections() {
+    use ds_check::instance_solve::{Resolution, resolve};
+
+    let mut f = fixture();
+    let int = f.ty(f.int);
+    f.declare_named(f.json, TypeExpr::atom(f.int), None)
+        .unwrap();
+    let named = f
+        .declare_named(f.json, TypeExpr::atom(f.int), Some("fast"))
+        .unwrap();
+
+    // The default vocabulary resolves exactly the unnamed row.
+    let Resolution::Unique(plain) = resolve(&f.universe, &f.env, &[], f.json, int, None) else {
+        panic!("the unnamed row keeps the default slot");
+    };
+    assert_ne!(plain, named[0]);
+    // The selection resolves the named row; a name nothing carries does
+    // not.
+    let Resolution::Unique(fast) = resolve(&f.universe, &f.env, &[], f.json, int, Some("fast"))
+    else {
+        panic!("the selection resolves the named row");
+    };
+    assert_eq!(fast, named[0]);
+    assert!(matches!(
+        resolve(&f.universe, &f.env, &[], f.json, int, Some("slow")),
+        Resolution::None
+    ));
+    // The unselected-call evidence names the named row: the refusal's
+    // note points at the selection the vocabulary offers.
+    assert_eq!(
+        ds_check::instance_solve::named_servers(&f.universe, &f.env, &[], f.json, int),
+        vec![named[0]]
+    );
+}
+
+/// Coherence runs per slot: two named impls of one trait over one head
+/// conflict only when they share the name — distinct names coexist as
+/// the escape for two legitimate impls, and the unnamed row conflicts
+/// with neither named one.
+#[test]
+fn coherence_and_link_elections_run_per_vocabulary_slot() {
+    let mut f = fixture();
+    let head = TypeExpr::atom(f.int);
+    f.declare_named(f.show, head.clone(), Some("fast")).unwrap();
+    f.declare_named(f.show, head.clone(), Some("slow")).unwrap();
+    // An unnamed impl coexists beside both named ones.
+    f.declare_named(f.show, head.clone(), None).unwrap();
+    assert_eq!(f.env.len(), 3);
+
+    // The same slot twice over the same head overlaps, with the witness.
+    let err = f.declare_named(f.show, head, Some("fast")).unwrap_err();
+    assert!(matches!(err, Error::InstanceOverlap { .. }));
+    assert_eq!(f.env.len(), 3, "the failed declaration inserts nothing");
 }
 
 #[test]
@@ -249,14 +323,14 @@ fn per_branch_conditions_solve_at_call_sites() {
     let list_int = f.universe.apply_atom(list, &[int_ty]).unwrap();
     let list_int_ty = f.universe.atom_ty(list_int).unwrap();
     assert!(matches!(
-        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, int_ty),
+        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, int_ty, None),
         ds_check::instance_solve::Resolution::Unique(id) if id == ids[0]
     ));
     // The unconditioned branch's own instance satisfies the list branch's
     // element condition, so `list[int]` resolves through the same impl
     // without any instance beyond the declaration's own branches.
     assert!(matches!(
-        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_int_ty),
+        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_int_ty, None),
         ds_check::instance_solve::Resolution::Unique(id) if id == ids[1]
     ));
     assert!(matches!(
@@ -265,11 +339,12 @@ fn per_branch_conditions_solve_at_call_sites() {
             &f.env,
             &[],
             f.show,
-            list_string_ty
+            list_string_ty,
+            None
         ),
         ds_check::instance_solve::Resolution::Unique(id) if id == ids[1]
     ));
-    match ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_bool_ty) {
+    match ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, list_bool_ty, None) {
         ds_check::instance_solve::Resolution::BoundUnsat { bound, target, .. } => {
             assert_eq!(bound, f.show);
             let miss_ty = f.universe.set_ty(&target);
@@ -355,7 +430,7 @@ fn canonical_empty_head_hosts_a_vacuous_instance() {
         "the empty heads never contain an inhabited query"
     );
     let empty = f.universe.empty_ty();
-    let solved = ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, empty);
+    let solved = ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, empty, None);
     assert!(
         !solved.satisfied(),
         "an empty target matches nothing at a call site"
@@ -934,6 +1009,7 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
     f.env.serve(vec![
         ServedInstance {
             trait_id: f.json,
+            name: None,
             head_expr: TypeExpr::atom(f.int),
             head: int_head,
             written: int_head,
@@ -942,6 +1018,7 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
         },
         ServedInstance {
             trait_id: f.json,
+            name: None,
             head_expr: TypeExpr::atom(f.string),
             head: string_head,
             written: string_head,
@@ -968,13 +1045,13 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
         (f.boolean, fresh[0]),
     ] {
         let ty = f.universe.atom_ty(atom).unwrap();
-        let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.json, ty) else {
+        let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.json, ty, None) else {
             panic!("the receiver shape must solve uniquely");
         };
         assert_eq!(id, want);
     }
     assert!(matches!(
-        resolve(&f.universe, &f.env, &[], f.show, int_head),
+        resolve(&f.universe, &f.env, &[], f.show, int_head, None),
         Resolution::None
     ));
 
@@ -997,7 +1074,7 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
     // The appended rows renumber at the merge, so the show row lands at 3.
     let merged_show = InstanceId::from_raw(3);
     assert_eq!(f.env.of_trait(f.show), &[merged_show]);
-    let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.show, int_head) else {
+    let Resolution::Unique(id) = resolve(&f.universe, &f.env, &[], f.show, int_head, None) else {
         panic!("the merged row must serve the receiver");
     };
     assert_eq!(id, merged_show);

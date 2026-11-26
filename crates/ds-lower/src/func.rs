@@ -6807,6 +6807,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }),
             args: Vec::new(),
             trailing: None,
+            selection: None,
         };
         let val = self.value(&call)?;
         let addrs = self.word_addrs(&val.place, val.ty)?;

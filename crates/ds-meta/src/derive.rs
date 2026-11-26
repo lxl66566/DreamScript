@@ -787,6 +787,7 @@ fn part_hole(part: Expr, ty: &Type, mint: &mut Mint) -> StrPart {
             }),
             args: Vec::new(),
             trailing: None,
+            selection: None,
         }
     };
     StrPart::Expr {
@@ -1152,6 +1153,7 @@ fn pair_compare(lhs: Expr, rhs: Expr, mint: &mut Mint) -> Expr {
             value: rhs,
         }],
         trailing: None,
+        selection: None,
     }
 }
 
@@ -1177,6 +1179,7 @@ fn member_call(recv: Expr, name: &str, args: Vec<Expr>, mint: &mut Mint) -> Expr
             })
             .collect(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -1472,6 +1475,7 @@ fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
         callee: Box::new(callee),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -2130,6 +2134,7 @@ fn default_value(
                         callee: Box::new(callee),
                         args: Vec::new(),
                         trailing: None,
+                        selection: None,
                     })
                 },
                 [key, value] if only.name == "map" => {
@@ -2151,6 +2156,7 @@ fn default_value(
                         callee: Box::new(callee),
                         args: Vec::new(),
                         trailing: None,
+                        selection: None,
                     })
                 },
                 // Every other application — a head the constructor
@@ -2320,6 +2326,7 @@ fn case_default(
                 callee: Box::new(Expr::Path { span, path: callee }),
                 args,
                 trailing: None,
+                selection: None,
             })
         },
         EnumPayload::Struct(fields) => {
@@ -2343,6 +2350,7 @@ fn case_default(
                 callee: Box::new(Expr::Path { span, path: callee }),
                 args,
                 trailing: None,
+                selection: None,
             })
         },
     }
@@ -2416,6 +2424,7 @@ fn applied_default(ty: &Type, mint: &mut Mint) -> Expr {
         }),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -2503,6 +2512,7 @@ fn type_keyed_call(type_name: &str, member: &str, mint: &mut Mint) -> Expr {
         }),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -2594,6 +2604,7 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
                         callee: Box::new(Expr::Path { span, path: callee }),
                         args,
                         trailing: None,
+                        selection: None,
                     }
                 },
                 EnumPayload::Struct(fields) => {
@@ -2614,6 +2625,7 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
                         callee: Box::new(Expr::Path { span, path: callee }),
                         args,
                         trailing: None,
+                        selection: None,
                     }
                 },
             };
@@ -3123,6 +3135,7 @@ fn type_keyed_decode(mint: &mut Mint, recv: &Expr, source: &str) -> Expr {
             value: path_expr(source, mint.span()),
         }],
         trailing: None,
+        selection: None,
     }
 }
 
@@ -3180,6 +3193,7 @@ fn list_read(
         }),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     };
     let array_read = path_expr(&array, mint.span());
     let index_read = path_expr(&index, mint.span());
@@ -3208,6 +3222,7 @@ fn list_read(
                 value: path_expr(SEED, mint.span()),
             }],
             trailing: None,
+            selection: None,
         }
     };
     let mut loop_body = vec![local(mint, &at, elem, false)];
@@ -3402,6 +3417,7 @@ fn case_decode_arm(
             }),
             args,
             trailing: None,
+            selection: None,
         }
     };
     let mut stmts = Vec::new();
@@ -3467,6 +3483,7 @@ fn case_decode_arm(
                             value: path_expr(SEED, mint.span()),
                         }],
                         trailing: None,
+                        selection: None,
                     }
                 };
                 stmts.push(local(mint, &at, elem, false));
@@ -3814,6 +3831,7 @@ fn map_empty(mint: &mut Mint) -> Expr {
         callee: Box::new(callee),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -3997,6 +4015,7 @@ fn type_keyed_encode(mint: &mut Mint, recv: &Expr, source: Expr) -> Expr {
             value: source,
         }],
         trailing: None,
+        selection: None,
     }
 }
 
@@ -4027,6 +4046,7 @@ fn list_write(
         }),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     };
     let body = if let Type::Optional { inner, .. } = paren_free(element) {
         let inner_name = fresh_binder(fresh, "n");
@@ -4204,6 +4224,7 @@ fn enum_encode_body(decl: &EnumDecl, mint: &mut Mint, diags: &mut Vec<Diagnostic
                         }),
                         args: Vec::new(),
                         trailing: None,
+                        selection: None,
                     };
                     let mut stmts = vec![local(mint, &out, empty, true)];
                     for (index, item) in items.iter().enumerate() {
@@ -4349,6 +4370,7 @@ fn doc_seed(mint: &mut Mint) -> Expr {
         callee: Box::new(callee),
         args: Vec::new(),
         trailing: None,
+        selection: None,
     }
 }
 
@@ -4376,6 +4398,7 @@ fn parse_err_expr(mint: &mut Mint) -> Expr {
             value: int_answer(mint, "0"),
         }],
         trailing: None,
+        selection: None,
     }
 }
 
@@ -4645,6 +4668,7 @@ fn impl_item(
             generics: impl_generics,
             trait_ref,
             target,
+            name: None,
             fns: vec![fn_decl],
         }),
         leading_trivia: Vec::new(),

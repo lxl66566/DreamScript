@@ -237,17 +237,26 @@ unary_lvl = { (neg_op ~ sp)* ~ postfix_lvl }
 
 // Postfix: `.`-access may open on the next line (method chains); a call, an
 // index, or `?` must open on the same line as their operand. A call may take
-// one trailing block, which becomes its final zero-argument lambda.
+// one trailing block, which becomes its final zero-argument lambda. A call
+// may carry one instance selection (`show(x) as fast`, the named-instance
+// vocabulary): a same-line `as` plus the impl's name, attached to the
+// paren call alone.
 postfix_lvl = { primary ~ postfix_op* }
 // One rule for every shape: the trivia scan and the rule entry are shared, and
 // the shape is read from the matched children (`args`, a block, a constructor
 // bracket, a field name, or none for `?`).
-postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
+postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")" ~ call_select?
                   | block_expr
                   | postfix_index
                   | "?"
                   | keyed_field
                   | sp ~ "." ~ h ~ field_name ) }
+// The instance selection on a paren call: `as` names the impl one named
+// instance's declaration carries. Contextual like every other `as` use
+// (imports, impl names), so the ident guard keeps ordinary identifiers
+// starting with `as` intact. The same-line `h` prefix mirrors the binary
+// operators: a selection never opens on the next line.
+call_select = { h ~ "as" ~ !ident_cont ~ h ~ ident }
 // The comptime-keyed field read `x.[name]` (the comptime field seam):
 // a dot immediately followed by the bracketed constant name expression,
 // disjoint from the plain `xs[i]` index by its dot.
@@ -370,7 +379,7 @@ nos_mul = { nos_unary ~ (h ~ mul_op ~ sp ~ nos_unary)* }
 nos_unary = { (neg_op ~ sp)* ~ nos_postfix }
 nos_postfix = { primary_nos ~ nos_postfix_op* }
 // As `postfix_op`, without the trailing block (control headers own their `{`).
-nos_postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
+nos_postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")" ~ call_select?
                       | postfix_index
                       | "?"
                       | keyed_field
@@ -462,7 +471,8 @@ member_const = { kw_const ~ sp ~ ident ~ h ~ "=" ~ sp ~ (lambda | member_sig) }
 member_sig = { params ~ ret_ann }
 assoc_type = { kw_type ~ sp ~ ident }
 
-impl_item = { kw_impl ~ sp ~ generics? ~ sp ~ (impl_trait ~ h ~ "for" ~ !ident_cont ~ sp)? ~ type_expr ~ sp ~ impl_body }
+impl_item = { kw_impl ~ sp ~ generics? ~ sp ~ (impl_trait ~ h ~ "for" ~ !ident_cont ~ sp)? ~ type_expr ~ sp ~ impl_name? ~ sp ~ impl_body }
+impl_name = { "as" ~ !ident_cont ~ h ~ ident }
 impl_trait = { path ~ type_args? }
 impl_member = _{ fn_item | local }
 // Like trait member lists: comma or newline separators, trailing comma OK.

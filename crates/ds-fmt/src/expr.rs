@@ -409,6 +409,7 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             callee,
             args,
             trailing,
+            selection,
             ..
         } => {
             write_expr_min(ctx, out, base, callee, 15);
@@ -432,6 +433,11 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
                     write_expr(ctx, out, base, &a.value);
                 }
                 out.push(')');
+            }
+            // The instance selection renders after the argument list.
+            if let Some(selection) = selection {
+                out.push_str(" as ");
+                out.push_str(&selection.name);
             }
             if let Some(t) = trailing {
                 out.push(' ');

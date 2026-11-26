@@ -107,6 +107,8 @@
 //! # }
 //! ```
 
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -186,6 +188,10 @@ pub struct InstanceBody;
 pub struct ServedInstance {
     /// The trait implemented.
     pub trait_id: TraitId,
+    /// The impl's name (`impl trait for head as name`): a named instance
+    /// sits outside the default vocabulary, reachable only through a call
+    /// site's selection. Every branch of one declaration shares it.
+    pub name: Option<Arc<str>>,
     /// The branch as written.
     pub head_expr: TypeExpr,
     /// The head solved at declaration.
@@ -204,6 +210,8 @@ pub struct ServedInstance {
 pub struct InstanceDecl {
     /// The trait implemented.
     pub trait_id: TraitId,
+    /// The impl's name; `None` is the default vocabulary.
+    pub name: Option<Arc<str>>,
     /// The head as written; unions decompose into per-branch instances at
     /// declaration (B6).
     pub head: TypeExpr,
@@ -219,10 +227,19 @@ impl InstanceDecl {
     pub fn new(trait_id: TraitId, head: TypeExpr) -> Self {
         Self {
             trait_id,
+            name: None,
             head,
             conditions: Vec::new(),
             body: InstanceBody,
         }
+    }
+
+    /// Attaches the impl's name, moving the instance out of the default
+    /// vocabulary.
+    #[must_use]
+    pub fn with_name(mut self, name: Option<Arc<str>>) -> Self {
+        self.name = name;
+        self
     }
 
     /// Attaches conditions, making the instance conditional.
@@ -238,6 +255,10 @@ impl InstanceDecl {
 /// solved at declaration.
 struct Instance {
     trait_id: TraitId,
+    /// The impl's name; every branch of one declaration shares it. Rows in
+    /// different slots (unnamed vs named, or two distinct names) never
+    /// conflict: the coherence probes and the link election run per slot.
+    name: Option<Arc<str>>,
     /// The branch as written; memberships may grow after declaration, so the
     /// solved snapshot can go stale until link-time re-solving.
     head_expr: TypeExpr,
@@ -479,6 +500,16 @@ impl InstanceEnv {
             .ok_or(Error::UnknownInstance(id))
     }
 
+    /// The instance's vocabulary slot: the impl's name, `None` for the
+    /// default vocabulary. Resolution and the link election compare slots,
+    /// never scan across them.
+    #[must_use]
+    pub fn name(&self, id: InstanceId) -> Option<&str> {
+        self.instances
+            .get(id.index() as usize)
+            .and_then(|inst| inst.name.as_deref())
+    }
+
     /// The solved conditions of an instance.
     pub fn conditions(&self, id: InstanceId) -> Result<&[Condition<Ty>], Error> {
         self.instances
@@ -573,6 +604,7 @@ impl InstanceEnv {
             for (index, inst) in self.instances.iter().enumerate() {
                 if !self.shadowed.contains(&(index as u32))
                     && inst.trait_id == decl.trait_id
+                    && inst.name == decl.name
                     && let Some(outcome) = overlap_error(
                         universe,
                         self,
@@ -612,6 +644,7 @@ impl InstanceEnv {
         for ((expr, head), (kept, kept_exprs)) in branches.into_iter().zip(heads).zip(per_branch) {
             self.instances.push(Instance {
                 trait_id: decl.trait_id,
+                name: decl.name.clone(),
                 head_expr: expr,
                 head,
                 written,
@@ -677,6 +710,7 @@ impl InstanceEnv {
             fresh.entry(row.trait_id).or_default().push(id);
             self.instances.push(Instance {
                 trait_id: row.trait_id,
+                name: row.name,
                 head_expr: row.head_expr,
                 head: row.head,
                 written: row.written,
@@ -698,6 +732,7 @@ impl InstanceEnv {
             .ok_or(Error::UnknownInstance(id))?;
         Ok(ServedInstance {
             trait_id: inst.trait_id,
+            name: inst.name.clone(),
             head_expr: inst.head_expr.clone(),
             head: inst.head,
             written: inst.written,
@@ -765,6 +800,7 @@ impl InstanceEnv {
                 if i < served && j < served
                     || self.shadowed.contains(&(i as u32))
                     || self.shadowed.contains(&(j as u32))
+                    || self.instances[i].name != self.instances[j].name
                 {
                     continue;
                 }

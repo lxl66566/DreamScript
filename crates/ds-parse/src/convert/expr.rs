@@ -396,22 +396,40 @@ impl Ctx {
         let start = acc.span().start;
         let end = self.span(&p).end;
         let span = Span::new(self.file, start, end);
-        match inner(&p).next() {
-            Some(c) if c.as_rule() == Rule::args => Expr::Call {
+        let mut children = inner(&p).collect::<Vec<Pair<'_, Rule>>>().into_iter();
+        let Some(shape) = children.next() else {
+            // The postfix `?` carries no children of its own.
+            return Expr::Try {
                 span,
-                callee: Box::new(acc),
-                args: self.args(&c),
-                trailing: None,
+                expr: Box::new(acc),
+            };
+        };
+        let mut rest = children;
+        match shape.as_rule() {
+            Rule::args => {
+                let mut selection = None;
+                if let Some(c) = rest.next() {
+                    // The paren call's optional instance selection.
+                    selection =
+                        Some(self.ident(inner(&c).next().expect("call_select holds the name")));
+                }
+                Expr::Call {
+                    span,
+                    callee: Box::new(acc),
+                    args: self.args(&shape),
+                    trailing: None,
+                    selection,
+                }
             },
-            Some(c) if c.as_rule() == Rule::block_expr => {
-                let bspan = self.span(&c);
+            Rule::block_expr => {
+                let bspan = self.span(&shape);
                 let lambda = Expr::Lambda {
                     span: bspan,
                     generics: Vec::new(),
                     params: Vec::new(),
                     ret: None,
                     arrow: false,
-                    body: Box::new(Expr::Block(self.block(c))),
+                    body: Box::new(Expr::Block(self.block(shape))),
                 };
                 match acc {
                     // The block feeds the directly preceding call's final
@@ -422,22 +440,25 @@ impl Ctx {
                         callee,
                         args,
                         trailing: None,
+                        selection,
                         ..
                     } => Expr::Call {
                         span,
                         callee,
                         args,
                         trailing: Some(Box::new(lambda)),
+                        selection,
                     },
                     recv => Expr::Call {
                         span,
                         callee: Box::new(recv),
                         args: Vec::new(),
                         trailing: Some(Box::new(lambda)),
+                        selection: None,
                     },
                 }
             },
-            Some(c) if c.as_rule() == Rule::postfix_index => match inner(&c).next() {
+            Rule::postfix_index => match inner(&shape).next() {
                 Some(arg) => Expr::Index {
                     span,
                     recv: Box::new(acc),
@@ -445,8 +466,8 @@ impl Ctx {
                 },
                 None => acc,
             },
-            Some(c) if c.as_rule() == Rule::keyed_field => {
-                match inner(&c).next() {
+            Rule::keyed_field => {
+                match inner(&shape).next() {
                     // The bracketed constant name expression converts as
                     // an ordinary expression; the checker admits only the
                     // comptime loop record's name member.
@@ -461,20 +482,17 @@ impl Ctx {
                     None => acc,
                 }
             },
-            Some(c) if c.as_rule() == Rule::field_name => {
-                match inner(&c).next().map(|i| self.ident(i)) {
-                    Some(name) => Expr::Field {
-                        span,
-                        recv: Box::new(acc),
-                        name,
-                    },
-                    None => acc,
-                }
+            Rule::field_name => match inner(&shape).next().map(|i| self.ident(i)) {
+                Some(name) => Expr::Field {
+                    span,
+                    recv: Box::new(acc),
+                    name,
+                },
+                None => acc,
             },
-            _ => Expr::Try {
-                span,
-                expr: Box::new(acc),
-            },
+            // Every postfix shape carries its own rule; the childless `?`
+            // answered above, so an unmatched child is unreachable.
+            _ => acc,
         }
     }
 

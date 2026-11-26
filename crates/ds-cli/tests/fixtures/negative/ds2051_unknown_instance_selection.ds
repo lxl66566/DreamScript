@@ -1,0 +1,11 @@
+// An `as` selection naming no impl the trait carries [B6]: the named
+// impl answers only its own slot, and no impl carries `slow`.
+
+tag int
+trait show {
+  fn text(self) -> int
+}
+impl show for int as fast {
+  fn text(self) -> int { self }
+}
+fn f(x: int) -> int { x.text() as slow }

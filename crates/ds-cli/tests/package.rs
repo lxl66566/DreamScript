@@ -2052,6 +2052,93 @@ fn the_trait_impls_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A producer's named impls cross the link seam with their vocabulary
+/// (the B6 two-impls escape): the linked row declares into its slot, a
+/// consumer call site's `as` selection resolves and dispatches the named
+/// body through the same CALLG machinery, the qualified spelling selects
+/// the same instance, and the unnamed row keeps answering the plain
+/// spelling — the default vocabulary unchanged beside the named slot.
+#[test]
+fn the_named_impls_cross_and_select_at_call_sites() {
+    let (work, pkg_id) = bespoke_pkg(
+        "lib-named-instances",
+        concat!(
+            "pub trait gauge {\n",
+            "  fn weight(self) -> int\n",
+            "}\n",
+            "pub struct lump {\n",
+            "  n: int,\n",
+            "}\n",
+            "impl gauge for lump {\n",
+            "  fn weight(self) -> int { self.n }\n",
+            "}\n",
+            "impl gauge for lump as heavy {\n",
+            "  fn weight(self) -> int { self.n * 10 }\n",
+            "}\n",
+        ),
+    );
+    let (ok, out, err) = bespoke_run(
+        &work,
+        &pkg_id,
+        concat!(
+            "import @lib (gauge, lump)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const m = lump { n: 3 }\n",
+            "  const plain = m.weight()\n",
+            "  const named = m.weight() as heavy\n",
+            "  const viaq = gauge::weight(m) as heavy\n",
+            "  println(\"${plain} ${named} ${viaq}\")\n",
+            "  plain + named + viaq\n",
+            "}\n",
+        ),
+    );
+    assert!(ok, "the named-impl run exits 0 (stderr: {err})");
+    // The plain site 3 over the unnamed row, both selections 30 over
+    // the named one — the run echoing the return 63.
+    assert_eq!(out, "3 30 30\n63\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A consumer's selection naming no impl the link carries refuses at
+/// the consumer's own compile (DS2051): the vocabulary is the closed
+/// set of the consuming compile's slots.
+#[test]
+fn a_selection_no_linked_impl_carries_refuses() {
+    let (work, pkg_id) = bespoke_pkg(
+        "lib-named-missing",
+        concat!(
+            "pub trait gauge {\n",
+            "  fn weight(self) -> int\n",
+            "}\n",
+            "pub struct lump {\n",
+            "  n: int,\n",
+            "}\n",
+            "impl gauge for lump as heavy {\n",
+            "  fn weight(self) -> int { self.n * 10 }\n",
+            "}\n",
+        ),
+    );
+    let (ok, _, err) = bespoke_run(
+        &work,
+        &pkg_id,
+        concat!(
+            "import @lib (gauge, lump)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const m = lump { n: 3 }\n",
+            "  m.weight() as brisk\n",
+            "}\n",
+        ),
+    );
+    assert!(!ok, "the missing selection must refuse");
+    assert!(
+        err.contains("DS2051") && err.contains("`as brisk`"),
+        "the refusal names the selection: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// One bespoke fixture package answering a single root: writes the
 /// member source as `lib.ds`, installs it, and returns the work dir
 /// with the root manifest pinning the installed identity.

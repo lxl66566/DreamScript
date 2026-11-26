@@ -142,6 +142,11 @@ pub const POSITIVE: &[&str] = &[
     // declarations: traits, impls, generics, comptime, extern, imports
     "trait animal { fn speak(self) -> string { \"\" }\n type food\n}\n",
     "impl json_val for int { fn to_json(self) -> string { \"\" }\n}\n",
+    "impl json_val for int as fast { fn to_json(self) -> string { \"\" }\n}\n",
+    "impl json_val for int as fast\n{ fn to_json(self) -> string { \"\" }\n}\n",
+    "fn f() { x.show() as fast\n}\n",
+    "fn f() { x.show() as fast + 1\n}\n",
+    "fn f() { ord::compare(a, b) as stable\n}\n",
     "impl[t: json_val] json_val for list<t> { fn to_json(self) -> string { \"\" }\n}\n",
     "impl[t: ~Copyable] stack<t> {\n  fn push(mut self, x: t) { self.items = cons(x, self.items) \
      }\n}\n",
@@ -643,8 +648,12 @@ fn norm_expr(e: &mut Expr) {
             callee,
             args,
             trailing,
+            selection,
         } => {
             z(span);
+            if let Some(selection) = selection {
+                z(&mut selection.span);
+            }
             norm_expr(callee);
             for a in args {
                 z(&mut a.span);

@@ -4511,6 +4511,7 @@ impl Bodies<'_> {
             callee,
             args,
             trailing,
+            selection,
             span,
         } = e
         else {
@@ -4521,6 +4522,7 @@ impl Bodies<'_> {
             };
         };
         let callee = peel_paren(callee);
+        let selection = selection.as_ref();
         // Inside a `for comptime` copy the plan-time dispatch records
         // are copy-dependent facts: member and generic dispatch queue
         // with the walker round, while free monomorphic calls (whose
@@ -4565,13 +4567,20 @@ impl Bodies<'_> {
             }
         }
         if let Expr::Field { recv, name, .. } = callee {
-            return self.dot_call(recv, name, args, trailing.as_deref(), *span);
+            return self.dot_call(recv, name, args, trailing.as_deref(), *span, selection);
         }
         // A generic-application constructor `list[t]()` [F9]: the callee
         // head resolves in the type namespace.
         if let Expr::Index { recv, index, .. } = callee
             && let Some(val) = self.ctor_apply_call(recv, index, args, trailing.as_deref(), *span)
         {
+            if let Some(selection) = selection {
+                self.selection_without_dispatch(
+                    selection,
+                    *span,
+                    "a constructor application dispatches through no trait instance",
+                );
+            }
             return val;
         }
         // The map constructor `map[k, v]()` [F9, B3]: the head resolved
@@ -4580,6 +4589,13 @@ impl Bodies<'_> {
             head, key, value, ..
         } = callee
         {
+            if let Some(selection) = selection {
+                self.selection_without_dispatch(
+                    selection,
+                    *span,
+                    "a map constructor dispatches through no trait instance",
+                );
+            }
             return self.map_ctor_call(head, key, value, args, trailing.as_deref(), *span);
         }
         if let Expr::Path { path, .. } = callee {
@@ -4587,6 +4603,13 @@ impl Bodies<'_> {
                 [only] => {
                     if let Some(Res::Def(def)) = self.res.get(only.span) {
                         let def = *def;
+                        if let Some(selection) = selection {
+                            self.selection_without_dispatch(
+                                selection,
+                                *span,
+                                "the callee is a package definition, not a trait dispatch",
+                            );
+                        }
                         if self.decls.fns.contains_key(&def) {
                             let val = self.call_def(def, None, args, trailing.as_deref(), *span);
                             return self.spawn_cancel_refines(def, val);
@@ -4633,7 +4656,13 @@ impl Bodies<'_> {
                 },
                 [_head, method] => {
                     if let Some(Res::TraitMethod(method_id)) = self.res.get(method.span) {
-                        return self.qualified_call(*method_id, args, trailing.as_deref(), *span);
+                        return self.qualified_call(
+                            *method_id,
+                            args,
+                            trailing.as_deref(),
+                            *span,
+                            selection,
+                        );
                     }
                     // The qualified label's call form (F9.5): a payloaded
                     // tag or case constructs through the same case-call
@@ -4649,6 +4678,13 @@ impl Bodies<'_> {
                             .get(&def)
                             .is_some_and(|case| !matches!(case.payload, EnumPayload::None))
                             || self.decls.structs.contains_key(&def);
+                        if let Some(selection) = selection {
+                            self.selection_without_dispatch(
+                                selection,
+                                *span,
+                                "the qualified label is a constructor, not a trait dispatch",
+                            );
+                        }
                         if payloaded {
                             return self.case_call(def, method, args, trailing.as_deref(), *span);
                         }
@@ -4668,8 +4704,102 @@ impl Bodies<'_> {
                 _ => {},
             }
         }
+        if let Some(selection) = selection {
+            self.selection_without_dispatch(
+                selection,
+                *span,
+                "an indirect callee dispatches through no trait instance",
+            );
+        }
         let callee_val = self.expr(callee, None);
         self.indirect_call(callee_val, args, trailing.as_deref(), *span)
+    }
+
+    /// DS2050: a call site's `as` selection where no trait dispatch
+    /// carries an instance vocabulary to select from. The call still
+    /// types through its ordinary reading.
+    fn selection_without_dispatch(&mut self, selection: &Ident, span: Span, what: &str) {
+        self.error(
+            ErrorCode::InstanceSelectionWithoutDispatch,
+            format!(
+                "the `as {}` selection names no trait dispatch: {what}",
+                selection.name
+            ),
+            span,
+            "selection on a non-dispatch call",
+        );
+    }
+
+    /// DS2051: the `as` selection names no serving impl of the trait for
+    /// the receiver. The note names the named impls serving the receiver
+    /// when any do, else every named impl the trait carries.
+    fn unknown_selection(&mut self, trait_id: TraitId, recv: Ty, selection: &Ident, span: Span) {
+        let serving = crate::instance_solve::named_servers(
+            &self.decls.universe,
+            &self.decls.instances,
+            &self.assumptions,
+            trait_id,
+            recv,
+        );
+        let mut names: Vec<&str> = serving
+            .iter()
+            .filter_map(|id| self.decls.instances.name(*id))
+            .collect();
+        if names.is_empty() {
+            names = self
+                .decls
+                .instances
+                .of_trait(trait_id)
+                .iter()
+                .filter_map(|id| self.decls.instances.name(*id))
+                .collect();
+        }
+        names.sort_unstable();
+        names.dedup();
+        let mut diag = Diagnostic::error(
+            ErrorCode::UnknownInstanceSelection,
+            format!(
+                "the `as {}` selection names no impl of `{}` for `{}`",
+                selection.name,
+                self.trait_name(trait_id),
+                self.decls.universe.render(recv)
+            ),
+        )
+        .with_primary(span, "no impl carries this name for this receiver");
+        if !names.is_empty() {
+            diag = diag.with_note(format!(
+                "the named impls of the trait: {}",
+                names
+                    .iter()
+                    .map(|name| format!("`as {name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        self.diags.push(diag);
+    }
+
+    /// The unselected-call note when a receiver's only serving impls are
+    /// named: the refusal names the selection the vocabulary offers
+    /// instead of a bare missing instance.
+    fn named_selection_note(&self, trait_id: TraitId, recv: Ty) -> Option<String> {
+        let names: Vec<&str> = crate::instance_solve::named_servers(
+            &self.decls.universe,
+            &self.decls.instances,
+            &self.assumptions,
+            trait_id,
+            recv,
+        )
+        .iter()
+        .filter_map(|id| self.decls.instances.name(*id))
+        .collect();
+        if names.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "this receiver's impls are named; a call site selects one with `as {}`",
+            names.first().unwrap_or(&"")
+        ))
     }
 
     /// Constructs one minted enum case by call form (B3): positional
@@ -5667,6 +5797,7 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        selection: Option<&Ident>,
     ) -> Val {
         let Some(sig) = self.member_sig(method) else {
             self.error(
@@ -5702,8 +5833,53 @@ impl Bodies<'_> {
             };
         };
         let recv_val = self.expr(&recv.value, None);
+        // A selection narrows the gate and the dispatch to one vocabulary
+        // slot, the resolution solved once and handed to the record and
+        // the member call; the unselected spelling keeps the default
+        // vocabulary's gate and resolution.
+        let mut selected = None;
         if let Some(trait_id) = trait_id {
-            if !self.trait_satisfied(trait_id, recv_val.ty, span) {
+            if let Some(selection) = selection {
+                let resolution =
+                    self.instance_in_slot(trait_id, recv_val.ty, Some(selection.name.as_str()));
+                match resolution {
+                    Resolution::Unique(_) | Resolution::Covered(_) => {},
+                    Resolution::Ambiguous(candidates) => {
+                        self.instance_ambiguity(trait_id, recv_val.ty, &candidates, span);
+                        for arg in args.iter().skip(1) {
+                            self.expr(&arg.value, None);
+                        }
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: false,
+                        };
+                    },
+                    Resolution::None => {
+                        self.unknown_selection(trait_id, recv_val.ty, selection, span);
+                        for arg in args.iter().skip(1) {
+                            self.expr(&arg.value, None);
+                        }
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: false,
+                        };
+                    },
+                    Resolution::BoundUnsat { bound, target, .. } => {
+                        self.report_bound_miss(trait_id, bound, &target, span);
+                        for arg in args.iter().skip(1) {
+                            self.expr(&arg.value, None);
+                        }
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: false,
+                        };
+                    },
+                }
+                selected = Some(resolution);
+            } else if !self.trait_satisfied(trait_id, recv_val.ty, span) {
                 for arg in args.iter().skip(1) {
                     self.expr(&arg.value, None);
                 }
@@ -5713,7 +5889,16 @@ impl Bodies<'_> {
                     poisoned: false,
                 };
             }
-            self.record_solved_dispatch(method, recv_val.ty, None, span);
+        } else if let Some(selection) = selection {
+            self.selection_without_dispatch(
+                selection,
+                span,
+                "the qualified member is inherent, not a trait dispatch",
+            );
+        }
+        let selected = selected.as_ref();
+        if trait_id.is_some() {
+            self.record_solved_dispatch(method, recv_val.ty, selected, span);
         }
         self.member_call(
             method,
@@ -5723,7 +5908,7 @@ impl Bodies<'_> {
             &args[1..],
             trailing,
             span,
-            None,
+            selected,
         )
     }
 
@@ -5734,6 +5919,7 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        selection: Option<&Ident>,
     ) -> Val {
         // A bare type name as the receiver takes the type-keyed tier: its
         // own impl members claim the spelling, and no value form feeds the
@@ -5749,6 +5935,13 @@ impl Bodies<'_> {
             );
             let value_reading = matches!(self.package.def(def).kind, DefKind::Tag | DefKind::Case);
             if recorded_static || !value_reading {
+                if let Some(selection) = selection {
+                    self.selection_without_dispatch(
+                        selection,
+                        span,
+                        "the type-keyed call dispatches an inherent member, not a trait instance",
+                    );
+                }
                 return self.static_member_call(
                     def,
                     recv_span,
@@ -5778,7 +5971,16 @@ impl Bodies<'_> {
             };
         };
         match res {
-            Res::Handler => self.err_ok(recv, &name.name, args, span),
+            Res::Handler => {
+                if let Some(selection) = selection {
+                    self.selection_without_dispatch(
+                        selection,
+                        span,
+                        "the handler form dispatches through no trait instance",
+                    );
+                }
+                self.err_ok(recv, &name.name, args, span)
+            },
             Res::Dot(DotRes::Free { func, fed_param }) => {
                 // The receiver feeds the recorded parameter [F3]; only
                 // parameter 0 exists today (capability parameters have no
@@ -5802,10 +6004,25 @@ impl Bodies<'_> {
                                 args,
                                 trailing,
                                 span,
+                                selection,
+                            );
+                        }
+                        if let Some(selection) = selection {
+                            self.selection_without_dispatch(
+                                selection,
+                                span,
+                                "the free function serves this call, not a trait instance",
                             );
                         }
                         return self.call_def(func, Some(recv), args, trailing, span);
                     }
+                }
+                if let Some(selection) = selection {
+                    self.selection_without_dispatch(
+                        selection,
+                        span,
+                        "the free function serves this call, not a trait instance",
+                    );
                 }
                 let fed = (fed_param == 0).then_some(recv);
                 self.call_def(func, fed, args, trailing, span)
@@ -5814,10 +6031,17 @@ impl Bodies<'_> {
                 // A module-qualified call (G4): the linked function takes
                 // the written arguments alone — no receiver word stages —
                 // and types exactly like the bare call of the bound name.
+                if let Some(selection) = selection {
+                    self.selection_without_dispatch(
+                        selection,
+                        span,
+                        "the module-qualified function dispatches through no trait instance",
+                    );
+                }
                 self.call_def(func, None, args, trailing, span)
             },
             Res::Dot(DotRes::Methods { candidates }) => {
-                self.method_select(recv, name, &candidates, args, trailing, span)
+                self.method_select(recv, name, &candidates, args, trailing, span, selection)
             },
             _ => {
                 self.error(
@@ -6121,15 +6345,23 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        selection: Option<&Ident>,
     ) -> Val {
         let recv_val = self.expr(recv, None);
-        self.method_select_typed(recv, recv_val, name, candidates, args, trailing, span)
+        self.method_select_typed(
+            recv, recv_val, name, candidates, args, trailing, span, selection,
+        )
     }
 
     /// The candidate selection over a receiver already typed once (the
     /// free-tier fallback's entry): identical to [`Self::method_select`]
     /// apart from the pre-typed receiver, whose second typing would
     /// double every diagnostic an erroneous receiver already reported.
+    /// A selection narrows every trait candidate's resolution to one
+    /// vocabulary slot and bypasses the assumption shortcut: a named
+    /// instance answers a selected call alone, and an in-scope bound
+    /// covers the default vocabulary only.
+    #[allow(clippy::too_many_arguments)]
     fn method_select_typed(
         &mut self,
         recv: &Expr,
@@ -6139,12 +6371,15 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        selection: Option<&Ident>,
     ) -> Val {
+        let slot = selection.map(|s| s.name.as_str());
         // Each survivor carries the resolution its trait branch solved:
         // the selected survivor hands its resolution to the dispatch
         // record and the member call, so the pair solves once.
         let mut survivors: Vec<(MethodId, Arc<FnSig>, Option<Resolution>)> = Vec::new();
         let mut miss = None;
+        let mut selected_miss = None;
         for &candidate in candidates {
             let Some(sig) = self.member_sig(candidate) else {
                 continue
@@ -6154,11 +6389,11 @@ impl Bodies<'_> {
                     let Some(trait_id) = self.decls.traits.get(def).copied() else {
                         continue;
                     };
-                    if self.assumption_covers(trait_id, recv_val.ty) {
+                    if slot.is_none() && self.assumption_covers(trait_id, recv_val.ty) {
                         survivors.push((candidate, sig, None));
                         continue;
                     }
-                    match self.instance_resolution(trait_id, recv_val.ty) {
+                    match self.instance_in_slot(trait_id, recv_val.ty, slot) {
                         resolution @ (Resolution::Unique(_)
                         | Resolution::Covered(_)
                         | Resolution::Ambiguous(_)) => {
@@ -6172,7 +6407,11 @@ impl Bodies<'_> {
                                 miss = Some((trait_id, bound, target));
                             }
                         },
-                        Resolution::None => {},
+                        Resolution::None => {
+                            if slot.is_some() && selected_miss.is_none() {
+                                selected_miss = Some(trait_id);
+                            }
+                        },
                     }
                 },
                 MethodOwner::Inherent(target) => {
@@ -6212,6 +6451,17 @@ impl Bodies<'_> {
                     poisoned: false,
                 };
             }
+            if let (Some(selection), Some(trait_id)) = (selection, selected_miss) {
+                self.unknown_selection(trait_id, recv_val.ty, selection, span);
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
+                };
+            }
             let trait_names: Vec<String> = candidates
                 .iter()
                 .filter_map(|c| match &self.package.method(*c).owner {
@@ -6219,7 +6469,7 @@ impl Bodies<'_> {
                     MethodOwner::Inherent(_) => None,
                 })
                 .collect();
-            self.error(
+            let mut diag = Diagnostic::error(
                 ErrorCode::UnsatisfiedConstraint,
                 if trait_names.is_empty() {
                     format!(
@@ -6238,9 +6488,21 @@ impl Bodies<'_> {
                         self.decls.universe.render(recv_val.ty)
                     )
                 },
+            )
+            .with_primary(
                 span,
                 if trait_names.is_empty() { "no accepting owner" } else { "unimplemented trait" },
             );
+            if !trait_names.is_empty()
+                && let Some(trait_id) = self
+                    .package
+                    .lookup_type(&trait_names[0])
+                    .and_then(|def| self.decls.traits.get(&def).copied())
+                && let Some(note) = self.named_selection_note(trait_id, recv_val.ty)
+            {
+                diag = diag.with_note(note);
+            }
+            self.diags.push(diag);
             for arg in args {
                 self.expr(&arg.value, None);
             }
@@ -6280,6 +6542,15 @@ impl Bodies<'_> {
             };
         }
         let (method, sig, resolution) = survivors.remove(0);
+        if selection.is_some()
+            && matches!(self.package.method(method).owner, MethodOwner::Inherent(_))
+        {
+            self.selection_without_dispatch(
+                selection.unwrap_or(name),
+                span,
+                "the member is inherent, not a trait dispatch",
+            );
+        }
         self.method_selections.insert(name.span, method);
         self.record_solved_dispatch(method, recv_val.ty, resolution.as_ref(), span);
         self.member_call(
@@ -9617,12 +9888,21 @@ impl Bodies<'_> {
     /// (recorded beside it) carries the substitution the dispatch seam
     /// needs.
     fn instance_resolution(&self, trait_id: TraitId, ty: Ty) -> Resolution {
+        self.instance_in_slot(trait_id, ty, None)
+    }
+
+    /// The resolution over one vocabulary slot: `None` scans the unnamed
+    /// default rows (every plain call spelling), `Some(name)` the impl
+    /// naming itself (a selected call). A named instance never answers an
+    /// unselected call, and an unnamed one never answers a selected one.
+    fn instance_in_slot(&self, trait_id: TraitId, ty: Ty, slot: Option<&str>) -> Resolution {
         crate::instance_solve::resolve(
             &self.decls.universe,
             &self.decls.instances,
             &self.assumptions,
             trait_id,
             ty,
+            slot,
         )
     }
 

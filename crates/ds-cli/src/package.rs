@@ -1259,6 +1259,7 @@ impl Graph {
             .iter()
             .map(|fact| ds_check::import::ImplFact {
                 trait_name: fact.trait_name.clone(),
+                name: fact.name.clone(),
                 head: fact.head.clone(),
                 members: fact.members.clone(),
                 span: rebase_span(fact.span, &rebase),

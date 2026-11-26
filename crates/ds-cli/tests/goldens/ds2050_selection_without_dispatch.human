@@ -1,0 +1,5 @@
+error[DS2050]: the `as fast` selection names no trait dispatch: the callee is a package definition, not a trait dispatch
+ --> tests/fixtures/negative/ds2050_selection_without_dispatch.ds:6:23
+  |
+6 | fn f(x: int) -> int { add(x, x) as fast }
+  |                       ^^^^^^^^^^^^^^^^^ selection on a non-dispatch call

@@ -461,6 +461,10 @@ fn write_impl(ctx: &Ctx, out: &mut String, base: usize, i: &ImplDecl) {
         out.push_str(" for ");
     }
     write_ty(ctx, out, &i.target);
+    if let Some(name) = &i.name {
+        out.push_str(" as ");
+        out.push_str(&name.name);
+    }
     if i.fns.is_empty() {
         out.push_str(" {}");
         return;

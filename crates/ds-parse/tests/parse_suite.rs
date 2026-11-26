@@ -1027,6 +1027,11 @@ parses! {
 parses! {
     trait_with_default_body => "trait animal { fn speak(self) -> string { \"\" }\n type food\n}\n",
     trait_impl => "impl json_val for int { fn to_json(self) -> string { \"\" }\n}\n",
+    named_trait_impl => "impl json_val for int as fast { fn to_json(self) -> string { \"\" }\n}\n",
+    named_impl_multiline_body => "impl json_val for int as fast\n{ fn to_json(self) -> string { \"\" }\n}\n",
+    call_instance_selection => "fn f(x: int) -> int { x.show() as fast\n}\n",
+    call_selection_then_binary => "fn f(x: int) -> int { x.show() as fast + 1\n}\n",
+    qualified_selection => "fn f(x: int) -> int { show::text(x) as fast\n}\n",
     conditional_impl => "impl[t: json_val] json_val for list<t> { fn to_json(self) -> string { \"\" }\n}\n",
     inherent_impl => "impl[t: ~Copyable] stack<t> {\n  fn push(mut self, x: t) { self.items = cons(x, self.items) }\n}\n",
     generic_struct => "struct pair[k, v] { key: k, val: v }\n",
@@ -1057,6 +1062,55 @@ fn impl_variants_distinguished() {
         panic!("impl");
     };
     assert!(imp.trait_ref.is_none());
+}
+
+/// The named-instance vocabulary converts on both sides: the impl's
+/// `as name` lands on the declaration, the call's `as name` on the
+/// call node alone (never the callee), and an ordinary call keeps no
+/// selection.
+#[test]
+fn named_impl_and_call_selection_convert() {
+    let ast = ok("impl ord for int as fast { fn f() { x\n}\n}\n");
+    let ItemKind::Impl(imp) = &ast.blocks[0].items[0].kind else {
+        panic!("impl");
+    };
+    assert_eq!(imp.name.as_ref().map(|n| n.name.as_str()), Some("fast"));
+
+    let ast = ok("impl ord for int { fn f() { x\n}\n}\n");
+    let ItemKind::Impl(imp) = &ast.blocks[0].items[0].kind else {
+        panic!("impl");
+    };
+    assert!(imp.name.is_none());
+
+    // A top-level bodied fn converts onto the const-of-lambda item (F2),
+    // so the calls read through an impl member body here.
+    let ast = ok("impl ord for int { fn f() { x.show() as fast\n}\n}\n");
+    let ItemKind::Impl(imp) = &ast.blocks[0].items[0].kind else {
+        panic!("impl");
+    };
+    let Some(body) = &imp.fns[0].body else {
+        panic!("body");
+    };
+    let StmtKind::Expr(Expr::Call {
+        selection: Some(sel),
+        ..
+    }) = &body.stmts[0].kind
+    else {
+        panic!("call");
+    };
+    assert_eq!(sel.name, "fast");
+
+    let ast = ok("impl ord for int { fn f() { x.show()\n}\n}\n");
+    let ItemKind::Impl(imp) = &ast.blocks[0].items[0].kind else {
+        panic!("impl");
+    };
+    let Some(body) = &imp.fns[0].body else {
+        panic!("body");
+    };
+    let StmtKind::Expr(Expr::Call { selection, .. }) = &body.stmts[0].kind else {
+        panic!("call");
+    };
+    assert!(selection.is_none());
 }
 
 parses! {

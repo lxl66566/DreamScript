@@ -510,6 +510,8 @@ pub struct ParamSigData {
 pub struct InstanceRowData {
     /// The trait implemented, name-referenced.
     pub trait_id: TraitRef,
+    /// The impl's vocabulary name; `None` is the default vocabulary.
+    pub name: Option<String>,
     /// The branch as written, over name-referenced atoms.
     pub head_expr: TypeExprData,
     /// The solved head, a raw intern index into the sets table.
@@ -1233,6 +1235,7 @@ fn instance_row_data(
 ) -> InstanceRowData {
     InstanceRowData {
         trait_id: names.trait_ref(universe, row.trait_id),
+        name: row.name.clone().map(|name| name.to_string()),
         head_expr: type_expr_data(&row.head_expr, universe, names),
         head: row.head.index(),
         written: row.written.index(),
@@ -2044,6 +2047,7 @@ fn resolve_rows(
         .map(|row| {
             Ok(ServedInstance {
                 trait_id: resolve_trait(universe, names, row.trait_id)?,
+                name: row.name.clone().map(Arc::from),
                 head_expr: resolve_expr(universe, names, rows.identity_limit, &row.head_expr)?,
                 head: solved(&row.head, &tys)?,
                 written: solved(&row.written, &tys)?,
@@ -2618,6 +2622,7 @@ mod tests {
             // `tells` at trait id 0 resolves over the fixture's own
             // walk, so the crafted head index is the refusal under test
             trait_id: TraitRef { name: 1, id: 0 },
+            name: None,
             head_expr: TypeExprData::Atom(AtomRef { name: 0, id: 100 }),
             head: 9,
             written: 0,

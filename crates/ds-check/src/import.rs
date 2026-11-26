@@ -313,6 +313,10 @@ impl Eq for TraitMemberFact {}
 pub struct ImplFact {
     /// The implemented trait's declared name.
     pub trait_name: String,
+    /// The impl's vocabulary name (`impl show for int as fast`): a
+    /// named instance sits outside the default vocabulary, reachable
+    /// only through a consumer call site's selection.
+    pub name: Option<String>,
     /// The implemented head, one word of the vocabulary.
     pub head: TypeWord,
     /// The impl's bodied members, one row per member fn.
@@ -344,6 +348,7 @@ pub struct ImplFact {
 impl PartialEq for ImplFact {
     fn eq(&self, other: &Self) -> bool {
         self.trait_name == other.trait_name
+            && self.name == other.name
             && self.head == other.head
             && self.members == other.members
             && self.link == other.link
@@ -1050,12 +1055,18 @@ impl ImplFact {
                     let mut members = Vec::with_capacity(imp.fns.len());
                     let mut planned = true;
                     for f in &imp.fns {
-                        let name = format!(
+                        let mut name = format!(
                             "{}#{}#{}",
                             only.name,
                             crate::decls::render_type(&imp.target),
                             f.name.name
                         );
+                        // A named impl's mangled body name carries the
+                        // vocabulary, mirroring the plan's own naming.
+                        if let Some(impl_name) = &imp.name {
+                            name.push('#');
+                            name.push_str(&impl_name.name);
+                        }
                         let Some(func) = functions.iter().position(|row| *row == name) else {
                             planned = false;
                             break;
@@ -1071,6 +1082,7 @@ impl ImplFact {
                     for head in heads {
                         out.push(Self {
                             trait_name: only.name.clone(),
+                            name: imp.name.as_ref().map(|n| n.name.clone()),
                             head,
                             members: members.clone(),
                             span: item.span,

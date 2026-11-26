@@ -111,6 +111,10 @@ impl Resolution {
 /// Resolves `trait_id` for `target` over the declared instances: every
 /// instance whose head contains the target or unifies with it under
 /// provable bounds. An empty target is unsatisfied (it matches nothing).
+/// `selection` narrows the scan to one vocabulary slot: `None` scans the
+/// unnamed default rows alone, `Some(name)` the impl naming itself — a
+/// named instance never answers an unselected call, and an unnamed one
+/// never answers a selected one.
 #[must_use]
 pub fn resolve(
     universe: &Universe,
@@ -118,6 +122,7 @@ pub fn resolve(
     assumptions: &[(TraitId, Ty)],
     trait_id: TraitId,
     target: Ty,
+    selection: Option<&str>,
 ) -> Resolution {
     resolve_members(
         universe,
@@ -125,7 +130,45 @@ pub fn resolve(
         assumptions,
         trait_id,
         universe.members(target),
+        selection,
     )
+}
+
+/// The rows of `trait_id` in one vocabulary slot: the unnamed default rows
+/// for a `None` selection, the rows of the named impl for `Some(name)`.
+fn slot_rows(env: &InstanceEnv, trait_id: TraitId, selection: Option<&str>) -> Vec<InstanceId> {
+    env.of_trait(trait_id)
+        .into_iter()
+        .filter(|id| env.name(*id) == selection)
+        .collect()
+}
+
+/// The named rows of `trait_id` that serve `target` under provable
+/// bounds: the unselected-call refusal's evidence — a head whose only
+/// impls are named diagnoses the selections instead of a bare missing
+/// instance.
+#[must_use]
+pub fn named_servers(
+    universe: &Universe,
+    env: &InstanceEnv,
+    assumptions: &[(TraitId, Ty)],
+    trait_id: TraitId,
+    target: Ty,
+) -> Vec<InstanceId> {
+    env.of_trait(trait_id)
+        .into_iter()
+        .filter(|id| env.name(*id).is_some())
+        .filter(|id| {
+            serves(
+                universe,
+                env,
+                assumptions,
+                *id,
+                universe.members(target),
+                MAX_DEPTH,
+            )
+        })
+        .collect()
 }
 
 /// The member-set form of [`resolve`]: the immutable core the lowering
@@ -137,13 +180,14 @@ fn resolve_members(
     assumptions: &[(TraitId, Ty)],
     trait_id: TraitId,
     members: &[TypeId],
+    selection: Option<&str>,
 ) -> Resolution {
     if members.is_empty() {
         return Resolution::None;
     }
     let mut serving = Vec::new();
     let mut miss = None;
-    for id in env.of_trait(trait_id) {
+    for id in slot_rows(env, trait_id, selection) {
         if serves(universe, env, assumptions, id, members, MAX_DEPTH) {
             serving.push(id);
         } else if miss.is_none()
@@ -158,7 +202,8 @@ fn resolve_members(
     // and the nearest-miss diagnostics survive a partial cover.
     if serving.is_empty()
         && members.len() > 1
-        && let Some(covered) = covered_branches(universe, env, assumptions, trait_id, members)
+        && let Some(covered) =
+            covered_branches(universe, env, assumptions, trait_id, members, selection)
     {
         return covered;
     }
@@ -187,12 +232,13 @@ fn covered_branches(
     assumptions: &[(TraitId, Ty)],
     trait_id: TraitId,
     members: &[TypeId],
+    selection: Option<&str>,
 ) -> Option<Resolution> {
     // Instances grouped by written head, in declaration order; each entry
     // carries its per-member coverage.
     let mut heads: Vec<Ty> = Vec::new();
     let mut groups: Vec<Vec<(InstanceId, Vec<bool>)>> = Vec::new();
-    for id in env.of_trait(trait_id) {
+    for id in slot_rows(env, trait_id, selection) {
         let Ok(written) = env.written(id) else {
             continue;
         };
@@ -386,7 +432,9 @@ pub fn evidence_bounds(
         };
         let solved = substitute(&subst, universe.members(cond.ty));
         let target = universe.set_ty(&solved);
-        let served = resolve(universe, env, &[], cond.trait_id, target).solved();
+        // Nested demands carry no selection of their own: a named
+        // instance never serves one, so the default slot alone answers.
+        let served = resolve(universe, env, &[], cond.trait_id, target, None).solved();
         out.push((var, cond.trait_id, served));
     }
     out
@@ -536,7 +584,9 @@ fn bound_evidence_step(
             continue;
         }
         let solved = substitute(&subst, universe.members(cond.ty));
-        let served = resolve_members(universe, env, &[], cond.trait_id, &solved).solved();
+        // The evidence chain resolves nested demands in the default
+        // vocabulary: its calls spell no selection.
+        let served = resolve_members(universe, env, &[], cond.trait_id, &solved, None).solved();
         return Some((solved, served));
     }
     None
@@ -722,7 +772,9 @@ fn substitute(subst: &[(TypeId, Vec<TypeId>)], members: &[TypeId]) -> Vec<TypeId
 
 /// Whether a trait holds for a member set: an in-scope assumption covers
 /// it, or some declared instance serves it (containment or unification
-/// with its own bounds proven, recursively, under the depth cap).
+/// with its own bounds proven, recursively, under the depth cap). Bound
+/// proofs scan the default vocabulary alone: a named instance answers a
+/// call site's selection, never a nested proof demand.
 fn trait_holds(
     universe: &Universe,
     env: &InstanceEnv,
@@ -741,6 +793,9 @@ fn trait_holds(
         return true;
     }
     for id in env.of_trait(trait_id) {
+        if env.name(id).is_some() {
+            continue;
+        }
         if serves(universe, env, assumptions, id, target, depth - 1) {
             return true;
         }
@@ -1012,7 +1067,8 @@ fn serves_ground(
 }
 
 /// [`trait_holds`] over grounding descriptions: some declared instance
-/// serves the target. The probe assumes nothing in scope.
+/// serves the target, the default vocabulary alone (a named instance
+/// answers no proof demand). The probe assumes nothing in scope.
 fn trait_holds_ground(
     universe: &Universe,
     env: &InstanceEnv,
@@ -1024,6 +1080,9 @@ fn trait_holds_ground(
         return false;
     }
     for id in env.of_trait(trait_id) {
+        if env.name(id).is_some() {
+            continue;
+        }
         if serves_ground(universe, env, id, target, depth - 1) {
             return true;
         }

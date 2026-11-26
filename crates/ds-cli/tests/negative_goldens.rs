@@ -133,6 +133,16 @@ const CASES: &[Case] = &[
         json: include_str!("goldens/ds2045_unknown_tag_member.json"),
     },
     Case {
+        stem: "ds2050_selection_without_dispatch",
+        human: include_str!("goldens/ds2050_selection_without_dispatch.human"),
+        json: include_str!("goldens/ds2050_selection_without_dispatch.json"),
+    },
+    Case {
+        stem: "ds2051_unknown_instance_selection",
+        human: include_str!("goldens/ds2051_unknown_instance_selection.human"),
+        json: include_str!("goldens/ds2051_unknown_instance_selection.json"),
+    },
+    Case {
         stem: "ds2015_lowercase_self_type",
         human: include_str!("goldens/ds2015_lowercase_self_type.human"),
         json: include_str!("goldens/ds2015_lowercase_self_type.json"),

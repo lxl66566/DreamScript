@@ -1047,7 +1047,15 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             pairs,
             bounds: bounds.clone(),
         };
-        let name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
+        let mut name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
+        // A named impl's body carries its vocabulary in the mangle:
+        // two impls of one trait over one head name distinct bodies
+        // (the B6 two-impls escape), and `#` stays outside the
+        // identifier charset, so no user-declared name collides.
+        if let Some(impl_name) = &imp.name {
+            name.push('#');
+            name.push_str(&impl_name.name);
+        }
         plan.push_declared(
             name,
             item.span,

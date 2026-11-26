@@ -270,6 +270,10 @@ pub fn impl_face(out: &mut String, src: &str, decl: &ImplDecl) {
         head.push(' ');
     }
     ty::write_ty(&ctx, &mut head, &decl.target);
+    if let Some(name) = &decl.name {
+        head.push_str(" as ");
+        head.push_str(&name.name);
+    }
     out.push_str(&head);
     let members = decl
         .fns

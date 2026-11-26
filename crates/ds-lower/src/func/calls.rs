@@ -886,6 +886,7 @@ impl<'a> FnLower<'a, '_, '_> {
             callee,
             args,
             trailing,
+            selection: _,
             span,
         } = e
         else {
@@ -3357,7 +3358,7 @@ impl<'a> FnLower<'a, '_, '_> {
             .any(|&atom| carries_a_var(universe, atom, None))
         {
             let Some(next_instance) =
-                ds_check::instance_solve::resolve(universe, env, &[], trait_id, arg).solved()
+                ds_check::instance_solve::resolve(universe, env, &[], trait_id, arg, None).solved()
             else {
                 return Err(LowerError::unsupported(
                     span,

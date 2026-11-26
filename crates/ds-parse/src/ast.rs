@@ -486,6 +486,9 @@ pub struct ImplDecl {
     pub trait_ref: Option<TypeRef>,
     /// The implementing type.
     pub target: Type,
+    /// The instance's name (`impl trait for type as name`): a named instance
+    /// leaves the default vocabulary, a call site selecting it by the name.
+    pub name: Option<Ident>,
     /// Implemented functions.
     pub fns: Vec<FnDecl>,
 }
@@ -892,6 +895,10 @@ pub enum Expr {
         args: Vec<CallArg>,
         /// Trailing block argument, if present.
         trailing: Option<Box<Expr>>,
+        /// The call's instance selection (`f(x) as name`): the impl one
+        /// named instance carries, spelled when the call must dispatch
+        /// outside the default vocabulary.
+        selection: Option<Ident>,
     },
     /// Field access `x.f` — for calls, UFCS applies (F3).
     Field {

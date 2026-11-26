@@ -1,0 +1,6 @@
+// An `as` selection on a call that dispatches through no trait
+// instance: the callee is a free function.
+
+tag int
+fn add(a: int, b: int) -> int { a }
+fn f(x: int) -> int { add(x, x) as fast }

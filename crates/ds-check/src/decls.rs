@@ -621,6 +621,11 @@ where
             continue;
         };
         let origin_positions = origin_positions_of(package, &decls, trait_def, solved);
+        // The election runs per vocabulary slot: a row in another slot
+        // (a named impl beside an unnamed one, or two distinct names)
+        // never conflicts with this row — each stays selectable in its
+        // own vocabulary.
+        let slot = fact.name.as_deref();
         let layer = |position: u32| {
             if origin_positions.contains(&position) {
                 ImplLayer::Origin
@@ -634,6 +639,9 @@ where
             .instances
             .overlapping(&mut decls.universe, trait_id, solved)
         {
+            if decls.instances.name(id) != slot {
+                continue;
+            }
             if let Some(&span) = decls.instance_impls.get(&id) {
                 match sides.iter_mut().find(|side| side.span == Some(span)) {
                     Some(side) => side.rows.push(id),
@@ -678,7 +686,8 @@ where
         };
         match outcome {
             LinkOutcome::Declare => {
-                let decl = InstanceDecl::new(trait_id, head);
+                let name = fact.name.as_ref().map(|n| Arc::from(n.as_str()));
+                let decl = InstanceDecl::new(trait_id, head).with_name(name);
                 match decls.instances.declare(&mut decls.universe, &decl) {
                     Ok(ids) => {
                         for id in ids {
@@ -2847,7 +2856,14 @@ fn declare_instance(
         }
     }
 
-    let decl = InstanceDecl::new(trait_id, head).with_conditions(conditions);
+    // The impl's name moves the instance out of the default vocabulary:
+    // coherence probes and call-site resolution run per slot, so a named
+    // impl coexists with an unnamed one over the same head (the B6
+    // two-impls escape).
+    let name = imp.name.as_ref().map(|n| Arc::from(n.name.as_str()));
+    let decl = InstanceDecl::new(trait_id, head)
+        .with_name(name)
+        .with_conditions(conditions);
     match decls.instances.declare(&mut decls.universe, &decl) {
         Ok(ids) => {
             for id in ids {

@@ -1395,6 +1395,7 @@ impl Ctx {
         let span = self.span(&p);
         let mut generics = Vec::new();
         let mut trait_ref = None;
+        let mut name = None;
         let mut target = Type::TypeKw(span);
         let mut fns = Vec::new();
         for c in inner(&p) {
@@ -1422,6 +1423,9 @@ impl Ctx {
                     }
                 },
                 Rule::type_expr => target = self.type_expr(c),
+                Rule::impl_name => {
+                    name = inner(&c).next().map(|i| self.ident(i));
+                },
                 Rule::impl_body => {
                     for f in inner(&c) {
                         match f.as_rule() {
@@ -1445,6 +1449,7 @@ impl Ctx {
             generics,
             trait_ref,
             target,
+            name,
             fns,
         }
     }

@@ -1,0 +1,1 @@
+{"code":"DS2050","severity":"error","message":"the `as fast` selection names no trait dispatch: the callee is a package definition, not a trait dispatch","spans":[{"file":"tests/fixtures/negative/ds2050_selection_without_dispatch.ds","start_line":6,"start_col":23,"end_line":6,"end_col":40,"label":"selection on a non-dispatch call","primary":true}],"notes":[],"suggestions":[]}
