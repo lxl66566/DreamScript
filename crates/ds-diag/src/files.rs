@@ -94,8 +94,16 @@ pub struct Files {
 }
 
 /// Byte offset at which each 1-based line starts: offset 0 plus the offset
-/// after every `\n`.
-fn line_starts_of(source: &str) -> Vec<u32> {
+/// after every `\n`. One builder serves every consumer of a line index
+/// ([`Files`] itself, the parser's comment routing, the formatter's
+/// layout probes), so the scan cannot drift between them.
+///
+/// # Panics
+///
+/// Panics if the source is longer than `u32` byte offsets (4 GiB), the
+/// [`Files::add_source`] contract.
+#[must_use]
+pub fn line_starts_of(source: &str) -> Vec<u32> {
     let mut line_starts = vec![0];
     for (i, b) in source.bytes().enumerate() {
         if b == b'\n' {

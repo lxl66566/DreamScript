@@ -52,7 +52,7 @@ pub mod render;
 
 pub use code::{ErrorClass, ErrorCode};
 pub use diagnostic::{Diagnostic, LabelStyle, LabeledSpan, Severity, Suggestion};
-pub use files::{FileId, Files, Location, Span};
+pub use files::{FileId, Files, Location, Span, line_starts_of};
 pub use render::human;
 #[cfg(feature = "json")]
 pub use render::to_json;

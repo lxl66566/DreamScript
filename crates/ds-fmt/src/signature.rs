@@ -8,11 +8,11 @@
 use std::fmt::Write as _;
 
 use ds_parse::{
-    Ast, EnumCase, EnumPayload, FieldDecl, FnDecl, Ident, Item, ItemKind, Param, ParamMode,
-    Pattern, StructMember, TraitMember, Type, TypeParam,
+    Ast, EnumCase, EnumPayload, FieldDecl, FnDecl, Item, ItemKind, Pattern, StructMember,
+    TraitMember, Type,
 };
 
-use crate::{ctx::Ctx, expr};
+use crate::{ctx::Ctx, expr, ty};
 
 /// One member's public surface: every `pub` item's signature, in source
 /// order (G4). The `src` is the member's own source text — a binding's
@@ -70,10 +70,12 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
                 },
             ) = (&local.pat, &local.init)
             {
-                let mut line = format!("pub fn {}", head(name, generics));
-                write_params(ctx, &mut line, params);
+                let mut line = format!("pub fn {}", name.name);
+                ty::write_generics(ctx, &mut line, generics);
+                ty::write_params(ctx, &mut line, params);
                 if let Some(ret) = ret {
-                    let _ = write!(line, " -> {}", render_type(ret));
+                    line.push_str(" -> ");
+                    ty::write_ty(ctx, &mut line, ret);
                 }
                 let _ = writeln!(out, "{line}");
                 return;
@@ -85,67 +87,75 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
             // ds fmt spells it.
             let mut line = format!("pub {} ", if local.mutable { "var" } else { "const" });
             expr::write_pattern(ctx, &mut line, &local.pat);
-            if let Some(ty) = &local.ty {
-                let _ = write!(line, ": {}", render_type(ty));
+            if let Some(t) = &local.ty {
+                line.push_str(": ");
+                ty::write_ty(ctx, &mut line, t);
             }
             line.push_str(" = ");
             expr::write_expr(ctx, &mut line, 0, &local.init);
             let _ = writeln!(out, "{line}");
         },
         ItemKind::Struct(s) => {
-            let _ = write!(out, "pub struct {}", head(&s.name, &s.generics));
+            let _ = write!(out, "pub struct {}", s.name.name);
+            ty::write_generics(ctx, out, &s.generics);
             if !s.supers.is_empty() {
-                let _ = write!(out, ": {}", type_list(&s.supers));
+                out.push_str(": ");
+                write_type_list(ctx, out, &s.supers);
             }
             let fields: Vec<String> = s
                 .members
                 .iter()
                 .filter_map(|member| match member {
-                    StructMember::Field(field) => Some(field_line(field)),
+                    StructMember::Field(field) => Some(field_line(ctx, field)),
                     StructMember::Deinit { .. } => None,
                 })
                 .collect();
             render_body(out, &fields);
         },
         ItemKind::Enum(e) => {
-            let _ = write!(out, "pub enum {}", head(&e.name, &e.generics));
+            let _ = write!(out, "pub enum {}", e.name.name);
+            ty::write_generics(ctx, out, &e.generics);
             if !e.supers.is_empty() {
-                let _ = write!(out, ": {}", type_list(&e.supers));
+                out.push_str(": ");
+                write_type_list(ctx, out, &e.supers);
             }
-            render_body(out, &e.cases.iter().map(case_line).collect::<Vec<_>>());
+            let members = e
+                .cases
+                .iter()
+                .map(|case| case_line(ctx, case))
+                .collect::<Vec<_>>();
+            render_body(out, &members);
         },
         ItemKind::Tag(t) => match &t.payload {
             EnumPayload::None => {
                 let _ = writeln!(out, "pub tag {}", t.name.name);
             },
             EnumPayload::Tuple(types) => {
-                let _ = writeln!(out, "pub tag {}({})", t.name.name, type_list(types));
+                let mut line = format!("pub tag {}(", t.name.name);
+                write_type_list(ctx, &mut line, types);
+                line.push(')');
+                let _ = writeln!(out, "{line}");
             },
             EnumPayload::Struct(fields) => {
-                let _ = writeln!(
-                    out,
-                    "pub tag {} {{ {} }}",
-                    t.name.name,
-                    fields
-                        .iter()
-                        .map(|field| format!("{}: {}", field.name.name, render_type(&field.ty)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                let mut line = format!("pub tag {} {{ ", t.name.name);
+                write_field_list(ctx, &mut line, fields);
+                line.push_str(" }");
+                let _ = writeln!(out, "{line}");
             },
         },
         ItemKind::TypeAlias(a) => {
-            let _ = writeln!(
-                out,
-                "pub type {} = {}",
-                head(&a.name, &a.generics),
-                render_type(&a.ty)
-            );
+            let _ = write!(out, "pub type {}", a.name.name);
+            ty::write_generics(ctx, out, &a.generics);
+            out.push_str(" = ");
+            ty::write_ty(ctx, out, &a.ty);
+            out.push('\n');
         },
         ItemKind::Trait(t) => {
-            let _ = write!(out, "pub trait {}", head(&t.name, &t.generics));
+            let _ = write!(out, "pub trait {}", t.name.name);
+            ty::write_generics(ctx, out, &t.generics);
             if !t.supers.is_empty() {
-                let _ = write!(out, ": {}", type_list(&t.supers));
+                out.push_str(": ");
+                write_type_list(ctx, out, &t.supers);
             }
             let members = t
                 .members
@@ -164,99 +174,53 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
 /// One function's signature: `prefix name[g](params) -> ret`, a defaulted
 /// parameter's literal spelled after its type.
 fn fn_signature(out: &mut String, ctx: &Ctx, f: &FnDecl, prefix: &str) {
-    let mut line = format!("{prefix} {}", head(&f.name, &f.generics));
-    write_params(ctx, &mut line, &f.params);
+    let _ = write!(out, "{prefix} {}", f.name.name);
+    ty::write_generics(ctx, out, &f.generics);
+    ty::write_params(ctx, out, &f.params);
     if let Some(ret) = &f.ret {
-        let _ = write!(line, " -> {}", render_type(ret));
+        out.push_str(" -> ");
+        ty::write_ty(ctx, out, ret);
     }
-    let _ = writeln!(out, "{line}");
-}
-
-/// A parameter list in its parens: `(mut xs: list[int], ...)`.
-fn write_params(ctx: &Ctx, line: &mut String, params: &[Param]) {
-    line.push('(');
-    for (index, param) in params.iter().enumerate() {
-        if index > 0 {
-            line.push_str(", ");
-        }
-        let _ = write!(line, "{}", param_line(ctx, param));
-    }
-    line.push(')');
+    out.push('\n');
 }
 
 /// One trait member's signature, indented and unprefixed.
 fn fn_line(ctx: &Ctx, f: &FnDecl) -> String {
-    let mut line = format!("fn {}", head(&f.name, &f.generics));
-    write_params(ctx, &mut line, &f.params);
+    let mut line = format!("fn {}", f.name.name);
+    ty::write_generics(ctx, &mut line, &f.generics);
+    ty::write_params(ctx, &mut line, &f.params);
     if let Some(ret) = &f.ret {
-        let _ = write!(line, " -> {}", render_type(ret));
+        line.push_str(" -> ");
+        ty::write_ty(ctx, &mut line, ret);
     }
     format!("  {line}")
 }
 
-/// A declaration head with its generic parameters: `name[t, v: bound]`.
-fn head(name: &Ident, generics: &[TypeParam]) -> String {
-    if generics.is_empty() {
-        return name.name.clone();
-    }
-    let params = generics
-        .iter()
-        .map(|param| match &param.bound {
-            Some(bound) => format!("{}: {}", param.name.name, render_type(bound)),
-            None => param.name.name.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}[{params}]", name.name)
-}
-
-/// One parameter's signature: the mode keyword, the name, the annotation,
-/// and a defaulted parameter's literal (F7: defaults are literal-only)
-/// rendered through the expression renderer — escaped chars and bytes,
-/// suffixed numbers, string and raw text verbatim from their spans, so
-/// the spelling re-parses to the value the parameter defaults from.
-fn param_line(ctx: &Ctx, param: &Param) -> String {
-    let mode = match param.mode {
-        ParamMode::Borrow => "",
-        ParamMode::Mut(_) => "mut ",
-        ParamMode::Consume(_) => "move ",
-        ParamMode::Comptime(_) => "comptime ",
-    };
-    let mut line = format!("{mode}{}", param.name.name);
-    if let Some(ty) = &param.ty {
-        let _ = write!(line, ": {}", render_type(ty));
-    }
-    if let Some(default) = &param.default {
-        line.push_str(" = ");
-        expr::write_expr(ctx, &mut line, 0, default);
-    }
-    line
-}
-
 /// One struct field's line: `name: type`.
-fn field_line(field: &FieldDecl) -> String {
-    format!("  {}: {}", field.name.name, render_type(&field.ty))
+fn field_line(ctx: &Ctx, field: &FieldDecl) -> String {
+    let mut line = format!("  {}: ", field.name.name);
+    ty::write_ty(ctx, &mut line, &field.ty);
+    line
 }
 
 /// One enum case's line: the bare name, a tuple payload's types, or a
 /// struct payload's fields.
-fn case_line(case: &EnumCase) -> String {
+fn case_line(ctx: &Ctx, case: &EnumCase) -> String {
     let annotation = if case.default.is_some() { "#[default] " } else { "" };
     match &case.payload {
         EnumPayload::None => format!("  {}{}", annotation, case.name.name),
         EnumPayload::Tuple(types) => {
-            format!("  {}{}({})", annotation, case.name.name, type_list(types))
+            let mut line = format!("  {}{}(", annotation, case.name.name);
+            write_type_list(ctx, &mut line, types);
+            line.push(')');
+            line
         },
-        EnumPayload::Struct(fields) => format!(
-            "  {}{} {{ {} }}",
-            annotation,
-            case.name.name,
-            fields
-                .iter()
-                .map(|field| format!("{}: {}", field.name.name, render_type(&field.ty)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        EnumPayload::Struct(fields) => {
+            let mut line = format!("  {}{} {{ ", annotation, case.name.name);
+            write_field_list(ctx, &mut line, fields);
+            line.push_str(" }");
+            line
+        },
     }
 }
 
@@ -280,73 +244,24 @@ fn render_body(out: &mut String, lines: &[String]) {
 }
 
 /// A comma-joined type list: supers, tuple payloads.
-fn type_list(types: &[Type]) -> String {
-    types.iter().map(render_type).collect::<Vec<_>>().join(", ")
+fn write_type_list(ctx: &Ctx, out: &mut String, types: &[Type]) {
+    for (i, t) in types.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        ty::write_ty(ctx, out, t);
+    }
 }
 
-/// The signature spelling of one written type (F2, B3, H5): paths with
-/// generic arguments, `?`, `~`, `&`, `|`, `-`, tuples, unit, fn types,
-/// pointers, `type`, and opaque foreign names.
-fn render_type(ty: &Type) -> String {
-    match ty {
-        Type::Path { path, args, .. } => {
-            let mut text = path
-                .segments
-                .iter()
-                .map(|segment| segment.name.clone())
-                .collect::<Vec<_>>()
-                .join("::");
-            if !args.is_empty() {
-                let _ = write!(text, "[{}]", type_list(args));
-            }
-            text
-        },
-        Type::Optional { inner, .. } => format!("{}?", render_type(inner)),
-        Type::Negation { inner, .. } => format!("~{}", render_type(inner)),
-        Type::Union { left, right, .. } => {
-            format!("{} | {}", render_type(left), render_type(right))
-        },
-        Type::Intersect { left, right, .. } => {
-            format!("{} & {}", render_type(left), render_type(right))
-        },
-        Type::Difference { left, right, .. } => {
-            format!("{} - {}", render_type(left), render_type(right))
-        },
-        Type::Paren { inner, .. } => format!("({})", render_type(inner)),
-        Type::Tuple { items, .. } => format!("({})", type_list(items)),
-        Type::Unit(_) => "()".to_owned(),
-        Type::Fn { params, ret, .. } => {
-            let mut text = String::from("fn(");
-            for (index, param) in params.iter().enumerate() {
-                if index > 0 {
-                    text.push_str(", ");
-                }
-                let mode = match param.mode {
-                    ParamMode::Borrow => "",
-                    ParamMode::Mut(_) => "mut ",
-                    ParamMode::Consume(_) => "move ",
-                    ParamMode::Comptime(_) => "comptime ",
-                };
-                let _ = write!(text, "{mode}{}", param.name.name);
-                if let Some(ty) = &param.ty {
-                    let _ = write!(text, ": {}", render_type(ty));
-                }
-            }
-            text.push(')');
-            if let Some(ret) = ret {
-                let _ = write!(text, " -> {}", render_type(ret));
-            }
-            text
-        },
-        Type::Ptr { mutable, inner, .. } => {
-            format!(
-                "*{} {}",
-                if *mutable { "mut" } else { "const" },
-                render_type(inner)
-            )
-        },
-        Type::TypeKw(_) => "type".to_owned(),
-        Type::Foreign { name, .. } => format!("c[\"{name}\"]"),
+/// A comma-joined `name: type` field list: tag and case struct payloads.
+fn write_field_list(ctx: &Ctx, out: &mut String, fields: &[FieldDecl]) {
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&field.name.name);
+        out.push_str(": ");
+        ty::write_ty(ctx, out, &field.ty);
     }
 }
 
@@ -385,6 +300,49 @@ mod tests {
             ),
             "the initializer renders in the .dsi spelling"
         );
+        let mut files = Files::new();
+        let file = files.add_source("surface.dsi", &out);
+        let ast = parse(&files, file)
+            .unwrap_or_else(|diags| panic!("the surface re-parses: {}", diags[0].message));
+        let mut again = String::new();
+        member(&mut again, &out, &ast);
+        assert_eq!(again, out, "the surface is a fixed point");
+    }
+
+    /// A foreign type's name cooks its escapes in the AST, so the surface
+    /// renders the literal verbatim from its span — a re-spelling of the
+    /// cooked text would emit the raw quote and fail the re-parse.
+    #[test]
+    fn foreign_type_names_render_verbatim() {
+        let src = "pub type db = c[\"a\\\"b\"]\n";
+        let mut files = Files::new();
+        let file = files.add_source("m.ds", src);
+        let ast = parse(&files, file).expect("the source parses");
+        let mut out = String::new();
+        member(&mut out, src, &ast);
+        assert_eq!(out, src, "the foreign name keeps its own escaping");
+        let mut files = Files::new();
+        let file = files.add_source("surface.dsi", &out);
+        let ast = parse(&files, file)
+            .unwrap_or_else(|diags| panic!("the surface re-parses: {}", diags[0].message));
+        let mut again = String::new();
+        member(&mut again, &out, &ast);
+        assert_eq!(again, out, "the surface is a fixed point");
+    }
+
+    /// A case-type reference (`badnumber(string)`) keeps its parens in the
+    /// surface: the delimiter is the source's own spelling, so the line
+    /// re-parses as the same case-type reference, not a generic
+    /// application.
+    #[test]
+    fn case_type_refs_keep_their_parens_in_the_surface() {
+        let src = "pub type e = badnumber(string) | missing\n";
+        let mut files = Files::new();
+        let file = files.add_source("m.ds", src);
+        let ast = parse(&files, file).expect("the source parses");
+        let mut out = String::new();
+        member(&mut out, src, &ast);
+        assert_eq!(out, src, "the parens survive the surface spelling");
         let mut files = Files::new();
         let file = files.add_source("surface.dsi", &out);
         let ast = parse(&files, file)

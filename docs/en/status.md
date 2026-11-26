@@ -33,4 +33,4 @@ What the tree runs today and what boundary each milestone left. Landed history l
 ## Early legs of later milestones
 
 - M9 fuzz: the checker generator, the VM execution leg, and the source leg all exist early with their nextest mirrors in CI, covering the landed surfaces.
-- M9 docs: `docs/en/tutorial.md` exists as the explainability-budget proof.
+- M9 docs: `docs/en/tutorial.md` exists as the explainability-budget proof; conversion gives stacked `?`/`~` type nodes per-node spans matching the expr-side folds, and the `.dsi`/hover signature renderer shares the formatter's precedence-aware type writer (foreign names and case-type parens verbatim in surfaces).

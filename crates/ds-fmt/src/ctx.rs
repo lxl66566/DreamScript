@@ -19,13 +19,9 @@ pub(crate) struct Ctx<'s> {
 
 impl<'s> Ctx<'s> {
     pub(crate) fn new(src: &'s str) -> Self {
-        let mut line_starts = vec![0u32];
-        // Offsets are u32 by the Files contract.
-        #[allow(clippy::cast_possible_truncation)]
-        line_starts.extend(memchr::memchr_iter(b'\n', src.as_bytes()).map(|i| i as u32 + 1));
         Self {
             src,
-            line_starts,
+            line_starts: ds_diag::line_starts_of(src),
             verbatim: RefCell::new(Vec::new()),
         }
     }

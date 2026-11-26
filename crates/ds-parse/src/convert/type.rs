@@ -48,39 +48,49 @@ impl Ctx {
             Rule::type_postfix => {
                 let span = self.span(&p);
                 let mut inner_ty = Type::TypeKw(span);
-                let mut marks = 0u32;
+                let mut marks: Vec<Span> = Vec::new();
                 for c in inner(&p) {
                     match c.as_rule() {
-                        Rule::opt_mark => marks += 1,
+                        Rule::opt_mark => marks.push(self.span(&c)),
                         _ => inner_ty = self.type_expr(c),
                     }
                 }
-                if self.chain_guard(marks as usize + 1, span) {
+                if self.chain_guard(marks.len() + 1, span) {
                     return Type::TypeKw(span);
                 }
-                (0..marks).fold(inner_ty, |acc, _| Type::Optional {
-                    span,
-                    inner: Box::new(acc),
-                })
+                // Fold in source order so every node spans the operand's
+                // start through its own mark (`int?` inside `int??`), not
+                // the whole level.
+                marks
+                    .into_iter()
+                    .fold(inner_ty, |acc, mspan| Type::Optional {
+                        span: join(acc.span(), mspan),
+                        inner: Box::new(acc),
+                    })
             },
             Rule::type_unary => {
                 let span = self.span(&p);
                 let mut atom = None;
-                let mut negs = 0u32;
+                let mut negs: Vec<Span> = Vec::new();
                 for c in inner(&p) {
                     match c.as_rule() {
-                        Rule::neg_prefix => negs += 1,
+                        Rule::neg_prefix => negs.push(self.span(&c)),
                         _ => atom = Some(self.type_expr(c)),
                     }
                 }
                 let inner_ty = atom.unwrap_or(Type::TypeKw(span));
-                if self.chain_guard(negs as usize + 1, span) {
+                if self.chain_guard(negs.len() + 1, span) {
                     return Type::TypeKw(span);
                 }
-                (0..negs).fold(inner_ty, |acc, _| Type::Negation {
-                    span,
-                    inner: Box::new(acc),
-                })
+                // Fold innermost-first (the rightmost prefix binds the
+                // atom), each node spanning its own prefix token through
+                // the operand's end, like the expr-side unary fold.
+                negs.into_iter()
+                    .rev()
+                    .fold(inner_ty, |acc, nspan| Type::Negation {
+                        span: join(nspan, acc.span()),
+                        inner: Box::new(acc),
+                    })
             },
             Rule::case_type => {
                 let span = self.span(&p);

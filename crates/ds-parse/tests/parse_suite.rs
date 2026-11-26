@@ -614,6 +614,57 @@ fn nested_unary_nodes_carry_exact_spans() {
     assert_eq!((inner.start, inner.end), (10, 12), "`!x`");
 }
 
+/// A bodied `fn` converts onto a binding of one lambda, so its return
+/// annotation rides the lambda's `ret` slot.
+fn converted_fn_ret(src: &str) -> Type {
+    let ast = ok(src);
+    let ItemKind::Local(local) = &ast.blocks[0].items[0].kind else {
+        panic!("a bodied fn converts onto a local binding");
+    };
+    let Expr::Lambda { ret: Some(ty), .. } = &local.init else {
+        panic!("the lambda carries the return annotation");
+    };
+    ty.clone()
+}
+
+#[test]
+fn stacked_optional_type_spans_are_exact() {
+    let ty = converted_fn_ret("fn f() -> int?? { 0 }\n");
+    let Type::Optional {
+        span: outer, inner, ..
+    } = &ty
+    else {
+        panic!("outer optional");
+    };
+    let Type::Optional {
+        span: inner_span, ..
+    } = inner.as_ref()
+    else {
+        panic!("inner optional");
+    };
+    assert_eq!((outer.start, outer.end), (10, 15), "`int??`");
+    assert_eq!((inner_span.start, inner_span.end), (10, 14), "`int?`");
+}
+
+#[test]
+fn stacked_negation_type_spans_are_exact() {
+    let ty = converted_fn_ret("fn f() -> ~~int { 0 }\n");
+    let Type::Negation {
+        span: outer, inner, ..
+    } = &ty
+    else {
+        panic!("outer negation");
+    };
+    let Type::Negation {
+        span: inner_span, ..
+    } = inner.as_ref()
+    else {
+        panic!("inner negation");
+    };
+    assert_eq!((outer.start, outer.end), (10, 15), "`~~int`");
+    assert_eq!((inner_span.start, inner_span.end), (11, 15), "`~int`");
+}
+
 #[test]
 fn stacked_try_spans_are_exact() {
     let ast = ok("fn f() { x??\n}\n");

@@ -475,11 +475,11 @@ impl Ctx {
 
     /// Converts call arguments (F7): named arguments (`f(x: 1)`) must follow
     /// positional ones, and a name may appear once. Both violations are
-    /// diagnostics, not grammar failures.
+    /// diagnostics, not grammar failures. The discipline runs as a pass
+    /// over the collected arguments, borrowing the idents already stored
+    /// there instead of cloning the names.
     fn args(&mut self, p: &Pair<'_, Rule>) -> Vec<CallArg> {
         let mut out = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        let mut named_seen = false;
         for a in inner(p).filter(|c| c.as_rule() == Rule::arg) {
             let aspan = self.span(&a);
             let (name, value) = match inner(&a).next() {
@@ -497,31 +497,35 @@ impl Ctx {
                 Some(e) => (None, self.expr(e)),
                 None => (None, Expr::Break(aspan)),
             };
-            match &name {
+            out.push(CallArg {
+                span: aspan,
+                name,
+                value,
+            });
+        }
+        let mut names: Vec<&str> = Vec::new();
+        let mut named_seen = false;
+        for a in &out {
+            match &a.name {
                 Some(n) => {
-                    if names.iter().any(|seen| seen == &n.name) {
+                    if names.contains(&n.name.as_str()) {
                         self.err(
                             n.span,
                             ErrorCode::DuplicateArgument,
                             format!("argument `{}` is passed twice by name", n.name),
                         );
                     } else {
-                        names.push(n.name.clone());
+                        names.push(n.name.as_str());
                     }
                     named_seen = true;
                 },
                 None if named_seen => self.err(
-                    aspan,
+                    a.span,
                     ErrorCode::UnexpectedToken,
                     "positional argument follows a named argument; named arguments come last",
                 ),
                 None => {},
             }
-            out.push(CallArg {
-                span: aspan,
-                name,
-                value,
-            });
         }
         out
     }

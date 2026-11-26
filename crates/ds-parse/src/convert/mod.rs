@@ -45,18 +45,6 @@ pub(crate) struct Ctx {
     script_stmts: Vec<Stmt>,
 }
 
-/// Byte offset at which each 1-based line starts: 0 plus the offset after
-/// every `\n`.
-fn line_starts_of(src: &str) -> Vec<u32> {
-    let mut line_starts = vec![0];
-    for (i, b) in src.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i as u32 + 1);
-        }
-    }
-    line_starts
-}
-
 /// Converts the `file` pair into an [`Ast`]; `script` folds the entry file's
 /// top-level statements into one synthesized `main` binding (G3's script
 /// entry), while library mode rejects them as diagnostics.
@@ -68,7 +56,7 @@ pub(crate) fn convert(
 ) -> Result<Ast, Vec<Diagnostic>> {
     let mut ctx = Ctx {
         file,
-        line_starts: line_starts_of(src),
+        line_starts: ds_diag::line_starts_of(src),
         diags: Vec::new(),
         script,
         script_stmts: Vec::new(),
