@@ -37,7 +37,7 @@ One Cargo workspace at the repository root; a crate appears in the milestone tha
 | `ds-cli` | The `ds` binary: run, build, check, test, info, doc, fmt, save, bind, dev, repl, lsp | grows from M3 |
 | `ds-lsp` | LSP server over `ds-query` | M7 |
 
-Supporting directories: `conformance/` (seed corpus, stage expectations, goldens) from M1, `fuzz/`, `benchmarks/`. Consumption runs ds-parse -> ds-query -> ds-check -> ds-lower -> ds-vm -> ds-jit, ds-abi beneath the lowerer, VM and JIT, ds-mod beneath the VM loader and package store, ds-diag beneath everything.
+Supporting directories: `conformance/` (seed corpus, stage expectations, goldens) from M1, `examples/` (the scripts the CLI's examples gate runs), `fuzz/`, `benchmarks/`, and `tools/` (the repo guards with their budgets and self-tests). Consumption runs ds-parse -> ds-query -> ds-check -> ds-lower -> ds-vm -> ds-jit, ds-abi beneath the lowerer, VM and JIT, ds-mod beneath the VM loader and package store, ds-diag beneath everything.
 
 ## 3. Dependency policy
 House-preferred crates plus domain needs; new dependencies enter at the latest version via `cargo add`.
