@@ -768,7 +768,9 @@ fn assemble(
     let parked = park.and_then(|park| park.get());
     // the tiered build needs a served prefix to split at and a park to
     // hold the prefix's rows; a base-tier package without a park (the
-    // fresh pass, a caller that hands none) builds the one map as ever
+    // fresh pass, a caller that hands none) builds the one map as ever,
+    // and a park beside a base-tier package builds it too, the cell
+    // left unfilled for the first serve that carries a prefix
     let tiered = parked.is_some() || (boundary > 0 && park.is_some());
     let installing = parked.is_some();
     let mut defs = Vec::new();
@@ -808,7 +810,10 @@ fn assemble(
     let base_names = if installing {
         parked.map(Arc::clone)
     } else {
-        if let Some(park) = park {
+        // the fill waits for a served prefix to split at: a park beside
+        // a base-tier package stays unfilled, so the first serve that
+        // carries a prefix finds the cell empty and parks its own rows
+        if tiered && let Some(park) = park {
             // the rows drop when a concurrent fill won the race, the
             // loser's set discarded exactly like the fill's own
             let _ = park.fill(Arc::new(prefix_names));
@@ -1606,5 +1611,109 @@ mod tests {
         );
         assert_eq!(effects.row_at(file, at("string")), None);
         assert_eq!(effects.covering_row(literal), Some(EffectRow::PURE));
+    }
+
+    /// A park handed to a base-tier compile stays unfilled: the compile
+    /// answers its own names through its one map, the cell keeps its
+    /// emptiness, and the first serve that carries a prefix fills its own
+    /// rows — a later serve installs the parked names and answers them.
+    #[test]
+    fn a_park_beside_a_base_tier_compile_stays_unfilled() {
+        let mut files = Files::new();
+        let user_file = files.add_source("user.ds", "fn twice() -> int { 1 + 2 }\n");
+        let user_ast = parse(&files, user_file).expect("the user parses");
+
+        let park = Park::<ServedEffectNames>::new();
+        // the base-tier compile: no served prefix, a park handed in
+        let (package, resolutions, _) = resolve_package(&[&user_ast]);
+        let first = effects_of_resolved_served(
+            &[&user_ast],
+            &package,
+            &resolutions,
+            &FxHashMap::default(),
+            &[],
+            &[],
+            &DeclaredRows::new(),
+            &WorldCaps::new(),
+            &park,
+        );
+        assert!(
+            park.get().is_none(),
+            "the base-tier compile leaves the park unfilled"
+        );
+        assert_eq!(
+            first.of_name("twice"),
+            Some(EffectRow::of(Effect::Trap)),
+            "the base-tier compile answers its own names"
+        );
+
+        // the first serve over a served prefix fills the park, a later
+        // one installs the parked rows: both answer the prefix's name
+        let prefix_file = files.add_source("prefix.ds", "extern fn speak (t: string) -> ()\n");
+        let prefix_ast = parse(&files, prefix_file).expect("the prefix parses");
+        let declared = DeclaredRows::new().with("speak", EffectRow::of(Effect::World));
+        let caps = WorldCaps::new();
+        let (prefix_package, prefix_resolutions, _) = resolve_package(&[&prefix_ast]);
+        let served_defs: Vec<DefEffects> =
+            effects_of(&[&prefix_ast], &declared, &caps).defs().to_vec();
+        let served_methods = solved_method_rows(
+            &[&prefix_ast],
+            &prefix_package,
+            &prefix_resolutions,
+            &declared,
+            &caps,
+        );
+        let base = PackageBase::from_parts(
+            vec![prefix_file],
+            vec![Def {
+                name: "speak".to_owned(),
+                kind: DefKind::Fn,
+                vis: Vis::Pub,
+                span: Span::new(prefix_file, 10, 15),
+            }],
+            Vec::new(),
+            vec![("speak".to_owned(), DefId::from_raw(0))],
+            Vec::new(),
+            Vec::new(),
+        );
+        let run_served = |park: &Park<ServedEffectNames>| {
+            let ast = parse(&files, user_file).expect("the user parses");
+            let mut package = Package::with_base(std::sync::Arc::new(base.clone()));
+            let collection = package.add_file(&ast);
+            assert!(
+                collection.is_empty(),
+                "the user file collects clean: {collection:?}"
+            );
+            let (resolutions, _) = package.resolve(&ast);
+            effects_of_resolved_served(
+                &[&ast],
+                &package,
+                std::slice::from_ref(&resolutions),
+                &FxHashMap::default(),
+                &served_defs,
+                &served_methods,
+                &declared,
+                &caps,
+                park,
+            )
+        };
+        let fill = run_served(&park);
+        assert!(park.get().is_some(), "the first serve fills the park");
+        let later = run_served(&park);
+        assert_eq!(
+            fill.of_name("speak"),
+            Some(EffectRow::of(Effect::World)),
+            "the filling serve answers the prefix's name"
+        );
+        assert_eq!(
+            later.of_name("speak"),
+            Some(EffectRow::of(Effect::World)),
+            "the later serve answers the parked prefix's name"
+        );
+        assert_eq!(
+            later.of_name("twice"),
+            Some(EffectRow::of(Effect::Trap)),
+            "the later serve answers its own growth name"
+        );
     }
 }

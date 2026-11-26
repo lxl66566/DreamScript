@@ -4098,16 +4098,18 @@ impl Vm {
     /// reactor wait. [`IoDrive::Answer`] lands when the host fiber ends
     /// its drive the way [`Vm::resume_fiber`] ends one; [`IoDrive::Parked`]
     /// answers a spent budget with the wait still standing — and, for an
-    /// idle seam (nothing runnable, nothing able to wake), at once: the
-    /// blocking drives' stall guard is the honest deadlock, a pumping
-    /// host idles instead.
+    /// idle seam (nothing runnable, nothing able to wake, no shutdown
+    /// standing), at once: the blocking drives' stall guard is the honest
+    /// deadlock, a pumping host idles instead.
     ///
     /// # Errors
     ///
     /// [`Trap::Shutdown`] when the host's shutdown door cut the parked
     /// drive; the execution traps otherwise.
     pub fn pump_io(&mut self, host: FiberId, budget: Option<Duration>) -> Result<IoDrive, Trap> {
-        if !self.sched.has_ready() && !self.sched.can_wake() {
+        // a standing shutdown never answers idle: the pump below runs
+        // the cut pass and reports the shutdown trap
+        if !self.sched.has_ready() && !self.sched.can_wake() && !self.shutdown {
             return Ok(IoDrive::Parked);
         }
         self.io_pump(host, None, budget)
@@ -4125,8 +4127,10 @@ impl Vm {
     ) -> Result<IoDrive, Trap> {
         let until = budget.map(|budget| Instant::now() + budget);
         let mut step = entered;
+        let mut last_pc = None;
         loop {
             if let Some((active, pc)) = step.take() {
+                last_pc = Some(pc);
                 match self.execute_host_step::<false>(active, pc, usize::MAX) {
                     // a world park registers and the executor keeps
                     // going inside the budget: ready siblings may run
@@ -4191,6 +4195,10 @@ impl Vm {
                 },
                 Ok(ExecutorStep::Idle) => return Ok(IoDrive::Parked),
                 Err(trap) => {
+                    // an executor-sourced trap (a scheduler stall, a
+                    // woken drive's own trap) reports at the last step
+                    // this pump drove
+                    self.trap_pc = last_pc;
                     self.host_release();
                     self.trap_child(self.current, &trap);
                     self.trap_delivery(&trap);

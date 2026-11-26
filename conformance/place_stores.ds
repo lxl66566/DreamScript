@@ -1,5 +1,5 @@
 // source: todo item 117, the assignment-sugar round (ruled 2026-11-25)
-// purpose: the place chains lower over the one mutation mechanism the surface already had — the field path's in-place frame sub-span store over the var-bound root, the subscript's identical staging to the `set` member call, and the nesting of both reading the element back and storing it through the same window — with the compound operator over a place chain the refusal (it keeps the plain-binding place this round)
+// purpose: the place chains lower over the one mutation mechanism the surface already had — the field path's in-place frame sub-span store over the var-bound root, the subscript's identical staging to the `set` member call, the nesting of both reading the element back and storing it through the same window, and the compound operator reading the leaf and storing its result through the same probe word (evaluated once)
 // items:
 // point: stage: typecheck
 // outer: stage: typecheck
@@ -9,7 +9,12 @@
 // subscript-nesting: stage: run
 // nested-subscripts: stage: run
 // map-subscript: stage: run
-// compound-place: stage: reject the compound operator over a place chain keeps the plain-binding place; the chain needs a read-then-store the place paths lower this round (DS2002)
+// bump: stage: run
+// compound-place: stage: run
+// compound-ops: stage: run
+// compound-nested: stage: run
+// compound-string: stage: run
+// compound-once: stage: run
 // main: stage: run
 
 struct point { x: int, y: int }
@@ -59,13 +64,72 @@ fn map_subscript() -> int {
   m.get("one").unwrap_or(-1) + m.get("two").unwrap_or(-1) * 10 + m.len() * 100
 }
 
+// one probe call per compound store: the counter rides a second list
+fn bump(c: mut list[int]) -> int {
+  c[0] += 1
+  1
+}
+
 fn compound_place() -> int {
   var xs = [1, 2, 3]
   xs[1] += 5
   xs.get(1).unwrap_or(-1)
 }
 
+// every compound spelling over an element and a map value
+fn compound_ops() -> int {
+  var xs = [1, 16, 3]
+  xs[0] += 5
+  xs[1] -= 4
+  xs[1] *= 3
+  xs[2] /= 2
+  xs[1] <<= 2
+  xs[1] >>= 1
+  xs[2] %= 2
+  var m = map[string, int]()
+  m["a"] = 1
+  m["a"] += 5
+  m["b"] = 10
+  m["b"] -= 2
+  xs.get(0).unwrap_or(-1) * 1000 + xs.get(1).unwrap_or(-1) * 10 + xs.get(2).unwrap_or(-1) + m.get("a").unwrap_or(-1) * 100000 + m.get("b").unwrap_or(-1) * 1000000
+}
+
+// the read copy's leaf mutates, the store-backs unwind through the same windows
+fn compound_nested() -> int {
+  var xs = [point { x: 1, y: 2 }, point { x: 3, y: 4 }]
+  xs[1].y += 10
+  xs[0].x *= 7
+  var rows = [[1, 2], [3, 4]]
+  rows[1][0] += 30
+  rows[0][1] -= 2
+  var o = outer { p: point { x: 1, y: 2 }, n: 1 }
+  o.n += 2
+  o.p.x += 4
+  xs.get(0).unwrap_or(point { x: 0, y: 0 }).x * 10000 + xs.get(1).unwrap_or(point { x: 0, y: 0 }).y * 1000 + rows.get(1).unwrap_or([0]).get(0).unwrap_or(-1) * 10 + rows.get(0).unwrap_or([0]).get(1).unwrap_or(-1) + o.n * 100 + o.p.x * 1000000
+}
+
+// the string `+=` returns the concat through an element, a map value, and a field
+fn compound_string() -> string {
+  var ss = ["a", "b"]
+  ss[0] += "x"
+  ss[1] += ss.get(0).unwrap_or("")
+  var m = map[string, string]()
+  m["k"] = "v"
+  m["k"] += "w"
+  var o = outer { p: point { x: 0, y: 0 }, n: 0 }
+  ss.get(0).unwrap_or("") + " " + ss.get(1).unwrap_or("") + " " + m.get("k").unwrap_or("")
+}
+
+// the probe evaluates exactly once and the read and the store share its slot
+fn compound_once() -> int {
+  var calls = [0]
+  var xs = [10, 20, 30]
+  xs[bump(calls)] += 1
+  xs.get(1).unwrap_or(-1) * 10 + calls.get(0).unwrap_or(-1)
+}
+
 fn main() -> () {
   println("fields ${field_store()} ${field_path()}")
   println("subscripts ${subscript_store()} ${subscript_nesting()} ${nested_subscripts()} ${map_subscript()}")
+  println("compound ${compound_place()} ${compound_ops()} ${compound_nested()} ${compound_string()} ${compound_once()}")
 }

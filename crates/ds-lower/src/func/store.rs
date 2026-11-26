@@ -1,24 +1,8 @@
-//! The assignment sugar's store synthesis (the 2026-11-25 ruling): one
-//! place chain — a field path over a `var`-bound struct, a subscript over
-//! the ambient collections, or a nesting of both — lowers over the one
-//! mutation mechanism the surface already had. A field-terminated chain
-//! writes the leaf's frame sub-span in place (the synthesized mut-window
-//! field store over the root binding, the exclusivity the checker's
-//! var-spelling gate proved — no new mutation channel); a subscript step
-//! stages the collection's `set` native exactly like the member call's
-//! own spelling, so `xs[i] = v` and `xs.set(i, v)` emit identical code;
-//! a nesting reads the element back through the checked read, mutates
-//! the read copy's sub-span, then stores the element back through the
-//! same `set` — the read's and the store's borrow windows composing over
-//! the one root, with the out-of-range store trapping (the place must
-//! resolve; the checked read's extractable `t | none` miss stays the
-//! probe's own answer).
-
 use super::*;
 
-/// One pending element store-back: the collection the step addressed,
-/// with its receiver and probe words and the element temp the chain's
-/// remaining steps mutated.
+/// One element store-back: the collection the step addressed, with its
+/// receiver and probe words and the element temp the chain's remaining
+/// steps mutated (a compound leaf's read copy holding the folded result).
 struct PendingStore {
     /// The collection the receiver names.
     native: StoreIndex,
@@ -34,18 +18,25 @@ impl FnLower<'_, '_, '_> {
     /// One assignment whose checked place chain the checker recorded at
     /// its own span: the root binder's place walks the recorded steps,
     /// the leaf store or the `set` staging synthesizing from the
-    /// per-step solved types. The assignment answers unit.
+    /// per-step solved types. A compound operator folds the right side
+    /// into the leaf's read copy and stores the result back. The
+    /// assignment answers unit.
     pub(super) fn assign_place_store(
         &mut self,
         e: &Expr,
         store: &PlaceStore,
     ) -> Result<Place, LowerError> {
         let Expr::Assign {
-            left, right, span, ..
+            op,
+            left,
+            right,
+            span,
+            ..
         } = e
         else {
             return Err(mismatch("a place assignment"));
         };
+        let compound = *op != ds_parse::AssignOp::Plain;
         let root = self
             .binders
             .get(&store.binder)
@@ -56,6 +47,9 @@ impl FnLower<'_, '_, '_> {
             ty: store.root_ty,
         };
         let mut pending: Vec<PendingStore> = Vec::new();
+        // A compound store whose leaf is a whole element: the element's
+        // collection, receiver, and the probe its read and store share.
+        let mut element: Option<PendingStore> = None;
         for (index, step) in store.steps.iter().enumerate() {
             let last = index + 1 == store.steps.len();
             match step {
@@ -64,8 +58,11 @@ impl FnLower<'_, '_, '_> {
                 },
                 PlaceStep::Index { native, elem } => {
                     let probe = self.value(Self::place_probe(left, store.steps.len(), index)?)?;
-                    let probe = self.probe_word(*native, &probe, !last, *span)?;
-                    if last {
+                    // two stagings read the probe when a read precedes the
+                    // store (a nesting, a compound store): one owned copy
+                    // serves both
+                    let probe = self.probe_word(*native, &probe, !last || compound, *span)?;
+                    if last && !compound {
                         // the whole element is the assignment's target:
                         // the value evaluates, then the `set` member call
                         // stages — the exact code `xs.set(i, v)` takes
@@ -80,43 +77,86 @@ impl FnLower<'_, '_, '_> {
                             ));
                         }
                         self.stage_index_store(*native, &place, &probe, &value)?;
+                        self.release_place(&probe)?;
+                        self.release_place(&value)?;
                     } else {
-                        // a nesting reads the element back through the
-                        // checked read and continues the walk over the
-                        // read copy; the store-back rides below
-                        let read = self.stage_index_read(*native, &place, &probe, *elem)?;
-                        pending.push(PendingStore {
+                        // the element reads back through the checked read
+                        // and the walk continues over the read copy; the
+                        // store-back rides below
+                        let elem = self.stage_index_read(*native, &place, &probe, *elem)?;
+                        let step = PendingStore {
                             native: *native,
                             recv: place,
                             probe,
-                            elem: read,
-                        });
-                        place = pending.last().expect("just pushed").elem.clone();
+                            elem: elem.clone(),
+                        };
+                        place = elem;
+                        if last {
+                            element = Some(step);
+                        } else {
+                            pending.push(step);
+                        }
                     }
                 },
             }
         }
-        // a field-terminated chain stores the value over the leaf's
-        // frame sub-span: the old words' counts drop ahead of the store,
-        // the value's words widen in — the whole-binding assignment's
-        // own store tail, over the sub-span
-        if matches!(store.steps.last(), Some(PlaceStep::Field { .. })) {
+        if let Some(step) = element {
+            // `xs[i] op= e`: the read copy is the old value, the result
+            // is written back through the read's own probe and receiver
+            let result = self.compound_value(*op, place, right, left.span())?;
+            self.stage_index_store(step.native, &step.recv, &step.probe, &result)?;
+            self.release_place(&step.elem)?;
+            self.release_place(&result)?;
+            self.release_place(&step.probe)?;
+        } else if matches!(store.steps.last(), Some(PlaceStep::Field { .. })) {
+            // a field-terminated chain stores over the leaf's frame
+            // sub-span: the old words' counts drop ahead of the store,
+            // the value's words widen in — the whole-binding assignment's
+            // own store tail, over the sub-span. A compound form computes
+            // into the leaf word itself when the leaf is a scalar, so the
+            // store tail degenerates to the in-place no-op there
             let leaf_ty = place.ty;
-            let assigned = self.value(right)?;
-            for word in self.count_words(place.place.base, leaf_ty)? {
-                self.rc.store_over(&mut self.code, &[word]);
-            }
+            let assigned = if compound {
+                let result = self.compound_value(*op, place.clone(), right, left.span())?;
+                for word in self.count_words(place.place.base, leaf_ty)? {
+                    self.rc.store_over(&mut self.code, &[word]);
+                }
+                result
+            } else {
+                self.value(right)?
+            };
             self.refuse_closure_widen(&assigned, leaf_ty, *span)?;
             self.guard_deinit_union_member(assigned.ty, leaf_ty, *span)?;
             self.widen_into(&place.place, leaf_ty, &assigned, *span)?;
         }
         // the pending store-backs unwind innermost-first: the mutated
         // element returns to its own collection before the enclosing
-        // element returns to its
-        while let Some(store) = pending.pop() {
-            self.stage_index_store(store.native, &store.recv, &store.probe, &store.elem)?;
+        // element returns to its, each read copy and probe copy dying at
+        // its own store
+        while let Some(step) = pending.pop() {
+            self.stage_index_store(step.native, &step.recv, &step.probe, &step.elem)?;
+            self.release_place(&step.elem)?;
+            self.release_place(&step.probe)?;
         }
         Ok(self.unit_value(*span)?.place)
+    }
+
+    /// Releases a chain operand its store was the last read of (an
+    /// element read copy, a frame-owned probe copy, a stored value): its
+    /// anonymous reference words die here, once per evaluation of the
+    /// assignment, so a store inside a loop leaks no count per
+    /// iteration. A named binding's word keeps its own death.
+    fn release_place(&mut self, value: &TypedPlace) -> Result<(), LowerError> {
+        let words: Vec<u8> = self
+            .shapes
+            .words(value.ty)?
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| matches!(slot, SlotType::Ref | SlotType::Raw))
+            .map(|(index, _)| value.place.base + u8::try_from(index).expect("span width fits u8"))
+            .collect();
+        self.rc.drop_unnamed(&mut self.code, &words);
+        Ok(())
     }
 
     /// One receiver's field sub-place: the struct's (or the refined
@@ -195,9 +235,9 @@ impl FnLower<'_, '_, '_> {
     /// The probe's staging word: the source's own word when one staging
     /// reads it (the member call's discipline — a dying source's dec
     /// defers to the call's flush), a frame-owned copy when a second
-    /// staging (a nesting's read and store-back) reads it too — the copy
-    /// owns its count across the whole chain while the source's own dec
-    /// lands wherever its binding dies.
+    /// staging (a nesting's or a compound store's read and store-back)
+    /// reads it too — the copy owns its count across the whole chain
+    /// while the source's own dec lands wherever its binding dies.
     fn probe_word(
         &mut self,
         native: StoreIndex,
@@ -242,9 +282,9 @@ impl FnLower<'_, '_, '_> {
     /// One checked element read (the nesting's front half): the generic
     /// `get` native's CALLG over the receiver and probe words, the ok
     /// payload's words copied into a fresh element temp under their own
-    /// counts. The tag word is never tested — the store-back below
-    /// traps on the same out-of-range probe, so a miss answer's payload
-    /// never becomes observable.
+    /// counts. The tag word decides: a miss answer's payload is the
+    /// probe, so the miss arm halts before any word of it lands in the
+    /// temp.
     fn stage_index_read(
         &mut self,
         native: StoreIndex,
@@ -269,11 +309,15 @@ impl FnLower<'_, '_, '_> {
         let elem_words = self.shapes.words(elem)?;
         let mut result_words = vec![SlotType::Tag];
         result_words.extend_from_slice(&elem_words);
-        self.guard_staged_count(result_words.len())?;
-        self.overlay_site(
-            &[SlotType::Ref, probe_addr.slot_ty, SlotType::I64],
-            &result_words,
-        );
+        // the staged span ends in the generic's evidence words, one per
+        // type parameter behind the instance — the area reserves them
+        // all, or a dispatch's riders overrun a frame whose widest call
+        // is this one
+        let evidence = usize::from(get.evidence);
+        let mut staged = vec![SlotType::Ref, probe_addr.slot_ty];
+        staged.resize(2 + evidence, SlotType::I64);
+        self.guard_staged_count(staged.len().max(result_words.len()))?;
+        self.overlay_site(&staged, &result_words);
         self.rc.native_open();
         self.rc.native_reads([recv_addr.slot, probe_addr.slot]);
         self.emit(Op::Mov {
@@ -285,17 +329,43 @@ impl FnLower<'_, '_, '_> {
             src: Slot::body(probe_addr.slot),
         });
         let kidx = self.pool(Constant::I64(instance as i64));
-        self.emit(Op::Kimm {
-            dst: Slot::overlay(2),
-            kidx,
-        });
+        for index in 0..evidence {
+            self.emit(Op::Kimm {
+                dst: Slot::overlay(u8::try_from(2 + index).expect("overlay word fits u8")),
+                kidx,
+            });
+        }
         let callee = self.pool(self.funcref_const(Callee::Generic(get)));
         self.emit(Op::Callg { callee, nargs: 2 });
         self.rc.native_done(&mut self.code);
+        let base = self.alloc(&elem_words)?;
+        let temp = TypedPlace {
+            place: Place {
+                base,
+                shape: PlaceShape::Span(elem),
+            },
+            ty: elem,
+        };
+        let cond = self.temp_word(SlotType::Bool)?;
+        self.emit(Op::TagTest {
+            dst: Slot::body(cond),
+            src: Slot::overlay(0),
+            tag: PLATFORM_IO_OK,
+        });
+        let ok = self.label();
+        self.emit(Op::Jmpif {
+            cond: Slot::body(cond),
+            target: ok,
+        });
+        // the miss arm halts inside its own call, so nothing it owns
+        // flows past the fork
+        let fork = self.rc.save();
+        self.place_miss(native, place, probe, &temp, &elem_words)?;
+        self.rc.restore(fork);
+        self.bind_label(ok);
         // the payload words move into the element temp, each `Ref` word
         // under the count the read handed out (the collection keeps its
         // own, C4)
-        let base = self.alloc(&elem_words)?;
         for (index, slot) in elem_words.iter().enumerate() {
             let word = base + u8::try_from(index).expect("span width fits u8");
             self.emit(Op::Mov {
@@ -306,13 +376,43 @@ impl FnLower<'_, '_, '_> {
                 self.rc.produced(word);
             }
         }
-        Ok(TypedPlace {
-            place: Place {
-                base,
-                shape: PlaceShape::Span(elem),
+        Ok(temp)
+    }
+
+    /// The miss arm of a checked place read: the place must resolve or
+    /// halt. A list's own store refuses the out-of-range probe — the
+    /// element temp first takes kind-true dead words so the staging stays
+    /// well-typed — answering the plain store's own trap; a map's store
+    /// would insert instead, so an absent key halts through the bare trap
+    /// primitive.
+    fn place_miss(
+        &mut self,
+        native: StoreIndex,
+        place: &TypedPlace,
+        probe: &TypedPlace,
+        temp: &TypedPlace,
+        elem_words: &[SlotType],
+    ) -> Result<(), LowerError> {
+        match native {
+            StoreIndex::List => {
+                for (index, slot) in elem_words.iter().enumerate() {
+                    let word = temp.place.base + u8::try_from(index).expect("span width fits u8");
+                    self.zero_word(word, *slot);
+                }
+                self.stage_index_store(native, place, probe, temp)
             },
-            ty: elem,
-        })
+            StoreIndex::Map => {
+                let trap =
+                    crate::native::lookup("trap").ok_or_else(|| mismatch("the trap primitive"))?;
+                let k = self.pool_str(
+                    "the map holds no value under the key; an assignment place must resolve, it \
+                     carries no miss answer",
+                );
+                let msg = self.temp_word(SlotType::Ref)?;
+                self.kstr(msg, k);
+                self.seam_call(trap, &[(msg, SlotType::Ref)], &[SlotType::I64])
+            },
+        }
     }
 
     /// One collection element store: the `set` native's CALL staging —

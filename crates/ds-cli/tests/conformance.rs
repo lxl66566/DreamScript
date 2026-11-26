@@ -267,3 +267,16 @@ fn the_string_view_surface_holds_cursors_into_a_shared_base() {
     // the materializing text — every refusal answering the none member
     run_golden("string_view_surface.ds", "roundtrip dream\nrefused 3\n0\n");
 }
+
+#[test]
+fn the_place_chains_store_and_the_compound_operator_folds_through_them() {
+    // the assignment sugar's whole surface through the binary: the field
+    // paths, the subscript stores, the nestings, the map's key/value
+    // staging, and the compound operator over every operator class, a
+    // nested chain, the string `+=`, and a probe evaluated once (the
+    // miss traps are the ds-lower place_assign suite's pins)
+    run_golden(
+        "place_stores.ds",
+        "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 211\n0\n",
+    );
+}

@@ -5886,34 +5886,10 @@ impl Bodies<'_> {
     fn assign(&mut self, op: ds_parse::AssignOp, left: &Expr, right: &Expr, span: Span) -> Val {
         let unit = self.unit();
         let chain = place_chain(left);
-        if op != ds_parse::AssignOp::Plain
-            && let PlaceShape::Chain(chain) = &chain
-        {
-            // A compound store reads the current value, so a place chain
-            // would need a read synthesized beside the store; the
-            // plain-binding place keeps the compound forms alone this
-            // round.
-            self.error(
-                ErrorCode::InferenceFailed,
-                format!(
-                    "compound assignment keeps the plain-binding place; the chain rooted at `{}` \
-                     needs a read-then-store the place paths lower this round",
-                    chain.root.name
-                ),
-                left.span(),
-                "compound place",
-            );
-            self.expr(right, None);
-            return Val {
-                ty: unit,
-                diverges: false,
-                poisoned: false,
-            };
-        }
         match chain {
             // The whole-binding place.
             PlaceShape::Binding => self.assign_binding(op, left, right, span),
-            PlaceShape::Chain(chain) => self.assign_place(&chain, right, span),
+            PlaceShape::Chain(chain) => self.assign_place(&chain, op, right, left.span(), span),
             PlaceShape::Unsupported => {
                 self.error(
                     ErrorCode::InferenceFailed,
@@ -5940,11 +5916,21 @@ impl Bodies<'_> {
     /// passes — every field step descends one single-member struct, and
     /// every index step resolves the ambient collection's element type
     /// while checking the probe expression against its parameter type.
-    /// The value checks against the leaf type, and the walked chain
-    /// records at the assignment's own span for the lowering to
-    /// synthesize the store — exclusivity rides the existing affine
-    /// gates, no new mutation channel.
-    fn assign_place(&mut self, chain: &PlaceChain<'_>, right: &Expr, span: Span) -> Val {
+    /// A plain store's value checks against the leaf type; a compound
+    /// form reads the leaf's current value (its declared type: no
+    /// refinement tracks a place) through the same operator table the
+    /// binding form reads, the result landing back in the leaf. The
+    /// walked chain records at the assignment's own span for the
+    /// lowering to synthesize the store — exclusivity rides the existing
+    /// affine gates, no new mutation channel.
+    fn assign_place(
+        &mut self,
+        chain: &PlaceChain<'_>,
+        op: ds_parse::AssignOp,
+        right: &Expr,
+        left_span: Span,
+        span: Span,
+    ) -> Val {
         let unit = self.unit();
         let root = chain.root;
         let Some(res) = self.res.get(root.span).cloned() else {
@@ -6073,8 +6059,22 @@ impl Bodies<'_> {
             }
         }
         let leaf = ty;
-        let val = self.expr(right, Some(leaf));
-        self.expect_contains(val, leaf, right.span(), "assignment");
+        if op == ds_parse::AssignOp::Plain {
+            let val = self.expr(right, Some(leaf));
+            self.expect_contains(val, leaf, right.span(), "assignment");
+        } else {
+            let right_val = self.expr(right, Some(leaf));
+            let result = self.binary_val(
+                compound_op(op),
+                leaf,
+                right_val.ty,
+                left_span,
+                right.span(),
+                span,
+                right_val.poisoned,
+            );
+            self.expect_contains(result, leaf, span, "compound assignment");
+        }
         self.place_stores.insert(span, PlaceStore {
             binder: bind,
             root_ty,

@@ -635,9 +635,9 @@ impl Vm {
                     // park seam without the marker): the continuation
                     // stays the submission's own, so the root re-enters at
                     // the parked call's answer overlay and the drive
-                    // continues
-                    let (next, at) =
-                        self.switch_in(FIBER_ROOT, Value::Tag(crate::native::PLATFORM_NONE));
+                    // continues, the payload the scalar word the answer
+                    // overlay's typed rows read
+                    let (next, at) = self.switch_in(FIBER_ROOT, Value::I64(0));
                     active = next;
                     pc = at;
                 },
@@ -701,8 +701,10 @@ impl Vm {
         }
         let until = budget.map(|budget| Instant::now() + budget);
         let mut step: Option<(Active, CodePc)> = None;
+        let mut last_pc: Option<CodePc> = None;
         loop {
             if let Some((active, pc)) = step.take() {
+                last_pc = Some(pc);
                 match self.execute_host_step::<false>(active, pc, usize::MAX) {
                     Ok(DriveOutcome::Yielded(_)) => {
                         // the session fiber's own park serves the prompt
@@ -718,9 +720,10 @@ impl Vm {
                         }
                         // an unmarked park left the fiber with the host
                         // as resumer: the root re-enters at the parked
-                        // call's answer overlay and the drive continues
-                        let (next, at) =
-                            self.switch_in(FIBER_ROOT, Value::Tag(crate::native::PLATFORM_NONE));
+                        // call's answer overlay and the drive continues,
+                        // the payload the scalar word the overlay's typed
+                        // rows read
+                        let (next, at) = self.switch_in(FIBER_ROOT, Value::I64(0));
                         step = Some((next, at));
                         continue;
                     },
@@ -777,6 +780,10 @@ impl Vm {
                 },
                 Ok(ExecutorStep::Idle) => return Ok(ReplOutcome::WorldParked),
                 Err(trap) => {
+                    // an executor-sourced trap (a scheduler stall, a
+                    // woken drive's own trap) reports at the last step
+                    // this pump drove
+                    self.trap_pc = last_pc;
                     self.host_release();
                     self.trap_child(self.current, &trap);
                     self.trap_delivery(&trap);

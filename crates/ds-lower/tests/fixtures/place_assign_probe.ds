@@ -3,9 +3,12 @@
 // the `set` member's own staging, the nesting of both (an element read
 // back, its sub-span mutated, the element stored back), and the
 // reference-carrying element counts — with the out-of-range store kept
-// to the trap test (the place must resolve, no miss answer exists).
+// to the trap test (the place must resolve, no miss answer exists). The
+// compound operator walks the same chains: the read copy is the old
+// value and the result returns through the same probe.
 
 tag int
+tag float
 tag string
 tag bool
 
@@ -14,8 +17,10 @@ struct map[k, v]
 
 struct point { x: int, y: int }
 struct outer { p: point, n: int, xs: list[int] }
+struct named { name: string, n: int }
 
 extern fn println (s: string) -> ()
+extern fn concat (a: string, b: string) -> string
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
@@ -95,9 +100,126 @@ fn ref_elements() -> bool {
   ss.get(2).unwrap_or("?").len() == 1 && ss.get(0).unwrap_or("?") == "z" && hold == "b"
 }
 
+// one probe call per compound store: the counter rides a second list
+// through a `mut` window
+fn bump(c: mut list[int]) -> int {
+  c[0] += 1
+  1
+}
+
+// the compound operator over every class the surface spells: the
+// arithmetic, shift, and remainder forms over an int element, the
+// arithmetic forms over a float element, and a map's value
+fn compound_ops() -> bool {
+  var xs = [1, 16, 3]
+  xs[0] += 5
+  xs[1] -= 4
+  xs[1] *= 3
+  xs[2] /= 2
+  xs[1] <<= 2
+  xs[1] >>= 1
+  xs[2] %= 2
+  var fs = [1.5, 2.0]
+  fs[0] += 0.25
+  fs[1] *= 4.0
+  var m = map[string, int]()
+  m["a"] = 1
+  m["a"] += 5
+  m["b"] = 10
+  m["b"] -= 2
+  xs.get(0).unwrap_or(-1) == 6 &&
+    xs.get(1).unwrap_or(-1) == 72 &&
+    xs.get(2).unwrap_or(-1) == 1 &&
+    fs.get(0).unwrap_or(0.0) == 1.75 &&
+    fs.get(1).unwrap_or(0.0) == 8.0 &&
+    m.get("a").unwrap_or(-1) == 6 &&
+    m.get("b").unwrap_or(-1) == 8
+}
+
+// the compound operator over a nested chain: the read copy's leaf
+// mutates and the store-backs unwind through the same windows; a field
+// path over the var-bound root computes into the leaf word itself
+fn compound_nested() -> bool {
+  var xs = [point { x: 1, y: 2 }, point { x: 3, y: 4 }]
+  xs[1].y += 10
+  xs[0].x *= 7
+  var rows = [[1, 2], [3, 4]]
+  rows[1][0] += 30
+  rows[0][1] -= 2
+  var o = outer { p: point { x: 1, y: 2 }, n: 1, xs: [9] }
+  o.n += 2
+  o.p.x += 4
+  o.xs[0] *= 3
+  xs.get(0).unwrap_or(point { x: 0, y: 0 }).x == 7 &&
+    xs.get(1).unwrap_or(point { x: 0, y: 0 }).y == 14 &&
+    rows.get(0).unwrap_or([0]).get(1).unwrap_or(-1) == 0 &&
+    rows.get(1).unwrap_or([0]).get(0).unwrap_or(-1) == 33 &&
+    o.n == 3 &&
+    o.p.x == 5 &&
+    o.xs.get(0).unwrap_or(-1) == 27
+}
+
+// the string `+=`: the concat's result returns through every leaf shape
+// (an element, a map value, a field, a field of an element)
+fn compound_strings() -> bool {
+  var ss = ["a", "b"]
+  ss[0] += "x"
+  ss[1] += ss.get(0).unwrap_or("")
+  var m = map[string, string]()
+  m["k"] = "v"
+  m["k"] += "w"
+  var o = named { name: "n", n: 0 }
+  o.name += "!"
+  var xs = [named { name: "z", n: 1 }]
+  xs[0].name += "?"
+  ss.get(0).unwrap_or("") == "ax" &&
+    ss.get(1).unwrap_or("") == "bax" &&
+    m.get("k").unwrap_or("") == "vw" &&
+    o.name == "n!" &&
+    xs.get(0).unwrap_or(named { name: "", n: 0 }).name == "z?"
+}
+
+// the probe evaluates exactly once, and the read and the store land on
+// the element it named
+fn compound_once() -> bool {
+  var calls = [0]
+  var xs = [10, 20, 30]
+  xs[bump(calls)] += 1
+  xs.get(1).unwrap_or(-1) == 21 && calls.get(0).unwrap_or(-1) == 1
+}
+
+// a compound store per iteration: each read copy, concat result, and
+// probe copy dies at its own store, so the loop leaves no count behind
+fn compound_loop() -> bool {
+  var ss = ["", ""]
+  var xs = [0, 0]
+  var calls = [0]
+  var i = 0
+  while i < 50 {
+    ss[i % 2] += "ab"
+    xs[i % 2] += 1
+    xs[bump(calls) % 2] += 1
+    i = i + 1
+  }
+  xs.get(0).unwrap_or(-1) == 25 &&
+    xs.get(1).unwrap_or(-1) == 75 &&
+    calls.get(0).unwrap_or(-1) == 50 &&
+    ss.get(0).unwrap_or("").len() == 50 &&
+    ss.get(1).unwrap_or("").len() == 50
+}
+
 fn main() -> bool {
-  field_paths() && subscripts() && nested_subscript() && map_subscript() && nested_lists() &&
-    ref_elements()
+  field_paths() &&
+    subscripts() &&
+    nested_subscript() &&
+    map_subscript() &&
+    nested_lists() &&
+    ref_elements() &&
+    compound_ops() &&
+    compound_nested() &&
+    compound_strings() &&
+    compound_once() &&
+    compound_loop()
 }
 
 // the out-of-range store: the place must resolve or halt (the trap test's
@@ -105,5 +227,41 @@ fn main() -> bool {
 fn trap_out_of_range() -> int {
   var xs = [1, 2]
   xs[3] = 9
+  0
+}
+
+// a compound store's place must resolve: a list's own store refuses the
+// out-of-range probe whatever the element's kind, and the inner probe of
+// a nesting names the inner list (the trap tests' own legs)
+fn trap_compound_int() -> int {
+  var xs = [1, 2]
+  xs[3] += 1
+  0
+}
+
+fn trap_compound_string() -> int {
+  var ss = ["a", "b"]
+  ss[3] += "x"
+  0
+}
+
+fn trap_compound_nested() -> int {
+  var rows = [[1, 2], [3, 4]]
+  rows[1][5] += 1
+  0
+}
+
+// a map's absent key halts at the read: its store would insert, and no
+// old value exists to fold into (the compound store and the plain
+// nesting alike)
+fn trap_compound_map() -> int {
+  var m = map[string, int]()
+  m["k"] += 1
+  0
+}
+
+fn trap_nesting_map() -> int {
+  var m = map[string, point]()
+  m["k"].x = 5
   0
 }

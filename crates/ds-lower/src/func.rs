@@ -3993,60 +3993,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             | ds_parse::AssignOp::Shr => {
                 // `x op= e` reads the current slots, then re-stores the
                 // result: the same word moves the binary path emits.
-                let current = TypedPlace {
-                    place: place.clone(),
-                    ty: declared,
-                };
-                match op {
-                    ds_parse::AssignOp::Rem => self.reject_float_rem(&current, left.span())?,
-                    ds_parse::AssignOp::Shl | ds_parse::AssignOp::Shr => {
-                        self.reject_float_shift_bitwise(&current, left.span())?;
+                self.compound_value(
+                    *op,
+                    TypedPlace {
+                        place: place.clone(),
+                        ty: declared,
                     },
-                    _ => {},
-                }
-                let (int_op, float_op) = match op {
-                    ds_parse::AssignOp::Add => (DataOp::AddI64, DataOp::AddF64),
-                    ds_parse::AssignOp::Sub => (DataOp::SubI64, DataOp::SubF64),
-                    ds_parse::AssignOp::Mul => (DataOp::MulI64, DataOp::MulF64),
-                    ds_parse::AssignOp::Div => (DataOp::DivI64, DataOp::DivF64),
-                    ds_parse::AssignOp::Shl => (DataOp::ShlI64, DataOp::ShlI64),
-                    ds_parse::AssignOp::Shr => (DataOp::ShrI64, DataOp::ShrI64),
-                    _ => (DataOp::ModI64, DataOp::ModI64),
-                };
-                // string `+=` opens the concat window before the rhs
-                // evaluation and pins the replaced word: a last use
-                // inside the rhs defers the replaced content's dec to
-                // the flush (after the CALL), and the store below then
-                // finds the word unowned and skips its own dec
-                let str_add = matches!(op, ds_parse::AssignOp::Add)
-                    && self.is_string_add_ty(declared, self.val(right.span())?.ty);
-                if str_add {
-                    self.rc.native_open();
-                    let words = self
-                        .word_addrs(&place, declared)
-                        .map_err(|err| err.respanned(right.span()))?;
-                    self.rc.native_reads(words.iter().map(|addr| addr.slot));
-                }
-                let rhs = self.value(right)?;
-                let result = if str_add {
-                    // string `+=` desugars like the binary arm: the
-                    // compound store re-stores the concat result, a
-                    // fresh Ref word
-                    self.concat_value(&current, &rhs, declared, left.span())?
-                } else if let PlaceShape::Word(SlotType::I64 | SlotType::F64) = place.shape {
-                    // a scalar compound store writes the var word
-                    // itself: the VM reads both operands before writing
-                    // dst, so the word safely aliases its own read, and
-                    // the re-store below degenerates to the in-place
-                    // no-op (a scalar word carries no count)
-                    self.arith_at(int_op, float_op, &current, &rhs, place.base, left.span())?
-                } else {
-                    self.arith(int_op, float_op, &current, &rhs, left.span())?
-                };
-                TypedPlace {
-                    place: result,
-                    ty: declared,
-                }
+                    right,
+                    left.span(),
+                )?
             },
         };
         // the replaced reference dies before the store overwrites its word
@@ -4104,6 +4059,69 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .claimed(&mut self.code, place.base, claim.hook, band, &words);
         }
         Ok(self.unit_value(e.span())?.place)
+    }
+
+    /// `current op= e`: reads `current`'s value, then folds the right
+    /// side in through the operator table the binary spelling uses. A
+    /// scalar leaf computes in place over its own word (the VM reads both
+    /// operands before writing dst), a wider leaf answers a fresh temp, and
+    /// the string `+=` answers the concat's fresh Ref word. The result's
+    /// type is the leaf's own; storing it back is the caller's.
+    fn compound_value(
+        &mut self,
+        op: ds_parse::AssignOp,
+        current: TypedPlace,
+        right: &Expr,
+        span: Span,
+    ) -> Result<TypedPlace, LowerError> {
+        let declared = current.ty;
+        match op {
+            ds_parse::AssignOp::Rem => self.reject_float_rem(&current, span)?,
+            ds_parse::AssignOp::Shl | ds_parse::AssignOp::Shr => {
+                self.reject_float_shift_bitwise(&current, span)?;
+            },
+            _ => {},
+        }
+        let (int_op, float_op) = match op {
+            ds_parse::AssignOp::Add => (DataOp::AddI64, DataOp::AddF64),
+            ds_parse::AssignOp::Sub => (DataOp::SubI64, DataOp::SubF64),
+            ds_parse::AssignOp::Mul => (DataOp::MulI64, DataOp::MulF64),
+            ds_parse::AssignOp::Div => (DataOp::DivI64, DataOp::DivF64),
+            ds_parse::AssignOp::Shl => (DataOp::ShlI64, DataOp::ShlI64),
+            ds_parse::AssignOp::Shr => (DataOp::ShrI64, DataOp::ShrI64),
+            _ => (DataOp::ModI64, DataOp::ModI64),
+        };
+        // string `+=` opens the concat window before the rhs evaluation
+        // and pins the replaced word: a last use inside the rhs defers the
+        // replaced content's dec to the flush (after the CALL), and the
+        // store below then finds the word unowned and skips its own dec
+        let str_add = matches!(op, ds_parse::AssignOp::Add)
+            && self.is_string_add_ty(declared, self.val(right.span())?.ty);
+        if str_add {
+            self.rc.native_open();
+            let words = self
+                .word_addrs(&current.place, declared)
+                .map_err(|err| err.respanned(right.span()))?;
+            self.rc.native_reads(words.iter().map(|addr| addr.slot));
+        }
+        let rhs = self.value(right)?;
+        let result = if str_add {
+            // string `+=` desugars like the binary arm: the compound
+            // store re-stores the concat result, a fresh Ref word
+            self.concat_value(&current, &rhs, declared, span)?
+        } else if let PlaceShape::Word(SlotType::I64 | SlotType::F64) = current.place.shape {
+            // a scalar compound store writes the leaf word itself: the VM
+            // reads both operands before writing dst, so the word safely
+            // aliases its own read, and the re-store below degenerates to
+            // the in-place no-op (a scalar word carries no count)
+            self.arith_at(int_op, float_op, &current, &rhs, current.place.base, span)?
+        } else {
+            self.arith(int_op, float_op, &current, &rhs, span)?
+        };
+        Ok(TypedPlace {
+            place: result,
+            ty: declared,
+        })
     }
 
     /// One `while cond { body }`: a backward jump over the re-tested

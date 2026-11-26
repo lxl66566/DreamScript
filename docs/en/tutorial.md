@@ -238,6 +238,8 @@ fn close(move h: file) -> int { h.fd }         // consume: dies and deinits here
 println("${size("x")} ${close(file { fd: 3 })}")
 ```
 
+Assignment into a place is sugar over that one channel: `p.x = v`, a nested field path, `xs[i] = v`, `m[k] = v`, and nestings such as `xs[i].x.y = v` and `rows[i][j] = v` (the element reads back and stores through the same window). The root is a `var` binding or a `mut` parameter (a `const` root is a compile error), each index or key evaluates once, and a compound operator (`xs[i] += 1`, `rows[i][j] <<= n`, `p.name += "!"`) reads the place and writes the result through the same path. The place must resolve: an out-of-range index traps like the store, and an absent map key halts at the read, where only the plain `m[k] = v` inserts.
+
 ## Collections and iteration
 
 Collections are linear-mutable copy-on-write: mutating calls take an exclusive window over the receiver and reuse it in place if and only if it is uniquely owned. Exclusivity is by spelling: a mutating call's receiver is a `var` binding or a fresh value, and a `const` receiver is a compile error. Functional updates (`map`, `filter`, `reduce` and friends) copy only when their source is aliased, a perf note and never an error; persistent structures are ordinary library types, `bytes`/`vec` the unboxed unique members. A record element is one unit: the checked `get` answers `t | none` whole, fields project out, and the copy closes move whole spans.
