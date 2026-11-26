@@ -2231,11 +2231,7 @@ fn linked_surface(
             .map(|at| u32::try_from(at).expect("function tables are tiny"));
         entries.push(entry(name, def, ForeignKind::Fn, sig, None, func));
     }
-    let tags = module
-        .tags()
-        .iter()
-        .map(|row| (row.name.clone(), row.id))
-        .collect();
+    let tags = module.tags().to_vec();
     MemberSurface {
         entries,
         tags,
@@ -2312,11 +2308,7 @@ fn origin_surface(
             ForeignKind::Type,
         ),
     ];
-    let tags = module
-        .tags()
-        .iter()
-        .map(|row| (row.name.clone(), row.id))
-        .collect();
+    let tags = module.tags().to_vec();
     MemberSurface {
         entries,
         tags,
@@ -2389,11 +2381,7 @@ fn middle_surface(
             .map(|at| u32::try_from(at).expect("function tables are tiny")),
         std: false,
     });
-    let tags = module
-        .tags()
-        .iter()
-        .map(|row| (row.name.clone(), row.id))
-        .collect();
+    let tags = module.tags().to_vec();
     MemberSurface {
         entries,
         tags,
@@ -2920,7 +2908,11 @@ pub fn exercise(data: &[u8]) -> Drawn {
                 payload: unit(),
             }),
         ));
-        conflict.tags.push(("clash".to_owned(), claimed));
+        conflict.tags.push(ds_mod::MemberTag {
+            decl: "clash".to_owned(),
+            name: "clash".to_owned(),
+            id: claimed,
+        });
     }
     let ast = Arc::new(parse(&files, id).expect("the generated program parses"));
     let mut imports = ImportGraph::new();

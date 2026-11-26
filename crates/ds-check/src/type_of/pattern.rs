@@ -519,9 +519,7 @@ impl Bodies<'_> {
     /// declarations; the latch keeps the caller's unknown-pattern word
     /// from doubling the report.
     fn qualified_pattern_label(&mut self, head: &Ident, tail: &Ident) -> Option<TypeId> {
-        let Some(head_ty) = self.head_type_of(head) else {
-            return None;
-        };
+        let head_ty = self.head_type_of(head)?;
         let labeled = self.members_labeled(head_ty, &tail.name);
         match labeled.as_slice() {
             [one] => {

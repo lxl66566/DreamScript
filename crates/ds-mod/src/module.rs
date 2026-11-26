@@ -130,12 +130,18 @@ pub struct EvidenceChain {
 }
 
 /// One row of the module's tag table: a declared union member atom's
-/// name and its module-wide tag id. The code words carry the ids (tag
-/// tests and staged member words); this table is the name side, so a
-/// host can build `Value::Tag` arguments without the front end.
+/// declaring declaration name and label, and its module-wide tag id. The
+/// code words carry the ids (tag tests and staged member words); this
+/// table is the name side, so a host can build `Value::Tag` arguments
+/// without the front end — and the declaring declaration beside the
+/// label keeps a row unambiguous where several declarations share a
+/// label across packages (F9.5).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct MemberTag {
-    /// The member atom's declared name.
+    /// The declaring declaration's name (a free-standing `tag`
+    /// declaration names itself).
+    pub decl: String,
+    /// The member atom's declared label.
     pub name: String,
     /// The module-wide tag id.
     pub id: u8,
@@ -570,11 +576,12 @@ impl Module {
             .map(|tag| tag.id)
     }
 
-    /// Appends one tag-table row; the caller keeps ids and names unique
+    /// Appends one tag-table row; the caller keeps ids and labels unique
     /// (the lowerer's first-use assignment does by construction).
     #[must_use]
-    pub fn with_tag(mut self, name: impl Into<String>, id: u8) -> Self {
+    pub fn with_tag(mut self, decl: impl Into<String>, name: impl Into<String>, id: u8) -> Self {
         self.tags.push(MemberTag {
+            decl: decl.into(),
             name: name.into(),
             id,
         });

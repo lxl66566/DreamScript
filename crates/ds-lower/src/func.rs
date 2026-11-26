@@ -6342,13 +6342,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         // atom); the nominal path spelling covers only the shapes the
         // checker recorded no solve for.
         let nominal;
-        let tested: &[TypeId] = match self.solved_is_members(span) {
-            Some(members) => members,
-            None => {
-                let atom = self.type_atom(ty)?;
-                nominal = vec![atom];
-                &nominal
-            },
+        let tested: &[TypeId] = if let Some(members) = self.solved_is_members(span) {
+            members
+        } else {
+            let atom = self.type_atom(ty)?;
+            nominal = vec![atom];
+            &nominal
         };
         let members = self.members(operand_ty);
         // the operand's member set decides the test: its whole coverage

@@ -1240,12 +1240,7 @@ impl Graph {
                 link: position,
             })
             .collect();
-        let tags = package
-            .module
-            .tags()
-            .iter()
-            .map(|row| (row.name.clone(), row.id))
-            .collect();
+        let tags = package.module.tags().to_vec();
         Ok(ImportSurface::Linked(MemberSurface {
             entries,
             tags,

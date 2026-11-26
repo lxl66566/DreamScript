@@ -1416,8 +1416,9 @@ impl FnLower<'_, '_, '_> {
                 }
                 Ok(atoms)
             },
-            Pattern::Path { path, .. } => self.label_pattern_atoms(path),
-            Pattern::Struct { path, .. } => self.label_pattern_atoms(path),
+            Pattern::Path { path, .. }
+            | Pattern::Struct { path, .. }
+            | Pattern::Call { path, .. } => self.label_pattern_atoms(path),
             Pattern::Tuple { .. } => Err(LowerError::unsupported(
                 pattern_span(pat),
                 "a tuple pattern in a member-test position",
@@ -1428,7 +1429,6 @@ impl FnLower<'_, '_, '_> {
             // dispatch jumps in on the case's tag and the section tests
             // the pattern's payload sub-patterns over the case's claimed
             // region offsets
-            Pattern::Call { path, .. } => self.label_pattern_atoms(path),
             Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
                 Err(LowerError::unsupported(
                     pattern_span(pat),

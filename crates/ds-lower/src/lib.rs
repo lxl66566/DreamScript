@@ -102,7 +102,7 @@ pub struct Lowered {
     module: Module,
     functions: Vec<String>,
     carried_defaults: HashMap<String, u32>,
-    tags: HashMap<String, u8>,
+    tags: Vec<ds_mod::MemberTag>,
     placed: Vec<Vec<PlacedOp>>,
     facts: Vec<FnFacts>,
     /// How many function records a served splice installed in front of
@@ -175,11 +175,25 @@ impl Lowered {
         self.spliced
     }
 
-    /// The module-wide tag id of a declared atom name, as the run entry
-    /// path needs to build `Value::Tag` arguments.
+    /// The module's tag-table rows, one per minted atom in id order,
+    /// each carrying the declaring declaration's name beside the label
+    /// (two files of one package may share a label, so a name-keyed
+    /// lookup is ambiguous — the rows and the ids are the truth).
+    #[must_use]
+    pub fn tags(&self) -> &[ds_mod::MemberTag] {
+        &self.tags
+    }
+
+    /// The module-wide tag id of a declared atom label's first row, as
+    /// a host building `Value::Tag` arguments over a label-unique module
+    /// needs. A module with two rows of one label answers the
+    /// lowest-id row — the first-use order's first mint.
     #[must_use]
     pub fn tag(&self, name: &str) -> Option<u8> {
-        self.tags.get(name).copied()
+        self.tags
+            .iter()
+            .find(|row| row.name == name)
+            .map(|row| row.id)
     }
 
     /// Records the module's dependency list into the header (G3.5's link
@@ -428,13 +442,12 @@ where
     for chain in plan.take_chains() {
         module = module.with_chain(chain);
     }
-    let tags = shapes.tag_names();
-    // the tag table rides the artifact in first-use order: ids are dense
-    // from zero, so sorting by id reconstructs the assignment order
-    let mut rows: Vec<(&str, u8)> = tags.iter().map(|(name, id)| (name.as_str(), *id)).collect();
-    rows.sort_unstable_by_key(|&(_, id)| id);
-    for (name, id) in rows {
-        module = module.with_tag(name, id);
+    // the tag table rides the artifact in first-use order, one row per
+    // minted atom carrying its declaring declaration's name beside the
+    // label (a defless structural atom an empty declaring name)
+    let tags = shapes.tag_rows();
+    for row in &tags {
+        module = module.with_tag(row.decl.clone(), row.name.clone(), row.id);
     }
     Ok(Lowered {
         module,

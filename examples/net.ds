@@ -25,11 +25,11 @@ fn main() -> () {
       const conn = net_connect("127.0.0.1", port)
       send(conn, "ping from DreamScript")
       match recv(conn, 64) {
-        timeout => println("recv timed out"),
-        refused => println("recv refused"),
-        addr_in_use => println("recv addr in use"),
-        reset => println("recv reset"),
-        net_other { msg } => println("recv other: ${msg}"),
+        timeout => println("recv timed out")
+        refused => println("recv refused")
+        addr_in_use => println("recv addr in use")
+        reset => println("recv reset")
+        net_other { msg } => println("recv other: ${msg}")
         reply => println("server replied: ${reply}")
       }
       const closed = close_conn(conn)

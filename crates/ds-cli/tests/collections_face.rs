@@ -90,6 +90,21 @@ fn the_mutation_and_membership_members_run_over_the_ambient() {
     );
 }
 
+/// The `.ok` handler over the receiver's `none` member runs over both
+/// word kinds the checked read answers: the checked difference collapses
+/// the result to the one flowing atom itself, so the hit arm extracts the
+/// payload word out of the operand's layout and the miss arm answers the
+/// handler's value, the mirror of `.err` over the payload side.
+#[test]
+fn the_ok_handler_over_none_runs_over_both_word_kinds() {
+    let out = run(ds().arg("run").arg(fixture("ok_handler_over_none.ds")));
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        concat!("hit 1 miss -1\n", "found localhost absent missing\n", "0\n",)
+    );
+}
+
 /// The built round trip reproduces the source run exactly.
 #[test]
 fn built_module_reproduces_the_source_run() {

@@ -2078,6 +2078,41 @@ fn bespoke_run(work: &Path, pkg_id: &str, source: &str) -> (bool, String, String
     ds(&["run", entry.to_str().expect("temp path is UTF-8")])
 }
 
+/// The qualified `Trait::f` spelling crosses the link seam over a
+/// linked trait: the import's registration mints the trait's def
+/// outside the type namespace, so the qualified head resolves through
+/// the foreign table and the call dispatches through the same per-site
+/// record the dot spelling takes — plain and tail sites both.
+#[test]
+fn the_qualified_trait_spelling_dispatches_over_the_link() {
+    let (work, pkg_id) = shapes_fixtures("shapes-qualified");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @shapes (pair, shapey)\n",
+            "\n",
+            "fn weigh(p: pair) -> int {\n",
+            "  shapey::size(p)\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const p = pair { a: 30, b: 12 }\n",
+            "  const viaq = shapey::size(p)\n",
+            "  println(\"${viaq} ${weigh(p)}\")\n",
+            "  viaq + weigh(p)\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the qualified run exits 0 (stderr: {err})");
+    // the plain site 42, the tail site 42 — the run echoing the return
+    assert_eq!(out, "42 42\n84\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A producer's trait default bodies cross the link seam (G4): the
 /// member's row carries the declared body's table index, the mint
 /// marks the member omittable, and a consumer's dispatch whose solving

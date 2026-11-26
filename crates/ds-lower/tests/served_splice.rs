@@ -161,6 +161,7 @@ fn a_row_without_an_atom_rides_the_table() {
     // rows following it shifted by one — the artifact's own shape
     let mut served = served(&analyzed, 0);
     served.tags.insert(0, ds_mod::MemberTag {
+        decl: String::new(),
         name: "list[byte]".to_owned(),
         id: 0,
     });
@@ -179,10 +180,12 @@ fn a_row_without_an_atom_rides_the_table() {
     .unwrap_or_else(|error| panic!("the splice lowers: {error:?}"));
     assert_eq!(spliced.spliced(), 0, "the empty prefix installs no records");
     let mut expected = vec![ds_mod::MemberTag {
+        decl: String::new(),
         name: "list[byte]".to_owned(),
         id: 0,
     }];
     expected.extend(fresh_rows.iter().map(|row| ds_mod::MemberTag {
+        decl: row.decl.clone(),
         name: row.name.clone(),
         id: row.id + 1,
     }));

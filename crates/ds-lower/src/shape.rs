@@ -250,13 +250,13 @@ pub(crate) struct Shapes<'a> {
     /// keyed by the list itself.
     member_cache: HashMap<Box<[TypeId]>, SpanWords>,
     tags: HashMap<TypeId, u8>,
-    /// The served splice's rows whose names resolve to no atom of this
+    /// The served splice's rows whose labels resolve to no atom of this
     /// package: the ambient's own bodies mint those rows in a fresh walk
     /// (structural atoms a body check registers), while a compile whose
     /// analysis never touches them holds no atom to key. They ride the
     /// module's table verbatim and consume their ids, so the bodies
     /// lowered here continue minting after them.
-    unkeyed_rows: Vec<(String, u8)>,
+    unkeyed_rows: Vec<ds_mod::MemberTag>,
     next_tag: u8,
 }
 
@@ -312,10 +312,10 @@ impl<'a> Shapes<'a> {
     /// merged module must own those ids before any body lowers here,
     /// and the ids must be the ones the fresh lowering's ambient-first
     /// walk assigns. The rows must be dense from zero, below the
-    /// reserved range, and name each atom at most once. A row's name need
-    /// not resolve to an atom of this package — the ambient's own
+    /// reserved range, and name each atom at most once. A row's label
+    /// need not resolve to an atom of this package — the ambient's own
     /// structural atoms mint only in the body walk the splice skips —
-    /// so an unresolved name rides the table verbatim instead of
+    /// so an unresolved label rides the table verbatim instead of
     /// refusing; the served bytes' identity pin and the equivalence
     /// gates hold the row set against the fresh walk.
     pub(crate) fn seed_served(&mut self, rows: &[ds_mod::MemberTag]) -> Result<(), LowerError> {
@@ -338,28 +338,48 @@ impl<'a> Shapes<'a> {
                 }
                 self.tags.insert(atom, row.id);
             } else {
-                if self.unkeyed_rows.iter().any(|(name, _)| *name == row.name) {
+                if self.unkeyed_rows.iter().any(|row2| row2.name == row.name) {
                     return Err(drift("the row names an atom twice"));
                 }
-                self.unkeyed_rows.push((row.name.clone(), row.id));
+                self.unkeyed_rows.push(row.clone());
             }
             self.next_tag = row.id + 1;
         }
         Ok(())
     }
 
-    /// The tag table keyed by atom name, for the run entry path.
-    pub(crate) fn tag_names(&self) -> HashMap<String, u8> {
-        let mut out = HashMap::new();
-        for (atom, tag) in &self.tags {
-            if let Ok(decl) = self.analyzed.decls.universe.atom_decl(*atom) {
-                out.insert(decl.name.clone(), *tag);
-            }
-        }
-        for (name, id) in &self.unkeyed_rows {
-            out.insert(name.clone(), *id);
-        }
-        out
+    /// The tag table's rows, one per minted atom in id order (ids are
+    /// dense from zero in first-use order, so sorting by id reconstructs
+    /// the assignment order). Each row carries the declaring
+    /// declaration's name beside the label: two files may declare one
+    /// label (distinct atoms, distinct ids), so the rows key by atom —
+    /// a name-keyed fold would drop one row at random — and a
+    /// defless structural atom (a body check's minted application)
+    /// carries an empty declaring name.
+    pub(crate) fn tag_rows(&self) -> Vec<ds_mod::MemberTag> {
+        let mut rows: Vec<ds_mod::MemberTag> = self
+            .tags
+            .iter()
+            .map(|(atom, id)| ds_mod::MemberTag {
+                decl: self
+                    .analyzed
+                    .decls
+                    .defs_of_atoms
+                    .get(atom)
+                    .map(|def| self.analyzed.package.def(*def).name.clone())
+                    .unwrap_or_default(),
+                name: self
+                    .analyzed
+                    .decls
+                    .universe
+                    .atom_decl(*atom)
+                    .map_or_else(|_| String::new(), |decl| decl.name.clone()),
+                id: *id,
+            })
+            .collect();
+        rows.extend(self.unkeyed_rows.iter().cloned());
+        rows.sort_unstable_by_key(|row| row.id);
+        rows
     }
 
     /// Seeds the tag table from the linked modules' rows (the shared tag
@@ -378,14 +398,16 @@ impl<'a> Shapes<'a> {
     /// owns refuses: two linked packages disagreeing on one id is a
     /// cross-wire no remap can fix (their code immediates are frozen in
     /// their artifacts), the shared mapping round's own refusal.
-    pub(crate) fn seed_linked(&mut self, rows: &[(String, u8)]) -> Result<(), LowerError> {
-        for (name, id) in rows {
+    pub(crate) fn seed_linked(&mut self, rows: &[ds_mod::MemberTag]) -> Result<(), LowerError> {
+        for row in rows {
+            let name = &row.name;
+            let id = row.id;
             let refuse = |reason: String| LowerError::LinkedTagRow {
                 name: name.clone(),
-                id: *id,
+                id,
                 reason,
             };
-            if *id >= FIRST_RESERVED_TAG {
+            if id >= FIRST_RESERVED_TAG {
                 return Err(refuse(
                     "the id reaches the platform's reserved range".to_owned(),
                 ));
@@ -401,7 +423,7 @@ impl<'a> Shapes<'a> {
                 continue;
             };
             match self.tags.get(&atom) {
-                Some(&held) if held == *id => {},
+                Some(&held) if held == id => {},
                 Some(&held) => {
                     return Err(refuse(format!(
                         "the linked mint already holds id {held} — a linked module re-keyed its \
@@ -409,22 +431,22 @@ impl<'a> Shapes<'a> {
                     )));
                 },
                 None => {
-                    if let Some(held) = self.id_owner(*id) {
+                    if let Some(held) = self.id_owner(id) {
                         return Err(refuse(format!(
                             "`{held}` already owns the id — two linked modules disagree on the id \
                              space, and their code immediates are frozen in their artifacts"
                         )));
                     }
-                    self.tags.insert(atom, *id);
-                    self.next_tag = self.next_tag.max(*id + 1);
+                    self.tags.insert(atom, id);
+                    self.next_tag = self.next_tag.max(id + 1);
                 },
             }
         }
         Ok(())
     }
 
-    /// The name owning one tag id already: a keyed atom's declaration
-    /// name or an unkeyed row's name.
+    /// The label owning one tag id already: a keyed atom's declaration
+    /// label or an unkeyed row's label.
     fn id_owner(&self, id: u8) -> Option<String> {
         for (&atom, &held) in &self.tags {
             if held == id
@@ -433,9 +455,9 @@ impl<'a> Shapes<'a> {
                 return Some(decl.name.clone());
             }
         }
-        for (name, held) in &self.unkeyed_rows {
-            if *held == id {
-                return Some(name.clone());
+        for row in &self.unkeyed_rows {
+            if row.id == id {
+                return Some(row.name.clone());
             }
         }
         None
@@ -1589,6 +1611,15 @@ mod tests {
     /// linked names claiming one id refuse with the row named.
     #[test]
     fn linked_tag_rows_seed_key_mints_and_refuse_crossed_ids() {
+        /// One linked row: the label under the producer's own declaring
+        /// declaration name (the test's spellings share both).
+        fn row(label: &str, id: u8) -> ds_mod::MemberTag {
+            ds_mod::MemberTag {
+                decl: label.to_owned(),
+                name: label.to_owned(),
+                id,
+            }
+        }
         let mut files = Files::new();
         let source = concat!(
             "pub tag int
@@ -1714,11 +1745,11 @@ mod tests {
         let mut shapes = Shapes::new(&analyzed, std::collections::HashSet::new());
         shapes
             .seed_linked(&[
-                ("quiet".to_owned(), 5),
-                ("loud".to_owned(), 6),
-                ("quiet".to_owned(), 5),
-                ("local".to_owned(), 3),
-                ("private".to_owned(), 4),
+                row("quiet", 5),
+                row("loud", 6),
+                row("quiet", 5),
+                row("local", 3),
+                row("private", 4),
             ])
             .expect("the rows seed");
         assert_eq!(shapes.tag_id(atom_of("quiet")), Ok(5));
@@ -1731,10 +1762,10 @@ mod tests {
         // row and the holder
         let mut crossed = Shapes::new(&analyzed, std::collections::HashSet::new());
         crossed
-            .seed_linked(&[("quiet".to_owned(), 5)])
+            .seed_linked(&[row("quiet", 5)])
             .expect("the first row seeds");
         let err = crossed
-            .seed_linked(&[("loud".to_owned(), 5)])
+            .seed_linked(&[row("loud", 5)])
             .expect_err("two linked mints cannot share one id");
         assert!(
             err.to_string().contains("loud") && err.to_string().contains("quiet"),
@@ -1744,7 +1775,7 @@ mod tests {
         // a row reaching the reserved range refuses
         let mut reserved = Shapes::new(&analyzed, std::collections::HashSet::new());
         let err = reserved
-            .seed_linked(&[("quiet".to_owned(), FIRST_RESERVED_TAG)])
+            .seed_linked(&[row("quiet", FIRST_RESERVED_TAG)])
             .expect_err("the reserved range is closed");
         assert!(
             err.to_string().contains("reserved"),

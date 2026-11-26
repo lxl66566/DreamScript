@@ -267,7 +267,7 @@ mod tests {
 
         // a module whose tag rows ride the splice: the serve hands them to
         // the lowering, whose seeding validates them against the plan
-        let tagged = module.clone().with_tag("a_probe_row", 200);
+        let tagged = module.clone().with_tag("probe", "a_probe_row", 200);
         assert!(serve_bytes(&artifact_bytes(&tagged, identity), &identity).is_some());
 
         // the unperturbed bytes still serve

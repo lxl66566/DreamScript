@@ -48,13 +48,13 @@ use gungraun::prelude::*;
 /// The host provision's declaration member an entry session registers
 /// beside the ambient: the `die` spelling the slab's guard branches
 /// compose, verbatim the run path's own provision.
-const HOST_SOURCE: &str = r#"
+const HOST_SOURCE: &str = r"
 pub extern fn die[t](msg: string) -> t
 pub extern fn exit[t](code: int) -> t
 pub extern fn mkdir(path: string) -> () | io_err
 pub extern fn remove(path: string) -> () | io_err
 pub extern fn fs_size(path: string) -> int | io_err
-"#;
+";
 
 /// The entry session's declared rows: the ambient's table plus the host
 /// provision's rows, the same table the run path attributes with.
@@ -65,8 +65,8 @@ fn session_rows() -> ds_check::DeclaredRows {
         .clone()
         .with("die", EffectRow::of(Effect::Trap))
         .with("exit", EffectRow::of(Effect::Trap))
-        .with("mkdir", error_world.clone())
-        .with("remove", error_world.clone())
+        .with("mkdir", error_world)
+        .with("remove", error_world)
         .with("fs_size", error_world)
 }
 
@@ -75,7 +75,7 @@ fn session_rows() -> ds_check::DeclaredRows {
 const PINNED_SUM: i64 = 1_081_925_563_920_800;
 
 /// The arena-face kernel: the container's own vocabulary end to end.
-const ARENA_SOURCE: &str = r#"
+const ARENA_SOURCE: &str = r"
 fn drive() -> int {
   const FILL_N = 5000
   const CHURN_N = 200000
@@ -113,7 +113,7 @@ fn drive() -> int {
 fn main() -> int {
   drive()
 }
-"#;
+";
 
 /// The bypass kernel: the same driver over the hand-rolled slab. The
 /// guard's trap branches never fire on this workload (every handle is

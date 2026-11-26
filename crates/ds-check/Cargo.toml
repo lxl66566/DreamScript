@@ -16,6 +16,7 @@ name    = "check_perf"
 
 [dependencies]
 ds-diag             = { path = "../ds-diag" }
+ds-mod              = { path = "../ds-mod" }
 ds-parse            = { path = "../ds-parse" }
 rustc-hash          = "2"
 thiserror.workspace = true

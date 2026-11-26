@@ -42,7 +42,6 @@ fn guarded_cancel(n: int) -> int | net_err {
     }
   }
   0
-
 }
 
 fn mixed(n: int) -> int | net_err {
@@ -60,7 +59,6 @@ fn mixed(n: int) -> int | net_err {
     }
   }
   0
-
 }
 
 fn guarded_claim() -> int | net_err {
@@ -141,6 +139,5 @@ fn main() -> () {
     reset => println("x")
     net_other { msg } => println("o")
     xs => println("list ${xs.len()}")
-
   }
 }

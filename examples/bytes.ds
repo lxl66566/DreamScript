@@ -18,16 +18,16 @@ fn main() -> () {
   const text = utf8_encode("héllo")
   println("${len(text)}")
   match utf8_decode(text) {
-    utf8_err => println("decode refused"),
-    s        => println(s)
+    utf8_err => println("decode refused")
+    s => println(s)
   }
 
   // the lead byte of a two-byte sequence alone is not valid UTF-8
   const pair = utf8_encode("é")
   const orphan = bytes_of([byte_at(pair, 0).unwrap_or(b'\0')])
   match utf8_decode(orphan) {
-    utf8_err => println("orphan byte refused"),
-    s        => println(s)
+    utf8_err => println("orphan byte refused")
+    s => println(s)
   }
 
   println(chunk { data: ab }.show())

@@ -162,7 +162,9 @@ fn bl7_fields_default_pending_and_round_trip() {
 #[test]
 fn the_tag_table_round_trips() {
     // The blocks payload's tag table: the name side of the tag ids.
-    let module = sample_module().with_tag("none", 0).with_tag("int", 1);
+    let module = sample_module()
+        .with_tag("none", "none", 0)
+        .with_tag("int", "int", 1);
     let bytes = write(&module);
     let read_back = read(&bytes).expect("the table round trips");
     assert_eq!(write(&read_back), bytes, "byte-stable across the read");

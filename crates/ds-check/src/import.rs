@@ -1620,15 +1620,16 @@ pub struct MemberSurface {
     /// dispatches through, each member body's index addressing this
     /// member's own module table at the surface's link position.
     pub impls: Vec<ImplFact>,
-    /// The linked module's tag-table rows, name and id: the shared tag
-    /// mapping's identity. A union-typed word crossing the module
-    /// boundary carries the producing module's tag ids as immediates,
+    /// The linked module's tag-table rows, the declaring declaration's
+    /// name beside the label and the id: the shared tag mapping's
+    /// identity. A union-typed word crossing the module boundary
+    /// carries the producing module's tag ids as immediates,
     /// so the consuming compile's own table must reserve each row's id
     /// for the atom the linked facts mint under the same name — the
     /// seed runs at lowering, before any body mints. Rows the consuming
     /// compile mints no atom for (the producer's private atoms) ride
     /// verbatim, consuming their ids.
-    pub tags: Vec<(String, u8)>,
+    pub tags: Vec<ds_mod::MemberTag>,
 }
 
 /// One linked member's top-level definitions, the import-side shape: the

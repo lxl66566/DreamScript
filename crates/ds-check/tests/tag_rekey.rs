@@ -114,9 +114,7 @@ fn a_same_file_redeclaration_keeps_the_refusal() {
 fn the_condition_is_test_still_refines_over_a_disjoint_tag() {
     // condition position: the disjoint label narrows legitimately, no
     // unknown-member refusal fires
-    let diags = check_user(concat!(
-        "fn f(e: io_err) -> () { if e is refused { () } else { () } }\n",
-    ));
+    let diags = check_user("fn f(e: io_err) -> () { if e is refused { () } else { () } }\n");
     assert!(diags.is_empty(), "{diags:?}");
 }
 

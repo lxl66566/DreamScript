@@ -13,14 +13,13 @@ fn at(xs: list[int], i: int) -> int {
 }
 
 fn main() -> () {
-  const race: list[fn() -> int] = [
-    () => { sleep(200000000)
-      1
-    },
-    () => { sleep(10000000)
-      2
-    },
-  ]
+  const race: list[fn() -> int] = [() => {
+    sleep(200000000)
+    1
+  }, () => {
+    sleep(10000000)
+    2
+  }]
   println("first ${firstof(race)}")
   const all = interleave(race)
   println("arrival ${at(all, 0)} ${at(all, 1)}")

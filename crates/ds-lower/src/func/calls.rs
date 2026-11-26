@@ -4916,6 +4916,23 @@ impl<'a> FnLower<'a, '_, '_> {
         if remainder.is_empty() {
             // every member jumps to the handler; the fallthrough is dead
             self.emit(Op::Jmp { target: join });
+        } else if remainder.len() == 1 && !self.is_span_ty(ty) {
+            // the handled tests already proved the fall-through value is
+            // the one remainder member, and the checked difference
+            // collapses the result to that atom itself: the word-address
+            // path extracts the member's payload words out of the
+            // operand's layout, the mirror of err_value's kept-side arm
+            self.widen_into(
+                &result,
+                ty,
+                &TypedPlace {
+                    place: src.place.clone(),
+                    ty,
+                },
+                recv.span(),
+            )?;
+            flow_jmps.push(self.code.len());
+            self.emit(Op::Jmp { target: join });
         } else if self.members(src_ty).len() == 1 {
             // a single-member operand: the value itself flows, no tags
             self.widen_into(

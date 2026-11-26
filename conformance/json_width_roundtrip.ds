@@ -14,7 +14,7 @@ fn read(text: string) -> json {
 }
 
 fn main() -> () {
-  println(packet.to_json(packet { kind: b'\u{ff}', serial: u32.of(4294967295), mark: 'é', payload: bytes_of([b'\u{0}', b'\u{ff}']) }).to_json())
+  println(packet.to_json(packet { kind: b'\u{ff}', serial: u32.of(4294967295), mark: 'é', payload: bytes_of([b'\0', b'\u{ff}']) }).to_json())
   println(packet.to_json(packet { kind: b'\0', serial: u32.of(0), mark: 'q', payload: bytes_of(list[byte]()) }).to_json())
   const back = packet.from_json(read("{\"kind\": 0, \"serial\": 4294967295, \"mark\": \"é\", \"payload\": [0, 255]}"))
   if back is parse_err { println("parse_err") } else { println(packet.to_json(back).to_json()) }

@@ -365,8 +365,8 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
         // the producer roots: every directory beside app/
         let producers = fs::read_dir(&fixture)
             .expect("the fixture directory reads")
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().map_or(false, |kind| kind.is_dir()))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .count()
             .saturating_sub(1);
         // the check leg: the one-namespace fixtures gate beside their

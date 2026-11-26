@@ -129,8 +129,10 @@ fn elf64_image() -> Vec<u8> {
     bytes
 }
 
-/// A dynamic table cut mid-entry: the GNU_HASH tag reads but its value
-/// runs past the image, the refusal naming the value's offset.
+/// A dynamic table cut mid-entry: the truncation leaves the image's
+/// sole PT_LOAD running past the file end, so the reader refuses at
+/// the segment itself, naming the break before any walk — every later
+/// mapping reads only segments that lie inside the image.
 #[test]
 fn an_elf64_truncated_dynamic_table_refuses() {
     let base = elf64_image();
@@ -140,7 +142,10 @@ fn an_elf64_truncated_dynamic_table_refuses() {
     let mut bytes = base;
     bytes.truncate(0x158);
     let error = enumerate(&bytes).expect_err("a dynamic table cut mid-entry refuses");
-    assert_eq!(malformed_detail(error), "a u64 at 344 runs past the image");
+    assert_eq!(
+        malformed_detail(error),
+        "a PT_LOAD segment runs past the image"
+    );
 }
 
 /// A PT_DYNAMIC whose `p_offset` and `p_vaddr` disagree pins which
@@ -295,4 +300,34 @@ fn every_fixture_truncation_refuses_without_panicking() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A PT_LOAD naming a segment wider than the address space or past the
+/// image end: both refuse at the segment's own validation, never
+/// panicking over the unchecked sum the old reader formed.
+#[test]
+fn a_pt_load_with_unbounded_fields_refuses() {
+    let base = elf64_image();
+    // p_filesz at PT_LOAD's p_filesz field: the sum with p_offset
+    // overflows the u64 range under the old reader
+    let mut huge = base.clone();
+    huge[0x60..0x68].copy_from_slice(&u64::MAX.to_le_bytes());
+    let error = enumerate(&huge).expect_err("an unbounded filesz refuses");
+    assert_eq!(
+        malformed_detail(error),
+        "a PT_LOAD segment runs past the image"
+    );
+
+    // a segment whose vaddr+filesz span overflows the address space,
+    // with a dynamic pointer asking for an address inside it: the old
+    // reader formed the overflowing sum in its range test
+    let mut spanning = base;
+    spanning[0x50..0x58].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+    spanning[0x60..0x68].copy_from_slice(&2u64.to_le_bytes());
+    spanning[0x128..0x130].copy_from_slice(&u64::MAX.to_le_bytes()); // DT_STRTAB value
+    let error = enumerate(&spanning).expect_err("an overflowing segment span refuses");
+    assert_eq!(
+        malformed_detail(error),
+        "the address 0xffffffffffffffff maps into no PT_LOAD"
+    );
 }

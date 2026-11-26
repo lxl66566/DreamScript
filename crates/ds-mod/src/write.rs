@@ -15,8 +15,10 @@ use crate::{
 /// Version 2 appends the module-level evidence-chain table after the
 /// function records; version 3 appends the tag table; version 4 retires
 /// the entry staging table (the process surface's string argv
-/// superseded entry-parameter staging).
-pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 4;
+/// superseded entry-parameter staging); version 5 carries each tag
+/// row's declaring declaration name beside the label (F9.5, the
+/// re-key's format leg).
+pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 5;
 
 /// Serializes `module` deterministically: equal modules produce equal
 /// bytes, and reading the output back yields a module that serializes to
@@ -257,6 +259,7 @@ fn blocks_into<S: Sink>(
     }
     out.uleb(uleb64(tags.len()));
     for tag in tags {
+        put_str(out, &tag.decl);
         put_str(out, &tag.name);
         out.uleb(u64::from(tag.id));
     }

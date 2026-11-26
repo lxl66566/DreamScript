@@ -1,0 +1,18 @@
+// The `.ok` handler over the receiver's `none` member end to end: the
+// set-difference answer collapses to the one flowing atom itself, so the
+// miss arm answers the handler's value and the hit arm extracts the
+// payload word — both word kinds the checked read answers (a list
+// element's int, a map value's string), the mirror of `.err` over the
+// payload side.
+fn main() -> int {
+  const xs = [1, 2]
+  const hit = xs.first().ok((_: none) => -1)
+  const miss = xs.get(7).ok((_: none) => -1)
+  println("hit ${hit} miss ${miss}")
+  var m = map[string, string]()
+  const _ = m.set("host", "localhost")
+  const found = m.get("host").ok((_: none) => "missing")
+  const absent = m.get("nope").ok((_: none) => "missing")
+  println("found ${found} absent ${absent}")
+  0
+}

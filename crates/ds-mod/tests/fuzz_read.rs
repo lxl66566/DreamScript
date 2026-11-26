@@ -142,9 +142,10 @@ fn random_module(u: &mut Unstructured) -> Module {
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 3 {
         module = module.with_function(random_function(u, dep_count));
     }
-    // The blocks payload's tag table: dense first-use ids by construction.
+    // The blocks payload's tag table: dense first-use ids by construction,
+    // the declaring declaration's name beside the label.
     for id in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
-        module = module.with_tag(random_string(u, 10), id);
+        module = module.with_tag(random_string(u, 10), random_string(u, 10), id);
     }
     for _ in 0..u8::arbitrary(u).unwrap_or(0) % 9 {
         let (a, b) = (

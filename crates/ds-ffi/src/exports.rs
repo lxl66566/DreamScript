@@ -4,11 +4,12 @@
 //! without a binary-format crate. The reader is total: a file that is
 //! not a recognized shared object refuses naming why, and a malformed
 //! table refuses naming the offset that ran past the image — a report
-//! over untrusted library bytes never panics. The never-panic contract
-//! assumes a 64-bit `usize`: the `usize::try_from` narrowing and the
-//! unchecked `usize` arithmetic over untrusted u32/u64 fields hold on
-//! the supported matrix alone (windows-msvc, linux x86_64/aarch64), so
-//! a 32-bit port needs every expect and addition audited.
+//! over untrusted library bytes never panics, with every address-sized
+//! sum over the library's own fields checked against overflow. The
+//! narrowing of u32 fields stays unchecked where the value cannot
+//! exceed the host address space on the supported matrix
+//! (windows-msvc, linux x86_64/aarch64); a 32-bit port needs those
+//! audits redone.
 
 /// Why a library's exported symbols cannot enumerate.
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +83,13 @@ const DT_STRSZ: i64 = 10;
 const DT_GNU_HASH: i64 = 0x6fff_fef5;
 const STB_GLOBAL: u8 = 1;
 const STB_WEAK: u8 = 2;
+
+/// A library's own address-sized field narrowed to usize: a value wider
+/// than the host's address space refuses the read instead of panicking,
+/// keeping the untrusted-bytes contract on 32-bit hosts too.
+fn checked_usize(value: u64) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| "a segment address exceeds the address space".to_owned())
+}
 
 impl Reader<'_> {
     fn u16_at(&self, at: usize) -> Result<u16, String> {
@@ -227,30 +235,55 @@ fn elf(bytes: &[u8]) -> Result<Vec<String>, ExportError> {
             )))
         },
     }
-    let phoff = usize::try_from(read.u64_at(0x20).map_err(malformed)?).expect("u64 fits usize");
+    let phoff = checked_usize(read.u64_at(0x20).map_err(malformed)?).map_err(malformed)?;
     let phentsize = usize::from(read.u16_at(0x36).map_err(malformed)?);
     let phnum = usize::from(read.u16_at(0x38).map_err(malformed)?);
     let mut loads = Vec::new();
     let mut dynamic = None;
     for index in 0..phnum {
-        let header = phoff + index * phentsize;
+        let header = phoff
+            .checked_add(index.checked_mul(phentsize).ok_or_else(|| {
+                malformed("the program header table overflows the address space".to_owned())
+            })?)
+            .ok_or_else(|| {
+                malformed("the program header table overflows the address space".to_owned())
+            })?;
         match read.u32_at(header).map_err(malformed)? {
-            PT_LOAD => loads.push((
-                read.u64_at(header + 8).map_err(malformed)?,
-                read.u64_at(header + 16).map_err(malformed)?,
-                read.u64_at(header + 32).map_err(malformed)?,
-            )),
+            PT_LOAD => {
+                let offset = read.u64_at(header + 8).map_err(malformed)?;
+                let vaddr = read.u64_at(header + 16).map_err(malformed)?;
+                let filesz = read.u64_at(header + 32).map_err(malformed)?;
+                // a kept segment maps inside the image: every later
+                // address mapped through the table stays a valid in-image
+                // offset, so the unchecked small additions over mapped
+                // offsets cannot overflow
+                let offset = checked_usize(offset).map_err(malformed)?;
+                let filesz = checked_usize(filesz).map_err(malformed)?;
+                let end = offset
+                    .checked_add(filesz)
+                    .filter(|end| *end <= bytes.len())
+                    .ok_or_else(|| malformed("a PT_LOAD segment runs past the image".to_owned()))?;
+                loads.push((end - filesz, vaddr, filesz));
+            },
             PT_DYNAMIC => dynamic = Some(read.u64_at(header + 8).map_err(malformed)?),
             _ => {},
         }
     }
     let vaddr = |address: u64| -> Result<usize, String> {
-        let address = usize::try_from(address).expect("u64 fits usize");
+        let address = checked_usize(address)?;
         for &(offset, vaddr, filesz) in &loads {
-            let vaddr = usize::try_from(vaddr).expect("u64 fits usize");
-            let filesz = usize::try_from(filesz).expect("u64 fits usize");
-            let offset = usize::try_from(offset).expect("u64 fits usize");
-            if address >= vaddr && address < vaddr + filesz {
+            // the segment rows validated at parse time keep the file-side
+            // fields inside the image, so the mapped offset stays
+            // in-bounds by construction; a virtual address whose span
+            // overflows the host's address space contains nothing, so
+            // the comparison never forms the overflowing sum
+            let Some(vaddr) = usize::try_from(vaddr).ok() else {
+                continue;
+            };
+            let Some(span) = vaddr.checked_add(filesz) else {
+                continue;
+            };
+            if address >= vaddr && address < span {
                 return Ok(offset + (address - vaddr));
             }
         }
@@ -264,20 +297,27 @@ fn elf(bytes: &[u8]) -> Result<Vec<String>, ExportError> {
     let mut strsz = 0usize;
     let mut hash = None;
     let mut gnu_hash = None;
-    let mut at = usize::try_from(dynamic).expect("u64 fits usize");
+    let mut at = checked_usize(dynamic).map_err(malformed)?;
     loop {
-        let tag = i64::try_from(read.u64_at(at).map_err(malformed)?).expect("a tag fits i64");
-        let value = read.u64_at(at + 8).map_err(malformed)?;
+        let tag = i64::try_from(read.u64_at(at).map_err(malformed)?)
+            .map_err(|_| malformed("a dynamic tag exceeds the signed range".to_owned()))?;
+        let value = read
+            .u64_at(at.checked_add(8).ok_or_else(|| {
+                malformed("the dynamic table overflows the address space".to_owned())
+            })?)
+            .map_err(malformed)?;
         match tag {
             DT_NULL => break,
             DT_STRTAB => strtab = Some(value),
             DT_SYMTAB => symtab = Some(value),
-            DT_STRSZ => strsz = usize::try_from(value).expect("u64 fits usize"),
+            DT_STRSZ => strsz = checked_usize(value).map_err(malformed)?,
             DT_HASH => hash = Some(value),
             DT_GNU_HASH => gnu_hash = Some(value),
             _ => {},
         }
-        at += 16;
+        at = at
+            .checked_add(16)
+            .ok_or_else(|| malformed("the dynamic table overflows the address space".to_owned()))?;
     }
     let strtab =
         vaddr(strtab.ok_or_else(|| malformed("no DT_STRTAB".to_owned()))?).map_err(malformed)?;

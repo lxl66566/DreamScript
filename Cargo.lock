@@ -507,6 +507,7 @@ version = "0.1.0"
 dependencies = [
  "ds-corpus-path",
  "ds-diag",
+ "ds-mod",
  "ds-parse",
  "ds-stdlib",
  "rustc-hash",

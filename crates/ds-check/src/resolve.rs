@@ -608,7 +608,7 @@ pub struct Package {
     /// these rows — identity from the linked module's artifact, never a
     /// positional guess. Duplicate rows (two imports of one package)
     /// ride twice; the seed is idempotent per name and id.
-    linked_tags: Vec<(String, u8)>,
+    linked_tags: Vec<ds_mod::MemberTag>,
     /// The linked members' trait-impl facts the link pass collected
     /// (G4): the owner-keyed member links a consuming trait call site
     /// dispatches through, deduplicated per linked impl — two imports
@@ -767,9 +767,10 @@ impl Package {
     /// The linked modules' tag-table rows the link pass collected (the
     /// shared tag mapping): the lowering seeds its own table with them
     /// before any body mints, so a union-typed word crossing a module
-    /// boundary carries ids both modules agree on.
+    /// boundary carries ids both modules agree on. Each row carries the
+    /// producing declaration's name beside the label.
     #[must_use]
-    pub fn linked_tag_rows(&self) -> &[(String, u8)] {
+    pub fn linked_tag_rows(&self) -> &[ds_mod::MemberTag] {
         &self.linked_tags
     }
 
@@ -2707,7 +2708,18 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => self.name_use(only),
             [head, method] => {
-                let Some(def) = self.package.lookup_type_in(self.file, &head.name) else {
+                let Some(def) = self
+                    .package
+                    .lookup_type_in(self.file, &head.name)
+                    .or_else(|| {
+                        // a linked package's registered type (its trait, its
+                        // structs) mints outside the type namespace: the
+                        // qualified head still resolves over its foreign row,
+                        // so the spelling dispatches through the same
+                        // per-site record the dot spellings take
+                        self.package.foreign_type_def(&head.name)
+                    })
+                else {
                     // A value name at the qualifier position still gets
                     // the sharper "not a trait" word.
                     if self.package.lookup_value(&head.name).is_some() {

@@ -62,14 +62,14 @@
 //! checksum) are committed fields with pending values: writers emit 0
 //! until M3 defines their computation, and the reader accepts and
 //! round-trips non-zero values without validating them. The blocks payload
-//! is version 4 (below); the type-metadata and effect-rows payloads remain
+//! is version 5 (below); the type-metadata and effect-rows payloads remain
 //! versioned minimal placeholders (payload version 0 plus a reserved zero
 //! uleb), completed at M2/M3 inside the locked framing by bumping their
 //! per-section payload version. Debug spans are a list of byte-offset
 //! spans into the source and the only strippable section: a module built
 //! with [`Flags::STRIP`] set carries no debug-spans section.
 //!
-//! # Blocks payload, version 4 `[BL-5, BL-6, BL-7]`
+//! # Blocks payload, version 5 `[BL-5, BL-6, BL-7]`
 //!
 //! ```text
 //! u8    payload version = 4
@@ -97,8 +97,10 @@
 //!   uleb               tail count, then one uleb chain-table index per
 //!                      the serving body's evidence pairs
 //! uleb  tag-table count (the name side of the code's tag ids; version
-//!      3's addition), then per row:
-//!   uleb len + UTF-8   member atom's declared name
+//!      3's addition; version 5 adds the declaring declaration name),
+//!      then per row:
+//!   uleb len + UTF-8   the declaring declaration's name (F9.5)
+//!   uleb len + UTF-8   member atom's declared label
 //!   uleb               the module-wide tag id
 //! ```
 //!

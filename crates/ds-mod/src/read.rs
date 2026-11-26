@@ -420,13 +420,16 @@ fn parse_constant(p: &mut Cursor<'_>, dep_count: usize) -> Result<Constant, Read
 /// evidence chains, and the tag table.
 type BlocksTables = (Vec<Function>, Vec<EvidenceChain>, Vec<MemberTag>);
 
-/// Parses the blocks payload, version 4: per-function records, then the
-/// module-level evidence-chain table and the tag table. Each body word
+/// Parses the blocks payload, version 5: per-function records, then the
+/// module-level evidence-chain table and the tag table (each row the
+/// declaring declaration name, the label, and the id). Each body word
 /// is decoded once — every word must decode canonically at its pc, and
 /// every jump must land inside the function's own body — and the stored
 /// words are what the loader takes. Every chain's function index must
 /// address the function list and every tail index the chain table
-/// itself; the tag table must spell unique names and unique tag ids.
+/// itself; the tag table must spell unique tag ids (two files of one
+/// module may share a label, so rows may repeat a declaring name or a
+/// label).
 fn parse_blocks(
     bytes: &[u8],
     offset: usize,
@@ -529,21 +532,20 @@ fn parse_blocks(
     }
     let tag_count = p.count()?;
     let mut tags = Vec::with_capacity(p.capacity_for(tag_count, 2));
-    let mut names = std::collections::HashSet::new();
     let mut ids = std::collections::HashSet::new();
     for _ in 0..tag_count {
-        let name_at = p.abs();
+        let decl = p.utf8()?.to_owned();
         let name = p.utf8()?.to_owned();
-        if !names.insert(name.clone()) {
-            return Err(malformed(name_at, "duplicate tag-table name"));
-        }
         let id_at = p.abs();
         let id = p.uleb()?;
         let id = u8::try_from(id).map_err(|_| malformed(id_at, "tag id exceeds u8"))?;
+        // the id is the identity: two files of one module may declare one
+        // label (distinct atoms, distinct ids), so rows may repeat a
+        // declaring name or a label — only the id space is unique
         if !ids.insert(id) {
             return Err(malformed(id_at, "duplicate tag-table id"));
         }
-        tags.push(MemberTag { name, id });
+        tags.push(MemberTag { decl, name, id });
     }
     p.exhausted("trailing bytes in blocks section")?;
     Ok((functions, chains, tags))

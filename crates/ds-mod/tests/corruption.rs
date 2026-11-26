@@ -3,8 +3,8 @@
 
 use ds_diag::{Diagnostic, ErrorCode, FileId, Severity};
 use ds_mod::{
-    Constant, FORMAT_VERSION, FuncRefKey, Hash128, MAGIC, Module, ReadError, SectionKind,
-    TargetClass, read, read_checked, write,
+    Constant, FORMAT_VERSION, FuncRefKey, Hash128, MAGIC, MemberTag, Module, ReadError,
+    SectionKind, TargetClass, read, read_checked, write,
 };
 
 const SOURCE: &[u8] = b"const x = 1";
@@ -397,19 +397,33 @@ fn jump_out_of_body_rejected() {
 
 #[test]
 fn duplicate_tag_rows_rejected() {
-    for (first, second) in [
-        (("a", 0u8), ("a", 1u8)), // same name, different ids
-        (("a", 3), ("b", 3)),     // same id, different names
-    ] {
-        let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
-            .with_tag(first.0, first.1)
-            .with_tag(second.0, second.1);
-        let error = read(&write(&module)).expect_err("duplicate tag row");
-        assert!(
-            matches!(&error, ReadError::Malformed { reason, .. } if reason.contains("tag-table"))
-        );
-        assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
-    }
+    // a repeated id is the wire corruption; a repeated label (two files
+    // of one module sharing it) is the legal shadow, so only the id row
+    // refuses — the id is the row's identity
+    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+        .with_tag("a", "a", 3u8)
+        .with_tag("a", "b", 3u8);
+    let error = read(&write(&module)).expect_err("duplicate tag row");
+    assert!(matches!(&error, ReadError::Malformed { reason, .. } if reason.contains("tag-table")));
+    assert_diagnostic(&error, ErrorCode::BytecodeMalformed);
+
+    // the same-label shadow reads back with both rows intact
+    let module = Module::new("m", TargetClass::Bytecode, Hash128::ZERO)
+        .with_tag("a", "same", 0u8)
+        .with_tag("b", "same", 1u8);
+    let read_back = read(&write(&module)).expect("the shadow rows read");
+    assert_eq!(read_back.tags(), [
+        MemberTag {
+            decl: "a".to_owned(),
+            name: "same".to_owned(),
+            id: 0
+        },
+        MemberTag {
+            decl: "b".to_owned(),
+            name: "same".to_owned(),
+            id: 1
+        },
+    ]);
 }
 
 /// A blocks payload declaring 2^32 code words: the count itself must
@@ -431,10 +445,10 @@ fn code_word_count_beyond_u32_rejected() {
     let dir_entries_at = bytes.len();
     bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
     let blocks_at = bytes.len();
-    // blocks payload v4: one function "f" with no params, slots, or
+    // blocks payload v5: one function "f" with no params, slots, or
     // constants, then the over-range code count uleb (2^32) — the count
     // rejects before the trailing tables are reached
-    bytes.extend_from_slice(&[4, 1, 1, b'f', 0, 0, 0, 0]);
+    bytes.extend_from_slice(&[5, 1, 1, b'f', 0, 0, 0, 0]);
     bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
     let blocks_len = bytes.len() - blocks_at;
     let constants_at = bytes.len();
@@ -508,9 +522,9 @@ fn huge_chain_count_rejected() {
     let dir_entries_at = bytes.len();
     bytes.extend_from_slice(&[0u8; 12]); // four 3-byte entries, patched below
     let blocks_at = bytes.len();
-    // blocks payload v4: zero functions, then the chain count uleb (2^40)
+    // blocks payload v5: zero functions, then the chain count uleb (2^40)
     // — the first chain record is absent, so the stream ends there
-    bytes.extend_from_slice(&[4, 0]);
+    bytes.extend_from_slice(&[5, 0]);
     bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x20]);
     let blocks_len = bytes.len() - blocks_at;
     let constants_at = bytes.len();
