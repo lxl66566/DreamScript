@@ -1,0 +1,19 @@
+// The refused generic assert_eq spelling: a generic body refuses
+// through every door it needs — the abort shape first (the panic
+// return's type variable never solves inside the if arm, so the
+// arm's value unions it into a `() | t` that does not fit the unit
+// answer), the equality compare underneath (the checker admits `==`
+// over a type variable and the lowering refuses it — no uop covers a
+// variable's runtime word kind, the reflection seam the
+// per-instantiation frames own), and the message rendering beside
+// them (the interpolation hole's `show` dispatch never solves over a
+// variable). The landed members are the concrete per-width spellings.
+
+fn assert_eq_any[t] (a: t, b: t, msg: string) -> () {
+  if !(a == b) { panic(msg) }
+}
+
+fn main() -> int {
+  assert_eq_any(1, 1, "ints")
+  0
+}

@@ -1,0 +1,9 @@
+// source: the G4 visibility round's cross-file half, the package-fixture port
+// purpose: pub(pkg) and pub names answer the cross-file use site while a private name refuses per use site with the two-span DS4017 - checked beside the defining file, never alone
+// items:
+// main: stage: typecheck
+// peek: stage: reject a private name used outside its defining file refuses with the two-span private diagnostic (DS4017)
+
+fn main() -> int { internal() + open() }
+
+fn peek() -> int { hidden() }

@@ -1,0 +1,23 @@
+pub struct cell {
+  n: int
+}
+pub struct pair {
+  a: int
+  b: int
+}
+pub fn make(n: int) -> cell {
+  cell { n: n }
+}
+pub trait shapey {
+  fn size(self) -> int
+}
+impl shapey for pair {
+  fn size(self) -> int {
+    self.a + self.b
+  }
+}
+impl shapey for cell {
+  fn size(self) -> int {
+    self.n
+  }
+}

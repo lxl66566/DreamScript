@@ -1,0 +1,23 @@
+// source: todo item 58's tuple-field slice, the linked word vocabulary's positional product
+// purpose: a linked struct's tuple field binds through its word-layout fact - one plain word per positional member - so the consumer constructs, destructures in place, and hands values to the producer's own tuple-taking functions
+// items:
+// std-io: stage: m7
+// blobs-link: stage: m7
+// main: stage: run
+
+import @std/io (println)
+import @blobs (pairfield, tagged_pair, mk_pair, pair_sum, mk_tagged, tag_weight)
+
+fn main() -> int {
+  const own = pairfield { p: (3, 4) }
+  const (a, b) = own.p
+  const made = mk_pair(10, 20)
+  var total = a + b + pair_sum(made) + pair_sum(own)
+  const tagged = mk_tagged("hey")
+  const (label, raw) = tagged.t
+  total = total + len(label) + len(raw) + tag_weight(tagged)
+  const own_tagged = tagged_pair { t: ("hi", [b'z', b'q']) }
+  total = total + tag_weight(own_tagged)
+  println("${total}")
+  0
+}

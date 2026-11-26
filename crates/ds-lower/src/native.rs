@@ -598,6 +598,43 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::F64),
     },
     Native {
+        // the half rounds away from zero, the IEEE edges answering (a
+        // NaN or infinite operand answering itself)
+        name: "round",
+        module: NativeModule::Builtin,
+        index: 102,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // the integer-valued float, the fraction discarded toward zero
+        name: "trunc",
+        module: NativeModule::Builtin,
+        index: 103,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // the natural logarithm (Rust's `ln` spelling: the flat `log`
+        // name stays the corpus files' own extern), 0.0 to negative
+        // infinity, a negative operand to NaN
+        name: "ln",
+        module: NativeModule::Builtin,
+        index: 104,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        // the natural exponential
+        name: "exp",
+        module: NativeModule::Builtin,
+        index: 105,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
+        name: "tan",
+        module: NativeModule::Builtin,
+        index: 106,
+        shape: NativeShape::Total(SlotType::F64),
+    },
+    Native {
         // the membership read, the empty needle always occurring
         name: "contains",
         module: NativeModule::Builtin,

@@ -684,6 +684,12 @@ pub extern fn eprintln(msg: string) -> ()
 pub extern fn exit[t](code: int) -> t
 ```
 
+#### `exp`
+
+```ds
+pub extern fn exp(x: float) -> float
+```
+
 #### `fields`
 
 ```ds
@@ -763,6 +769,12 @@ spelling for `s.len()` and `xs.len()` alike.
 
 ```ds
 pub extern fn len[t](xs: t) -> int
+```
+
+#### `ln`
+
+```ds
+pub extern fn ln(x: float) -> float
 ```
 
 #### `local_addr`
@@ -1043,6 +1055,12 @@ pub extern fn reduce[t](xs: list[t], init: t, f: fn(t, t) -> t) -> t
 pub extern fn remove(path: string) -> () | io_err
 ```
 
+#### `round`
+
+```ds
+pub extern fn round(x: float) -> float
+```
+
 #### `send`
 
 The net face's ds-source handlers over the raw externs: the same
@@ -1098,11 +1116,12 @@ pub extern fn sort[t: ord](xs: list[t]) -> list[t]
 
 #### `sqrt`
 
-The float math family (the 2026-11-21 pure-builtin round): IEEE f64
-semantics over the float type, total by construction — no operand
-shape traps (a negative sqrt answers NaN). `atan2` takes (y, x), the
-quadrant read off both signs; `pow` takes (base, exp). `abs` covers
-the float width alone; no int sibling exists.
+The float math family: IEEE f64 semantics over the float type, total
+by construction — no operand shape traps (a negative sqrt or ln
+answers NaN, a NaN or infinite operand answers
+itself). `atan2` takes (y, x), the quadrant read off both signs;
+`pow` takes (base, exp). `abs`, `round`, and `trunc` cover the float
+width alone; no int sibling exists.
 
 ```ds
 pub extern fn sqrt(x: float) -> float
@@ -1132,6 +1151,12 @@ pub extern fn str_hash(s: string) -> int
 pub extern fn tail[t](xs: list[t]) -> list[t]
 ```
 
+#### `tan`
+
+```ds
+pub extern fn tan(x: float) -> float
+```
+
 #### `time`
 
 The clock pair: `time` answers epoch nanoseconds (the wall clock —
@@ -1147,6 +1172,12 @@ pub extern fn time() -> int
 
 ```ds
 pub extern fn total_compare(a: float, b: float) -> int
+```
+
+#### `trunc`
+
+```ds
+pub extern fn trunc(x: float) -> float
 ```
 
 #### `try_wait`
@@ -1282,6 +1313,18 @@ impl clone for string { fn clone(self) -> Self }
 
 ```ds
 impl float { fn default() -> float }
+```
+
+The ordering pair on the float's own member tier: the flat
+`max`/`min` names are the int pair's (one declaration per
+value-namespace name — overloads refuse), so the float pair spells
+the same comparison bodies through the dot call; the generic
+ord-routed spelling rides the later linked-surface rounds. The
+comparison answers the partial order: a NaN first operand poisons
+the answer, a NaN second operand loses.
+
+```ds
+impl float { fn max(self, other: float) -> float, fn min(self, other: float) -> float }
 ```
 
 ```ds
@@ -1605,6 +1648,46 @@ pub type row = map[string, string]
 
 ### Functions
 
+#### `assert`
+
+The assert family over the ambient `panic` abort: the condition is
+the bool word and the failure the deliberate-bug abort, so the
+members carry no capability and no return value. The equality pair
+spells one concrete member per scalar width, because a generic body
+refuses the variable word kinds the equality compare and the message
+rendering need (the == chain and the interpolation hole answering no
+runtime kind for a type variable — the reflection seam the generic
+spellings wait on), so the refused generic spelling stays a test
+pin, never a member.
+
+```ds
+pub fn assert(cond: bool, msg: string) -> ()
+```
+
+#### `assert_eq_bool`
+
+```ds
+pub fn assert_eq_bool(a: bool, b: bool, msg: string) -> ()
+```
+
+#### `assert_eq_float`
+
+```ds
+pub fn assert_eq_float(a: float, b: float, msg: string) -> ()
+```
+
+#### `assert_eq_int`
+
+```ds
+pub fn assert_eq_int(a: int, b: int, msg: string) -> ()
+```
+
+#### `assert_eq_string`
+
+```ds
+pub fn assert_eq_string(a: string, b: string, msg: string) -> ()
+```
+
 #### `char_at`
 
 The checked char read (B8): the char at the position, none outside
@@ -1832,7 +1915,8 @@ solves from a concrete fn or lambda argument (containment binds a
 bare return variable alone, and no lambda-return annotation exists),
 so `flatten` lands as the composable half — the flat spelling
 composing at call sites over map's hosted lambda. scan and compose
-wait behind the seams above (their residuals ride todo item 81).
+wait behind the seams above (their residuals ride the reflection
+seams the generic bodies wait on).
 
 The race combinators over the timer capability: the caller builds the
 thunk list (non-capturing scalar lambdas alone — a closure cannot
@@ -1866,7 +1950,7 @@ contract and the byte-identical pool answers carry over unchanged.
 The free generic body's one-word instantiation boundary binds the
 fold's init parameter to one-word element types through this
 spelling (the multi-word fold keeps its seam-level coverage until the
-generic-body staging seam widens, todo item 81's residuals).
+generic-body staging seam widens, the same generic-body residuals).
 
 The seeded PRNG (splitmix64): the stream state is one int the caller
 holds — `rand_next` the pure state step (one wrapping add), `rand`

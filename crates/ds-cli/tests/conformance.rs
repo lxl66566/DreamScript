@@ -7,8 +7,16 @@
 //! list[record] checked reads, the transitive dispatch chain, the E5
 //! teardown deinit prints (their order deterministic across runs), and
 //! the tutorial's show-interpolation and receiverless-default answers.
+//!
+//! Beside the single-file gate stands the package-fixture gate: the
+//! multi-package corpus (conformance/packages/) composes producer and
+//! consumer through the same binary paths.
 
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
+
+use ds_check::corpus::item_stages;
+use ds_diag::Files;
+use ds_parse::parse;
 
 mod support;
 
@@ -289,5 +297,152 @@ fn the_fallible_io_spellings_answer_the_io_err_union() {
     run_golden(
         "io_fallible.ds",
         "write refused\nlist refused\nsize not_found\n0\n",
+    );
+}
+
+/// The package-fixture gate beside the file gate: one directory per
+/// fixture below conformance/packages/ — the consumer package root
+/// `app/` (its `ds.pkg` manifest, the `main.ds` entry carrying the
+/// corpus `// items:` header, and any same-package member files)
+/// beside an optional producer package root the manifest's path dep
+/// names. The gate composes both sides through the real binary paths,
+/// in deterministic fixture-name order: every fixture checks through
+/// `ds check` beside its members when it declares no producer root (its
+/// staged rejects are the fixture's own — printed, never fatal, one
+/// diagnostic per reject item), and a fixture carrying a `run.golden`
+/// runs through `ds run` and byte-pins it exactly like the single-file
+/// corpus does; a fixture without a golden stays on the check leg alone
+/// (a reject-staged fixture the run would refuse, or a check-only one
+/// whose surface sits outside the M3 lowering contract). A
+/// cross-package fixture's run is its own check — the consumer's
+/// compile types against the linked surface the resolution serves — so
+/// the linked members the single-file corpus cannot carry gate here.
+#[test]
+fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
+    let packages = ds_corpus_path::dir().join("packages");
+    let mut fixtures: Vec<PathBuf> = fs::read_dir(&packages)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the package fixtures exist below {}: {error}",
+                packages.display()
+            )
+        })
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    fixtures.sort();
+    assert!(
+        fixtures.len() >= 5,
+        "the package fixtures landed below {}",
+        packages.display()
+    );
+    for fixture in fixtures {
+        let name = fixture
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the fixture directory names")
+            .to_owned();
+        let app = fixture.join("app");
+        let entry = app.join("main.ds");
+        let source = fs::read_to_string(&entry).unwrap_or_else(|error| panic!("{name}: {error}"));
+        // the entry's header discipline: the items header aligns with
+        // the parsed items, exactly like the single-file corpus
+        let mut files = Files::new();
+        let id = files.add_source(format!("{name}/app/main.ds"), &source);
+        let ast = parse(&files, id).unwrap_or_else(|diags| panic!("{name}: {diags:?}"));
+        let staged = item_stages(&source, &ast)
+            .unwrap_or_else(|| panic!("{name}: the header and the entry's items disagree"));
+        assert!(
+            staged
+                .iter()
+                .all(|stage| !stage.stage.starts_with("unresolved")),
+            "{name}: package fixtures stage no unresolved items"
+        );
+        let rejects = staged
+            .iter()
+            .filter(|stage| stage.stage.starts_with("reject "))
+            .count();
+        // the producer roots: every directory beside app/
+        let producers = fs::read_dir(&fixture)
+            .expect("the fixture directory reads")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map_or(false, |kind| kind.is_dir()))
+            .count()
+            .saturating_sub(1);
+        // the check leg: the one-namespace fixtures gate beside their
+        // members; a cross-package fixture's check is its run below
+        if producers == 0 {
+            let mut checks: Vec<PathBuf> = fs::read_dir(&app)
+                .expect("the consumer root reads")
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ds"))
+                .collect();
+            checks.sort();
+            let out = ds()
+                .arg("check")
+                .args(&checks)
+                .output()
+                .expect("the binary runs");
+            assert!(
+                out.status.success(),
+                "{name}: the composed check exits clean (stderr: {})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                stderr.matches("error[").count(),
+                rejects,
+                "{name}: every reject item fires its one diagnostic: {stderr}"
+            );
+        }
+        // the run leg: the golden's presence opts the fixture into the
+        // composed run, byte-pinned exactly like the single-file corpus;
+        // its absence keeps the fixture on the check leg alone — a
+        // reject-staged fixture (the run would refuse) or a check-only
+        // one whose surface sits outside the M3 lowering contract
+        let golden_path = fixture.join("run.golden");
+        if golden_path.exists() {
+            assert!(
+                rejects == 0,
+                "{name}: a reject-staged fixture carries no run golden"
+            );
+            let golden = fs::read_to_string(&golden_path)
+                .unwrap_or_else(|error| panic!("{name}: the run golden reads: {error}"));
+            let out = ds()
+                .arg("run")
+                .arg(&entry)
+                .output()
+                .expect("the binary runs");
+            assert!(
+                out.status.success(),
+                "{name}: the composed run exits clean (stderr: {})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                golden,
+                "{name}: the golden stdout drifted"
+            );
+        } else {
+            assert!(
+                rejects > 0
+                    || staged
+                        .iter()
+                        .all(|stage| stage.stage == "typecheck" || stage.stage.starts_with('m')),
+                "{name}: a fixture without a run golden gates through the check leg alone"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_float_surface_answers_the_family_and_the_ordering_pair() {
+    // the math family's five completions over their IEEE rows, the
+    // limiting rows staying total, and the float max/min members
+    // ordering through the dot call with the comparison's own NaN
+    // answer (the unit tail prints the run's own 0)
+    run_golden(
+        "float_surface.ds",
+        "unary true\nlimits true\norder true\nnan true\n0\n",
     );
 }

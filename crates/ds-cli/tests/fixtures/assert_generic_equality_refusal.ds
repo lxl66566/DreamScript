@@ -1,0 +1,14 @@
+// The refused generic equality spelling, isolated from the abort
+// shape: the checker admits a structural `==` over a type variable
+// (set algebra over the variable's own member) and the lowering
+// refuses it — no uop covers a variable's runtime word kind, the
+// reflection seam the per-instantiation frames own. This is the door
+// no spelling of a generic equality member dodges.
+
+fn eq_any[t] (a: t, b: t) -> bool {
+  a == b
+}
+
+fn main() -> int {
+  if eq_any(1, 1) { 1 } else { 0 }
+}

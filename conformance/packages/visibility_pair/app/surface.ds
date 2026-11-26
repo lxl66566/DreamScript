@@ -1,0 +1,12 @@
+// source: the G4 visibility round's defining file, the package-fixture port
+// purpose: private is the defining file's alone and pub(pkg) opens the package while pub opens dependents - the file-grain tiers one package composes
+// items:
+// hidden: stage: m7
+// internal: stage: typecheck
+// open: stage: typecheck
+// uses-own: stage: typecheck
+
+fn hidden() -> int { 1 }
+pub(pkg) fn internal() -> int { 2 }
+pub fn open() -> int { 3 }
+fn uses_own() -> int { hidden() + internal() + open() }

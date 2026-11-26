@@ -1,0 +1,16 @@
+// The @std assert family's acceptance program: the bool-typed
+// `assert` aborting through the ambient `panic` on the false arm, the
+// per-width equality pair answering on the equal arm and aborting with
+// the rendered message on the differing one, and the passing calls
+// answering in statement position.
+
+fn main() -> int {
+  assert(true, "holds")
+  assert(1 + 1 == 2, "arithmetic holds")
+  assert_eq_int(2 + 2, 4, "ints")
+  assert_eq_float(1.5, 1.5, "floats")
+  assert_eq_string("a" + "b", "ab", "strings")
+  assert_eq_bool(1 < 2, true, "bools")
+  println("face asserted")
+  0
+}

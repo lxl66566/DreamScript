@@ -1,0 +1,25 @@
+// source: todo item 58's linked-default-body slice, DS2044's producer-side walk
+// purpose: a trait's default body crosses the link seam - the member row carries the declared body's linked table index, and a consumer's dispatch whose solving impl spells no member, the producer's own omitting impl or the consumer's local one, CALLGs into the linked default body while the spelled impl answers its own body
+// items:
+// std-io: stage: m7
+// shapes-link: stage: m7
+// float-impl: stage: run
+// weigh: stage: run
+// main: stage: run
+
+import @std/io (println)
+import @shapes (defaulted)
+
+impl defaulted for float {}
+
+fn weigh(s: string) -> int {
+  s.answer()
+}
+
+fn main() -> int {
+  const once = 3.answer()
+  const own = 2.5.answer()
+  const x = "x"
+  println("${once + own + weigh(x)}")
+  0
+}

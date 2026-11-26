@@ -1,0 +1,22 @@
+// source: todo item 58's linked-trait-impl slice, the foreign method-registry rows
+// purpose: a producer's trait impl crosses the link seam - the impl's owner-keyed member links declare the instance over the minted head, and the consumer's dot-call dispatches through CALLG to the linked member body over a plain site, a tail site, and a second head
+// items:
+// std-io: stage: m7
+// shapes-link: stage: m7
+// weigh: stage: run
+// main: stage: run
+
+import @std/io (println)
+import @shapes (pair, cell, shapey, make)
+
+fn weigh(p: pair) -> int {
+  p.size()
+}
+
+fn main() -> int {
+  const made = pair { a: 30, b: 12 }
+  const once = made.size()
+  const c = make(4)
+  println("${once + weigh(made) + c.size()}")
+  0
+}

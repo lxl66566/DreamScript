@@ -45,9 +45,10 @@ use ds_vm::{
         BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX,
         BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
         BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
-        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_SORT, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE,
-        BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL, BUILTIN_TOTAL_COMPARE,
-        BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
+        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND, BUILTIN_SORT, BUILTIN_STR_BOOL,
+        BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL,
+        BUILTIN_TAN, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
+        BUILTIN_UTF8_ENCODE,
     },
     platform::{
         OP_CLOSE_RAW, OP_COUNT, OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_OPEN_FILE, OP_PRINT,
@@ -1141,9 +1142,14 @@ fn both_native_modules_are_installed_and_resolvable() {
     for index in BUILTIN_ARENA_NEW..=BUILTIN_ARENA_AT {
         assert!(reg.resolve_native("builtin", index).is_some());
     }
+    // the float math family's completion (102-106): the five unary rows
+    // answering over the f64 word beside the family's originals
+    for index in BUILTIN_ROUND..=BUILTIN_TAN {
+        assert!(reg.resolve_native("builtin", index).is_some());
+    }
     assert!(
-        reg.resolve_native("builtin", 102).is_none(),
-        "102 table entries: the core's, the list block, the fiber pair, the push, the map block,
+        reg.resolve_native("builtin", 107).is_none(),
+        "107 table entries: the core's, the list block, the fiber pair, the push, the map block,
      the generic container closes, the reentrant combinators, the nursery seams, the join,
      the partition, the fork-join combinator, the fork-join fold, the float sort key, the
      string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1151,10 +1157,10 @@ fn both_native_modules_are_installed_and_resolvable() {
      reserved slot, the map key face, the bytes collection's face with its content
      compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
      bare trap primitive, the list and map collections' content compares, the
-     byte/u32 width bridges, the float math family, the string search triple, the
-     bounded channel's intercepted send/recv/construct triple, the ord-routed list
-     sort's reserved slot, the collection member round, and the arena face's
-     construct/store/remove/read seams"
+     byte/u32 width bridges, the float math family and its completion, the string
+     search triple, the bounded channel's intercepted send/recv/construct triple, the
+     ord-routed list sort's reserved slot, the collection member round, the arena
+     face's construct/store/remove/read seams"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

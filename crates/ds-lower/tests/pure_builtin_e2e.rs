@@ -60,7 +60,7 @@ fn the_rounds_rows_answer_and_the_heap_drains() {
     );
     assert_eq!(
         vm.captured_output(),
-        b"sqrt 2 floor 2 ceil 3\n",
+        b"sqrt 2 floor 2 ceil 3 round 3 trunc 2\n",
         "the interpolated float conversions of the family's answers"
     );
     assert!(
@@ -91,5 +91,46 @@ fn the_float_family_answers_the_platforms_own_ieee_rows() {
     assert_eq!(
         vm.run("pure_builtin_probe", "atan2_probe", &[]),
         Ok(FrameAnswer::one(Value::F64(1.0f64.atan2(0.0))))
+    );
+    // the completion rows: the half rounds away from zero, the
+    // transcendentals answer the host's own bits, and the limit rows
+    // hold (a NaN or negative operand answers NaN, ln(0) negative
+    // infinity, exp(infinity) positive infinity)
+    assert_eq!(
+        vm.run("pure_builtin_probe", "round_probe", &[]),
+        Ok(FrameAnswer::one(Value::F64(-3.0)))
+    );
+    assert_eq!(
+        vm.run("pure_builtin_probe", "trunc_probe", &[]),
+        Ok(FrameAnswer::one(Value::F64(2.0)))
+    );
+    assert_eq!(
+        vm.run("pure_builtin_probe", "ln_probe", &[]),
+        Ok(FrameAnswer::one(Value::F64(0.5f64.ln())))
+    );
+    assert_eq!(
+        vm.run("pure_builtin_probe", "exp_probe", &[]),
+        Ok(FrameAnswer::one(Value::F64(1.5f64.exp())))
+    );
+    assert_eq!(
+        vm.run("pure_builtin_probe", "tan_probe", &[]),
+        Ok(FrameAnswer::one(Value::F64(0.5f64.tan())))
+    );
+    for probe in ["nan_round", "nan_ln"] {
+        let Ok(FrameAnswer::Words { head, n: 1 }) = vm.run("pure_builtin_probe", probe, &[]) else {
+            panic!("{probe} answers one word");
+        };
+        let Value::F64(nan) = head[0] else {
+            panic!("{probe} answers a float word");
+        };
+        assert!(nan.is_nan(), "{probe} answers NaN");
+    }
+    assert_eq!(
+        vm.run("pure_builtin_probe", "ln_zero", &[]),
+        Ok(FrameAnswer::one(Value::F64(f64::NEG_INFINITY)))
+    );
+    assert_eq!(
+        vm.run("pure_builtin_probe", "exp_infinite", &[]),
+        Ok(FrameAnswer::one(Value::F64(f64::INFINITY)))
     );
 }

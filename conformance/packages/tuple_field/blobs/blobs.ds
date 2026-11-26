@@ -1,0 +1,20 @@
+pub struct pairfield {
+  p: (int, int)
+}
+pub struct tagged_pair {
+  t: (string, list[byte])
+}
+pub fn mk_pair(a: int, b: int) -> pairfield {
+  pairfield { p: (a, b) }
+}
+pub fn pair_sum(pf: pairfield) -> int {
+  const (a, b) = pf.p
+  a + b
+}
+pub fn mk_tagged(label: string) -> tagged_pair {
+  tagged_pair { t: (label, [b'k']) }
+}
+pub fn tag_weight(tp: tagged_pair) -> int {
+  const (label, raw) = tp.t
+  len(label) + len(raw)
+}

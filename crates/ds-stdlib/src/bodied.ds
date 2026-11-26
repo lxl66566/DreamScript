@@ -32,7 +32,8 @@
 // bare return variable alone, and no lambda-return annotation exists),
 // so `flatten` lands as the composable half — the flat spelling
 // composing at call sites over map's hosted lambda. scan and compose
-// wait behind the seams above (their residuals ride todo item 81).
+// wait behind the seams above (their residuals ride the reflection
+// seams the generic bodies wait on).
 //
 // The race combinators over the timer capability: the caller builds the
 // thunk list (non-capturing scalar lambdas alone — a closure cannot
@@ -66,7 +67,7 @@
 // The free generic body's one-word instantiation boundary binds the
 // fold's init parameter to one-word element types through this
 // spelling (the multi-word fold keeps its seam-level coverage until the
-// generic-body staging seam widens, todo item 81's residuals).
+// generic-body staging seam widens, the same generic-body residuals).
 //
 // The seeded PRNG (splitmix64): the stream state is one int the caller
 // holds — `rand_next` the pure state step (one wrapping add), `rand`
@@ -204,4 +205,53 @@ pub fn rand (seed: int) -> int {
 }
 pub fn rand_seed () -> int {
   rand_next(time())
+}
+
+// The assert family over the ambient `panic` abort: the condition is
+// the bool word and the failure the deliberate-bug abort, so the
+// members carry no capability and no return value. The equality pair
+// spells one concrete member per scalar width, because a generic body
+// refuses the variable word kinds the equality compare and the message
+// rendering need (the == chain and the interpolation hole answering no
+// runtime kind for a type variable — the reflection seam the generic
+// spellings wait on), so the refused generic spelling stays a test
+// pin, never a member.
+pub fn assert (cond: bool, msg: string) -> () {
+  if cond {
+  } else {
+    panic(msg)
+    ()
+  }
+}
+pub fn assert_eq_int (a: int, b: int, msg: string) -> () {
+  if a == b {
+    ()
+  } else {
+    panic("${msg} left ${a} right ${b}")
+    ()
+  }
+}
+pub fn assert_eq_float (a: float, b: float, msg: string) -> () {
+  if a == b {
+    ()
+  } else {
+    panic("${msg} left ${a} right ${b}")
+    ()
+  }
+}
+pub fn assert_eq_string (a: string, b: string, msg: string) -> () {
+  if a == b {
+    ()
+  } else {
+    panic("${msg} left ${a} right ${b}")
+    ()
+  }
+}
+pub fn assert_eq_bool (a: bool, b: bool, msg: string) -> () {
+  if a == b {
+    ()
+  } else {
+    panic("${msg} left ${a} right ${b}")
+    ()
+  }
 }

@@ -1,0 +1,31 @@
+// source: the float face completion round (the math family's missing members and the member-tier ordering pair)
+// purpose: the float math family's five completions answer their IEEE rows over values, the limiting rows stay total (a NaN or negative ln operand answers NaN, ln at zero answers negative infinity, exp at both infinities answers 0 and infinity), and the float max/min members order through the dot call with the comparison's own NaN answer — a NaN first operand poisoning the result, a NaN second operand losing; the flat max/min names stay the int pair's
+// items:
+// unary-values: stage: run
+// limiting-rows: stage: run
+// ordering-pair: stage: run
+// nan-answers: stage: run
+// main: stage: run
+
+fn unary_values() -> bool {
+  round(2.5) == 3.0 && round(0.0 - 2.5) == 0.0 - 3.0 && round(2.4) == 2.0 && trunc(2.9) == 2.0 && trunc(0.0 - 2.9) == 0.0 - 2.0 && round(0.5) == 1.0 && trunc(2.999) == 2.0
+}
+
+fn limiting_rows() -> bool {
+  ln(1.0) == 0.0 && exp(0.0) == 1.0 && ln(exp(1.0)) == 1.0 && tan(0.0) == 0.0 && ln(0.0) == 0.0 - 1.0 / 0.0 && ln(0.0 - 1.0) == 0.0 / 0.0 && exp(1.0 / 0.0) == 1.0 / 0.0 && exp(0.0 - 1.0 / 0.0) == 0.0
+}
+
+fn ordering_pair() -> bool {
+  1.5.max(2.5) == 2.5 && 1.5.min(2.5) == 1.5 && (0.0 - 1.5).max(1.5) == 1.5 && (0.0 - 1.5).min(1.5) == 0.0 - 1.5 && 2.0.max(2.0) == 2.0 && 2.0.min(2.0) == 2.0 && 1.5.max(2.5).min(2.0) == 2.0
+}
+
+fn nan_answers() -> bool {
+  (0.0 / 0.0).max(1.0) == 0.0 / 0.0 && 1.5.min(0.0 / 0.0) == 1.5 && (0.0 / 0.0).min(1.0) == 0.0 / 0.0 && round(0.0 / 0.0) == 0.0 / 0.0 && ln(0.0 / 0.0) == 0.0 / 0.0
+}
+
+fn main() -> () {
+  println("unary ${unary_values()}")
+  println("limits ${limiting_rows()}")
+  println("order ${ordering_pair()}")
+  println("nan ${nan_answers()}")
+}

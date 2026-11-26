@@ -1,0 +1,15 @@
+// source: G3 order-independent top levels, the cross-file direction's package-fixture port
+// purpose: the entry file's top-level binding consumes a later member's top-level binding - the composing walk reads the consuming file first - and the run refuses at the M3 top-level-value boundary the single-file corpus records (DS4009), so the fixture gates through the check leg alone
+// items:
+// std-io: stage: m7
+// cross-echo: stage: typecheck
+// main: stage: typecheck
+
+import @std/io (println)
+
+const echo = far_seed
+
+fn main() -> int {
+  println("${echo}")
+  0
+}

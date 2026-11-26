@@ -1,0 +1,11 @@
+pub trait defaulted {
+  fn answer(self) -> int {
+    7
+  }
+}
+impl defaulted for int {}
+impl defaulted for string {
+  fn answer(self) -> int {
+    5
+  }
+}

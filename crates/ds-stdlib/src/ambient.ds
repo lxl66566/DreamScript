@@ -484,11 +484,12 @@ pub extern fn utf8_decode (b: bytes) -> string | utf8_err
 // The generic count over the free tier's instance table [H3]: one
 // spelling for `s.len()` and `xs.len()` alike.
 pub extern fn len[t] (xs: t) -> int
-// The float math family (the 2026-11-21 pure-builtin round): IEEE f64
-// semantics over the float type, total by construction — no operand
-// shape traps (a negative sqrt answers NaN). `atan2` takes (y, x), the
-// quadrant read off both signs; `pow` takes (base, exp). `abs` covers
-// the float width alone; no int sibling exists.
+// The float math family: IEEE f64 semantics over the float type, total
+// by construction — no operand shape traps (a negative sqrt or ln
+// answers NaN, a NaN or infinite operand answers
+// itself). `atan2` takes (y, x), the quadrant read off both signs;
+// `pow` takes (base, exp). `abs`, `round`, and `trunc` cover the float
+// width alone; no int sibling exists.
 pub extern fn sqrt (x: float) -> float
 pub extern fn sin (x: float) -> float
 pub extern fn cos (x: float) -> float
@@ -497,6 +498,28 @@ pub extern fn floor (x: float) -> float
 pub extern fn ceil (x: float) -> float
 pub extern fn pow (base: float, exp: float) -> float
 pub extern fn abs (x: float) -> float
+pub extern fn round (x: float) -> float
+pub extern fn trunc (x: float) -> float
+pub extern fn ln (x: float) -> float
+pub extern fn exp (x: float) -> float
+pub extern fn tan (x: float) -> float
+
+// The ordering pair on the float's own member tier: the flat
+// `max`/`min` names are the int pair's (one declaration per
+// value-namespace name — overloads refuse), so the float pair spells
+// the same comparison bodies through the dot call; the generic
+// ord-routed spelling rides the later linked-surface rounds. The
+// comparison answers the partial order: a NaN first operand poisons
+// the answer, a NaN second operand loses.
+impl float {
+  fn max (self, other: float) -> float {
+    if self < other { other } else { self }
+  }
+  fn min (self, other: float) -> float {
+    if other < self { other } else { self }
+  }
+}
+
 // The core string face's own concatenation seam: the `+` and `+=`
 // spellings lower through it beside the interpolation's STRCAT, the
 // free spelling the F3 receiver fallback routes `xs.concat(ys)`'s

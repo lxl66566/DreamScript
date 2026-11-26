@@ -128,6 +128,11 @@
 //! | 95    | `map_remove (m: map, key: value) -> unit` — the in-place row removal, a missing key a no-op (the member tier's `remove`) |
 //! | 96    | `map_contains (m: map, key: value) -> bool` — the membership read (the member tier's `contains`) |
 //! | 97    | `map_entries (m: map) -> list` — the entry-order pair list, one key word then the value span per row (the member tier's `entries`) |
+//! | 102   | `round (x: float) -> float` — the half-away-from-zero round |
+//! | 103   | `trunc (x: float) -> float` — the integer-valued float |
+//! | 104   | `ln (x: float) -> float` — the natural logarithm |
+//! | 105   | `exp (x: float) -> float` |
+//! | 106   | `tan (x: float) -> float` |
 //!
 //! The surface-level `str()` is one function in source; the core table
 //! carries its typed instances, and lowering emits the `str_*` FuncRef for
@@ -834,6 +839,17 @@ pub const BUILTIN_ARENA_REMOVE: u32 = 100;
 /// live handle, a `Ref` element answering as one retained count; a
 /// dangling handle traps deterministically.
 pub const BUILTIN_ARENA_AT: u32 = 101;
+/// `round(x: float) -> float` — the nearest integer, the half away from zero, as a float.
+pub const BUILTIN_ROUND: u32 = 102;
+/// `trunc(x: float) -> float` — the integer-valued float (the fraction discarded).
+pub const BUILTIN_TRUNC: u32 = 103;
+/// `ln(x: float) -> float` — the natural logarithm (`ln(0.0)` answers negative infinity, a
+/// negative operand NaN).
+pub const BUILTIN_LN: u32 = 104;
+/// `exp(x: float) -> float` — the natural exponential.
+pub const BUILTIN_EXP: u32 = 105;
+/// `tan(x: float) -> float`.
+pub const BUILTIN_TAN: u32 = 106;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -1681,6 +1697,11 @@ float_unary!(cos_fn, f64::cos);
 float_unary!(floor_fn, f64::floor);
 float_unary!(ceil_fn, f64::ceil);
 float_unary!(abs_fn, f64::abs);
+float_unary!(round_fn, f64::round);
+float_unary!(trunc_fn, f64::trunc);
+float_unary!(log_fn, f64::ln);
+float_unary!(exp_fn, f64::exp);
+float_unary!(tan_fn, f64::tan);
 
 /// `atan2(y: float, x: float) -> float` — the two-argument arctangent:
 /// the quadrant reads off both operands' signs, the signed zeros
@@ -4236,10 +4257,55 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             channel: None,
             func: arena_at_fn,
         },
+        NativeFunction {
+            name: "round",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: round_fn,
+        },
+        NativeFunction {
+            name: "trunc",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: trunc_fn,
+        },
+        NativeFunction {
+            name: "ln",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: log_fn,
+        },
+        NativeFunction {
+            name: "exp",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: exp_fn,
+        },
+        NativeFunction {
+            name: "tan",
+            params: &[SlotType::F64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: tan_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_ARENA_AT, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_ARENA_AT as usize + 1);
+    // BUILTIN_TAN, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_TAN as usize + 1);
     fns
 }
 
@@ -5116,7 +5182,12 @@ mod tests {
         assert_eq!(fns[BUILTIN_ARENA_INSERT as usize].name, "arena_insert");
         assert_eq!(fns[BUILTIN_ARENA_REMOVE as usize].name, "arena_remove");
         assert_eq!(fns[BUILTIN_ARENA_AT as usize].name, "arena_at");
-        assert_eq!(fns.len(), BUILTIN_ARENA_AT as usize + 1);
+        assert_eq!(fns[BUILTIN_ROUND as usize].name, "round");
+        assert_eq!(fns[BUILTIN_TRUNC as usize].name, "trunc");
+        assert_eq!(fns[BUILTIN_LN as usize].name, "ln");
+        assert_eq!(fns[BUILTIN_EXP as usize].name, "exp");
+        assert_eq!(fns[BUILTIN_TAN as usize].name, "tan");
+        assert_eq!(fns.len(), BUILTIN_TAN as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
@@ -5402,7 +5473,10 @@ mod tests {
     /// total: a negative `sqrt`, a NaN propagation, and a negative base
     /// to a non-integer exponent all answer NaN, never a trap; `floor`/
     /// `ceil` keep the signed zero and round the negative halves away
-    /// from and toward zero; `abs` clears the sign bit.
+    /// from and toward zero; `abs` clears the sign bit; `round` carries
+    /// the half away from zero and `trunc` keeps the sign of the zero
+    /// it collapses to; `log`/`exp` answer the limit rows (0 to
+    /// negative infinity, the exponentials to 0 and infinity).
     #[test]
     fn float_math_family_answers_ieee_and_stays_total() {
         let mut objects = Objects::new(FIBER_ROOT);
@@ -5449,6 +5523,38 @@ mod tests {
         assert!(abs_zero.is_sign_positive(), "abs clears the sign bit");
         assert_eq!(unary(abs_fn, f64::NEG_INFINITY), f64::INFINITY);
         assert!(unary(abs_fn, f64::NAN).is_nan());
+        assert_eq!(unary(round_fn, 2.5), 3.0, "the half rounds away from zero");
+        assert_eq!(unary(round_fn, 2.4), 2.0);
+        assert_eq!(unary(round_fn, -2.5), -3.0);
+        assert_eq!(unary(round_fn, f64::INFINITY), f64::INFINITY);
+        assert!(unary(round_fn, f64::NAN).is_nan());
+        assert_eq!(unary(trunc_fn, 2.9), 2.0);
+        assert_eq!(
+            unary(trunc_fn, -2.9),
+            -2.0,
+            "trunc discards the fraction, never floors"
+        );
+        let truncated = unary(trunc_fn, -0.5);
+        assert_eq!(truncated, 0.0);
+        assert!(
+            truncated.is_sign_negative(),
+            "trunc keeps the sign of the zero"
+        );
+        assert_eq!(unary(log_fn, 1.0), 0.0);
+        assert_eq!(unary(log_fn, 0.0), f64::NEG_INFINITY);
+        assert_eq!(unary(log_fn, f64::INFINITY), f64::INFINITY);
+        assert!(unary(log_fn, -1.0).is_nan(), "a negative log answers NaN");
+        assert_eq!(unary(exp_fn, 0.0), 1.0);
+        assert_eq!(unary(exp_fn, 1.0), std::f64::consts::E);
+        assert_eq!(unary(exp_fn, f64::NEG_INFINITY), 0.0);
+        assert_eq!(unary(exp_fn, f64::INFINITY), f64::INFINITY);
+        assert!(unary(exp_fn, f64::NAN).is_nan());
+        assert_eq!(unary(tan_fn, 0.0), 0.0);
+        assert!(
+            unary(tan_fn, f64::INFINITY).is_nan(),
+            "tan of infinity is NaN"
+        );
+        assert!(unary(tan_fn, f64::NAN).is_nan());
     }
 
     /// The two-argument float natives stage (y, x) for `atan2` and
