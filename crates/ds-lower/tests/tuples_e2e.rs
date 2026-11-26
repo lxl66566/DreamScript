@@ -150,3 +150,50 @@ fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
         );
     }
 }
+
+/// The empty tuple `()` is the unit value — the frame's one canonical
+/// word — never a field spelling: a `()`-typed field would span zero
+/// words, so the declaration-side walk refuses it in every position (a
+/// union member's payload shape and the plain struct's own layout
+/// alike) instead of laying a phantom zero-width field, while the
+/// value-side spellings — a unit binding, an `int | ()` member — keep
+/// their word.
+#[test]
+fn empty_tuple_fields_refuse_at_the_declaration() {
+    let cases = [
+        // the union-member shape: the zero-width span used to reach the
+        // region claim itself
+        (
+            "struct unit_box { u: () }\nfn id(x: unit_box | int) -> int { 0 }\nfn main() -> int { \
+             id(1) }",
+            "stays outside the inline-span vocabulary",
+        ),
+        // the plain struct's own layout, reached through the literal
+        // that used to refuse at the construction's width mismatch
+        (
+            "struct unit_box { u: () }\nfn main() -> int { const v = unit_box { u: () }\n 0 }",
+            "stays outside the inline-span vocabulary",
+        ),
+    ];
+    for (source, needle) in cases {
+        let Err(error) = lower_inline(source) else {
+            panic!("the empty-tuple field does not reject: {source}");
+        };
+        assert!(
+            error.to_string().contains(needle),
+            "the rejection names its seam: {error}"
+        );
+    }
+}
+
+/// The unit value's own spellings stay in the vocabulary: a `()`-typed
+/// parameter passes the canonical word, and an `int | ()` member rides
+/// the union's tag word with no payload region of its own.
+#[test]
+fn the_unit_value_and_union_member_keep_lowering() {
+    lower_inline(
+        "fn sink(u: ()) -> int { 0 }\nfn pick() -> int | () { 1 }\nfn main() -> int {\n  match \
+         pick() { v => sink(()) }\n }",
+    )
+    .expect("the unit value spellings lower");
+}

@@ -7601,10 +7601,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Ok(vec![word]);
                 }
                 let shape = self.shapes.atom_shape(atom)?;
-                let Shape::Word(slot) = shape else {
+                let Shape::Word(slot) = &*shape else {
                     return Err(mismatch("an equality plan"));
                 };
-                Ok(vec![WordEq::Scalar(eq_op(slot)?)])
+                Ok(vec![WordEq::Scalar(eq_op(*slot)?)])
             },
         }
     }
@@ -7705,10 +7705,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     return Ok(vec![word]);
                 }
                 let shape = self.shapes.atom_shape(atom)?;
-                let Shape::Word(slot) = shape else {
+                let Shape::Word(slot) = &*shape else {
                     return Err(mismatch("an equality plan"));
                 };
-                Ok(vec![WordEq::Scalar(eq_op(slot)?)])
+                Ok(vec![WordEq::Scalar(eq_op(*slot)?)])
             },
         }
     }

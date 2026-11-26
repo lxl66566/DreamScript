@@ -532,7 +532,7 @@ impl<'a> Shapes<'a> {
     ) -> Result<Shape, LowerError> {
         Ok(match members {
             [] => Shape::Word(SlotType::I64), // the empty type; never flows
-            [only] => self.atom_shape(*only)?,
+            [only] => (*self.atom_shape(*only)?).clone(),
             _ => self.union_shape(members, depth)?,
         })
     }
@@ -574,13 +574,15 @@ impl<'a> Shapes<'a> {
     }
 
     /// A single-atom type: a primitive or unit-tag word, a bare struct
-    /// span, or the arity-0 tuple's unit word.
-    pub(crate) fn atom_shape(&mut self, atom: TypeId) -> Result<Shape, LowerError> {
+    /// span, or the arity-0 tuple's unit word — the cached handle, the
+    /// way `shape` and `words` share theirs, so a walk reading one atom
+    /// per element never copies the shape.
+    pub(crate) fn atom_shape(&mut self, atom: TypeId) -> Result<Rc<Shape>, LowerError> {
         if let Some(shape) = self.atom_cache.get(&atom) {
-            return Ok(Shape::clone(shape));
+            return Ok(shape.clone());
         }
-        let shape = self.atom_shape_uncached(atom)?;
-        self.atom_cache.insert(atom, Rc::new(shape.clone()));
+        let shape = Rc::new(self.atom_shape_uncached(atom)?);
+        self.atom_cache.insert(atom, shape.clone());
         Ok(shape)
     }
 
@@ -624,7 +626,7 @@ impl<'a> Shapes<'a> {
                     // tuple vocabulary keeps one word per element until
                     // those spans stage per element.
                     let shape = self.atom_shape(*element)?;
-                    let Shape::Word(slot) = shape else {
+                    let Shape::Word(slot) = &*shape else {
                         return Err(unsupported(
                             "a multi-word tuple element",
                             "tuple elements lower as one plain frame word; a wider element needs \
@@ -633,7 +635,7 @@ impl<'a> Shapes<'a> {
                     };
                     fields.push(MemberField {
                         name: None,
-                        slots: vec![slot],
+                        slots: vec![*slot],
                         word: word_of(index)?,
                     });
                 }
@@ -713,14 +715,15 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Tuple(elements) => {
                 let mut out = Vec::with_capacity(elements.len());
                 for element in elements {
-                    let Shape::Word(slot) = self.atom_shape(*element)? else {
+                    let shape = self.atom_shape(*element)?;
+                    let Shape::Word(slot) = &*shape else {
                         return Err(unsupported(
                             "a multi-word tuple member element",
                             "tuple elements lower as one plain frame word; a wider element needs \
                              its whole span staged per element, which tuple spans do not carry yet",
                         ));
                     };
-                    out.push(PayloadField::word(None, slot));
+                    out.push(PayloadField::word(None, *slot));
                 }
                 Ok(out)
             },
@@ -771,10 +774,16 @@ impl<'a> Shapes<'a> {
             // one plain frame word per element — the tuple value
             // vocabulary: a wider element (a nested tuple, a struct, a
             // union) stays outside, exactly as a tuple literal's element
-            // does
+            // does, and the empty tuple `()` stays outside with it: the
+            // unit value is the frame's one canonical word, never a
+            // per-field spelling, so a `()`-typed field would span zero
+            // words
             TypeExpr::Tuple(elements) => {
-                let mut slots = Vec::with_capacity(elements.len());
-                for element in elements {
+                let [first, rest @ ..] = &elements[..] else {
+                    return Ok(None);
+                };
+                let mut slots = Vec::with_capacity(1 + rest.len());
+                for element in std::iter::once(first).chain(rest) {
                     match self.field_span(element, depth + 1)?.as_deref() {
                         Some([only]) => slots.push(*only),
                         _ => return Ok(None),
@@ -841,12 +850,17 @@ impl<'a> Shapes<'a> {
                 Ok(Some(vec![SlotType::Ref]))
             },
             // an aliased tuple: the same one-word-per-element rule the
-            // written tuple spelling takes
+            // written tuple spelling takes, the empty tuple refusing on
+            // the same line so the alias is no side door around it
             ds_check::AtomKind::Tuple(elements) => {
-                let mut slots = Vec::with_capacity(elements.len());
-                for element in elements {
-                    match self.atom_shape(*element)? {
-                        Shape::Word(slot) => slots.push(slot),
+                let [first, rest @ ..] = &elements[..] else {
+                    return Ok(None);
+                };
+                let mut slots = Vec::with_capacity(1 + rest.len());
+                for element in std::iter::once(first).chain(rest) {
+                    let shape = self.atom_shape(*element)?;
+                    match &*shape {
+                        Shape::Word(slot) => slots.push(*slot),
                         _ => return Ok(None),
                     }
                 }

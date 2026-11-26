@@ -44,15 +44,22 @@ macro_rules! emit {
     };
 }
 
+/// Excerpt lines one label may show before truncating to head and tail
+/// lines around an ellipsis: a whole-construct span cannot turn one
+/// diagnostic into a file dump.
+const MAX_EXCERPT_LINES_PER_LABEL: u32 = 6;
+
 /// Renders `diagnostic` against `files` as plain text.
 ///
 /// The header points at the first primary label (the first label when
 /// none is primary). Each label gets one excerpt block; a label spanning
 /// multiple lines gets one caret line per line, with the label text on
-/// the first. An excerpt in a file other than the one last shown (starting
-/// with the header's) is introduced by its own `-->` location line, so
-/// cross-file diagnostics stay readable. Notes and suggestion helps follow
-/// under `= note:` / `= help:`.
+/// the first, up to `MAX_EXCERPT_LINES_PER_LABEL` shown lines: a longer
+/// span shows its first and last lines around an ellipsis naming the
+/// skipped count. An excerpt in a file other than the one last shown
+/// (starting with the header's) is introduced by its own `-->` location
+/// line, so cross-file diagnostics stay readable. Notes and suggestion
+/// helps follow under `= note:` / `= help:`.
 #[must_use]
 pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
     let mut out = String::new();
@@ -107,7 +114,7 @@ pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
             LabelStyle::Primary => "^",
             LabelStyle::Secondary => "-",
         };
-        for line in first_line..=last_line {
+        let emit_line = |out: &mut String, line: u32| {
             let text = line_text(files, span.file, line);
             emit!(out, "{line:>width$} |");
             if !text.is_empty() {
@@ -131,6 +138,23 @@ pub fn human(diagnostic: &Diagnostic, files: &Files) -> String {
                 emit!(out, " {}", label.label);
             }
             out.push('\n');
+        };
+        let covered = last_line.saturating_sub(first_line).saturating_add(1);
+        let keep = MAX_EXCERPT_LINES_PER_LABEL / 2;
+        if covered > MAX_EXCERPT_LINES_PER_LABEL {
+            for line in first_line..first_line + keep {
+                emit_line(&mut out, line);
+            }
+            let skipped = covered - 2 * keep;
+            let noun = if skipped == 1 { "line" } else { "lines" };
+            emit!(out, "... {skipped} {noun} skipped\n");
+            for line in last_line - keep + 1..=last_line {
+                emit_line(&mut out, line);
+            }
+        } else {
+            for line in first_line..=last_line {
+                emit_line(&mut out, line);
+            }
         }
     }
 
@@ -236,6 +260,78 @@ error[DS1001]: multi-line span rendering
   | ^^^^^^
 4 |   )
   | ^^^
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    /// `count` source lines numbered `line 1` through `line N`.
+    fn numbered_lines(count: u32) -> String {
+        let mut src = String::new();
+        for n in 1..=count {
+            writeln!(&mut src, "line {n}").expect("writing into a String cannot fail");
+        }
+        src
+    }
+
+    /// A span covering more lines than the excerpt cap shows its head and
+    /// tail lines around an ellipsis naming the skipped count: conversion
+    /// labels span whole constructs, and the cap keeps one pathological
+    /// span from turning the message into a file dump.
+    #[test]
+    fn multi_line_span_past_cap_shows_head_ellipsis_tail() {
+        let mut files = Files::new();
+        let src = numbered_lines(20);
+        let file = files.add_source("big.ds", &src);
+        let end = u32::try_from(src.len()).unwrap();
+        let diag = Diagnostic::error(ErrorCode::UnexpectedToken, "whole construct")
+            .with_primary(Span::new(file, 0, end), "whole");
+        let expected = "\
+error[DS1001]: whole construct
+ --> big.ds:1:1
+   |
+ 1 | line 1
+   | ^^^^^^ whole
+ 2 | line 2
+   | ^^^^^^
+ 3 | line 3
+   | ^^^^^^
+... 14 lines skipped
+18 | line 18
+   | ^^^^^^^
+19 | line 19
+   | ^^^^^^^
+20 | line 20
+   | ^^^^^^^
+";
+        assert_eq!(human(&diag, &files), expected);
+    }
+
+    /// A span exactly at the cap still renders every covered line: the
+    /// cap is the compatibility boundary, nothing under it moves.
+    #[test]
+    fn multi_line_span_at_cap_renders_every_line() {
+        let mut files = Files::new();
+        let src = numbered_lines(6);
+        let file = files.add_source("cap.ds", &src);
+        let end = u32::try_from(src.len()).unwrap();
+        let diag = Diagnostic::error(ErrorCode::UnexpectedToken, "at cap")
+            .with_primary(Span::new(file, 0, end), "all shown");
+        let expected = "\
+error[DS1001]: at cap
+ --> cap.ds:1:1
+  |
+1 | line 1
+  | ^^^^^^ all shown
+2 | line 2
+  | ^^^^^^
+3 | line 3
+  | ^^^^^^
+4 | line 4
+  | ^^^^^^
+5 | line 5
+  | ^^^^^^
+6 | line 6
+  | ^^^^^^
 ";
         assert_eq!(human(&diag, &files), expected);
     }

@@ -1259,8 +1259,9 @@ impl FnLower<'_, '_, '_> {
     /// The declared fields of the struct a nested struct sub-pattern's
     /// path names: the checker proved the pattern's atom is the
     /// struct-typed field's own type, so the atom's declaration owns the
-    /// nested field offsets. The shape carries the fields by value, so
-    /// the walk reads them without copying the list.
+    /// nested field offsets. The shape cache shares one allocation per
+    /// atom, so the helper copies the nested field list once for its
+    /// walk.
     fn struct_sub_shape(&mut self, pat: &Pattern) -> Result<StructShape, LowerError> {
         let Pattern::Struct { path, .. } = pat else {
             return Err(mismatch("a nested struct sub-pattern"));
@@ -1272,10 +1273,10 @@ impl FnLower<'_, '_, '_> {
             return Err(mismatch("a struct sub-pattern's atom"));
         };
         let shape = self.shapes.atom_shape(atom)?;
-        let Shape::Struct(s) = shape else {
+        let Shape::Struct(s) = &*shape else {
             return Err(mismatch("a nested struct sub-pattern's field"));
         };
-        Ok(s)
+        Ok(s.clone())
     }
 
     /// Emits a nested struct sub-pattern's field tests at `base`, the
