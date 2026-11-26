@@ -55,7 +55,6 @@ fn the_box_face_builds_walks_and_dies() {
             "root 2\n",
             "held hey\n",
             "tracked 4 dies\n",
-            "0\n",
         ),
         "the box tree's golden stdout drifted"
     );

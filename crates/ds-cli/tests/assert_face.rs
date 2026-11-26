@@ -66,7 +66,7 @@ fn the_assert_family_answers_on_the_satisfied_arms() {
         "the face run exits clean: {}",
         text(&out.stderr)
     );
-    assert_eq!(text(&out.stdout), "face asserted\n0\n", "the face answers");
+    assert_eq!(text(&out.stdout), "face asserted\n", "the face answers");
 }
 
 /// A false condition aborts through the ambient panic: the message
@@ -134,7 +134,11 @@ fn a_diverging_call_sits_in_a_block_tail() {
         "fn branch(b: bool) -> int {\n  if b { exit(1) } else { 7 }\n}\n\nfn main() -> int {\n  \
          branch(false)\n}\n",
     );
-    let out = run(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let out = run(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert_eq!(
         out.status.code(),
         Some(0),

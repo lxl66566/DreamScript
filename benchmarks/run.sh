@@ -74,7 +74,10 @@ run_kernel() {
     interp=$1
     file=$2
     case $interp in
-    ds) TIMEOUT "$ds_bin" run --no-cache "$file" ;;
+    # the answer switch keeps the ds face's stdout shape aligned with
+    # the peers: the kernel prints its own final `result:` line, and an
+    # echoed non-unit answer would only add an unextracted line
+    ds) TIMEOUT "$ds_bin" run --no-cache --print-result "$file" ;;
     python) TIMEOUT "$python_bin" "$file" ;;
     lua) TIMEOUT "$lua_bin" "$file" ;;
     node) TIMEOUT "$node_bin" "$file" ;;

@@ -93,7 +93,7 @@ const FACE_OUT: &str = concat!(
     "pts pt { x: 1, y: 5 } pt { x: 2, y: 1 }\n",
     "stable 1:x 1:y 2:a 2:b\n",
     "empty 0\n",
-    "0\n",
+    "",
 );
 
 /// The acceptance: both spellings sort int and string elements, the

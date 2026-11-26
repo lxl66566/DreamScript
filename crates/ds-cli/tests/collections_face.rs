@@ -63,7 +63,7 @@ fn the_member_spellings_run_over_the_ambient() {
             "clear 1 7\n",
             "map 1 true false\n",
             "entries 2\n",
-            "0\n",
+            "",
         )
     );
 }
@@ -87,7 +87,7 @@ fn the_mutation_and_membership_members_run_over_the_ambient() {
             "probed true false\n",
             "removed true false 1\n",
             "pairs two=2\n",
-            "0\n",
+            "",
         )
     );
 }
@@ -103,7 +103,7 @@ fn the_ok_handler_over_none_runs_over_both_word_kinds() {
     assert!(out.status.success(), "the run failed: {out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        concat!("hit 1 miss -1\n", "found localhost absent missing\n", "0\n",)
+        concat!("hit 1 miss -1\n", "found localhost absent missing\n", "",)
     );
 }
 
@@ -124,7 +124,7 @@ fn handler_seam_records_run_end_to_end() {
             "retried 21 direct 42\n",
             "hit 6 miss 0\n",
             "caught -7 kept 42\n",
-            "0\n",
+            "",
         )
     );
 }
@@ -158,7 +158,7 @@ fn built_module_reproduces_the_source_run() {
             "clear 1 7\n",
             "map 1 true false\n",
             "entries 2\n",
-            "0\n",
+            "",
         )
     );
     let _ = fs::remove_file(&module);

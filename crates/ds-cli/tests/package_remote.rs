@@ -179,7 +179,7 @@ fn a_git_remote_registry_fills_a_cold_store_run() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds(cache.path(), &url, &["run", entry]);
+    let (ok, out, err) = ds(cache.path(), &url, &["run", "--print-result", entry]);
     assert!(ok, "the remote-filled run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n", "the run calls through the fetched graph");
     assert!(

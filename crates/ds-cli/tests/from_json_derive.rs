@@ -118,7 +118,7 @@ const GOLDEN: &str = concat!(
     "parse_err\n",
     "parse_err\n",
     "parse_err\n",
-    "0\n",
+    "",
 );
 
 #[test]

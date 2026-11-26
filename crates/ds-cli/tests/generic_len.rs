@@ -37,7 +37,7 @@ fn run_ok(command: &mut Command) -> String {
 fn len_prints_distinct_outputs_per_receiver_shape() {
     assert_eq!(
         run_ok(ds().arg("run").arg(fixture())),
-        "string 11 11\nlist 3 3\n0\n"
+        "string 11 11\nlist 3 3\n"
     );
 }
 
@@ -56,7 +56,7 @@ fn built_module_reproduces_the_source_run() {
     assert!(out.status.success(), "the build failed: {out:?}");
     assert_eq!(
         run_ok(ds().arg("run").arg(&module)),
-        "string 11 11\nlist 3 3\n0\n"
+        "string 11 11\nlist 3 3\n"
     );
     let _ = fs::remove_file(&module);
 }

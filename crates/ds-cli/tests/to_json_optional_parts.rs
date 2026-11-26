@@ -78,7 +78,7 @@ const GOLDEN: &str = concat!(
     "[]\n",
     "\"rest\"\n",
     "parse_err\n",
-    "0\n",
+    "",
 );
 
 #[test]

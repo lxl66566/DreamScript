@@ -78,7 +78,7 @@ const GOLDEN: &str = concat!(
     "9\n",
     "6\n",
     "6\n",
-    "0\n",
+    "",
 );
 
 #[test]

@@ -95,7 +95,7 @@ const GOLDEN: &str = concat!(
     "left\n",
     "spin 3\n",
     "parse_err\n",
-    "0\n",
+    "",
 );
 
 #[test]

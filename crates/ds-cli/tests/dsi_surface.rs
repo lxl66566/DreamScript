@@ -145,7 +145,11 @@ fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
 fn a_package_run_caches_the_dep_dsi_beside_its_dsmod() {
     let (app, _lib, cache) = fixture("beside");
     let entry = app.join("main.ds");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("utf-8 path"),
+    ]);
     assert!(ok, "the run succeeds (stderr: {err})");
     assert_eq!(out, "42\n", "the fixture's answer");
 
@@ -174,7 +178,11 @@ fn a_package_run_caches_the_dep_dsi_beside_its_dsmod() {
         "the .dsi sits beside the dep's dsmod under one key: {dsi:?} vs {dsmods:?}"
     );
     // the warm run serves the whole graph from disk, answer unchanged
-    let (ok, warm, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    let (ok, warm, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("utf-8 path"),
+    ]);
     assert!(ok, "the warm run succeeds (stderr: {err})");
     assert_eq!(warm, out, "the warm answer matches the cold one");
     fs::remove_dir_all(app.parent().expect("the tree root")).expect("the tree removes");
@@ -405,7 +413,11 @@ fn a_mid_session_repin_serves_the_new_surface_without_restart() {
     let entry = app.join("main.ds");
     let (ok, _, err) = ds(&cache, &["save", lib.to_str().expect("utf-8 path")]);
     assert!(ok, "the v1 library saves into the store (stderr: {err})");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("utf-8 path"),
+    ]);
     assert!(ok, "the v1 run caches the dep's .dsi (stderr: {err})");
     assert_eq!(out, "42\n");
 
@@ -488,7 +500,11 @@ fn a_mid_session_repin_serves_the_new_surface_without_restart() {
     write_pkg(&app, &root_manifest(v2), &[("main.ds", REPIN_ROOT_SOURCE)]);
     let (ok, _, err) = ds(&cache, &["save", lib.to_str().expect("utf-8 path")]);
     assert!(ok, "the v2 library saves into the store (stderr: {err})");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("utf-8 path")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("utf-8 path"),
+    ]);
     assert!(ok, "the v2 run succeeds (stderr: {err})");
     assert_eq!(out, "42\n");
 

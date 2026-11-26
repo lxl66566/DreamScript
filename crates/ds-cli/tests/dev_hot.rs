@@ -87,6 +87,26 @@ impl Dev {
         }
     }
 
+    /// The session log folded with the first `skip` lines dropped and
+    /// the trailing answer echo dropped after them: the watch door
+    /// prints the entry's answer after the program's own output, and
+    /// the default `ds run` face answers silent, so the differentials
+    /// compare the program prints alone. A trailing echo is the one-word
+    /// unit answer; a non-unit echo never spells `0` and stays.
+    fn without_answer_echo(&self, skip: usize) -> String {
+        let logged = self.log.borrow();
+        let lines: &[String] = match logged.last() {
+            Some(line) if line == "0" => &logged[..logged.len() - 1],
+            _ => &logged[..],
+        };
+        let mut text = String::new();
+        for line in &lines[skip.min(lines.len())..] {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    }
+
     /// The next program stdout line, failing the test on the timeout.
     fn line(&self) -> String {
         let line = self.stdout.recv_timeout(WAIT).unwrap_or_else(|_| {
@@ -200,15 +220,13 @@ fn a_hot_swap_retires_the_old_frame_at_its_next_qualified_call() {
     swap_source(&fresh_source, &v2).expect("the fresh source writes");
     let fresh = ds()
         .arg("run")
+        .arg("--print-result")
         .arg(&fresh_source)
         .output()
         .expect("the fresh run completes");
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
     assert_eq!(
-        dev.log
-            .borrow()
-            .iter()
-            .fold(String::new(), |text, line| text + line + "\n"),
+        dev.without_answer_echo(0),
         String::from_utf8_lossy(&fresh.stdout).into_owned(),
         "the hot-swapped run is byte-identical to the fresh run"
     );
@@ -423,15 +441,13 @@ fn a_content_preserving_reorder_rekeys_the_staged_lambda() {
     swap_source(&fresh_source, &v2).expect("the fresh source writes");
     let fresh = ds()
         .arg("run")
+        .arg("--print-result")
         .arg(&fresh_source)
         .output()
         .expect("the fresh run completes");
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
     assert_eq!(
-        dev.log
-            .borrow()
-            .iter()
-            .fold(String::new(), |text, line| text + line + "\n"),
+        dev.without_answer_echo(0),
         String::from_utf8_lossy(&fresh.stdout).into_owned(),
         "the re-keyed run is byte-identical to the fresh run"
     );
@@ -582,16 +598,12 @@ fn a_trapped_entrys_abandoned_nursery_releases_with_the_entry() {
     // the dev door's, not a round's)
     let fresh = ds()
         .arg("run")
+        .arg("--print-result")
         .arg(&prog)
         .output()
         .expect("the fresh run completes");
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
-    let tail = dev
-        .log
-        .borrow()
-        .iter()
-        .skip(4)
-        .fold(String::new(), |text, line| text + line + "\n");
+    let tail = dev.without_answer_echo(4);
     assert_eq!(
         tail,
         String::from_utf8_lossy(&fresh.stdout).into_owned(),
@@ -655,18 +667,14 @@ fn an_argv_entry_survives_a_reload_reading_the_process_arguments() {
     // fresh `ds run --args` of the updated source
     let fresh = ds()
         .arg("run")
+        .arg("--print-result")
         .arg(&prog)
         .arg("--args")
         .arg("21")
         .output()
         .expect("the fresh run completes");
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
-    let tail = dev
-        .log
-        .borrow()
-        .iter()
-        .skip(2)
-        .fold(String::new(), |text, line| text + line + "\n");
+    let tail = dev.without_answer_echo(2);
     assert_eq!(
         tail,
         String::from_utf8_lossy(&fresh.stdout).into_owned(),
@@ -1022,16 +1030,12 @@ fn a_repinned_dep_swaps_alongside_the_root() {
         .env("DS_CACHE", &fix.cache)
         .env_remove("DS_REGISTRY")
         .arg("run")
+        .arg("--print-result")
         .arg(&fix.entry)
         .output()
         .expect("the fresh run completes");
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
-    let tail = dev
-        .log
-        .borrow()
-        .iter()
-        .skip(2)
-        .fold(String::new(), |text, line| text + line + "\n");
+    let tail = dev.without_answer_echo(2);
     let fresh_tail = String::from_utf8_lossy(&fresh.stdout)
         .lines()
         .skip(2)
@@ -1194,7 +1198,7 @@ fn a_path_dep_source_edit_hot_reloads_without_a_repin() {
     assert!(fresh.status.success(), "{:?}", fresh.stderr);
     assert_eq!(
         String::from_utf8_lossy(&fresh.stdout).into_owned(),
-        "0\n10\n20\n30\n40\n50\n0\n",
+        "0\n10\n20\n30\n40\n50\n",
         "the fresh run serves the edited dep source"
     );
 }

@@ -85,7 +85,7 @@ fn the_directed_value_crosses_to_the_first_members_arm() {
     ));
     let out = ds_run(&entry);
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "a: refused\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a: refused\n");
 }
 
 /// The shadowing file's own alias carries its own atom: a value
@@ -109,7 +109,7 @@ fn the_shadowing_file_reads_its_own_atom() {
     ));
     let out = ds_run(&entry);
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "b: refused\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b: refused\n");
 }
 
 /// The qualified escape hatch at run: the second member constructs the
@@ -129,7 +129,7 @@ fn the_qualified_escape_constructs_the_first_members_atom() {
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "a: refused\na: refused\n0\n"
+        "a: refused\na: refused\n"
     );
 }
 
@@ -153,7 +153,7 @@ fn the_shadow_artifact_carries_both_rows_and_serves_warm() {
     ));
     let first = ds_run(&entry);
     assert!(first.status.success(), "stderr: {:?}", first.stderr);
-    assert_eq!(String::from_utf8_lossy(&first.stdout), "a: refused\n0\n");
+    assert_eq!(String::from_utf8_lossy(&first.stdout), "a: refused\n");
 
     // the written module's tag table: two `refused` rows, distinct ids,
     // the declaring declaration's name recorded beside each label
@@ -196,7 +196,7 @@ fn the_shadow_artifact_carries_both_rows_and_serves_warm() {
     // run answers identically
     let second = ds_run(&entry);
     assert!(second.status.success(), "stderr: {:?}", second.stderr);
-    assert_eq!(String::from_utf8_lossy(&second.stdout), "a: refused\n0\n");
+    assert_eq!(String::from_utf8_lossy(&second.stdout), "a: refused\n");
     let _ = fs::remove_dir_all(&cache);
 }
 
@@ -291,6 +291,6 @@ fn the_entry_fn_wins_the_call_form_and_the_tag_stays_reachable() {
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "answer=42\na: refused\n0\n"
+        "answer=42\na: refused\n"
     );
 }

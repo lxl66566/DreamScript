@@ -167,8 +167,10 @@ run_stage() {
     stage=$1
     case $stage in
     floor) TIMEOUT "$ds_bin" --version ;;
-    warm) DS_CACHE=$warm_cache TIMEOUT "$ds_bin" run "$sdir/trivial.ds" ;;
-    *) TIMEOUT "$ds_bin" run --no-cache "$sdir/$stage.ds" ;;
+    # the answer switch: the fixture prints its own `result:` line and
+    # the entry's answer echoes only when it is non-unit
+    warm) DS_CACHE=$warm_cache TIMEOUT "$ds_bin" run --print-result "$sdir/trivial.ds" ;;
+    *) TIMEOUT "$ds_bin" run --no-cache --print-result "$sdir/$stage.ds" ;;
     esac >"$outtmp" 2>/dev/null
 }
 

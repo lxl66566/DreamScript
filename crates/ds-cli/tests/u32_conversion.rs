@@ -78,7 +78,7 @@ fn the_in_range_construction_answers_the_width_word() {
     assert!(out.status.success(), "the edges run failed: {out:?}");
     assert_eq!(
         text(&out.stdout),
-        "0\n4294967295\ntrue true\n0\n",
+        "0\n4294967295\ntrue true\n",
         "both edges answer and the checked form stays fallible"
     );
 }

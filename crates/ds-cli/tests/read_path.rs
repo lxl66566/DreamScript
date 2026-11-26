@@ -78,8 +78,7 @@ fn main() -> () {
     assert!(status.success(), "the reads run clean: {stderr}");
     assert_eq!(
         stdout,
-        "scalar 20\nalpha!\nbeta!\nnested 3\npair 1one\ncomputed 30\nreceiver alphabeta\nmap \
-         7\n0\n",
+        "scalar 20\nalpha!\nbeta!\nnested 3\npair 1one\ncomputed 30\nreceiver alphabeta\nmap 7\n",
         "the read answers carry the elements"
     );
 }
@@ -142,10 +141,7 @@ fn the_checked_get_members_keep_their_spelling() {
 ",
     );
     assert!(status.success(), "get keeps the checked union: {stderr}");
-    assert_eq!(
-        stdout, "10\n20\n-1\n0\n",
-        "the miss answers none's fallback"
-    );
+    assert_eq!(stdout, "10\n20\n-1\n", "the miss answers none's fallback");
 }
 
 #[test]
@@ -161,7 +157,7 @@ fn the_store_spelling_keeps_its_own_path() {
 ",
     );
     assert!(status.success(), "the store spelling runs: {stderr}");
-    assert_eq!(stdout, "99\n25\n0\n");
+    assert_eq!(stdout, "99\n25\n");
     // a const root keeps the mut-window refusal on the store
     let (status, _stdout, stderr) = run_source(
         r"fn main() -> () {
@@ -196,7 +192,7 @@ fn for_in_destructures_the_tuple_elements() {
 "#,
     );
     assert!(status.success(), "the destructuring loops run: {stderr}");
-    assert_eq!(stdout, "6\none:1\ntwo:2\nthree:3\n0\n");
+    assert_eq!(stdout, "6\none:1\ntwo:2\nthree:3\n");
 }
 
 #[test]

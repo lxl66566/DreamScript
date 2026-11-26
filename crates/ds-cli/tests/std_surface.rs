@@ -77,7 +77,7 @@ fn split_takes_the_string_separator_beside_the_char() {
     ));
     assert!(status.success(), "the split spellings run clean: {stderr}");
     assert_eq!(
-        stdout, "a|b;c\na|b;c\nd|o|.|o|r|.|r|e\nx|y\n0\n",
+        stdout, "a|b;c\na|b;c\nd|o|.|o|r|.|r|e\nx|y\n",
         "the string, char, empty (per-char), and union-variable separators answer alike"
     );
 }
@@ -94,7 +94,7 @@ fn join_takes_the_string_separator_beside_the_char() {
 "#,
     );
     assert!(status.success(), "the join spellings run clean: {stderr}");
-    assert_eq!(stdout, "a-b\na-b\na--b--c\n0\n");
+    assert_eq!(stdout, "a-b\na-b\na--b--c\n");
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn abs_joins_the_int_width_on_the_float_face() {
 ",
     );
     assert!(status.success(), "the abs spellings run clean: {stderr}");
-    assert_eq!(stdout, "5\n9\n2.5\n3.5\n0\n");
+    assert_eq!(stdout, "5\n9\n2.5\n3.5\n");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn the_format_family_answers_over_the_builtin_faces() {
     );
     assert!(status.success(), "the format family runs clean: {stderr}");
     assert_eq!(
-        stdout, "3.14\n0.3333\n2\nff\n0\n-1a\n007\nabc\n7..\n0\n",
+        stdout, "3.14\n0.3333\n2\nff\n0\n-1a\n007\nabc\n7..\n",
         "the fixed-point width, the hex digits, and the two alignments answer"
     );
 }

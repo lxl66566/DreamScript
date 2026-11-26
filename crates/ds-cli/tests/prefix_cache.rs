@@ -313,5 +313,5 @@ fn a_build_persists_what_a_run_serves() {
         err.contains("ds prefix cache: hit"),
         "the build's prefix serves the run: {err}"
     );
-    assert_eq!(run_out, "warm as toast\n0\n", "the run prints the program");
+    assert_eq!(run_out, "warm as toast\n", "the run prints the program");
 }

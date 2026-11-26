@@ -49,7 +49,7 @@ fn the_arena_face_builds_traverses_and_reuses() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        concat!("cycle 9 home true\n", "len 3 at0 2\n", "0\n",),
+        concat!("cycle 9 home true\n", "len 3 at0 2\n", "",),
         "the arena's golden stdout drifted"
     );
 }
@@ -78,7 +78,7 @@ fn the_string_view_face_holds_cursors_without_allocating() {
             "beyond-the-view slice refused\n",
             "eq true false\n",
             "range refused\n",
-            "0\n",
+            "",
         ),
         "the view's golden stdout drifted"
     );

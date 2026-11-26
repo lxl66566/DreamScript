@@ -2,7 +2,8 @@
 //! read from bytes, or a .ds source compiled in-process through the source
 //! pipeline (parse, check, lower, install), with the script-mode dsmod
 //! cache consulted before that pipeline — resolving one entry function
-//! and reporting its result. A .ds source with a `ds.pkg` beside it runs
+//! and printing its answer only under the `--print-result` switch. A .ds
+//! source with a `ds.pkg` beside it runs
 //! as a package: the manifest resolves over the store, the deps-first
 //! walk installs the linked graph before the root, and the same
 //! script-mode caches — the dsmod artifact, the checked-prefix `.dsi`,
@@ -65,6 +66,10 @@ pub struct RunArgs {
     /// dsmod artifact and the checked-prefix `.dsi`)
     #[arg(long)]
     no_cache: bool,
+    /// Print a non-unit entry answer after a clean run (a unit answer
+    /// prints nothing either way)
+    #[arg(long)]
+    print_result: bool,
 }
 
 /// Runs one module: the dsmod path mmaps and installs; the source path
@@ -104,7 +109,7 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     // the reactor's own interest, every other host's helper flips the
     // blocking drive's stop flag
     signals.arm(&mut prepared.vm)?;
-    resolve_and_run(&mut prepared, &args.entry, &signals)
+    resolve_and_run(&mut prepared, &args.entry, &signals, args.print_result)
 }
 
 /// The `ds test` re-entry's drive: one test module — the package's
@@ -144,7 +149,7 @@ pub(crate) fn run_test_entry(
         prepared.vm.install_reactor(reactor);
     }
     signals.arm(&mut prepared.vm)?;
-    resolve_and_run(&mut prepared, "main", &signals)
+    resolve_and_run(&mut prepared, "main", &signals, false)
 }
 
 /// The extension as UTF-8, when it is.
@@ -436,8 +441,9 @@ fn resolve_and_run(
     prepared: &mut PreparedRun,
     entry: &str,
     signals: &ShutdownWatch,
+    print_result: bool,
 ) -> Result<ExitCode> {
-    let outcome = resolve_and_drive(prepared, entry);
+    let outcome = resolve_and_drive(prepared, entry, print_result);
     // the host's shutdown event: the
     // exit code is the host's own per the die split — Unix answers
     // 128+signum — whatever the drive's last outcome was, the event
@@ -448,13 +454,14 @@ fn resolve_and_run(
     outcome
 }
 
-/// Resolves the entry, runs it, and reports the result: a platform
-/// failure tag (io, net, parse) is a failed run — the lowered
-/// unhandled-failure handler already printed the message — the `none`
-/// member of a checked read prints by name, and everything else prints
-/// like the dsmod path always did. The run answers the entry's whole
-/// word span, so a multi-word answer (a tuple, a widened span) prints
-/// one word per line instead of a truncated head. A trapped run reports
+/// Resolves the entry, runs it, and reports under the answer switch: a
+/// platform failure tag (io, net, parse) is a failed run whatever the
+/// switch says — the lowered unhandled-failure handler already printed
+/// the message. A clean run prints its answer only when the caller
+/// passed the switch, and then only a non-unit answer: the unit answer
+/// stays silent either way, the `none` member of a checked read prints
+/// by name, and the run's whole word span prints one word per line (a
+/// tuple or a widened span never truncates to its head). A trapped run reports
 /// first — the backtrace reads the kept frames — and then releases the
 /// interrupted root, so the kept frames' deinit hooks fire exactly once
 /// and their claims drain before the run exits nonzero. The host owns
@@ -463,7 +470,11 @@ fn resolve_and_run(
 /// with its deliberate status, no report printed, and the shutdown
 /// trap carries no report at all — the host's door observed the event
 /// and owns the status.
-fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
+fn resolve_and_drive(
+    prepared: &mut PreparedRun,
+    entry: &str,
+    print_result: bool,
+) -> Result<ExitCode> {
     // the error-trace switch is a VM debug switch the boundary
     // report reads: armed, every `?` error leg records the failing
     // frame's position into the fiber's private ring, and an
@@ -510,14 +521,22 @@ fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode
                 ))
             },
             // The `none` member of a checked read is a plain result: print
-            // its name, not the platform reservation's raw id.
+            // its name under the switch, never the platform reservation's
+            // raw id.
             [Value::Tag(tag), ..] if *tag == PLATFORM_NONE => {
-                println!("none");
+                if print_result {
+                    println!("none");
+                }
                 Ok(ExitCode::SUCCESS)
             },
+            // the unit answer rides the inert `I64(0)` word and stays
+            // silent whatever the switch says
+            [Value::I64(0)] => Ok(ExitCode::SUCCESS),
             _ => {
-                for value in answer.as_slice() {
-                    print_value(value);
+                if print_result {
+                    for value in answer.as_slice() {
+                        print_value(value);
+                    }
                 }
                 Ok(ExitCode::SUCCESS)
             },
@@ -751,9 +770,8 @@ pub(crate) fn print_error_trace(vm: &Vm) {
     }
 }
 
-/// Prints the run result to stdout. Unit-result entries halt on the inert
-/// unit word (`I64(0)`), so nothing distinguishes them; a heap reference
-/// prints as its object-table index (the object kind is a VM concern).
+/// Prints one answer word to stdout; a heap reference prints as its
+/// object-table index (the object kind is a VM concern).
 pub(crate) fn print_value(value: &Value) {
     match value {
         Value::I64(v) => println!("{v}"),

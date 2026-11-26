@@ -95,7 +95,7 @@ fn the_fsys_path_round_reaches_a_library_package() {
         String::from_utf8_lossy(&out.stdout),
         concat!(
             "made already_exists made io_other removed removed not_found\n",
-            "0\n",
+            "",
         ),
         "the library member's path round answers through the root's call"
     );

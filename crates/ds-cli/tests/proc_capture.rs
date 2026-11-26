@@ -194,7 +194,7 @@ fn the_closing_deinit_kills_a_still_running_child() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "spawned\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "spawned\n");
     // generous against parallel load: the child sleeps a minute, the
     // run ends when the deinit kills it
     assert!(

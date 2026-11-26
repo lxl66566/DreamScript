@@ -36,7 +36,7 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// and the inverted range; the empty string's char read falls back; and
 /// the multi-byte slice cuts between scalars.
 const GOLDEN: &str = concat!(
-    "he\n", "none\n", "none\n", "none\n", "e\n", "none\n", "x\n", "él\n", "0\n",
+    "he\n", "none\n", "none\n", "none\n", "e\n", "none\n", "x\n", "él\n", "",
 );
 
 #[test]

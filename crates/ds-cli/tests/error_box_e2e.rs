@@ -67,7 +67,7 @@ fn the_error_box_face_runs_through_the_ambient() {
             "bad bytes (name not utf-8)\n",
             "field config unread\n",
             "payload not_found\n",
-            "0\n",
+            "",
         ),
         "the box face's golden stdout drifted"
     );

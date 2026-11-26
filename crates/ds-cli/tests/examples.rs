@@ -46,7 +46,7 @@ fn run_ok(command: &mut Command) -> String {
 fn hello_prints_the_greeting() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("hello.ds"))),
-        "hello, DreamScript\n1 + 2 = 3\n0\n"
+        "hello, DreamScript\n1 + 2 = 3\n"
     );
 }
 
@@ -56,7 +56,7 @@ fn fib_computes_and_runs_the_tail_variant_a_million_deep() {
     // per call the stack would grow past the VM's limit
     assert_eq!(
         run_ok(ds().arg("run").arg(example("fib.ds"))),
-        "fib(10) = 55\nfib_tail(90, 0, 1) = 2880067194370816120\nfib_tail(1000000, 0, 0) = 0\n0\n"
+        "fib(10) = 55\nfib_tail(90, 0, 1) = 2880067194370816120\nfib_tail(1000000, 0, 0) = 0\n"
     );
 }
 
@@ -64,7 +64,7 @@ fn fib_computes_and_runs_the_tail_variant_a_million_deep() {
 fn lists_print_the_literal_and_constructor_surface() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("lists.ds"))),
-        "ints 6 0\nwords 3 alpha\n0\n"
+        "ints 6 0\nwords 3 alpha\n"
     );
 }
 
@@ -76,7 +76,7 @@ fn containers_compose_the_generic_closes() {
     // ordering pair answers over its int members
     assert_eq!(
         run_ok(ds().arg("run").arg(example("containers.ds"))),
-        "cons 2 1 1 2\nempty -1 -1\nmax 9 3\n0\n"
+        "cons 2 1 1 2\nempty -1 -1\nmax 9 3\n"
     );
 }
 
@@ -101,7 +101,6 @@ traced 10 50
 sum 15 joined alphabeta
 split 3 2
 zip 3 enum 2 5
-0
 "
     );
 }
@@ -120,7 +119,7 @@ fn callables_pass_named_fns_closures_and_collections() {
     // beside the `.err` fallback
     assert_eq!(
         run_ok(ds().arg("run").arg(example("callables.ds"))),
-        "named 5 3\nclosure 40\nblock 42\nfactory 42\nfns 2 42\nparsed port 68\nfallback 8\n0\n"
+        "named 5 3\nclosure 40\nblock 42\nfactory 42\nfns 2 42\nparsed port 68\nfallback 8\n"
     );
 }
 
@@ -129,7 +128,7 @@ fn tuples_destructure_in_bindings_and_match_arms() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("tuples.ds"))),
         "host:8080\nport 5432\nmatched host 8080\nlabel unit\nseven 7\nequal\nvar db:8081\npick \
-         zero-five big zero flat\n0\n"
+         zero-five big zero flat\n"
     );
 }
 
@@ -145,7 +144,7 @@ fn patterns_test_bind_and_guard_every_match_shape() {
     // destructures positionally inside its arm's body
     assert_eq!(
         run_ok(ds().arg("run").arg(example("patterns.ds"))),
-        "at 2 7\naxis 4\nunit\none\nbig 9\nn 2\nplain\npair 7 0\naxis 5\nat 2 3\nnone\n0\n"
+        "at 2 7\naxis 4\nunit\none\nbig 9\nn 2\nplain\npair 7 0\naxis 5\nat 2 3\nnone\n"
     );
 }
 
@@ -153,7 +152,7 @@ fn patterns_test_bind_and_guard_every_match_shape() {
 fn strings_print_every_conversion() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("strings.ds"))),
-        "int: 42\nfloat: 2.5\nbool: true\ngreeting: hello, DreamScript\n0\n"
+        "int: 42\nfloat: 2.5\nbool: true\ngreeting: hello, DreamScript\n"
     );
 }
 
@@ -165,7 +164,7 @@ fn mutation_runs_the_fallible_parse_extraction() {
     // arithmetic
     assert_eq!(
         run_ok(ds().arg("run").arg(example("mutation.ds"))),
-        "total: 10\nname: DREAMSCRIPT\nfirst: a\nport + total: 8090\njoined: abc\nslot: 7\n0\n"
+        "total: 10\nname: DREAMSCRIPT\nfirst: a\nport + total: 8090\njoined: abc\nslot: 7\n"
     );
 }
 
@@ -184,7 +183,7 @@ fn files_round_trip_runs_through_the_success_typed_read() {
         .current_dir(&dir);
     assert_eq!(
         run_ok(&mut command),
-        "read back: files round trip\nsize: 16\nexists: true\nround trip ok\n0\n"
+        "read back: files round trip\nsize: 16\nexists: true\nround trip ok\n"
     );
     assert!(
         dir.join("ds_files_example.txt").exists(),
@@ -204,7 +203,7 @@ fn net_skips_with_instructions_without_a_staged_port() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "skipped: no local test server\n  start a TCP listener, then run: ds run examples/net.ds \
-         --args <port>\n0\n"
+         --args <port>\n"
     );
 }
 
@@ -236,7 +235,7 @@ fn net_round_trips_against_a_local_listener() {
     assert!(out.status.success(), "the net flow failed: {out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "server replied: echo: ping from DreamScript\n0\n"
+        "server replied: echo: ping from DreamScript\n"
     );
 }
 
@@ -249,7 +248,7 @@ fn nursery_joins_cancels_and_unions_child_errors() {
     // boundary into the match
     assert_eq!(
         run_ok(ds().arg("run").arg(example("nursery.ds"))),
-        "kept 2 bodies\ncaught refused\n0\n"
+        "kept 2 bodies\ncaught refused\n"
     );
 }
 
@@ -260,7 +259,7 @@ fn script_entry_runs_top_level_statements() {
     // the early return ends the run before the final line.
     assert_eq!(
         run_ok(ds().arg("run").arg(example("script_entry.ds"))),
-        "total: 3\nsize: small\nbumped: 41\n0\n"
+        "total: 3\nsize: small\nbumped: 41\n"
     );
 }
 
@@ -354,7 +353,7 @@ fn pub_import_selects_the_reexported_surface_through_the_middle_package() {
 
     let entry = root.join("app.ds");
     assert_eq!(
-        run_ok(ds().arg("run").arg(&entry)),
+        run_ok(ds().arg("run").arg("--print-result").arg(&entry)),
         "hi\n87\n",
         "the re-exported callable, const, and struct answer beside the middle package's own member"
     );
@@ -374,7 +373,7 @@ fn race_combinators_answer_in_arrival_order() {
     // position); sum is the reduce-based fold over the hosted callable
     assert_eq!(
         run_ok(ds().arg("run").arg(example("race.ds"))),
-        "first 2\narrival 2 1\nsum 10\n0\n",
+        "first 2\narrival 2 1\nsum 10\n",
         "the race answers by arrival, and the fold folds"
     );
 }
@@ -392,7 +391,7 @@ fn slice_members_clamp_and_flatten_composes_over_map() {
     // spelling chains the same pair through a dot-call's receiver
     assert_eq!(
         run_ok(ds().arg("run").arg(example("slices.ds"))),
-        "take 2 0 5 0\nedges 0 3\ndrop 3 5 0 5\nedges 0 1\nflat 10 10\nfluent 10\nempty 0 3\n0\n",
+        "take 2 0 5 0\nedges 0 3\ndrop 3 5 0 5\nedges 0 1\nflat 10 10\nfluent 10\nempty 0 3\n",
         "the slices clamp at their bounds, and flatten composes"
     );
 }
@@ -408,7 +407,7 @@ fn schema_builds_its_table_at_comptime() {
     assert_eq!(
         run_ok(ds().arg("run").arg(example("schema.ds"))),
         "{title: string, views: int, tags: list[string], }\n{quiet: none/quiet, loud: loud/loud, \
-         }\ntitle,views,tags\nfields: 3\nschema ======\n0\n"
+         }\ntitle,views,tags\nfields: 3\nschema ======\n"
     );
 }
 
@@ -421,7 +420,7 @@ fn generic_dispatch_tells_through_the_staged_evidence() {
     // two-level list-of-list hop
     assert_eq!(
         run_ok(ds().arg("run").arg(example("generic_dispatch.ds"))),
-        "told list:n=1;n=2;\ntold list:a!;b!;\ntold list:list:n=3;;\nlist:n=4;\n0\n"
+        "told list:n=1;n=2;\ntold list:a!;b!;\ntold list:list:n=3;;\nlist:n=4;\n"
     );
 }
 
@@ -434,7 +433,7 @@ fn records_list_reads_stage_whole_word_spans() {
     // record), and the fields project out of the extracted element
     assert_eq!(
         run_ok(ds().arg("run").arg(example("records_lists.ds"))),
-        "count 3 first pen mug 15 miss none\ntotal 42\n0\n"
+        "count 3 first pen mug 15 miss none\ntotal 42\n"
     );
 }
 
@@ -447,7 +446,7 @@ fn trait_defaults_answer_from_their_single_authorities() {
     // default
     assert_eq!(
         run_ok(ds().arg("run").arg(example("trait_defaults.ds"))),
-        "int 4 4 13 13\nstr 5 5 9\ncounter 4 11\n0\n"
+        "int 4 4 13 13\nstr 5 5 9\ncounter 4 11\n"
     );
 }
 
@@ -471,7 +470,7 @@ fn json_round_trips_through_the_derive_families() {
             "\"quiet\"\n",
             "{\"volume\":3}\n",
             "parse_err\n",
-            "0\n"
+            ""
         )
     );
 }
@@ -494,7 +493,7 @@ fn json_width_round_trips_the_scalar_field_vocabulary() {
             "parse_err\n",
             "parse_err\n",
             "parse_err\n",
-            "0\n"
+            ""
         )
     );
 }
@@ -518,7 +517,7 @@ fn bytes_face_shows_orders_and_crosses_the_utf8_bridges() {
             "héllo\n",
             "orphan byte refused\n",
             "chunk { data: bytes[97, 98] }\n",
-            "0\n"
+            ""
         )
     );
 }
@@ -566,7 +565,7 @@ fn build_then_run_the_module_reproduces_the_source_output() {
     assert!(out.stdout.is_empty(), "build stays quiet on success");
     assert_eq!(
         run_ok(ds().arg("run").arg(&module)),
-        "hello, DreamScript\n1 + 2 = 3\n0\n",
+        "hello, DreamScript\n1 + 2 = 3\n",
         "the module path and the source path print identically"
     );
     // the written header carries the source's blake3: read_checked, the

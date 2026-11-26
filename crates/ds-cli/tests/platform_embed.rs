@@ -35,7 +35,7 @@ fn the_embed_platform_serves_the_console_face() {
     for pass in ["cold", "warm"] {
         let (ok, out, err) = ds_run(&["run", "--no-ambient", "tests/fixtures/embed_console.ds"]);
         assert!(ok, "the {pass} run succeeds (stderr: {err})");
-        assert_eq!(out, "hello from embed\n0\n", "the {pass} run prints");
+        assert_eq!(out, "hello from embed\n", "the {pass} run prints");
     }
 }
 

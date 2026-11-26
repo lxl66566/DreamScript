@@ -96,7 +96,7 @@ fn cold_writes_one_artifact_and_warm_hits_identically() {
 
     let (ok, cold_out, cold_err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the cold run succeeds (stderr: {cold_err})");
-    assert_eq!(cold_out, "warm as toast\n0\n");
+    assert_eq!(cold_out, "warm as toast\n");
     assert!(
         cold_err.contains("cache: miss"),
         "cold reports miss: {cold_err}"
@@ -117,14 +117,14 @@ fn cold_writes_one_artifact_and_warm_hits_identically() {
     let stmt = source_file("stmt", "println(\"statement script\")\n");
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&stmt)]);
     assert!(ok, "the statement script succeeds (stderr: {err})");
-    assert_eq!(out, "statement script\n0\n");
+    assert_eq!(out, "statement script\n");
     assert!(
         err.contains("cache: miss"),
         "the statement script misses first: {err}"
     );
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&stmt)]);
     assert!(ok, "the warm statement script succeeds (stderr: {err})");
-    assert_eq!(out, "statement script\n0\n");
+    assert_eq!(out, "statement script\n");
     assert!(
         err.contains("cache: hit"),
         "the warm statement script hits: {err}"
@@ -176,7 +176,7 @@ fn editing_the_source_rekeys() {
     fs::write(&source, &edited).expect("the edit writes");
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the edited run succeeds (stderr: {err})");
-    assert_eq!(out, "edited\n0\n");
+    assert_eq!(out, "edited\n");
     assert!(err.contains("cache: miss"), "an edit re-keys: {err}");
     assert_eq!(
         artifacts(&cache).len(),
@@ -188,7 +188,7 @@ fn editing_the_source_rekeys() {
     fs::write(&source, WRITTEN_MAIN).expect("the revert writes");
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the reverted run succeeds (stderr: {err})");
-    assert_eq!(out, "warm as toast\n0\n");
+    assert_eq!(out, "warm as toast\n");
     assert!(
         err.contains("cache: hit"),
         "the first artifact still serves: {err}"
@@ -211,7 +211,7 @@ fn a_corrupt_artifact_falls_back_and_is_repaired() {
         ok,
         "the run over a truncated artifact succeeds (stderr: {err})"
     );
-    assert_eq!(out, "warm as toast\n0\n");
+    assert_eq!(out, "warm as toast\n");
     assert!(
         err.contains("cache: miss"),
         "a truncated artifact is a miss: {err}"
@@ -219,7 +219,7 @@ fn a_corrupt_artifact_falls_back_and_is_repaired() {
 
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the repaired-cache run succeeds (stderr: {err})");
-    assert_eq!(out, "warm as toast\n0\n");
+    assert_eq!(out, "warm as toast\n");
     assert!(
         err.contains("cache: hit"),
         "the miss repaired the artifact: {err}"
@@ -299,7 +299,7 @@ fn an_unusable_cache_root_still_runs() {
     let source = source_file("unusable", WRITTEN_MAIN);
     let (ok, out, err) = ds_run(&blocker, &["run", &run_path(&source)]);
     assert!(ok, "the run over an unusable root succeeds (stderr: {err})");
-    assert_eq!(out, "warm as toast\n0\n");
+    assert_eq!(out, "warm as toast\n");
     assert!(
         err.contains("cache: miss"),
         "the unusable root reads as a miss: {err}"
@@ -334,14 +334,14 @@ fn argv_reaches_the_program_identically_warm_and_cold() {
     let cold_source = source_file("argvcold", ARGS_MAIN);
     let (ok, cold_out, err) = ds_run(&cold, &["run", &run_path(&cold_source), "--args", "8080"]);
     assert!(ok, "the cold argv run succeeds (stderr: {err})");
-    assert_eq!(cold_out, "port 8080\n0\n");
+    assert_eq!(cold_out, "port 8080\n");
     let _ = fs::remove_dir_all(&cold);
 
     let cache = cache_dir("argv");
     let source = source_file("argv", ARGS_MAIN);
     let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
     assert!(ok, "the args-reading entry runs (stderr: {err})");
-    assert_eq!(out, "no port\n0\n");
+    assert_eq!(out, "no port\n");
     assert!(
         err.contains("cache: miss"),
         "the first run compiles in-process: {err}"
@@ -378,7 +378,13 @@ fn an_entry_flag_onto_a_lambda_serves_warm() {
         "fn worker() -> int {\n  41 +% 1\n}\nfn main() -> () {\n  println(\"string \
          ${worker()}\")\n}\n",
     );
-    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source), "--entry", "worker"]);
+    let (ok, out, err) = ds_run(&cache, &[
+        "run",
+        "--print-result",
+        &run_path(&source),
+        "--entry",
+        "worker",
+    ]);
     assert!(ok, "the flagged entry runs cold (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(
@@ -387,8 +393,13 @@ fn an_entry_flag_onto_a_lambda_serves_warm() {
     );
     assert_eq!(artifacts(&cache).len(), 1);
 
-    let (ok, warm_out, warm_err) =
-        ds_run(&cache, &["run", &run_path(&source), "--entry", "worker"]);
+    let (ok, warm_out, warm_err) = ds_run(&cache, &[
+        "run",
+        "--print-result",
+        &run_path(&source),
+        "--entry",
+        "worker",
+    ]);
     assert!(ok, "the flagged entry runs warm (stderr: {warm_err})");
     assert_eq!(warm_out, out, "the warm flagged run prints the cold output");
     assert!(
@@ -413,7 +424,13 @@ fn an_entry_flag_on_a_synthesized_member_serves_warm() {
     assert_eq!(artifacts(&cache).len(), 1);
 
     for _ in 0..2 {
-        let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source), "--entry", "unit#make"]);
+        let (ok, out, err) = ds_run(&cache, &[
+            "run",
+            "--print-result",
+            &run_path(&source),
+            "--entry",
+            "unit#make",
+        ]);
         assert!(ok, "the synthesized-member entry runs (stderr: {err})");
         assert_eq!(out, "42\n");
         assert!(
@@ -463,7 +480,7 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
     let cache = cache_dir("deps");
     let source = source_file("deps", IMPORT_MAIN);
 
-    let (ok, out, err) = ds_run(&cache, &["run", &run_path(&source)]);
+    let (ok, out, err) = ds_run(&cache, &["run", "--print-result", &run_path(&source)]);
     assert!(ok, "the importing run succeeds (stderr: {err})");
     assert_eq!(out, "7\n");
     let written = artifacts(&cache);
@@ -493,7 +510,7 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
     // the warm run serves the root and the dep member from disk: the
     // debug markers name both families' hits, so the walk compiled
     // nothing in-process
-    let (ok, warm_out, warm_err) = ds_run(&cache, &["run", &run_path(&source)]);
+    let (ok, warm_out, warm_err) = ds_run(&cache, &["run", "--print-result", &run_path(&source)]);
     assert!(ok, "the warm run succeeds (stderr: {warm_err})");
     assert_eq!(warm_out, out, "the warm run prints the cold output");
     assert!(

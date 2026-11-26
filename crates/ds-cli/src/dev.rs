@@ -613,9 +613,10 @@ impl DevSession {
         }
     }
 
-    /// Reports a completed entry's answer on stdout exactly as `ds run`
-    /// would (the failure tags and the checked read's `none` member ride
-    /// the span's head word, the rest prints per word); an unhandled
+    /// Reports a completed entry's answer on stdout: the failure tags
+    /// and the checked read's `none` member ride the span's head word,
+    /// the rest prints per word, the entry's answer echo included (the
+    /// watch loop is an interactive face like the REPL); an unhandled
     /// world failure is a dev note on stderr (the loop keeps watching).
     fn report_answer(&mut self, answer: &FrameAnswer) {
         match answer.as_slice() {

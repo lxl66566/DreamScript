@@ -72,7 +72,7 @@ fn args_reaches_the_program_verbatim() {
     // no arguments: the empty list
     let out = ds_run(&source, &[]);
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "argc=0\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "argc=0\n");
 
     // strings stay strings: spaces, empties, and non-numeric words ride
     // verbatim, the shape `--args` could never carry as i64 words
@@ -80,7 +80,7 @@ fn args_reaches_the_program_verbatim() {
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "argc=3\nhello world\n\nx7\n0\n"
+        "argc=3\nhello world\n\nx7\n"
     );
 }
 
@@ -101,7 +101,7 @@ fn env_reads_the_process_environment() {
         .output()
         .expect("the ds binary runs");
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "here\n<none>\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "here\n<none>\n");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn eprint_writes_stderr_leaving_stdout_clean() {
     );
     let out = ds_run(&source, &[]);
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "fine\n0\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "fine\n");
     assert_eq!(String::from_utf8_lossy(&out.stderr), "oops\ntail\n");
 }
 
@@ -129,7 +129,7 @@ fn read_line_reads_stdin_until_eof() {
     assert!(out.status.success(), "stderr: {:?}", out.stderr);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "first\nsecond\n<eof>\n0\n"
+        "first\nsecond\n<eof>\n"
     );
 }
 

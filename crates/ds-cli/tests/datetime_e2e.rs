@@ -99,7 +99,7 @@ const FACE_OUT: &str = concat!(
     "292277026596-12-04T15:30:07\n",
     "fields 2026 11 24 0 0 0 2\n",
     "offset bounded\n",
-    "0\n",
+    "",
 );
 
 /// The acceptance: the pure calendar and the fixed-shape spelling run
@@ -144,7 +144,7 @@ fn the_local_face_reads_the_forced_zone() {
             "1970-01-01T05:00:00\n",
             "2000-02-29T05:00:00\n",
             "local 5 2\n",
-            "0\n",
+            "",
         ),
         "the forced-zone run answers"
     );
@@ -187,7 +187,7 @@ fn a_std_declared_root_formats_over_the_datetime_member() {
             "1970-01-01T00:00:00\n",
             "2000-02-29T00:00:00\n",
             "292277026596-12-04T15:30:07\n",
-            "0\n",
+            "",
         ),
         "the std-declared run answers"
     );

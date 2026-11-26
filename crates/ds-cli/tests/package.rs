@@ -221,7 +221,7 @@ fn a_saved_dep_serves_a_package_run_and_build() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the package run exits 0 (stderr: {err})");
     assert_eq!(out, "hi\n42\n", "the call crosses two linked packages");
 
@@ -286,7 +286,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
 
     // the cold run: the root misses, both linked members miss and
     // compile in-process, and one artifact lands per compiled module
-    let (ok, cold, err) = ds_debug(&cache, &["run", entry]);
+    let (ok, cold, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the cold package run succeeds (stderr: {err})");
     assert_eq!(cold, "hi\n42\n");
     assert!(err.contains("ds run cache: miss"), "the root misses: {err}");
@@ -304,7 +304,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     // the warm run: the root serves and both members serve from disk —
     // the dep hit markers are the walk's own lookup decisions, so
     // nothing compiled in-process — and the output is byte-identical
-    let (ok, warm, err) = ds_debug(&cache, &["run", entry]);
+    let (ok, warm, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm package run succeeds (stderr: {err})");
     assert_eq!(warm, cold, "the warm run prints the cold output");
     assert!(err.contains("ds run cache: hit"), "the root serves: {err}");
@@ -360,7 +360,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     );
     fs::write(root.join("ds.pkg"), &root_two_manifest).expect("the repin writes");
 
-    let (ok, repinned, err) = ds_debug(&cache, &["run", entry]);
+    let (ok, repinned, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the repinned run succeeds (stderr: {err})");
     assert_eq!(
         repinned, "hi\n43\n",
@@ -381,7 +381,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
         "the repinned resolution lands its own three artifacts"
     );
 
-    let (ok, warm_two, err) = ds_debug(&cache, &["run", entry]);
+    let (ok, warm_two, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the repinned warm run succeeds (stderr: {err})");
     assert_eq!(
         warm_two, repinned,
@@ -400,7 +400,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     // the old pins keep their own artifacts: the original resolution
     // still serves warm over its content
     fs::write(root.join("ds.pkg"), root_manifest(lib_id, false)).expect("the revert writes");
-    let (ok, reverted, err) = ds_debug(&cache, &["run", entry]);
+    let (ok, reverted, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the reverted run succeeds (stderr: {err})");
     assert_eq!(
         reverted, cold,
@@ -430,7 +430,7 @@ fn a_missing_dep_refuses_naming_the_fill() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "a package run with a missing dep exits nonzero");
     assert_eq!(out, "");
     assert!(err.contains("`@ghost`"), "the refusal names the dep: {err}");
@@ -443,7 +443,7 @@ fn a_missing_dep_refuses_naming_the_fill() {
     // name refuses without the local-fill hint
     let cache = work.join("cache");
     let registry = write_registry(&work, lib_id);
-    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", "--print-result", entry]);
     assert!(!ok, "a registry that never heard the name exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -526,7 +526,7 @@ fn a_registry_index_fills_a_cold_store_run() {
     let entry = entry.to_str().expect("temp path is UTF-8");
 
     let cache = work.join("cache");
-    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", "--print-result", entry]);
     assert!(ok, "the registry-filled run exits 0 (stderr: {err})");
     assert_eq!(out, "hi\n42\n");
     // the fetched, verified bundles installed through the store
@@ -568,7 +568,7 @@ fn a_registry_hash_mismatch_refuses_naming_both_hashes() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
     let cache = work.join("cache");
-    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", "--print-result", entry]);
     assert!(!ok, "the mismatched fetch exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -604,7 +604,7 @@ fn an_undeclared_import_refuses() {
     let root = write_root(&work, &root_manifest(lib_id, false), source);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "an undeclared import exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -662,7 +662,7 @@ fn a_multi_member_package_composes_one_module() {
     };
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "a multi-member package run exits 0 (stderr: {err})");
     assert_eq!(out, "13\n");
 
@@ -736,7 +736,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
     let cache = work.join("cache");
 
     // the cold run: both tiers miss and the compose answers
-    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the multi-member root run exits 0 (stderr: {err})");
     assert_eq!(out, "6\n", "the sibling member binds inside the root");
     assert!(err.contains("ds run cache: miss"), "the root misses: {err}");
@@ -748,7 +748,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
     // the warm run: the run artifact serves, byte-identical output (a
     // run-cache hit installs without the front end, so the prefix tier's
     // own observable rides the build leg below)
-    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm multi-member root run exits 0 (stderr: {err})");
     assert_eq!(out, "6\n", "the warm run prints the cold output");
     assert!(err.contains("ds run cache: hit"), "the root serves: {err}");
@@ -787,7 +787,11 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
         folded,
         "the artifact's header carries the composed member identity"
     );
-    let (ok, out, err) = ds(&["run", out_path.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(ok, "the built artifact runs (stderr: {err})");
     assert_eq!(out, "6\n");
 
@@ -799,7 +803,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
         "pub fn twice(n: int) -> int {\n3 * n\n}\n",
     )
     .expect("the sibling edit writes");
-    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the sibling-edited run exits 0 (stderr: {err})");
     assert_eq!(out, "9\n", "the new member set serves");
     assert!(
@@ -810,7 +814,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
         err.contains("ds prefix cache: miss"),
         "the sibling edit re-keys the prefix tier: {err}"
     );
-    let (ok, out, err) = ds_caches_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_caches_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the re-keyed warm run exits 0 (stderr: {err})");
     assert_eq!(out, "9\n");
     assert!(
@@ -832,7 +836,7 @@ fn a_multi_member_root_composes_and_rekeys_on_sibling_edits() {
     // a broken sibling refuses under its own member path: the sibling
     // joined the compile, so its diagnostic names it
     fs::write(root.join("helper.ds"), "fn broken {\n").expect("the broken sibling writes");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "a broken sibling member refuses the run");
     assert_eq!(out, "");
     assert!(
@@ -873,7 +877,7 @@ fn a_three_member_root_binds_a_cross_member_impl() {
     ]);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the three-member root run exits 0 (stderr: {err})");
     assert_eq!(out, "cell 3\n6\n", "the cross-member impl dispatches");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -911,7 +915,7 @@ fn a_whole_package_import_and_an_alias_bind() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the aliased run exits 0 (stderr: {err})");
     assert_eq!(out, "16\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -981,7 +985,7 @@ fn the_import_tiers_refuse() {
         let root = write_root(&work, &root_manifest, source);
         let entry = root.join("app.ds");
         let entry = entry.to_str().expect("temp path is UTF-8");
-        let (ok, out, err) = ds(&["run", entry]);
+        let (ok, out, err) = ds(&["run", "--print-result", entry]);
         assert!(!ok, "the {tag} selection refuses");
         assert_eq!(out, "");
         assert!(
@@ -1088,7 +1092,7 @@ version = \"0.1.0\"
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the const-facts run exits 0 (stderr: {err})");
     assert_eq!(
         out,
@@ -1148,7 +1152,7 @@ version = \"0.1.0\"
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the alias-qualified const run exits 0 (stderr: {err})");
     assert_eq!(
         out,
@@ -1278,7 +1282,7 @@ version = \"0.1.0\"
         let root = write_root(&work, &root_manifest, source);
         let entry = root.join("app.ds");
         let entry = entry.to_str().expect("temp path is UTF-8");
-        let (ok, out, err) = ds(&["run", entry]);
+        let (ok, out, err) = ds(&["run", "--print-result", entry]);
         assert!(!ok, "the {tag} selection refuses");
         assert_eq!(out, "");
         assert!(
@@ -1364,7 +1368,7 @@ fn a_trapping_exported_const_refuses_the_producer_build() {
     let root = probe_root(&work, &pkg_id);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "the trapping const refuses the producer build");
     assert_eq!(out, "");
     assert!(
@@ -1404,7 +1408,7 @@ fn a_world_reaching_exported_const_refuses_the_producer_build() {
     let root = probe_root(&work, &pkg_id);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "the world-reaching const refuses the producer build");
     assert_eq!(out, "");
     assert!(
@@ -1707,7 +1711,7 @@ fn linked_struct_facts_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the struct-facts run exits 0 (stderr: {err})");
     // 3 + 6 + 10 + 2 + 8 = 29 through the linked and local spellings, the
     // narrowed arm adding widen(2).n = 2, the match arm adding 0, and the
@@ -1750,7 +1754,7 @@ fn linked_container_word_fields_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the spread run exits 0 (stderr: {err})");
     // weigh(s) = len([3]) + len(grid) + miss = 1 + 2 + 0 = 3; the sparse
     // twin adds 1 + 2 + 7 = 10 over its filled table; the empty own adds
@@ -1803,7 +1807,7 @@ fn linked_named_type_fields_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the fleet run exits 0 (stderr: {err})");
     // fleet_weight(made) = area(make(3)) 6 + len([make(1)]) 1 + opt(3).n 3
     // + index["k"].n 3 + score(pick(4)) 4 = 17; fleet_weight(own) = 10 + 2
@@ -1957,7 +1961,7 @@ fn linked_bytes_field_facts_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the bytes-field run exits 0 (stderr: {err})");
     // total(b) = 3+2 and total(made) = 10+2 open at 17, the == chain adds 2
     // (the equal twin, the differing content answered unequal), the
@@ -2003,7 +2007,7 @@ fn the_tuple_fields_cross_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the tuple-field run exits 0 (stderr: {err})");
     // the destructure 7, the made pair 30, the own pair 7, the tagged
     // legs 3+1+4, and the consumer-built tagged pair 2+2 — 56 in all,
@@ -2044,7 +2048,7 @@ fn the_trait_impls_cross_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the trait-impl run exits 0 (stderr: {err})");
     // the plain site 42, the tail site 42, and the second head's
     // producer-made value 4 — 88 in all, the run echoing the return
@@ -2162,7 +2166,11 @@ fn bespoke_run(work: &Path, pkg_id: &str, source: &str) -> (bool, String, String
     );
     let root = write_root(work, &manifest, source);
     let entry = root.join("app.ds");
-    ds(&["run", entry.to_str().expect("temp path is UTF-8")])
+    ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ])
 }
 
 /// The qualified `Trait::f` spelling crosses the link seam over a
@@ -2193,7 +2201,11 @@ fn the_qualified_trait_spelling_dispatches_over_the_link() {
         ),
     );
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(ok, "the qualified run exits 0 (stderr: {err})");
     // the plain site 42, the tail site 42 — the run echoing the return
     assert_eq!(out, "42 42\n84\n");
@@ -2232,7 +2244,7 @@ fn the_trait_default_bodies_cross_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the default-body run exits 0 (stderr: {err})");
     // the linked omitting impl's site 7, the consumer's own omitting
     // impl 7, and the spelled string head's tail site 5
@@ -2328,7 +2340,7 @@ fn a_wide_receiver_into_a_linked_default_body_refuses() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "the wide receiver refuses");
     assert_eq!(out, "");
     assert!(
@@ -2531,7 +2543,7 @@ fn linked_signatures_bind_over_an_unselected_type() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the opaque-type run exits 0 (stderr: {err})");
     assert_eq!(out, "10\n10\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2599,7 +2611,7 @@ fn linked_enum_facts_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the enum-facts run exits 0 (stderr: {err})");
     // 15 (own construct + match) + 0 + 1 + 11 (producer scores the
     // producer-made values) + 12 (consumer match over a producer value)
@@ -2639,7 +2651,7 @@ fn linked_tuple_payloads_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the tuple-payload run exits 0 (stderr: {err})");
     assert_eq!(out, "17\n17\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2669,7 +2681,7 @@ fn linked_linear_structs_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the linear-struct run exits 0 (stderr: {err})");
     assert_eq!(out, "5\n5\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2716,7 +2728,7 @@ fn linked_tag_facts_bind_and_run() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the tag-facts run exits 0 (stderr: {err})");
     // 1 (own construct + match) + 1 + 2 (the producer scores its
     // own values both ways) + 1 (the consumer match over a
@@ -2753,7 +2765,7 @@ fn an_empty_linked_enum_binds_its_name() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the empty-enum name solves (stderr: {err})");
     assert_eq!(out, "7\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2867,7 +2879,7 @@ fn the_uncarried_type_shapes_refuse() {
         let root = write_root(&work, &root_manifest, source);
         let entry = root.join("app.ds");
         let entry = entry.to_str().expect("temp path is UTF-8");
-        let (ok, out, err) = ds(&["run", entry]);
+        let (ok, out, err) = ds(&["run", "--print-result", entry]);
         assert!(!ok, "the {tag} selection refuses");
         assert_eq!(out, "");
         assert!(
@@ -2910,7 +2922,7 @@ fn an_impl_over_a_linked_type_dispatches() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the impl-over-linked-type run exits 0 (stderr: {err})");
     assert_eq!(out, "5\n5\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -2960,7 +2972,7 @@ fn the_alias_bodies_and_the_subset_union_cross() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the richer-words run exits 0 (stderr: {err})");
     // tally(made) = 6 (green), the subset match adds 20, head_of adds
     // 3, the chain list's len 2, and the string-narrowed either adds
@@ -3009,7 +3021,7 @@ fn comptime_reflection_reads_a_linked_type() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the reflection run exits 0 (stderr: {err})");
     // cell carries seven fields; shade's entry carries one record per
     // case (red, green, blue)
@@ -3040,7 +3052,7 @@ fn the_linked_type_receiver_seam_refuses_at_the_check() {
     let root = write_root(&work, &root_manifest, source);
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(!ok, "the {tag} seam refuses");
     assert_eq!(out, "");
     assert!(
@@ -3085,7 +3097,11 @@ fn a_plain_script_beside_no_manifest_runs_as_today() {
     fs::create_dir_all(&dir).expect("the dir creates");
     let source = dir.join("main.ds");
     fs::write(&source, "fn main() -> int {\n7\n}\n").expect("the source writes");
-    let (ok, out, err) = ds(&["run", source.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        source.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(ok, "the plain script runs (stderr: {err})");
     assert_eq!(out, "7\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
@@ -3112,7 +3128,11 @@ fn a_duplicate_module_alias_refuses_cleanly_at_a_run() {
             "}\n",
         ),
     )]);
-    let (ok, out, err) = ds(&["run", root.join("app.ds").to_str().expect("path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        root.join("app.ds").to_str().expect("path is UTF-8"),
+    ]);
     assert!(!ok, "the duplicate-alias run exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -3168,7 +3188,11 @@ fn a_self_importing_package_refuses_with_the_cycle_error() {
             ),
         )],
     );
-    let (ok, out, err) = ds(&["run", root.join("app.ds").to_str().expect("path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        root.join("app.ds").to_str().expect("path is UTF-8"),
+    ]);
     assert!(!ok, "the self-importing run exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -3233,7 +3257,11 @@ fn mutual_source_imports_refuse_with_the_cycle_error() {
             ),
         )],
     );
-    let (ok, out, err) = ds(&["run", root.join("app.ds").to_str().expect("path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        root.join("app.ds").to_str().expect("path is UTF-8"),
+    ]);
     assert!(!ok, "the mutual-import run exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -3330,7 +3358,7 @@ fn a_package_run_serves_the_script_cache_across_runs() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the cold package run exits 0 (stderr: {err})");
     assert_eq!(out, "hi\n42\n", "the call crosses two linked packages");
     assert!(
@@ -3338,7 +3366,7 @@ fn a_package_run_serves_the_script_cache_across_runs() {
         "the first run compiles cold: {err}"
     );
 
-    let (ok, warm_out, warm_err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, warm_out, warm_err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm package run exits 0 (stderr: {warm_err})");
     assert_eq!(warm_out, out, "the warm run prints the cold output");
     assert!(
@@ -3403,14 +3431,14 @@ fn a_bumped_dep_rekeys_the_served_root() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the first pinned run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(
         err.contains("cache: miss"),
         "the first run compiles cold: {err}"
     );
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the second pinned run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(err.contains("cache: hit"), "the same pin serves: {err}");
@@ -3424,21 +3452,21 @@ fn a_bumped_dep_rekeys_the_served_root() {
     let v2_id = bundle_identity(&v2_manifest, &[("scale.ds", v2_member)]);
     fs::write(root.join("ds.pkg"), manifest(v2_id, "2.0.0")).expect("the re-pin writes");
 
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the re-pinned run exits 0 (stderr: {err})");
     assert_eq!(out, "63\n", "the bumped content answers");
     assert!(
         err.contains("cache: miss"),
         "a dep's changed resolved content re-keys, never serving the old artifact: {err}"
     );
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the re-pinned warm run exits 0 (stderr: {err})");
     assert_eq!(out, "63\n");
     assert!(err.contains("cache: hit"), "the new pin serves: {err}");
 
     // the first artifact still serves the first pin
     fs::write(root.join("ds.pkg"), manifest(v1_id, "1.0.0")).expect("the reversion writes");
-    let (ok, out, err) = ds_cache_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_cache_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the reverted run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n", "the old content answers");
     assert!(
@@ -3524,7 +3552,7 @@ fn a_package_run_serves_the_prefix_across_runs() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, cold_out, cold_err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, cold_out, cold_err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the cold package run exits 0 (stderr: {cold_err})");
     assert_eq!(cold_out, "hi\n42\n", "the call crosses two linked packages");
     assert!(
@@ -3537,7 +3565,7 @@ fn a_package_run_serves_the_prefix_across_runs() {
     // the eviction: only the dsmod goes away, so the run below serves
     // the prefix and re-runs the body pass over it
     fs::remove_file(the_cached_artifact(&cache)).expect("the dsmod evicts");
-    let (ok, warm_out, warm_err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, warm_out, warm_err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm package run exits 0 (stderr: {warm_err})");
     assert_eq!(warm_out, cold_out, "the warm run prints the cold output");
     assert!(
@@ -3593,7 +3621,7 @@ fn a_bumped_dep_rekeys_the_served_prefix() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the first pinned run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(
@@ -3601,7 +3629,7 @@ fn a_bumped_dep_rekeys_the_served_prefix() {
         "the first run compiles cold: {err}"
     );
     evict_dsmods(&cache);
-    let (ok, out, err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the first warm run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n");
     assert!(
@@ -3618,7 +3646,7 @@ fn a_bumped_dep_rekeys_the_served_prefix() {
     let v2_id = bundle_identity(&v2_manifest, &[("scale.ds", v2_member)]);
     fs::write(root.join("ds.pkg"), manifest(v2_id, "2.0.0")).expect("the re-pin writes");
 
-    let (ok, out, err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the re-pinned run exits 0 (stderr: {err})");
     assert_eq!(out, "63\n", "the bumped content answers");
     assert!(
@@ -3626,7 +3654,7 @@ fn a_bumped_dep_rekeys_the_served_prefix() {
         "a dep's changed resolved content re-keys the prefix, never serving the old one: {err}"
     );
     evict_dsmods(&cache);
-    let (ok, out, err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the re-pinned warm run exits 0 (stderr: {err})");
     assert_eq!(out, "63\n");
     assert!(
@@ -3637,7 +3665,7 @@ fn a_bumped_dep_rekeys_the_served_prefix() {
     // the first prefix still serves the first pin
     fs::write(root.join("ds.pkg"), manifest(v1_id, "1.0.0")).expect("the reversion writes");
     evict_dsmods(&cache);
-    let (ok, out, err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, out, err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the reverted run exits 0 (stderr: {err})");
     assert_eq!(out, "42\n", "the old content answers");
     assert!(
@@ -3728,7 +3756,7 @@ fn a_linked_facts_root_serves_the_prefix_across_runs() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, cold_out, cold_err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, cold_out, cold_err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the cold facts run exits 0 (stderr: {cold_err})");
     assert_eq!(cold_out, "200 101 104\n402\n");
     assert!(
@@ -3738,7 +3766,7 @@ fn a_linked_facts_root_serves_the_prefix_across_runs() {
     let cold_module = fs::read(the_cached_artifact(&cache)).expect("the dsmod persists");
 
     fs::remove_file(the_cached_artifact(&cache)).expect("the dsmod evicts");
-    let (ok, warm_out, warm_err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, warm_out, warm_err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm facts run exits 0 (stderr: {warm_err})");
     assert_eq!(
         warm_out, cold_out,
@@ -3814,7 +3842,7 @@ fn an_artifact_declaring_package_installs_and_runs() {
     // no registry, nothing installed: the refusal names the artifact,
     // its pin, and where a fill comes from
     let cache = work.join("cache-a");
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(!ok, "a missing artifact refuses the run");
     assert_eq!(out, "");
     assert!(
@@ -3831,9 +3859,9 @@ fn an_artifact_declaring_package_installs_and_runs() {
     // run's declared extern answers
     let registry = artifact_registry(&work, identity);
     let cache = work.join("cache-b");
-    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, Some(&registry), &["run", "--print-result", entry]);
     assert!(ok, "the artifact-backed run exits 0 (stderr: {err})");
-    assert_eq!(out, "42\n0\n", "the declared extern runs over the graph");
+    assert_eq!(out, "42\n", "the declared extern runs over the graph");
     let installed = cache.join("artifact").join(format!("{identity}.lib"));
     assert_eq!(
         fs::read(&installed).expect("the installed library reads"),
@@ -3842,12 +3870,12 @@ fn an_artifact_declaring_package_installs_and_runs() {
     );
 
     // the store answers the second run with no registry at all
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(
         ok,
         "the installed library serves without a registry (stderr: {err})"
     );
-    assert_eq!(out, "42\n0\n");
+    assert_eq!(out, "42\n");
 
     // a registry whose storage drifted refuses hard, never serving
     // wrong bytes — the installed copy already answers, so the drift
@@ -3860,7 +3888,7 @@ fn an_artifact_declaring_package_installs_and_runs() {
     )
     .expect("the drift lands");
     let cold = work.join("cache-c");
-    let (ok, _, err) = ds_env(&cold, Some(&drifted), &["run", entry]);
+    let (ok, _, err) = ds_env(&cold, Some(&drifted), &["run", "--print-result", entry]);
     assert!(!ok, "drifted artifact storage refuses");
     assert!(
         err.contains("nativelib"),
@@ -3924,9 +3952,9 @@ fn a_declared_std_dep_serves_the_default_install() {
     let entry = entry.to_str().expect("temp path is UTF-8");
     let cache = work.join("cache");
 
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(ok, "the default-install run exits 0 (stderr: {err})");
-    assert_eq!(out, "HI!\n0\n", "the @std members answer through the link");
+    assert_eq!(out, "HI!\n", "the @std members answer through the link");
 
     // the default install landed in the content-addressed store
     assert!(
@@ -3990,10 +4018,10 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     let entry = entry.to_str().expect("temp path is UTF-8");
     let cache = work.join("cache");
 
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(ok, "the shrunk-core run exits 0 (stderr: {err})");
     assert_eq!(
-        out, "CORE\n0\n",
+        out, "CORE\n",
         "the linked extern face answers over the core"
     );
 
@@ -4029,7 +4057,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(
         ok,
         "the migrated residue binds through the link (stderr: {err})"
@@ -4039,7 +4067,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
         "https://ds.dev\n",
         "https://example.org\n",
         "localhost 3 1 2\n",
-        "0\n",
+        "",
     );
     assert_eq!(out, expected, "the four migrated shapes answer end to end");
 
@@ -4051,7 +4079,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     // the run cache and runs no front end, so no path consults a
     // prefix (the composed prefix serves a dsmod miss's compile and
     // `ds info`'s file target, the dep `.dsi` only the `ds lsp` hover)
-    let (ok, warm, warm_err) = ds_both_debug(&cache, &["run", entry]);
+    let (ok, warm, warm_err) = ds_both_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the warm residue run exits 0 (stderr: {warm_err})");
     assert_eq!(warm, expected, "the warm run answers the same bytes");
     assert!(
@@ -4090,7 +4118,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(!ok, "the opaque value use refuses");
     assert_eq!(out, "");
     assert!(
@@ -4116,7 +4144,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(!ok, "the opaque construction refuses at the lowering");
     assert_eq!(out, "");
     assert!(
@@ -4143,7 +4171,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     );
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(!ok, "the bare demo-residue names refuse over the core");
     assert_eq!(out, "");
     assert!(
@@ -4207,7 +4235,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
 
     // the migrated shapes bind through the linked surface over the
     // implicit resolution, answering exactly the declaring-graph bytes
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(
         ok,
         "the implicit-resolution script run exits 0 (stderr: {err})"
@@ -4217,13 +4245,13 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
         "https://ds.dev\n",
         "https://example.org\n",
         "localhost 3 1 2\n",
-        "0\n",
+        "",
     );
     assert_eq!(out, expected, "the four migrated shapes answer end to end");
 
     // the warm run serves the root and the @std dep member from the
     // cached artifacts, answering byte-identically
-    let (ok, warm, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, warm, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(ok, "the warm script run exits 0 (stderr: {err})");
     assert_eq!(warm, expected, "the warm run answers the same bytes");
 
@@ -4248,6 +4276,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
     .expect("the opaque script writes");
     let (ok, out, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         opq.to_str().expect("temp path is UTF-8"),
     ]);
     assert!(!ok, "the opaque value use refuses");
@@ -4267,6 +4296,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
     .expect("the segment script writes");
     let (ok, out, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         seg.to_str().expect("temp path is UTF-8"),
     ]);
     assert!(!ok, "the phantom member segment refuses");
@@ -4329,9 +4359,9 @@ fn an_undeclaring_graph_keeps_the_merged_ambient_reading() {
     let entry = entry.to_str().expect("temp path is UTF-8");
     let cache = work.join("cache");
 
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(ok, "the merged-reading package run exits 0 (stderr: {err})");
-    let expected = "localhost 3 1\n0\n";
+    let expected = "localhost 3 1\n";
     assert_eq!(
         out, expected,
         "the demo residue answers bare through the merged ambient"
@@ -4345,7 +4375,11 @@ fn an_undeclaring_graph_keeps_the_merged_ambient_reading() {
     fs::create_dir_all(&script_dir).expect("the script dir creates");
     let script = script_dir.join("app.ds");
     fs::write(&script, source).expect("the script writes");
-    let (ok, script_out, err) = ds_env(&cache, None, &["run", script.to_str().expect("UTF-8")]);
+    let (ok, script_out, err) = ds_env(&cache, None, &[
+        "run",
+        "--print-result",
+        script.to_str().expect("UTF-8"),
+    ]);
     assert!(!ok, "the script run refuses the bare migrated names");
     assert_eq!(script_out, "", "nothing executes");
     assert!(
@@ -4372,7 +4406,11 @@ fn a_user_package_named_std_refuses() {
         "fn main() -> int {\n7\n}\n",
     );
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(!ok, "a root named @std exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -4401,7 +4439,11 @@ fn a_std_demand_above_the_tree_s_offering_refuses() {
         "fn main() -> int {\n7\n}\n",
     );
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(!ok, "an unsatisfiable @std bound exits nonzero");
     assert_eq!(out, "");
     assert!(
@@ -4475,7 +4517,11 @@ fn the_std_linked_surface_tiers_refuse() {
     ] {
         let root = write_root(&work, &manifest, source);
         let entry = root.join("app.ds");
-        let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+        let (ok, out, err) = ds(&[
+            "run",
+            "--print-result",
+            entry.to_str().expect("temp path is UTF-8"),
+        ]);
         assert!(!ok, "the {tag} selection refuses");
         assert_eq!(out, "");
         assert!(
@@ -4578,7 +4624,7 @@ fn a_pub_import_reexport_crosses_the_middle_package() {
     let entry = root.join("app.ds");
     let entry = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds(&["run", entry]);
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
     assert!(ok, "the re-exported call serves the run (stderr: {err})");
     assert_eq!(
         out, "hi\n66\n",
@@ -4629,7 +4675,11 @@ fn a_pub_import_reexport_crosses_the_middle_package() {
     );
     let root = write_root(&work, &root_manifest(lib_id, false), refused);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(!ok, "the privately-imported name refuses");
     assert_eq!(out, "");
     assert!(
@@ -4769,7 +4819,11 @@ fn a_reexported_named_type_field_crosses_the_middle_package() {
     );
     let root = write_root(&work, &root_manifest, source);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(ok, "the re-exported Named-word run exits 0 (stderr: {err})");
     // fleet_weight(made) = area(make(3)) 6 + len([make(1)]) 1 + 0
     // + score(green) 2 = 9; fleet_weight(own) = area(5) 10 + len 1 + 0
@@ -4797,7 +4851,11 @@ fn a_privately_imported_type_field_keeps_its_refusal() {
     );
     let root = write_root(&work, &root_manifest, source);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(!ok, "the privately-imported type field refuses");
     assert_eq!(out, "");
     assert!(
@@ -4899,7 +4957,11 @@ fn a_cross_module_tail_transfer_runs_a_ten_million_hop_loop_over_a_linked_packag
     );
     let root = tail_loop_tree(&work, source);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds(&[
+        "run",
+        "--print-result",
+        entry.to_str().expect("temp path is UTF-8"),
+    ]);
     assert!(ok, "the ten-million-hop run exits 0 (stderr: {err})");
     assert_eq!(
         out, "4242\n",
@@ -4964,7 +5026,11 @@ fn the_cross_module_frame_reuse_answers_like_the_stacked_reference() {
         ] {
             let root = tail_loop_tree(&work, &source);
             let entry = root.join("app.ds");
-            let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+            let (ok, out, err) = ds(&[
+                "run",
+                "--print-result",
+                entry.to_str().expect("temp path is UTF-8"),
+            ]);
             assert!(ok, "the variant at depth {depth} exits 0 (stderr: {err})");
             answers.push(out);
             let (ok, _, err) = ds(&[
@@ -5035,7 +5101,11 @@ fn a_closure_word_into_a_linked_fn_parameter_keeps_the_in_place_tail() {
         let source = format!("import @fnlib/fnlib (apply)\n\nfn main() -> int {{\n{body}}}\n");
         let root = write_root(&work, &root_manifest, &source);
         let entry = root.join("app.ds");
-        let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+        let (ok, out, err) = ds(&[
+            "run",
+            "--print-result",
+            entry.to_str().expect("temp path is UTF-8"),
+        ]);
         assert!(ok, "the {tag} run exits 0 (stderr: {err})");
         assert_eq!(out, "42\n");
         let out_path = work.join(format!("{tag}.dsmod"));
@@ -5139,7 +5209,11 @@ fn a_cross_module_tail_transfer_hands_a_counted_ref_word() {
         {
             let root = lend_tree(&work, &source);
             let entry = root.join("app.ds");
-            let (ok, out, err) = ds(&["run", entry.to_str().expect("temp path is UTF-8")]);
+            let (ok, out, err) = ds(&[
+                "run",
+                "--print-result",
+                entry.to_str().expect("temp path is UTF-8"),
+            ]);
             assert!(
                 ok,
                 "the spelling {index} at depth {depth} exits 0 (stderr: {err})"
@@ -5223,7 +5297,7 @@ fn a_local_path_dep_serves_a_package_run() {
     let entry = root.join("app.ds");
     let entry_str = entry.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds_env(&cache, None, &["run", entry_str]);
+    let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry_str]);
     assert!(ok, "the path-dep run exits 0 (stderr: {err})");
     assert_eq!(out, "hi\n28\n", "the call crosses two source-read packages");
 
@@ -5292,6 +5366,7 @@ fn a_dep_declared_at_both_shapes_refuses() {
     );
     let (ok, _, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(!ok, "the both-shape manifest refuses");
@@ -5323,6 +5398,7 @@ fn a_transitive_path_dep_cycle_refuses() {
     );
     let (ok, _, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(!ok, "the path cycle refuses");
@@ -5415,13 +5491,14 @@ fn the_root_package_impl_shadows_a_dependency_impl_with_a_warning() {
     )]);
     let (ok, out, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(
         ok,
         "the shadowing resolves and the run stands (stderr: {err})"
     );
-    assert_eq!(out, "root 3\n0\n", "the root's own impl takes the head");
+    assert_eq!(out, "root 3\n", "the root's own impl takes the head");
     assert!(
         err.contains("DS2047"),
         "the shadowing warns, never silent (stderr: {err})"
@@ -5485,6 +5562,7 @@ fn an_origin_impl_shadows_a_third_party_impl() {
     )]);
     let (ok, out, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(
@@ -5492,7 +5570,7 @@ fn an_origin_impl_shadows_a_third_party_impl() {
         "the origin's row wins and the run stands (stderr: {err})"
     );
     assert_eq!(
-        out, "base 3\n0\n",
+        out, "base 3\n",
         "the origin impl takes the head over the third party's"
     );
     assert!(
@@ -5540,6 +5618,7 @@ fn two_third_party_impls_refuse_the_link_naming_both() {
     );
     let (ok, _, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(!ok, "two third-party impls refuse the link (stderr: {err})");
@@ -5590,6 +5669,7 @@ fn an_exercised_impl_refuses_its_shadowing_naming_the_loser() {
     )]);
     let (ok, _, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(
@@ -5642,13 +5722,14 @@ fn a_runtime_resolved_impl_shadows_with_a_warning() {
     )]);
     let (ok, out, err) = ds_env(&cache, None, &[
         "run",
+        "--print-result",
         root.join("app.ds").to_str().expect("UTF-8"),
     ]);
     assert!(
         ok,
         "the runtime-resolved impl shadows with a warning (stderr: {err})"
     );
-    assert_eq!(out, "root 4\n0\n", "the winner serves every dispatch");
+    assert_eq!(out, "root 4\n", "the winner serves every dispatch");
     assert!(err.contains("DS2047"), "the shadowing warns: {err}");
     assert!(
         !err.contains("DS2049"),

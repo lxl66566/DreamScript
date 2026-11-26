@@ -32,7 +32,7 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 
 /// The probe's golden: the min literal's interpolated digits, the
 /// computed-min equality, and main's int answer.
-const GOLDEN: &str = concat!("-9223372036854775808\n", "min\n", "0\n");
+const GOLDEN: &str = concat!("-9223372036854775808\n", "min\n", "");
 
 #[test]
 fn int_min_prints_through_interpolation_and_equals_the_computed_min() {

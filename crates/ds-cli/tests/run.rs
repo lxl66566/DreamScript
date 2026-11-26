@@ -250,15 +250,16 @@ fn run_executes_main_and_named_entries() {
     let path = temp_module("parity", &write(&parity_module(100_000)));
     let file = path.to_str().expect("temp path is UTF-8");
 
-    let (ok, out, err) = ds_run(&["run", file]);
+    // the answer switch prints the entries' non-unit answers
+    let (ok, out, err) = ds_run(&["run", "--print-result", file]);
     assert!(ok, "ds run exits 0 (stderr: {err})");
     assert_eq!(out, "true\n");
 
     // a named entry
-    let (ok, out, err) = ds_run(&["run", file, "--entry", "answer"]);
+    let (ok, out, err) = ds_run(&["run", "--print-result", file, "--entry", "answer"]);
     assert!(ok, "ds run --entry answer (stderr: {err})");
     assert_eq!(out, "42\n");
-    let (ok, out, err) = ds_run(&["run", file, "--entry", "half"]);
+    let (ok, out, err) = ds_run(&["run", "--print-result", file, "--entry", "half"]);
     assert!(ok, "ds run --entry half (stderr: {err})");
     assert_eq!(out, "2.5\n");
 
@@ -447,13 +448,17 @@ fn platform_tags_in_run_results_decode_by_name() {
     assert_eq!(out, "");
     assert!(err.contains("unhandled parse failure"), "stderr: {err}");
 
-    // The none member of a checked read is a plain result: printed by
-    // name, not as the reservation's raw id.
+    // The none member of a checked read is a plain result: under the
+    // answer switch it prints by name, never as the reservation's raw id.
     let path = temp_module(
         "none-tag",
         &write(&platform_tag_module("none_tag", PLATFORM_NONE)),
     );
-    let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
+    let (ok, out, err) = ds_run(&[
+        "run",
+        "--print-result",
+        path.to_str().expect("temp path is UTF-8"),
+    ]);
     fs::remove_file(&path).expect("temp dsmod removes");
     assert!(ok, "a none result is a successful run (stderr: {err})");
     assert_eq!(out, "none\n");
@@ -537,7 +542,7 @@ fn a_runaway_comptime_loop_answers_the_step_budget_at_the_run() {
     let (ok, out, err) = ds_run(&["run", path.to_str().expect("temp path is UTF-8")]);
     fs::remove_file(&path).expect("temp source removes");
     assert!(ok, "the healthy source runs (stderr: {err})");
-    assert_eq!(out, "42 3\n0\n");
+    assert_eq!(out, "42 3\n");
 
     let path = env::temp_dir().join(format!(
         "ds-cli-run-comptime-spin-{}.ds",

@@ -58,7 +58,7 @@ fn trait_defaults_stages_one_authority_across_every_spelling() {
     // member keeps its own body default
     run_golden(
         "trait_defaults.ds",
-        "int 12 12 13 13\nword 6 6 5\ngauge 7 11\n0\n",
+        "int 12 12 13 13\nword 6 6 5\ngauge 7 11\n",
     );
 }
 
@@ -69,7 +69,7 @@ fn records_lists_read_whole_elements_through_the_checked_span() {
     // sum over the explicit-index walk (4*9 + 2*25 + 8*3)
     run_golden(
         "records_lists.ds",
-        "count 3 miss absent total 110\nfirst nut 36\n0\n",
+        "count 3 miss absent total 110\nfirst nut 36\n",
     );
 }
 
@@ -80,7 +80,7 @@ fn transitive_dispatch_rides_the_staged_evidence_area() {
     // generic shows-for-list body at int, string, and one nested hop
     run_golden(
         "transitive_dispatch.ds",
-        "got [n=6,n=7,]\ngot [x!,y!,]\ngot [[n=5,],]\n0\n",
+        "got [n=6,n=7,]\ngot [x!,y!,]\ngot [[n=5,],]\n",
     );
 }
 
@@ -92,7 +92,7 @@ fn teardown_deinit_fires_at_the_own_exit_and_the_drain() {
     // the timeout unions out) — the "never" line stays unreached
     run_golden(
         "teardown_deinit.ds",
-        "ran clean\nfreed clean\nclean kept 0\nstart cut\nfreed cut\nt\n0\n",
+        "ran clean\nfreed clean\nclean kept 0\nstart cut\nfreed cut\nt\n",
     );
 }
 
@@ -105,7 +105,7 @@ fn the_nursery_surface_joins_cuts_and_unions_payloads_out() {
     // natives
     run_golden(
         "nursery_surface.ds",
-        "guarded kept 3\nt\nr\nran 1\nfreed 1\nclaim kept 0\ncode 3 payload\nlist 3\n0\n",
+        "guarded kept 3\nt\nr\nran 1\nfreed 1\nclaim kept 0\ncode 3 payload\nlist 3\n",
     );
 }
 
@@ -115,7 +115,7 @@ fn a_recursive_nursery_block_drains_the_interlock_iteratively() {
     // enclosing drive owns the child stands one interlock frame per
     // recursion level; depth 2000 lands where the recursive driver
     // overflowed the process stack near depth 50
-    run_golden("nursery_deep.ds", "three 0\ntwo-thousand 0\n0\n");
+    run_golden("nursery_deep.ds", "three 0\ntwo-thousand 0\n");
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn the_timeout_surface_races_answers_and_handles_the_deadline() {
     run_golden(
         "timeout_surface.ds",
         "scalar 41\nclosure hello thunk\nnamed 5\none field 4\nat once -9\nfallback \
-         12\ngreen\nblock 5 6\nnested 7\nloop 1000000\n0\n",
+         12\ngreen\nblock 5 6\nnested 7\nloop 1000000\n",
     );
 }
 
@@ -142,7 +142,7 @@ fn the_union_default_annotation_answers_the_member_construction() {
     // same construction
     run_golden(
         "derive_default_union.ds",
-        "tone=loud { volume: 0 } level=big(0) pick=loud { volume: 0 }\n0\n",
+        "tone=loud { volume: 0 } level=big(0) pick=loud { volume: 0 }\n",
     );
 }
 
@@ -152,7 +152,7 @@ fn the_comptime_fence_admits_pure_row_helpers() {
     // the fenced evaluation (a two-hop chain riding the transitive
     // closure), the answer embedding at the call site, and the helper
     // still running on the runtime path
-    run_golden("comptime_admission.ds", "kind=point flat=true\n0\n");
+    run_golden("comptime_admission.ds", "kind=point flat=true\n");
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn the_comptime_fence_admits_trap_row_helpers() {
     // string-concat helper (its row the effects pass's unsolved-type over-approximation) join
     // the fenced evaluation with their answers embedding, and both still
     // run on the runtime path
-    run_golden("comptime_trap_row.ds", "page!\n42\n0\n");
+    run_golden("comptime_trap_row.ds", "page!\n42\n");
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn the_tutorial_surface_interpolates_and_defaults_end_to_end() {
     run_golden(
         "tutorial_surface.ds",
         "derived shape { label: nut, weight: 3 } / shape { label: nut, weight: 3 }\nunion loud { \
-         volume: 7 }\ninherent gauge 4\ndefault 0 0 0\ncase true\n0\n",
+         volume: 7 }\ninherent gauge 4\ndefault 0 0 0\ncase true\n",
     );
 }
 
@@ -204,7 +204,7 @@ fn the_json_derive_families_round_trip_through_the_parser_and_writer() {
             "{\"times\":3}\n",
             "parse_err\n",
             "parse_err\n",
-            "0\n",
+            "",
         ),
     );
 }
@@ -231,7 +231,7 @@ fn the_bytes_surface_renders_orders_and_crosses_the_bridges() {
             "utf8_err\n",
             "true false\n",
             "true false\n",
-            "0\n",
+            "",
         ),
     );
 }
@@ -247,7 +247,7 @@ fn collection_equality_compares_nested_content_and_membership() {
     // a NaN reflexive, the two zeros distinct keys and unequal elements
     run_golden(
         "collection_equality.ds",
-        "nested true\nmatrix true\nfields true\nmember true\nfloat true\n0\n",
+        "nested true\nmatrix true\nfields true\nmember true\nfloat true\n",
     );
 }
 
@@ -268,7 +268,7 @@ fn the_json_width_vocabulary_round_trips_both_derive_families() {
             "true\n",
             "true\n",
             "true\n",
-            "0\n",
+            "",
         ),
     );
 }
@@ -280,7 +280,7 @@ fn the_arena_surface_builds_traverses_and_reuses() {
     // slot the reuse reanswers under the bumped generation, the handle
     // crosses calls as a plain int word, and the dangling probe stays
     // uncalled — its trap is the ds-cli arena_face suite's pin
-    run_golden("arena_surface.ds", "cycle 9\nreuse 0\ncrossed 7\n0\n");
+    run_golden("arena_surface.ds", "cycle 9\nreuse 0\ncrossed 7\n");
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn the_string_view_surface_holds_cursors_into_a_shared_base() {
     // the zero-copy parsing face: the validated construction, the
     // checked char read, the composing slice, the content equality, and
     // the materializing text — every refusal answering the none member
-    run_golden("string_view_surface.ds", "roundtrip dream\nrefused 3\n0\n");
+    run_golden("string_view_surface.ds", "roundtrip dream\nrefused 3\n");
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn the_place_chains_store_and_the_compound_operator_folds_through_them() {
     // miss traps are the ds-lower place_assign suite's pins)
     run_golden(
         "place_stores.ds",
-        "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 211\n0\n",
+        "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 211\n",
     );
 }
 /// The non-handle io spellings answer the io_err union: a failed write,
@@ -311,7 +311,7 @@ fn the_place_chains_store_and_the_compound_operator_folds_through_them() {
 fn the_fallible_io_spellings_answer_the_io_err_union() {
     run_golden(
         "io_fallible.ds",
-        "write refused\nlist refused\nsize not_found\n0\n",
+        "write refused\nlist refused\nsize not_found\n",
     );
 }
 
@@ -328,7 +328,7 @@ fn handler_parameters_take_the_handled_members() {
     // whole so the .err handler fires: fallback, -1, and the miss side
     run_golden(
         "handler_inference.ds",
-        "io failed\n-1\n42\nfallback\nabsent\nada\n0\n",
+        "io failed\n-1\n42\nfallback\nabsent\nada\n",
     );
 }
 
@@ -472,11 +472,11 @@ fn the_block_fn_surface_calls_siblings_and_persists_captures() {
     // the sibling call runs the recursion to the answer, the
     // capture-counter state persisting across three sibling calls
     // through the closure object's re-stores, and a nested declaration
-    // composing with its enclosing fn's own body (the unit tail prints
-    // the run's own 0)
+    // composing with its enclosing fn's own body (the entry's unit
+    // answer prints nothing)
     run_golden(
         "block_fn_surface.ds",
-        "fib(10) = 55\ncounter = 3\nnested = 3\n0\n",
+        "fib(10) = 55\ncounter = 3\nnested = 3\n",
     );
 }
 #[test]
@@ -487,7 +487,7 @@ fn the_box_surface_moves_stores_and_walks_the_recursive_chain() {
     // deinit, and the name stands beside the error box face
     run_golden(
         "box_surface.ds",
-        "held 3\ncopied 3 3\nset 41\nsplit 82\ntotal 6\nboxed negative input\nchain 7 dies\n0\n",
+        "held 3\ncopied 3 3\nset 41\nsplit 82\ntotal 6\nboxed negative input\nchain 7 dies\n",
     );
 }
 
@@ -499,6 +499,6 @@ fn the_float_surface_answers_the_family_and_the_ordering_pair() {
     // answer (the unit tail prints the run's own 0)
     run_golden(
         "float_surface.ds",
-        "unary true\nlimits true\norder true\nnan true\n0\n",
+        "unary true\nlimits true\norder true\nnan true\n",
     );
 }

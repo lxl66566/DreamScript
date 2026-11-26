@@ -66,7 +66,7 @@ fn the_fsys_path_round_runs_through_the_ambient() {
             "inner removed\n",
             "swept\n",
             "clean false\n",
-            "0\n",
+            "",
         ),
         "the golden stdout drifted"
     );

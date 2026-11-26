@@ -77,7 +77,7 @@ fn two_impls_of_one_head_select_at_call_sites() {
         ),
     );
     assert!(out.status.success(), "the run failed: {out:?}");
-    assert_eq!(text(&out.stdout), "plain fast slow\n0\n");
+    assert_eq!(text(&out.stdout), "plain fast slow\n");
 }
 
 /// A selected call into a generic named impl dispatches through the
@@ -106,7 +106,7 @@ fn a_generic_named_impl_selects_and_composes() {
         ),
     );
     assert!(out.status.success(), "the run failed: {out:?}");
-    assert_eq!(text(&out.stdout), "<int>\n0\n");
+    assert_eq!(text(&out.stdout), "<int>\n");
 }
 
 /// An unselected call over a named-only head keeps the ordinary missing
@@ -162,5 +162,5 @@ fn all_unnamed_packages_keep_the_plain_resolution() {
         ),
     );
     assert!(out.status.success(), "the run failed: {out:?}");
-    assert_eq!(text(&out.stdout), "plain plain\n0\n");
+    assert_eq!(text(&out.stdout), "plain plain\n");
 }

@@ -39,8 +39,7 @@ fn run(command: &mut Command) -> Output {
 
 /// The acceptance: the byte-list rendering (decimal per byte, empty
 /// printing `bytes[]`), the derive compositions over a bytes part, and
-/// the bridges — the unit entry's trailing `0` line is the script-mode
-/// convention.
+/// the bridges — the entry's unit answer prints nothing
 #[test]
 fn the_bytes_face_runs_over_the_ambient() {
     let out = run(ds().arg("run").arg(fixture("bytes_face.ds")));
@@ -60,7 +59,7 @@ fn the_bytes_face_runs_over_the_ambient() {
             "false\n",
             "6\n",
             "héllo\n",
-            "0\n",
+            "",
         )
     );
 }
@@ -93,7 +92,7 @@ fn built_module_reproduces_the_source_run() {
             "false\n",
             "6\n",
             "héllo\n",
-            "0\n",
+            "",
         )
     );
     let _ = fs::remove_file(&module);

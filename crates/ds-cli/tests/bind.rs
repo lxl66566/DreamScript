@@ -371,7 +371,11 @@ fn a_missing_artifact_refuses_the_bind() {
 fn a_bound_extern_call_answers_over_the_installed_artifact() {
     let (root, cache, _) = fixture("consume", true);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("the path is UTF-8"),
+    ]);
     assert!(ok, "the bound extern call runs (stderr: {err})");
     assert_eq!(
         out, "42\n",
@@ -379,7 +383,11 @@ fn a_bound_extern_call_answers_over_the_installed_artifact() {
     );
     // the warm run: the script-mode cache serves the root's dsmod and
     // the same bound install answers identically
-    let (ok, warm, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    let (ok, warm, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("the path is UTF-8"),
+    ]);
     assert!(ok, "the warm run answers (stderr: {err})");
     assert_eq!(warm, out, "the warm run answers identically");
 }
@@ -404,7 +412,11 @@ const SHAPES_SOURCE: &str = concat!(
 fn the_register_class_shapes_answer_over_the_installed_artifact() {
     let (root, cache, _) = fixture_source("shapes", true, SHAPES_SOURCE);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("the path is UTF-8"),
+    ]);
     assert!(ok, "the shapes run (stderr: {err})");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "three answers print (stdout: {out})");
@@ -447,7 +459,11 @@ fn the_marshaled_pair_and_unit_shapes_answer_over_the_installed_artifact() {
     );
     let (root, cache, _) = fixture_both("marshal", true, MARSHAL_FIXTURE_SOURCE, source);
     let entry = root.join("app.ds");
-    let (ok, out, err) = ds(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+    let (ok, out, err) = ds(&cache, &[
+        "run",
+        "--print-result",
+        entry.to_str().expect("the path is UTF-8"),
+    ]);
     assert!(ok, "the marshaled shapes run (stderr: {err})");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "four answers print (stdout: {out})");
@@ -590,8 +606,11 @@ fn a_repinned_artifact_never_serves_the_warm_module() {
         .install_artifact(pin_b, &b)
         .expect("fixture B installs");
     let run = || {
-        let (ok, out, err) =
-            ds_traced(&cache, &["run", entry.to_str().expect("the path is UTF-8")]);
+        let (ok, out, err) = ds_traced(&cache, &[
+            "run",
+            "--print-result",
+            entry.to_str().expect("the path is UTF-8"),
+        ]);
         assert!(
             ok,
             "the run over the pinned artifact exits 0 (stderr: {err})"

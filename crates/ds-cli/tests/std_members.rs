@@ -82,7 +82,7 @@ const PAIR_MAIN: &str = concat!(
     "  0\n",
     "}\n",
 );
-const PAIR_OUT: &str = "9 3 -2 -4\n0\n";
+const PAIR_OUT: &str = "9 3 -2 -4\n";
 
 /// A bare script's session composes the @std bodied members back
 /// beside the shrunk core (the implicit resolution over the implicit
@@ -162,7 +162,9 @@ fn the_repl_answers_the_bare_spellings() {
 }
 
 /// The dev loop's script round registers the merged ambient: the one
-/// round compiles over the composed members and answers the pair.
+/// round compiles over the composed members and answers the pair, the
+/// watch door echoing the entry's unit answer the way interactive
+/// faces do.
 #[test]
 fn the_dev_script_round_answers_the_bare_spellings() {
     let file = script("dev", PAIR_MAIN);
@@ -173,7 +175,7 @@ fn the_dev_script_round_answers_the_bare_spellings() {
         "the dev round exits 0: {}",
         text(&out.stderr)
     );
-    assert_eq!(text(&out.stdout), PAIR_OUT);
+    assert_eq!(text(&out.stdout), format!("{PAIR_OUT}0\n"));
     fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
 }
 
@@ -240,7 +242,7 @@ fn a_std_declared_root_refuses_bare_and_binds_the_link() {
     );
     assert_eq!(
         text(&out.stdout),
-        "9 3\n0\n",
+        "9 3\n",
         "the bodied pair answers over the link"
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
@@ -274,7 +276,7 @@ const STRINGS_OUT: &str = concat!(
     "true 6\n",
     "Hello There\n",
     "42 3.5\n",
-    "0\n",
+    "",
 );
 
 /// The bare spellings of the @std string face run through a bare
@@ -360,7 +362,7 @@ fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
     );
     assert_eq!(
         text(&out.stdout),
-        concat!("HI THERE hi there true\n", "yo there\n", "0\n",),
+        concat!("HI THERE hi there true\n", "yo there\n", "",),
         "the string face answers over the link"
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
@@ -382,7 +384,7 @@ const COMBINATORS_MAIN: &str = concat!(
     "  0\n",
     "}\n",
 );
-const COMBINATORS_OUT: &str = concat!("zip 2 2 enum 3 5\n", "edge 0 0\n", "0\n",);
+const COMBINATORS_OUT: &str = concat!("zip 2 2 enum 3 5\n", "edge 0 0\n", "",);
 
 /// The landed pair runs cold and serves warm under the same answer:
 /// the script session composes the bodied file back beside the shrunk
@@ -491,7 +493,7 @@ const PRNG_OUT: &str = concat!(
     "-2152535657050944081\n",
     "7960286522194355700\n",
     "487617019471545679\n",
-    "0\n",
+    "",
 );
 
 /// The seeded PRNG runs through a bare script's session (the family
