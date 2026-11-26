@@ -614,6 +614,17 @@ pub struct Package {
     /// dispatches through, deduplicated per linked impl — two imports
     /// of one package share the row the first registered.
     linked_impls: Vec<crate::import::ImplFact>,
+    /// The tag declarations a file re-declares beside an earlier file's
+    /// same-label tag or case (F9.5): label to the shadowing def. The
+    /// first declaration per label owns the type namespace's entry; a
+    /// shadowing file's own uses resolve through here first, its atom
+    /// a distinct declaration the directed probe reads beside the
+    /// first's.
+    file_tags: FxHashMap<ds_diag::FileId, FxHashMap<String, DefId>>,
+    /// The file currently collecting (`add_file`): the gate that tells
+    /// a same-file redeclaration (refused, both namespaces) from a
+    /// cross-file tag shadow (F9.5, kept distinct).
+    collecting_file: Option<ds_diag::FileId>,
 }
 
 /// The collected namespace tables a checked-ambient serve parks per
@@ -925,12 +936,14 @@ impl Package {
     /// contribute nothing yet (G4, M7).
     pub fn add_file(&mut self, ast: &Ast) -> Vec<Diagnostic> {
         self.files.push(ast.file);
+        self.collecting_file = Some(ast.file);
         let mut diags = Vec::new();
         for block in &ast.blocks {
             for item in &block.items {
                 self.collect_item(item, &mut diags);
             }
         }
+        self.collecting_file = None;
         diags
     }
 
@@ -942,6 +955,7 @@ impl Package {
             package: self,
             uses: Vec::new(),
             diags: Vec::new(),
+            file: ast.file,
             imports: self.imports.get(&ast.file),
             scopes: vec![FxHashMap::default()],
             type_scopes: vec![FxHashMap::default()],
@@ -1696,6 +1710,17 @@ impl Package {
         })
     }
 
+    /// The type declaration a name carries for ONE FILE's uses (F9.5):
+    /// the file's own shadowing tag declaration beats the first
+    /// declaration per label, whose entry owns the shared namespace.
+    #[must_use]
+    pub fn lookup_type_in(&self, file: ds_diag::FileId, name: &str) -> Option<DefId> {
+        if let Some(shadow) = self.file_tags.get(&file).and_then(|tags| tags.get(name)) {
+            return Some(*shadow);
+        }
+        self.lookup_type(name)
+    }
+
     /// The definition of a value-namespace name, if any (F9): the growth
     /// tier answers first, the shared base below.
     #[must_use]
@@ -1872,18 +1897,66 @@ impl Package {
         let existing =
             if kind.in_type_namespace() { self.lookup_type(name) } else { self.lookup_value(name) };
         if let Some(first) = existing {
-            let first_span = self.def(first).span;
-            diags.push(
-                Diagnostic::error(
-                    ErrorCode::DuplicateDefinition,
-                    format!("`{name}` is already defined"),
-                )
-                .with_secondary(first_span, "first defined here")
-                .with_primary(span, "redefined here"),
-            );
-            return first;
+            // Within one module a label names at most one tag
+            // declaration: the file's own shadow is the duplicate the
+            // refusal names (F9.5 keeps the same-file refusal).
+            if matches!(kind, DefKind::Tag | DefKind::Case)
+                && let Some(file) = self.collecting_file
+                && let Some(prev) = self.file_tags.get(&file).and_then(|tags| tags.get(name))
+            {
+                let prev = *prev;
+                let prev_span = self.def(prev).span;
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::DuplicateDefinition,
+                        format!("`{name}` is already defined"),
+                    )
+                    .with_secondary(prev_span, "first defined here")
+                    .with_primary(span, "redefined here"),
+                );
+                return prev;
+            }
+            // A tag family declaration shadowing an earlier FILE's
+            // same-label declaration stays distinct (F9.5): the def
+            // registers, the shared namespace keeps the first, and the
+            // declaring file's own uses resolve through the shadow map.
+            // Every other family keeps the refusal.
+            let tag_shadow = matches!(kind, DefKind::Tag | DefKind::Case)
+                && matches!(self.def(first).kind, DefKind::Tag | DefKind::Case)
+                && self.collecting_file.is_some()
+                && Some(self.def(first).span.file) != self.collecting_file;
+            if !tag_shadow {
+                let first_span = self.def(first).span;
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::DuplicateDefinition,
+                        format!("`{name}` is already defined"),
+                    )
+                    .with_secondary(first_span, "first defined here")
+                    .with_primary(span, "redefined here"),
+                );
+                return first;
+            }
+            // The shadow registers its def row beside the first's; the
+            // shared namespace keeps the first.
+            let id = DefId::from_raw(u32::try_from(self.len()).expect("table index fits u32"));
+            self.defs.push(Def {
+                name: name.to_owned(),
+                kind,
+                vis,
+                span,
+            });
+            if let Some(file) = self.collecting_file {
+                self.file_tags
+                    .entry(file)
+                    .or_default()
+                    .insert(name.to_owned(), id);
+            }
+            return id;
         }
-        // A growth id continues the def space past the base tier's run.
+        // The growth path: a fresh name lands in its namespace. The
+        // shadow map carries only cross-file tag shadows, never a
+        // namespace's own entries.
         let id = DefId::from_raw(u32::try_from(self.len()).expect("table index fits u32"));
         self.defs.push(Def {
             name: name.to_owned(),
@@ -1971,6 +2044,9 @@ struct FileResolver<'a> {
     package: &'a Package,
     uses: Vec<(Span, Res)>,
     diags: Vec<Diagnostic>,
+    /// The file being resolved: the shadowing tag lookup (F9.5) is
+    /// per file, a file's own tag declaration beating the first's.
+    file: ds_diag::FileId,
     /// The file's import bindings, when the link pass produced any.
     imports: Option<&'a FileImports>,
     /// Value scopes, innermost last: binder name to binder span.
@@ -2475,7 +2551,7 @@ impl FileResolver<'_> {
         if let Some(def) = self
             .package
             .lookup_value(&name.name)
-            .or_else(|| self.package.lookup_type(&name.name))
+            .or_else(|| self.package.lookup_type_in(self.file, &name.name))
         {
             self.def_use(name.span, def);
         } else if let Some(def) = self.import_binding(&name.name) {
@@ -2527,16 +2603,23 @@ impl FileResolver<'_> {
             self.uses.push((name.span, Res::Local { bind }));
             return;
         }
-        match (
-            self.package.lookup_value(&name.name),
-            self.package.lookup_type(&name.name),
-        ) {
+        let type_def = self.package.lookup_type_in(self.file, &name.name);
+        match (self.package.lookup_value(&name.name), type_def) {
             (Some(value), Some(ty)) => {
-                self.namespace_collision(name, value, ty);
-                // Still record the value declaration so the checker types
-                // the call through and the ambiguity stays the single
-                // diagnostic; the error is fatal.
-                self.def_use(name.span, value);
+                // A tag family declaration yields to the value (F9.5):
+                // tag names left the value namespace, so the call form
+                // always means the fn or const. Every other family is
+                // the constructor collision F9 keeps — DS2014, naming
+                // both declarations.
+                if matches!(self.package.def(ty).kind, DefKind::Tag | DefKind::Case) {
+                    self.def_use(name.span, value);
+                } else {
+                    self.namespace_collision(name, value, ty);
+                    // Still record the value declaration so the checker
+                    // types the call through and the ambiguity stays the
+                    // single diagnostic; the error is fatal.
+                    self.def_use(name.span, value);
+                }
             },
             (Some(value), None) => self.def_use(name.span, value),
             (None, Some(ty)) => self.def_use(name.span, ty),
@@ -2624,7 +2707,7 @@ impl FileResolver<'_> {
         match path.segments.as_slice() {
             [only] => self.name_use(only),
             [head, method] => {
-                let Some(def) = self.package.lookup_type(&head.name) else {
+                let Some(def) = self.package.lookup_type_in(self.file, &head.name) else {
                     // A value name at the qualifier position still gets
                     // the sharper "not a trait" word.
                     if self.package.lookup_value(&head.name).is_some() {
@@ -2644,7 +2727,36 @@ impl FileResolver<'_> {
                     self.unknown_name(head, self.shadowing_candidates());
                     return;
                 };
-                if self.package.def(def).kind != DefKind::Trait {
+                if self.package.def(def).kind == DefKind::Trait {
+                    let candidate = self
+                        .package
+                        .method_candidates(&method.name)
+                        .find(|&id| self.package.method(id).owner == MethodOwner::Trait(def));
+                    let Some(id) = candidate else {
+                        let others = self
+                            .package
+                            .method_candidates(&method.name)
+                            .filter(|&id| self.package.method(id).owner != MethodOwner::Trait(def))
+                            .map(|id| self.package.method(id).owner_name(self.package))
+                            .collect::<Vec<_>>();
+                        let mut diag = Diagnostic::error(
+                            ErrorCode::UnresolvedName,
+                            format!("trait `{}` has no method `{}`", head.name, method.name),
+                        )
+                        .with_primary(method.span, "no such member");
+                        if !others.is_empty() {
+                            diag = diag.with_note(format!(
+                                "method `{}` exists on: {}",
+                                method.name,
+                                others.join(", ")
+                            ));
+                        }
+                        self.diags.push(diag);
+                        return;
+                    };
+                    self.def_use(head.span, def);
+                    self.uses.push((method.span, Res::TraitMethod(id)));
+                } else if !self.qualified_label_use(def, head, method) {
                     self.diags.push(
                         Diagnostic::error(
                             ErrorCode::UnresolvedName,
@@ -2655,36 +2767,7 @@ impl FileResolver<'_> {
                         )
                         .with_primary(head.span, "not a trait"),
                     );
-                    return;
                 }
-                let candidate = self
-                    .package
-                    .method_candidates(&method.name)
-                    .find(|&id| self.package.method(id).owner == MethodOwner::Trait(def));
-                let Some(id) = candidate else {
-                    let others = self
-                        .package
-                        .method_candidates(&method.name)
-                        .filter(|&id| self.package.method(id).owner != MethodOwner::Trait(def))
-                        .map(|id| self.package.method(id).owner_name(self.package))
-                        .collect::<Vec<_>>();
-                    let mut diag = Diagnostic::error(
-                        ErrorCode::UnresolvedName,
-                        format!("trait `{}` has no method `{}`", head.name, method.name),
-                    )
-                    .with_primary(method.span, "no such member");
-                    if !others.is_empty() {
-                        diag = diag.with_note(format!(
-                            "method `{}` exists on: {}",
-                            method.name,
-                            others.join(", ")
-                        ));
-                    }
-                    self.diags.push(diag);
-                    return;
-                };
-                self.def_use(head.span, def);
-                self.uses.push((method.span, Res::TraitMethod(id)));
             },
             _ => {
                 self.diags.push(
@@ -3123,6 +3206,22 @@ impl FileResolver<'_> {
             Type::Path { path, args, .. } => {
                 match path.segments.as_slice() {
                     [only] => self.type_name_use(only),
+                    [head, tail] => {
+                        let routed = self
+                            .package
+                            .lookup_type_in(self.file, &head.name)
+                            .is_some_and(|def| self.qualified_label_use(def, head, tail));
+                        if !routed {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    ErrorCode::UnresolvedName,
+                                    "qualified type paths resolve through imports, which land \
+                                     with modules [G4]",
+                                )
+                                .with_primary(path.span, "qualified type path"),
+                            );
+                        }
+                    },
                     _ => {
                         self.diags.push(
                             Diagnostic::error(
@@ -3170,7 +3269,7 @@ impl FileResolver<'_> {
     fn type_name_use(&mut self, name: &Ident) {
         if let Some(bind) = self.lookup_type_var(&name.name) {
             self.uses.push((name.span, Res::Local { bind }));
-        } else if let Some(def) = self.package.lookup_type(&name.name) {
+        } else if let Some(def) = self.package.lookup_type_in(self.file, &name.name) {
             self.def_use(name.span, def);
         } else if name.name == "none" {
             // `none` is the universe's distinguished unit atom [B4], not a
@@ -3275,7 +3374,7 @@ impl FileResolver<'_> {
             return ArmTag::Binding;
         }
         self.package
-            .lookup_type(&name.name)
+            .lookup_type_in(self.file, &name.name)
             .or_else(|| self.import_type_binding(&name.name))
             .filter(|&def| self.package.def(def).kind.is_constructor())
             .map_or(ArmTag::Binding, ArmTag::Def)
@@ -3296,7 +3395,7 @@ impl FileResolver<'_> {
             [only] => {
                 if let Some(def) = self
                     .package
-                    .lookup_type(&only.name)
+                    .lookup_type_in(self.file, &only.name)
                     .or_else(|| self.import_type_binding(&only.name))
                 {
                     self.def_use(only.span, def);
@@ -3306,13 +3405,20 @@ impl FileResolver<'_> {
                 }
             },
             // The tail is a case name; case tables are the checker's.
-            [head, _case] => {
+            // A tag-family head routes its label through the qualified
+            // spelling instead (F9.5).
+            [head, tail] => {
                 if let Some(def) = self
                     .package
-                    .lookup_type(&head.name)
+                    .lookup_type_in(self.file, &head.name)
                     .or_else(|| self.import_type_binding(&head.name))
                 {
-                    self.def_use(head.span, def);
+                    if self.package.def(def).kind == DefKind::Enum {
+                        self.def_use(head.span, def);
+                    } else if !self.qualified_label_use(def, head, tail) {
+                        let candidates = candidates();
+                        self.unknown_name_at(head, candidates, "pattern");
+                    }
                 } else {
                     let candidates = candidates();
                     self.unknown_name_at(head, candidates, "pattern");
@@ -3379,6 +3485,34 @@ impl FileResolver<'_> {
     }
 
     // ---- diagnostics -------------------------------------------------------
+
+    /// The qualified `type::label` routing (F9.5): a type-family head
+    /// (tag, case, enum, alias) routes its label to the declaring
+    /// declaration the HEAD's own file names — the escape hatch the bare
+    /// label's ambiguity refusal points at. Membership in the head's set
+    /// is the checker's universe work, never the resolver's. Returns
+    /// whether the pair took the route (the caller keeps its own
+    /// refusal otherwise).
+    fn qualified_label_use(&mut self, head_def: DefId, head: &Ident, tail: &Ident) -> bool {
+        if !matches!(
+            self.package.def(head_def).kind,
+            DefKind::Tag | DefKind::Case | DefKind::Enum | DefKind::TypeAlias
+        ) {
+            return false;
+        }
+        let head_file = self.package.def(head_def).span.file;
+        self.def_use(head.span, head_def);
+        if let Some(label_def) = self
+            .package
+            .lookup_type_in(head_file, &tail.name)
+            .filter(|&d| matches!(self.package.def(d).kind, DefKind::Tag | DefKind::Case))
+        {
+            self.def_use(tail.span, label_def);
+        } else {
+            self.unknown_name(tail, self.shadowing_candidates());
+        }
+        true
+    }
 
     fn unknown_name(&mut self, name: &Ident, candidates: Vec<String>) {
         self.unknown_name_at(name, candidates, "name");

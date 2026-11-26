@@ -189,9 +189,22 @@ fn collects_every_declaration_kind() {
 
 #[test]
 fn duplicate_definitions_name_both_spans() {
+    // A cross-file tag shadow declares clean since F9.5: the shadowing
+    // file resolves its own declaration, the shared namespace keeps the
+    // first. The same-file redeclaration and every other family keep
+    // the two-span refusal.
     let mut files = Files::new();
     let a = files.add_source("a.ds", "tag dup\nconst one = ()\n");
     let b = files.add_source("b.ds", "tag dup\n");
+    let ast_a = parse(&files, a).unwrap();
+    let ast_b = parse(&files, b).unwrap();
+    let mut package = Package::new();
+    assert_eq!(package.add_file(&ast_a).len(), 0);
+    assert_eq!(package.add_file(&ast_b).len(), 0);
+
+    let mut files = Files::new();
+    let a = files.add_source("a.ds", "struct dup\nconst one = ()\n");
+    let b = files.add_source("b.ds", "struct dup\n");
     let ast_a = parse(&files, a).unwrap();
     let ast_b = parse(&files, b).unwrap();
     let mut package = Package::new();
@@ -376,8 +389,10 @@ fn trait_path_qualification_resolves_directly() {
         "pub tag t\n",
         "pub trait ord { fn cmp(self, other: Self) -> t }\n",
         "pub trait empty { }\n",
+        "pub fn val(x: t) -> t { x }\n",
         "pub fn caller(x: t) -> t { ord::cmp(x, x) }\n",
-        "pub fn not_trait(x: t) -> t { t::cmp(x, x) }\n",
+        "pub fn not_label(x: t) -> t { t::cmp(x, x) }\n",
+        "pub fn not_trait(x: t) -> t { val::cmp(x, x) }\n",
         "pub fn no_member(x: t) -> t { empty::cmp(x, x) }\n",
     ));
     let (uses, diags) = f.resolve(0);
@@ -393,21 +408,27 @@ fn trait_path_qualification_resolves_directly() {
         },
         other => panic!("Trait::f qualifies directly [F3]: {other:?}"),
     }
-    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert_eq!(diags.len(), 3, "{diags:?}");
     assert!(
-        diags[0].message.contains("not a trait"),
-        "head must be a trait: {}",
+        diags[0].message.contains("unknown name `cmp`"),
+        "a tag head routes its tail as a label (F9.5), so a method name behind one is an unknown \
+         label: {}",
         diags[0].message
     );
     assert!(
-        diags[1].message.contains("no method `cmp`"),
-        "missing member reported: {}",
+        diags[1].message.contains("not a trait"),
+        "a value head keeps the not-a-trait word: {}",
         diags[1].message
     );
     assert!(
-        diags[1].notes.iter().any(|n| n.contains("ord")),
+        diags[2].message.contains("no method `cmp`"),
+        "missing member reported: {}",
+        diags[2].message
+    );
+    assert!(
+        diags[2].notes.iter().any(|n| n.contains("ord")),
         "the note names where the method exists: {:?}",
-        diags[1].notes
+        diags[2].notes
     );
 }
 
@@ -690,12 +711,13 @@ fn same_named_struct_and_function_coexist() {
     );
 }
 
-/// The residual error class [F9]: a call-form name present in BOTH
-/// namespaces is an ambiguity error naming both declarations; nothing
-/// resolves. A bare use of the same name is not a call form — the value
-/// declaration wins it.
+/// Tag names left the value namespace (F9.5): a tag and a fn share a
+/// label without ambiguity — the call form always means the fn, and a
+/// bare use stays value-first. The constructor families keep F9's
+/// residual class: a struct beside the fn is still the DS2014 call-form
+/// collision naming both declarations.
 #[test]
-fn call_form_collision_is_an_ambiguity_error() {
+fn call_form_of_a_tag_label_means_the_value() {
     let f = resolve_one(concat!(
         "pub tag int\n",
         "pub tag page\n",
@@ -706,25 +728,41 @@ fn call_form_collision_is_an_ambiguity_error() {
     let src = f.source(0);
     let file = file_of(&f, 0);
     let (uses, diags) = f.resolve(0);
+    assert_eq!(diags.len(), 0, "{diags:?}");
+    assert_eq!(
+        uses.get(span_in(src, file, "page(n)", 0, "page")),
+        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
+    );
+    assert_eq!(
+        uses.get(span_in(src, file, "const bare = page", 0, "page")),
+        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
+    );
+}
+
+#[test]
+fn call_form_collision_with_a_constructor_is_an_ambiguity_error() {
+    let f = resolve_one(concat!(
+        "pub tag int\n",
+        "pub struct page { n: int }\n",
+        "pub fn page(n: int) -> int { n }\n",
+        "pub fn caller(n: int) -> int { page(n) }\n",
+    ));
+    let (uses, diags) = f.resolve(0);
     assert_eq!(diags.len(), 1, "{diags:?}");
     let diag = &diags[0];
     assert_eq!(diag.code, ErrorCode::AmbiguousCall);
     assert_eq!(
         diag.message,
-        "call-form `page` is ambiguous between the value `page` and the tag `page` [F9]"
+        "call-form `page` is ambiguous between the value `page` and the struct `page` [F9]"
     );
     assert_eq!(diag.labels.len(), 3, "the use plus both declarations");
     // The call records the value declaration (the checker types through;
     // the fatal ambiguity is the single diagnostic), never the type.
     assert_eq!(
-        uses.get(span_in(src, file, "page(n)", 0, "page")),
+        uses.get(span_in(f.source(0), file_of(&f, 0), "page(n)", 0, "page")),
         Some(&Res::Def(f.package.lookup_value("page").unwrap()))
     );
-    // The bare use is value-first [F9]: the function binding.
-    assert_eq!(
-        uses.get(span_in(src, file, "const bare = page", 0, "page")),
-        Some(&Res::Def(f.package.lookup_value("page").unwrap()))
-    );
+    let _ = uses;
 }
 
 /// Constructor positions resolve against the type namespace only [F9]:

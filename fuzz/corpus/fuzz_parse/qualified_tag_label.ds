@@ -1,0 +1,29 @@
+// Seed for the qualified `type::label` grammar (F9.5): a bare
+// qualified pattern (no call or struct tail), the qualified is-test
+// type, the qualified value construction, and the qualified
+// construction call form — the `::` spelling a bare label's ambiguity
+// refusal points at. Carries the `pathsep` dictionary token's first
+// committed parse carrier.
+tag int
+tag bool
+tag marker
+type u = int | marker
+enum verdict {
+  pass
+  fail { why: int }
+}
+fn w(v: verdict, e: u) -> int {
+  match v {
+    verdict::pass => 1
+    verdict::fail { why } => why
+  }
+}
+fn t(e: u) -> bool { e is u::marker }
+fn c() -> u { u::marker }
+fn p(v: verdict) -> int {
+  match v {
+    verdict::pass => 0
+    rest => 2
+  }
+}
+fn main() -> int { 0 }

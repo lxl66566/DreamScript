@@ -163,6 +163,12 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // zero noise — the fallible io spellings extract their io_err classes
     // over the ambient taxonomy (the whole-file run golden sits beside)
     assert_corpus_clean("io_fallible.ds", 0);
+    // the five errors are the file's own reject items: the three
+    // unknown-member spellings, the ambiguous label naming both
+    // declarations, and the same-file redeclaration — the fn/tag
+    // coexistence and the directed spellings check clean beside the
+    // shadowing declaration (the F9.5 phase-1 round)
+    assert_corpus_clean("tag_resolution.ds", 5);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a
@@ -217,15 +223,17 @@ fn without_the_ambient_the_corpus_names_stay_unresolved() {
 }
 
 /// A self-contained package under the ambient collides with the shared
-/// namespace [G3]: the file's own `tag int` redefines the ambient's.
+/// namespace [G3]: tag declarations shadow across files [F9.5], so the
+/// residual duplicate class is the other families — the file's own
+/// struct redefines the ambient's.
 #[test]
 fn a_package_redeclaring_an_ambient_name_reports_the_duplicate() {
-    let out = ds_check(&["check", "tests/fixtures/clean.ds"]);
+    let out = ds_check(&["check", "tests/fixtures/ambient_redeclare.ds"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
         String::from_utf8(out.stderr)
             .unwrap()
-            .contains("`int` is already defined")
+            .contains("`list` is already defined")
     );
 }
 

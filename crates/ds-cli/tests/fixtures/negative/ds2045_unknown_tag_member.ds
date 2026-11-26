@@ -1,0 +1,12 @@
+// A bare tag label outside the expected union [F9.5]: the directed
+// positions resolve a label against the expected members; a declared
+// label none of them carries refuses unknown-member, never an
+// inference. The escape hatch is the qualified spelling, and a label
+// the head itself does not carry refuses the same way there.
+
+tag int
+tag page
+tag marker
+type u = int | marker
+const bad: u = page
+const worse: u = u::page

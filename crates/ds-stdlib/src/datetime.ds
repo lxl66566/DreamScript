@@ -1,4 +1,4 @@
-// The @std datetime face (the todo 101 datetime round): the calendar
+// The @std datetime face: the calendar
 // over unix seconds as pure ds source — the civil-from-days walk over
 // the proleptic Gregorian rules (trunc-division-safe at every step,
 // the era arithmetic sized so no intermediate leaves the i64 range
@@ -20,7 +20,7 @@
 pub struct datetime { year: int, month: int, day: int, hour: int, minute: int, second: int, weekday: int }
 
 // The floor of the seconds-over-a-day division: `/` truncates toward
-// zero [B7], so a negative remainder names the day before the
+// zero, so a negative remainder names the day before the
 // truncated one — the same fix the era walk below makes.
 fn day_floor (unix_seconds: int) -> int {
   var days = unix_seconds / 86400

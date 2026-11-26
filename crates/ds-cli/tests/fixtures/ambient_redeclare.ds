@@ -1,0 +1,6 @@
+// A package redeclaration of an ambient name outside the tag families:
+// tags shadow across files since F9.5, so the residual duplicate class
+// is the other families — a struct beside the ambient's `pub struct
+// list`.
+
+struct list

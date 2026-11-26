@@ -1,9 +1,11 @@
-// A call-form name present in both namespaces [F9]: the tag and the
-// function share `page`; the call is an ambiguity error, never a priority
-// search. The brace form and the bare use still resolve (their own
+// A call-form name present in both namespaces [F9]: the struct and the
+// function share `page`; the call is an ambiguity error, never a
+// priority search. A tag beside the fn coexists since F9.5 — the call
+// form always means the fn — so the residual class is the constructor
+// declaration. The brace form and the bare use still resolve (their own
 // positions), so only the call reports.
 
 tag int
-tag page
+struct page { n: int }
 fn page(n: int) -> int { n }
 fn caller(n: int) -> int { page(n) }

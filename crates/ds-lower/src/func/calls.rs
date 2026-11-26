@@ -1123,6 +1123,22 @@ impl<'a> FnLower<'a, '_, '_> {
                     args.iter().map(|arg| &arg.value).collect(),
                     Some(dispatch),
                 )
+            } else if path.segments.len() == 2
+                && let [.., last] = path.segments.as_slice()
+                && matches!(
+                    self.res.get(last.span),
+                    Some(Res::Def(def))
+                        if matches!(
+                            self.analyzed.package.def(*def).kind,
+                            ds_check::DefKind::Tag | ds_check::DefKind::Case
+                        )
+                )
+            {
+                // The qualified `type::label` call form (F9.5): a payloaded
+                // label constructs through the same case-value door as
+                // the bare spelling, over the call's own checked type
+                // (a unit label's call never leaves the checker).
+                return self.case_value(args, ty);
             } else if let Some(Res::Def(def)) = self.res.get(*span) {
                 (
                     Some(*def),

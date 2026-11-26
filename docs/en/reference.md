@@ -14,12 +14,12 @@ pub trait Copyable { }
 
 #### `clone`
 
-The clone derive's target (G1): one member answering the shallow
+The clone derive's target: one member answering the shallow
 duplicate; `#[derive(clone)]` synthesizes the impl. The primitives
 carry clone themselves (the one-word atom answers itself, byte's
 included), so the derived body is a construction over the borrowed
 receiver whose Ref parts dup through the placement pass — a count
-bump per reference, never a deep copy (C4).
+bump per reference, never a deep copy).
 
 ```ds
 pub trait clone { fn clone(self) -> Self }
@@ -27,15 +27,15 @@ pub trait clone { fn clone(self) -> Self }
 
 #### `hash`
 
-The hash derive's target (G1, B9's ruling that hash stays consistent
-with universal structural `==`): one member answering the content
+The hash derive's target: hash stays consistent with universal
+structural `==`, one member answering the content
 hash; `#[derive(hash)]` synthesizes the impl. Every primitive part
 carries hash itself: int and bool mix their own word, byte through
 its decimal text (the atom sits outside the int conversion family),
 string and char through the FNV-1a native over their bytes, and
 float through the fold native (which normalizes -0.0 to +0.0 and
 every NaN payload to the one canonical NaN, the bit-structural
-equality B9 pins).
+equality the hash contract requires).
 
 ```ds
 pub trait hash { fn hash(self) -> int }
@@ -43,8 +43,8 @@ pub trait hash { fn hash(self) -> int }
 
 #### `ord`
 
-The ord derive's target (G1, B9's ruling that ordering is never
-structural): one member answering the field-order lexicographic
+The ord derive's target: ordering is never structural, so one
+member answers the field-order lexicographic
 comparison; `#[derive(ord)]` synthesizes the impl. The primitives
 carry ord themselves, each part's sort key an explicit compare
 native: float through `total_compare` (the IEEE total order, the one
@@ -58,7 +58,7 @@ pub trait ord { fn compare(self, other: Self) -> int }
 
 #### `show`
 
-The show derive's target (G1, F6): one member answering the
+The show derive's target: one member answering the
 construction spelling; `#[derive(show)]` synthesizes the impl.
 
 ```ds
@@ -69,7 +69,7 @@ pub trait show { fn show(self) -> string }
 
 #### `arena`
 
-The read-side aliasing container (ruled 2026-11-25): the library
+The read-side aliasing container: the library
 shape for cyclic graphs, node trees, ECS, and cross-call cursors —
 no language change. One opaque word behind one heap object on the
 owning fiber's store, the payload a slot array of one element word
@@ -78,7 +78,7 @@ copyable handle (the index and generation packed into one int word,
 so the handle keeps scalar provenance through every value position),
 `remove` tombstones the slot onto the free list with the generation
 bumping at the removal, and a stale handle — any copy taken before it
-— traps deterministically instead of naming the reused element. Elements stage one word this round (a scalar or reference
+— traps deterministically instead of naming the reused element. Elements stage one word (a scalar or reference
 word; a multi-word record or a deinit-carrying value refuses at the
 insert's staging), and a reference element is a counted share: the
 arena's store owns one edge count per element, released at the
@@ -92,7 +92,7 @@ pub struct arena[t] { }
 
 #### `chan`
 
-The bounded channel (the 2026-11-21 shared-state ruling): the one
+The bounded channel: the one
 inter-fiber shared-state vocabulary — no lock, mutex or atomic ever
 enters the language. One opaque word behind one heap object on the
 creating fiber's store (the one owning heap): the word copies into a
@@ -112,7 +112,7 @@ pub struct chan[t] { }
 
 #### `field`
 
-The comptime reflection vocabulary (G1, G2): the one record `fields`
+The comptime reflection vocabulary: the one record `fields`
 answers over declared data — a struct's fields and an enum's cases
 share the (name, type, tag) triple. A field's record: its declared
 name, its type as a type value, and its nominal tag name when its
@@ -183,7 +183,7 @@ pub struct net_handle: ~Copyable { conn: int }
 
 #### `net_listener`
 
-The net face's server half (the server surface round): the same
+The net face's server half: the same
 discipline as the connection half over the package-owned linear
 `net_listener`, whose one inline word is the listener table's key.
 `net_listen` answers this type directly — the total spelling for
@@ -198,7 +198,7 @@ full. `accept` keeps the total spelling for the same reason, so a
 failed accept (the configured wait's bound expiring with no pending
 connection among its classes) halts on the net error line too; a
 non-halting accept needs a union member holding a deinit-carrying
-handle, which C5 refuses (an open author question). The deinit
+handle, which the checker refuses (an open author question). The deinit
 closes the listener (a binding dropped without an explicit
 close_listener still ends clean), and `net_listener_close` is
 idempotent because the deinit may fire on a handle the owner already
@@ -290,7 +290,7 @@ pub tag bool
 
 #### `byte`
 
-The b'x' literal's atom [F6]: its own u8 width class, outside
+The b'x' literal's atom: its own u8 width class, outside
 the int conversion family.
 
 ```ds
@@ -341,7 +341,7 @@ pub tag net_other { msg: string }
 
 #### `not_found`
 
-The failure taxonomy of the fallible natives (ruled 2026-11-21):
+The failure taxonomy of the fallible natives:
 `io_err` and `net_err` are aliases over branchable unit tags, each
 native failure landing on its class and the classes a platform cannot
 discriminate portably folding into the `*_other` floors — which alone
@@ -457,7 +457,7 @@ pub fn accept_tls(l: net_listener) -> net_handle
 
 #### `args`
 
-The process face (the CLI process surface, 2026-11-21): `args`
+The process face (the CLI process surface): `args`
 answers the process arguments the host staged (`ds run`'s `--args`
 words) as a list of strings, `env` reads one process environment
 variable into the checked none member when unset, and `proc_run`
@@ -501,11 +501,11 @@ pub extern fn byte_list(b: bytes) -> list[byte]
 
 #### `byte_of`
 
-The byte and u32 width bridges (2026-11-19): byte sits outside the int
-conversion family [F6] and u32 carries no literal or constructor, so
+The byte and u32 width bridges: byte sits outside the int
+conversion family and u32 carries no literal or constructor, so
 crossing either width is not expressible in ds source — the json face's
 byte/u32 readers build their values through these. `byte_of`/`u32_of`
-answer the in-range word or none (B8's convention); the read-back pair
+answer the in-range word or none (the checked-API convention); the read-back pair
 answers the word's number for the json_int construction.
 
 ```ds
@@ -533,10 +533,10 @@ pub extern fn bytes_hash(b: bytes) -> int
 The bytes collection's native face: `bytes_of` is the construction
 seam (the `list[byte]` bridge in — one payload byte per element word),
 `byte_list` the bridge back out (one word per byte), `byte_at`
-the checked indexed read (B8's convention: the in-range byte under
+the checked indexed read (the checked-API convention: the in-range byte under
 the ok discriminant, none outside the payload's range — never a
 clamp and never a trap), and the two string bridges one UTF-8 face
-each way (2026-11-18): `utf8_encode` takes the string's own bytes,
+each way: `utf8_encode` takes the string's own bytes,
 and `utf8_decode` validates UTF-8 on the way back, an invalid
 sequence answering the taxonomy's utf8_err tag.
 
@@ -630,7 +630,7 @@ pub extern fn collect[t](xs: list[t]) -> list[t]
 
 The core string face's own concatenation seam: the `+` and `+=`
 spellings lower through it beside the interpolation's STRCAT, the
-free spelling the F3 receiver fallback routes `xs.concat(ys)`'s
+free spelling the receiver fallback routes `xs.concat(ys)`'s
 member-name twin behind, and the bytes show body below calls it —
 the core body's same-file call pins it here. The pure string
 operations over the face (the checked slice and char read, the
@@ -670,7 +670,7 @@ pub extern fn eprint(msg: string) -> ()
 #### `eprintln`
 
 The console face's stderr twins and stdin read (the CLI process
-surface, 2026-11-21): the error stream mirrors the stdout pair, and
+surface): the error stream mirrors the stdout pair, and
 `read_line` answers one stdin line per call, the checked none member
 at end of input.
 
@@ -764,7 +764,7 @@ pub extern fn int_of_u32(v: u32) -> int
 
 #### `len`
 
-The generic count over the free tier's instance table [H3]: one
+The generic count over the free tier's instance table: one
 spelling for `s.len()` and `xs.len()` alike.
 
 ```ds
@@ -803,7 +803,7 @@ pub extern fn map_err[t, e, e2](x: t | e, f: fn(e) -> e2) -> t | e2
 
 #### `mkdir`
 
-The fsys path round: `mkdir` creates one directory a single level deep
+The fsys path face: `mkdir` creates one directory a single level deep
 (`already_exists` the branchable outcome), `remove` deletes one entry
 whatever it is (a directory only once empty, the non-empty directory
 answering the `io_other` floor), and `fs_size` answers the entry's byte
@@ -827,15 +827,15 @@ pub extern fn net_accept(lid: int) -> net_handle
 
 #### `net_accept_tls`
 
-The server half's tls upgrade (the tls capability's own op, the
-2026-11-23 ruling): the accepted connection upgraded over the
+The server half's tls upgrade (the tls capability's own op): the
+accepted connection upgraded over the
 host-pinned rustls server identity, registering with its session so
 it owns the same `net_handle` face in full — the send/recv over the
 tls records, the closing deinit the plain accepted connection's
 own. The host pins the identity (no default exists, a server
 certificate being the host's own), the unprovisioned call answering
 its own net_err; the tls-omitting host keeps the op unserved. The
-total spelling `accept` keeps is this op's too (C5: the handle is
+total spelling `accept` keeps is this op's too (the handle is
 deinit-carrying, so a union member holding it refuses), so a failed
 accept or handshake halts on the net error line; a non-halting
 upgrade needs the same optional-over-linear union seam.
@@ -1092,7 +1092,7 @@ pub extern fn sin(x: float) -> float
 
 The parking sleep: parks the calling fiber for at least the given
 nanoseconds (a negative span answering at once) — the timer-only
-wait over the deadline wheel, the 2026-11-21 timer ruling; under no
+wait over the deadline wheel; under no
 installed reactor the blocking twin sleeps the thread. The promised
 `timeout`/`firstof`/`interleave` combinators layer over this op as
 ordinary library code.
@@ -1200,7 +1200,7 @@ pub extern fn u32_of(n: int) -> u32 | none
 
 #### `unwrap_or`
 
-The E4 extraction family: calls type locally against the checked
+The extraction family: calls type locally against the checked
 receiver (unwrap_or's fallback is eager, unwrap_or_else's lambda runs
 only on the none side), composed with `?` for early exits.
 
@@ -1319,7 +1319,7 @@ The ordering pair on the float's own member tier: the flat
 `max`/`min` names are the int pair's (one declaration per
 value-namespace name — overloads refuse), so the float pair spells
 the same comparison bodies through the dot call; the generic
-ord-routed spelling rides the later linked-surface rounds. The
+ord-routed pair does not exist yet. The
 comparison answers the partial order: a NaN first operand poisons
 the answer, a NaN second operand loses.
 
@@ -1336,7 +1336,7 @@ impl hash for byte { fn hash(self) -> int }
 ```
 
 Bytes hash their payload content through the FNV-1a native, the one
-scheme the hash family folds under (2026-11-18).
+scheme the hash family folds under.
 
 ```ds
 impl hash for bytes { fn hash(self) -> int }
@@ -1358,7 +1358,7 @@ impl hash for int { fn hash(self) -> int }
 impl hash for string { fn hash(self) -> int }
 ```
 
-The receiverless member's ambient slice (the 2026-11-15 ruling):
+The receiverless member's ambient slice:
 every primitive carries `default` in its own impl, callable as
 `int.default()` through the type-keyed surface with no instance
 word, so a `#[derive(default)]` field dispatches through its own
@@ -1379,7 +1379,7 @@ impl ord for byte { fn compare(self, other: Self) -> int }
 ```
 
 Bytes order lexicographically over the payload, a shorter prefix
-first (2026-11-18), through the collection's own compare native.
+first, through the collection's own compare native.
 
 ```ds
 impl ord for bytes { fn compare(self, other: Self) -> int }
@@ -1409,7 +1409,7 @@ impl show for bool { fn show(self) -> string }
 impl show for byte { fn show(self) -> string }
 ```
 
-The bytes representation (2026-11-18): `show` renders the payload as
+The bytes representation: `show` renders the payload as
 a byte list — `bytes[1, 2, 255]`, empty printing `bytes[]` — one
 decimal per payload byte over the `list[byte]` bridge. The body
 carries no trapping op (the `concat` extern and a for-in walk, never
@@ -1444,21 +1444,20 @@ impl show for string { fn show(self) -> string }
 impl string { fn default() -> string }
 ```
 
-The u32 width's trapping construction (ruled 2026-11-19, B7's family):
+The u32 width's trapping construction:
 the receiverless member answers the in-range word and traps out of
 range naming the value and the range — the checked `u32_of` above
 stays the fallible form. It rides the u32 type's own static tier (the
 `int.default()` precedent, called `u32.of(x)`): a free fn named `u32`
-cannot carry the ruling's bare call form, since a call-form name in
-both namespaces is F9's ambiguity error and the runtime plan binds a
-top-level fn's name through the type namespace first — the bare form
-waits on an author ruling over F9's priority.
+cannot carry the bare call form `u32(x)`, since a call-form name in
+both namespaces is the two-namespace ambiguity error and a top-level
+fn's name binds through the type namespace first.
 
 ```ds
 impl u32 { fn of(n: int) -> u32 }
 ```
 
-The collection face's member tier (H5.5): the inherent members the
+The collection face's member tier: the inherent members the
 runtime seam lowers over the builtin collections. A member whose
 parameter or answer spans the collection's own type variable has no
 static word kind (the free generic fn's Raw-word shape is the free
@@ -1498,8 +1497,8 @@ impl[t] arena[t] {
 ```
 
 The channel face: the net handle's plain receiver discipline (the
-word is a shared handle, the mutation the object's own state — D1's
-one shared-state exception). `send` answers unit, `recv` the payload;
+word is a shared handle, the mutation the object's own state, the
+language's one shared-state exception). `send` answers unit, `recv` the payload;
 both park the calling fiber when the buffer cannot serve it, the
 wake delivering at the parked call site.
 
@@ -1543,7 +1542,7 @@ pub trait decoder {
 
 #### `encoder`
 
-The @std serialization driver face (the 2026-11-21 ruling): the two
+The @std serialization driver face: the two
 traits every format driver implements over its own document type,
 the derive synthesis's closed target — one derivation serving every
 format, the json face the first driver (its impls live in the json
@@ -1614,13 +1613,13 @@ pub struct response { }
 
 #### `string_view`
 
-The zero-copy parsing face (ruled 2026-11-25): one view over a
+The zero-copy parsing face: one view over a
 counted share of a base string — the `s` field's Ref word is the
 share, safe under precise counting with no model change — carrying
 the half-open char range [start, end) into it. Every position is a
 char index, the checked reads' own vocabulary, so a view composes
 with `char_at` and `substring` with no boundary translation, and a
-free `len` owns the dot position [F3], so the range spells its two
+free `len` owns the dot position, so the range spells its two
 bounds instead of a length. Construction validates the range against
 the base's char count (the checked-API convention: the none member
 outside it, never clamping and never a trap), the members answer
@@ -1690,7 +1689,7 @@ pub fn assert_eq_string(a: string, b: string, msg: string) -> ()
 
 #### `char_at`
 
-The checked char read (B8): the char at the position, none outside
+The checked char read: the char at the position, none outside
 the string's range — the old total spelling answered the empty
 string instead.
 
@@ -1700,7 +1699,7 @@ pub extern fn char_at(s: string, i: int) -> char | none
 
 #### `contains`
 
-The string search family (the 2026-11-21 pure-builtin round):
+The string search family:
 `contains` answers the membership read, the empty needle always
 occurring; `index_of` answers the first occurrence's char index
 (substring's indexing, so the answer composes with the checked
@@ -1779,7 +1778,7 @@ pub fn json_as_bool(v: json) -> bool | parse_err
 
 #### `json_as_byte`
 
-The width-bridging readers (2026-11-19): a json number reads as a byte
+The width-bridging readers: a json number reads as a byte
 (0-255) or a u32 through the checked bridge natives — an out-of-range
 number answers parse_err like a wrong shape — and a one-character json
 string reads as a char (any other length a wrong shape).
@@ -1790,7 +1789,7 @@ pub fn json_as_byte(v: json) -> byte | parse_err
 
 #### `json_as_bytes`
 
-The bytes representation (2026-11-19): a json array of numbers, one
+The bytes representation: a json array of numbers, one
 element per payload byte — the exact round-trip of the writer below,
 consistent with the show impl's byte-list rendering. Every element
 must be an in-range json number; anything else answers parse_err.
@@ -1845,7 +1844,7 @@ pub fn json_member(v: json, key: string) -> json | none
 
 #### `json_of_byte`
 
-The encode half the to_json walk dispatches through (2026-11-19):
+The encode half the to_json walk dispatches through:
 byte and u32 write as json numbers, char as its one-character json
 string, and bytes as the array of numbers the reader above takes
 back — one construction per value the case vocabulary alone cannot
@@ -1889,8 +1888,8 @@ shrunk core — the bodies lower as ambient bodies, where a data member
 (a type or a const) cannot, so the bare spellings keep resolving and
 running for every entry script session while its data-shaped @std
 imports stay bound through the linked surface. The ordering pair is
-the first family (the library-boundary round): the float and
-ord-generic spellings ride the later linked-surface rounds.
+the first family: the flat word-shaped signatures, the float and
+ord-generic spellings waiting on the linked surface.
 
 The FP combinator family: the list transforms as plain generic
 library fns. A generic body stages values only through the shapes it
@@ -1909,14 +1908,14 @@ match spelling lowers), and the slice pair guards the same write by
 the bool match, the one spelling an order comparison lowers. The
 slice pair clamps at the list's own bounds (a negative, zero, or
 past-the-end n answering the empty or whole list the bounds imply).
-flat_map waits behind B2: a fn-typed parameter whose return nests the
+flat_map does not exist: a fn-typed parameter whose return nests the
 callee's variable in a type application (`fn(t) -> list[r]`) never
 solves from a concrete fn or lambda argument (containment binds a
 bare return variable alone, and no lambda-return annotation exists),
 so `flatten` lands as the composable half — the flat spelling
 composing at call sites over map's hosted lambda. scan and compose
-wait behind the seams above (their residuals ride the reflection
-seams the generic bodies wait on).
+wait behind the seams above (their bodies need the type variable's
+runtime word kind, the same reflection fact).
 
 The race combinators over the timer capability: the caller builds the
 thunk list (non-capturing scalar lambdas alone — a closure cannot
@@ -1958,7 +1957,7 @@ the draw following a seed (the mix over the advanced state, so a
 stream reads `rand(s)` beside `s = rand_next(s)`), and `rand_seed`
 stepping the wall clock into a fresh state. The mixer's shifts are
 unsigned facts the core's `>>` cannot spell alone (the i64 shift is
-sign-propagating, B7), so each xor operand masks the shifted word
+sign-propagating), so each xor operand masks the shifted word
 back to its logical bits — the mask a no-op when the shifted word
 carries no sign. The int spellings of the mixer's unsigned constants
 ride as negative literals (the i64 range the literals carry).
@@ -2038,7 +2037,7 @@ pub extern fn split(s: string, sep: char) -> list[string]
 
 #### `substring`
 
-The checked slice (B8): the chars between the two positions, none
+The checked slice: the chars between the two positions, none
 outside `0 <= start <= end` and the string's char count — never
 clamping and never a trap.
 
@@ -2187,7 +2186,7 @@ impl encoder for json {
 ```
 
 ---- the json driver over the serialization face ----
-The json face is the driver face's first driver (2026-11-21): the
+The json face is the driver face's first driver: the
 document type's empty-document seed (the encode walk's receiver) and
 the encoder/decoder impls delegating to this file's own readers and
 constructions above, so the derive synthesis targets the driver

@@ -6,8 +6,8 @@
 // (a type or a const) cannot, so the bare spellings keep resolving and
 // running for every entry script session while its data-shaped @std
 // imports stay bound through the linked surface. The ordering pair is
-// the first family (the library-boundary round): the float and
-// ord-generic spellings ride the later linked-surface rounds.
+// the first family: the flat word-shaped signatures, the float and
+// ord-generic spellings waiting on the linked surface.
 //
 // The FP combinator family: the list transforms as plain generic
 // library fns. A generic body stages values only through the shapes it
@@ -26,14 +26,14 @@
 // the bool match, the one spelling an order comparison lowers. The
 // slice pair clamps at the list's own bounds (a negative, zero, or
 // past-the-end n answering the empty or whole list the bounds imply).
-// flat_map waits behind B2: a fn-typed parameter whose return nests the
+// flat_map does not exist: a fn-typed parameter whose return nests the
 // callee's variable in a type application (`fn(t) -> list[r]`) never
 // solves from a concrete fn or lambda argument (containment binds a
 // bare return variable alone, and no lambda-return annotation exists),
 // so `flatten` lands as the composable half — the flat spelling
 // composing at call sites over map's hosted lambda. scan and compose
-// wait behind the seams above (their residuals ride the reflection
-// seams the generic bodies wait on).
+// wait behind the seams above (their bodies need the type variable's
+// runtime word kind, the same reflection fact).
 //
 // The race combinators over the timer capability: the caller builds the
 // thunk list (non-capturing scalar lambdas alone — a closure cannot
@@ -75,7 +75,7 @@
 // stream reads `rand(s)` beside `s = rand_next(s)`), and `rand_seed`
 // stepping the wall clock into a fresh state. The mixer's shifts are
 // unsigned facts the core's `>>` cannot spell alone (the i64 shift is
-// sign-propagating, B7), so each xor operand masks the shifted word
+// sign-propagating), so each xor operand masks the shifted word
 // back to its logical bits — the mask a no-op when the shifted word
 // carries no sign. The int spellings of the mixer's unsigned constants
 // ride as negative literals (the i64 range the literals carry).

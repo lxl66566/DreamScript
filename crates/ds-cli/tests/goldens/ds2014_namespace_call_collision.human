@@ -1,11 +1,11 @@
-error[DS2014]: call-form `page` is ambiguous between the value `page` and the tag `page` [F9]
- --> tests/fixtures/negative/ds2014_namespace_call_collision.ds:9:28
-  |
-9 | fn caller(n: int) -> int { page(n) }
-  |                            ^^^^ ambiguous call form
-  |
-8 | fn page(n: int) -> int { n }
-  |    ---- the value declaration
-  |
-7 | tag page
-  |     ---- the type declaration
+error[DS2014]: call-form `page` is ambiguous between the value `page` and the struct `page` [F9]
+ --> tests/fixtures/negative/ds2014_namespace_call_collision.ds:11:28
+   |
+11 | fn caller(n: int) -> int { page(n) }
+   |                            ^^^^ ambiguous call form
+   |
+10 | fn page(n: int) -> int { n }
+   |    ---- the value declaration
+   |
+ 9 | struct page { n: int }
+   |        ---- the type declaration

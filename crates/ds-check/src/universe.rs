@@ -118,8 +118,48 @@ impl Universe {
     // ---- declarations ----------------------------------------------------
 
     /// Declares a unit tag: `tag io_err` (B1). Inhabited by the tag itself.
+    /// The name-keyed form: a label already declared refuses, and the
+    /// caller reuses the atom the first declaration minted. The serve's
+    /// name-addressed rows and the linked-word decode address atoms
+    /// through this index, so the foreign installs mint through it.
+    /// A local tag declaration mints through [`Universe::mint_tag`]
+    /// instead — its identity is its declaring declaration plus label,
+    /// never the bare name (F9.5).
     pub fn declare_tag(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Unit)
+    }
+
+    /// Mints one unit tag atom per declaring declaration (F9.5): two
+    /// declarations may share a label and stay distinct atoms, so the
+    /// mint never refuses. The name index keeps the FIRST holder of a
+    /// label — the address the serve's name-keyed rows and the
+    /// scalar/builtin decode resolve through — and a later same-label
+    /// atom resolves only through its own declaration.
+    pub fn mint_tag(&mut self, label: &str) -> TypeId {
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atom_names.entry(label.to_owned()).or_insert(id);
+        self.atoms.push(AtomDecl {
+            name: label.to_owned(),
+            kind: AtomKind::Unit,
+        });
+        self.atom_tys.push(None);
+        self.full_ty = None;
+        id
+    }
+
+    /// The re-keyed mint for a struct-shaped atom behind a tag
+    /// declaration: a payloaded tag or payloaded case (F9.5), same
+    /// first-holder name rule as [`Universe::mint_tag`].
+    pub fn mint_payload_tag(&mut self, label: &str) -> TypeId {
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atom_names.entry(label.to_owned()).or_insert(id);
+        self.atoms.push(AtomDecl {
+            name: label.to_owned(),
+            kind: AtomKind::Reserved,
+        });
+        self.atom_tys.push(None);
+        self.full_ty = None;
+        id
     }
 
     /// Declares a struct by reserving its identity (B1, B3); the field

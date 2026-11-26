@@ -205,13 +205,22 @@ fn focus(diag: &Diagnostic) -> (u32, u32, u32) {
         })
 }
 
-/// Whether every label of the diagnostic lies inside an item the corpus
-/// stages away from `typecheck` — run leftovers, intended rejections,
-/// later-milestone constructs. Only `typecheck` items gate M2 checking;
+/// Whether the diagnostic's primary label lies inside an item the
+/// corpus stages away from `typecheck` — run leftovers, intended
+/// rejections, later-milestone constructs. The primary span names the
+/// item that owns the rejection; secondary labels are evidence the
+/// rejection carries (a naming label may point at another file's
+/// declaration, the ambient's included, which stages nothing), so they
+/// never gate the exemption. Only `typecheck` items gate M2 checking;
 /// a file with no `// items:` header stages nothing, so its diagnostics
-/// are never exempt.
+/// are never exempt; a diagnostic with no primary label keeps today's
+/// exempt reading.
 fn exempt(scopes: &[Option<Vec<corpus::ItemStage>>], diag: &Diagnostic) -> bool {
-    diag.labels.iter().all(|label| {
+    let mut primary = diag
+        .labels
+        .iter()
+        .filter(|label| label.style == LabelStyle::Primary);
+    primary.all(|label| {
         scopes
             .get(label.span.file.as_u32() as usize)
             .and_then(Option::as_deref)

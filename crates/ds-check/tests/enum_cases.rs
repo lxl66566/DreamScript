@@ -135,12 +135,22 @@ fn call_forms_on_bare_cases_and_structs_stay_rejected() {
 }
 
 #[test]
-fn a_case_name_colliding_with_a_value_declaration_is_ambiguous_at_call_form() {
-    // F9's residual class: a call-form name in both namespaces is
-    // DS2014, naming both declarations.
+fn a_case_label_beside_a_value_follows_the_fn_at_call_form() {
+    // F9.5: tag names left the value namespace, so the call form always
+    // means the fn — even beside a payloaded case of the same label. The
+    // constructor families keep F9's residual DS2014 class.
     let found = codes(concat!(
         "tag int\n",
         "enum e { make(int) }\n",
+        "fn make(n: int) -> int { n }\n",
+        "const v = make(1)\n",
+    ));
+    assert!(found.is_empty(), "{found:?}");
+    let found = codes("tag int\ntag page\nfn page() -> int { 1 }\nconst v = page()\n");
+    assert!(found.is_empty(), "{found:?}");
+    let found = codes(concat!(
+        "tag int\n",
+        "struct make { n: int }\n",
         "fn make(n: int) -> int { n }\n",
         "const v = make(1)\n",
     ));
@@ -242,10 +252,12 @@ fn unit_cases_of_a_generic_enum_test_over_the_applied_head() {
         "  }\n",
         "}\n",
     ));
+    // the directed arm label refuses unknown-member (F9.5), the
+    // non-member reading of today's not-a-member mismatch
     assert!(
         found
             .iter()
-            .any(|(code, msg)| *code == "DS2001" && msg.contains("is not a member")),
+            .any(|(code, msg)| *code == "DS2045" && msg.contains("names no member")),
         "another enum's case refuses as a non-member: {found:?}"
     );
 }

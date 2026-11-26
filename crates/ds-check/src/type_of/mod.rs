@@ -287,6 +287,13 @@ pub struct Checked {
     /// atom from it when the written type is not a nominal single-segment
     /// path (a written fn type is the read-back call-through spelling).
     pub is_tests: FxHashMap<Span, Ty>,
+    /// Every label use the directed probe (F9.5) resolved to an expected
+    /// member's atom, keyed by the label's own span: a bare label in a
+    /// directed position names the member of the expected union, which
+    /// may be another declaration's atom than the one name resolution
+    /// bound. The lowering pass reads the atom to emit here and never
+    /// re-derives the redirection.
+    pub directed_tags: FxHashMap<Span, TypeId>,
     /// The member one dot-call's type-directed selection settled on,
     /// keyed by the callee name's own span (F3): the single survivor of
     /// the value-receiver tier — a trait member a solved instance or an
@@ -449,6 +456,7 @@ pub fn analyze_resolved(
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
+        directed_tags: checked.directed_tags,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
         place_stores: checked.place_stores,
@@ -614,6 +622,7 @@ fn analyze_served_over(
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
+        directed_tags: checked.directed_tags,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
         place_stores: checked.place_stores,
@@ -667,6 +676,7 @@ where
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
+    let mut directed_tags: FxHashMap<Span, TypeId> = FxHashMap::default();
     let mut hole_show_dispatches: FxHashMap<Span, MethodId> = FxHashMap::default();
     for (ast, res) in trees.iter().zip(resolutions) {
         let mut bodies = Bodies {
@@ -675,6 +685,7 @@ where
             res,
             resolutions,
             res_by_file: &res_by_file,
+            file: Some(ast.file),
             decls: &mut decls,
             def_types: &mut def_types,
             binders: &mut binders,
@@ -685,6 +696,7 @@ where
             inherent_call_bounds: &mut inherent_call_bounds,
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
+            directed_tags: &mut directed_tags,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
@@ -707,6 +719,7 @@ where
             cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
+            pattern_label_reported: false,
             value_pos: true,
             expected_ty_span: None,
             comptime: ComptimeCtx::default(),
@@ -730,6 +743,7 @@ where
             res: &empty_res,
             resolutions: &empty_tables,
             res_by_file: &no_files,
+            file: None,
             decls: &mut decls,
             def_types: &mut def_types,
             binders: &mut binders,
@@ -740,6 +754,7 @@ where
             inherent_call_bounds: &mut inherent_call_bounds,
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
+            directed_tags: &mut directed_tags,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
@@ -762,6 +777,7 @@ where
             cond_depth: 0,
             visiting: Vec::new(),
             solve_reported: false,
+            pattern_label_reported: false,
             value_pos: true,
             expected_ty_span: None,
             comptime: ComptimeCtx::default(),
@@ -792,6 +808,7 @@ where
         inherent_call_bounds,
         generic_call_bounds,
         is_tests,
+        directed_tags,
         method_selections,
         member_call_params,
         place_stores,
@@ -893,6 +910,14 @@ impl FilePositions {
     }
 }
 
+/// One bare label's directed outcome against an expected union (F9.5).
+enum DirectedLabel {
+    /// Exactly one expected member carries the label: its atom.
+    Directed(TypeId),
+    /// None or several carried it, the diagnostic reported.
+    Refused,
+}
+
 /// The body checker over one file.
 struct Bodies<'a> {
     files: &'a Files,
@@ -903,6 +928,10 @@ struct Bodies<'a> {
     /// (G3), no matter which file's body triggered the memo fill.
     resolutions: &'a [Resolutions],
     res_by_file: &'a FilePositions,
+    /// The file whose bodies this walk checks: a tag label resolves
+    /// through the declaring file's shadow entry first (F9.5), `None`
+    /// in the foreign-defs pass where only linked names answer.
+    file: Option<ds_diag::FileId>,
     decls: &'a mut Decls,
     def_types: &'a mut FxHashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
@@ -916,6 +945,14 @@ struct Bodies<'a> {
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
+    /// The member atom the directed probe (F9.5) resolved each directed
+    /// label use to, keyed by the label's own span; exported through
+    /// [`Checked::directed_tags`] for the lowering pass, which never
+    /// re-derives the redirection.
+    directed_tags: &'a mut FxHashMap<Span, TypeId>,
+    /// Whether a qualified pattern label already reported its refusal
+    /// (F9.5), so the caller's unknown-pattern word stays quiet.
+    pattern_label_reported: bool,
     hole_show_dispatches: &'a mut FxHashMap<Span, MethodId>,
     diags: Vec<Diagnostic>,
     /// Minted type variables whose generic parameter subtracts the
@@ -1269,10 +1306,12 @@ impl Bodies<'_> {
         // initializer's spans resolve under the binding's OWN file table,
         // never the triggering file's [G3].
         let home_res = self.res;
+        let home_file = self.file;
         if let Some(index) = self.res_by_file.get(self.package.def(defs[0]).span.file)
             && let Some(res) = self.resolutions.get(index)
         {
             self.res = res;
+            self.file = Some(self.package.def(defs[0]).span.file);
         }
 
         // A top-level fn declaration's initializer is its lambda: mark it
@@ -1281,10 +1320,14 @@ impl Bodies<'_> {
         let was = self.comptime;
         self.comptime.declaring_fn = matches!(local.init, Expr::Lambda { .. });
         self.value_pos = true;
-        let mut val = self.expr(&local.init, None);
+        // the annotation directs the initializer (F9.5): a bare label
+        // in it resolves against the expected members, so the written
+        // type solves BEFORE the walk
+        let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
+        let mut val = self.expr(&local.init, expected);
         self.comptime = was;
         if let Some(ann) = &local.ty {
-            if let Some(expected) = self.solve_here(ann) {
+            if let Some(expected) = expected {
                 self.expect_contains(val, expected, local.init.span(), "annotated binding");
                 val.ty = expected;
             } else if !self.take_solve_reported() {
@@ -1310,6 +1353,7 @@ impl Bodies<'_> {
         self.frame_depth = outer_frames;
         self.loop_breaks = outer_breaks;
         self.res = home_res;
+        self.file = home_file;
         self.visiting.truncate(visiting);
     }
 
@@ -1508,9 +1552,12 @@ impl Bodies<'_> {
     /// A statement-level binding: locals infer (B2).
     fn local_stmt(&mut self, local: &LocalDecl) {
         self.value_pos = true;
-        let mut val = self.expr(&local.init, None);
+        // the annotation directs the initializer (F9.5), the same
+        // solve-before-walk the top-level binding takes
+        let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
+        let mut val = self.expr(&local.init, expected);
         if let Some(ann) = &local.ty {
-            if let Some(expected) = self.solve_here(ann) {
+            if let Some(expected) = expected {
                 self.expect_contains(val, expected, local.init.span(), "annotated binding");
                 val.ty = expected;
             } else if !self.take_solve_reported() {
@@ -1669,57 +1716,7 @@ impl Bodies<'_> {
             },
             Expr::Try { expr, span } => self.try_expr(expr, expected, *span),
             Expr::Unary { op, expr, span } => self.unary(*op, expr, *span),
-            Expr::Is { expr, ty, span, .. } => {
-                let operand = self.expr(expr, None);
-                let Some(solved) = self.solve_here(ty) else {
-                    if !self.take_solve_reported() {
-                        self.error(
-                            ErrorCode::TypeMismatch,
-                            format!(
-                                "the `is` test against `{}` does not solve",
-                                decls::render_type(ty)
-                            ),
-                            ty.span(),
-                            "unsolvable test type",
-                        );
-                    }
-                    return Val {
-                        ty: self.bool_ty(),
-                        diverges: false,
-                        poisoned: false,
-                    };
-                };
-                self.is_tests.insert(*span, solved);
-                // A provably-disjoint test computes a constant false, so in
-                // value/assert position it is a compile error — the same
-                // ruling as the constant `==` [B9 carve-out 2]. In
-                // condition position (if/match guard/while, any depth) the
-                // test refines legitimately: the kept branch narrows to
-                // empty, which is sound dead code, and a match arm covering
-                // nothing is the exhaustiveness story.
-                if self.cond_depth == 0
-                    && !operand.poisoned
-                    && !self.decls.universe.is_empty(operand.ty)
-                    && !self.decls.universe.is_empty(solved)
-                    && self.decls.universe.is_disjoint(operand.ty, solved)
-                {
-                    self.error(
-                        ErrorCode::TypeMismatch,
-                        format!(
-                            "the `is` test against `{}` is always false over `{}` [B2]",
-                            self.decls.universe.render(solved),
-                            self.decls.universe.render(operand.ty)
-                        ),
-                        ty.span(),
-                        "always false",
-                    );
-                }
-                Val {
-                    ty: self.bool_ty(),
-                    diverges: false,
-                    poisoned: false,
-                }
-            },
+            Expr::Is { expr, ty, span, .. } => self.is_expr(expr, ty, *span),
             Expr::Binary {
                 op,
                 left,
@@ -2038,7 +2035,11 @@ impl Bodies<'_> {
         for part in parts {
             let (hole_span, hole_val) = match part {
                 StrPart::Text { .. } => continue,
-                StrPart::Expr { span, expr } => (*span, self.expr(expr, Some(string_ty))),
+                // The hole is a conversion context, never a directed one
+                // (F9.5): no expected type threads in, so a bare label
+                // keeps its declaring atom and the `show` proof below
+                // owns the operand.
+                StrPart::Expr { span, expr } => (*span, self.expr(expr, None)),
                 StrPart::Ident { span, name } => {
                     let val = self.ident_hole_value(name);
                     self.expr_types.insert(name.span, val);
@@ -2210,7 +2211,7 @@ impl Bodies<'_> {
                     diverges: false,
                     poisoned: false,
                 },
-                Res::Def(def) => self.def_value(*def, name.span),
+                Res::Def(def) => self.def_value(*def, name.span, None),
                 Res::TraitMethod(_) | Res::Dot(_) | Res::Handler | Res::Module(_) => Val {
                     ty: self.empty(),
                     diverges: false,
@@ -2285,7 +2286,7 @@ impl Bodies<'_> {
                                 poisoned: false,
                             };
                         }
-                        self.def_value(*def, only.span)
+                        self.def_value(*def, only.span, expected)
                     },
                     Res::TraitMethod(_) | Res::Dot(_) | Res::Handler => Val {
                         ty: self.empty(),
@@ -2331,6 +2332,41 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             }
+        } else if let [head, tail] = path.segments.as_slice() {
+            // The qualified `type::label` use (F9.5): a tag-family label
+            // behind a type head resolves against the head's own members,
+            // never the expected type — the escape hatch the bare label's
+            // refusals point at.
+            if let Some(Res::Def(def)) = self.res.get(tail.span)
+                && matches!(self.package.def(*def).kind, DefKind::Tag | DefKind::Case)
+            {
+                return self.qualified_label_val(head, tail);
+            }
+            if self.res.get(head.span).is_some_and(|res| {
+                matches!(res, Res::Def(def) if matches!(
+                    self.package.def(*def).kind,
+                    DefKind::Tag | DefKind::Case | DefKind::Enum | DefKind::TypeAlias
+                ))
+            }) {
+                // the label did not resolve: resolve's unknown-name
+                // refusal is the single report
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                };
+            }
+            self.error(
+                ErrorCode::InferenceFailed,
+                "qualified paths are callable method references, not values [F3]".to_owned(),
+                path.span,
+                "method reference",
+            );
+            Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            }
         } else {
             self.error(
                 ErrorCode::InferenceFailed,
@@ -2347,7 +2383,230 @@ impl Bodies<'_> {
     }
 
     /// The value type of a package-level definition used as a value.
-    fn def_value(&mut self, def: DefId, span: Span) -> Val {
+    /// One expected union's members carrying a bare label (F9.5). No
+    /// probe runs without an expected type (`None` = undirected).
+    fn probe_label(
+        &mut self,
+        label: &str,
+        own: Option<TypeId>,
+        expected: Ty,
+        span: Span,
+    ) -> Option<DirectedLabel> {
+        let labeled: Vec<TypeId> = self
+            .decls
+            .universe
+            .members(expected)
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == label)
+            })
+            .collect();
+        match labeled.as_slice() {
+            [one] => {
+                self.directed_tags.insert(span, *one);
+                Some(DirectedLabel::Directed(*one))
+            },
+            [] => {
+                // the label names a declaration whose atom sits outside
+                // the expected union: unknown-member, never an
+                // inference (F9.5)
+                if own.is_some() {
+                    self.error(
+                        ErrorCode::UnknownTagMember,
+                        format!(
+                            "a bare `{label}` names no member of `{}` [F9.5]",
+                            self.decls.universe.render(expected)
+                        ),
+                        span,
+                        "unknown member",
+                    );
+                    Some(DirectedLabel::Refused)
+                } else {
+                    None
+                }
+            },
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "a bare `{label}` matches several members of `{}` [F9.5]; qualify which \
+                         declaration you mean",
+                        self.decls.universe.render(expected)
+                    ),
+                )
+                .with_primary(span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                Some(DirectedLabel::Refused)
+            },
+        }
+    }
+
+    /// A resolved tag-family def's value atom, type-directed when the
+    /// position carries an expected type (F9.5): the expected union's
+    /// members carrying the label pick the atom — one member wins even
+    /// over the use's own declaration, none refuses unknown-member,
+    /// several refuse ambiguous naming both candidates. Without an
+    /// expected type the declaration's own atom stands, exactly the
+    /// undirected spellings of today.
+    /// The solved set of a qualified label's head (F9.5): the head's
+    /// own type, solved under the walking file's namespace so an alias
+    /// expands under its declaring file.
+    fn head_type_of(&mut self, head: &Ident) -> Option<Ty> {
+        let head_path = Path {
+            span: head.span,
+            segments: vec![head.clone()],
+        };
+        let head_ty = Type::Path {
+            span: head.span,
+            path: head_path,
+            args: Vec::new(),
+            delim: Delim::Bracket,
+        };
+        self.solve_here(&head_ty)
+    }
+
+    /// The members of one solved set whose declaration carries `label`
+    /// (F9.5) — the atoms a bare label's directed probe and a qualified
+    /// label's head scan both read.
+    fn members_labeled(&self, set: Ty, label: &str) -> Vec<TypeId> {
+        self.decls
+            .universe
+            .members(set)
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == label)
+            })
+            .collect()
+    }
+
+    /// The value of one qualified `type::label` use (F9.5): the head's
+    /// own members carrying the label pick the atom — one answers the
+    /// member's type, none refuses unknown-member, several refuse
+    /// ambiguous naming both declarations. The qualified spelling is
+    /// never re-directed by an expected type; it is the escape hatch the
+    /// bare label's refusals point at.
+    fn qualified_label_val(&mut self, head: &Ident, tail: &Ident) -> Val {
+        let Some(head_ty) = self.head_type_of(head) else {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!("the qualified label's head `{}` does not solve", head.name),
+                head.span,
+                "unsolvable head",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        };
+        let labeled = self.members_labeled(head_ty, &tail.name);
+        match labeled.as_slice() {
+            [one] => {
+                self.directed_tags.insert(tail.span, *one);
+                Val {
+                    ty: self
+                        .decls
+                        .universe
+                        .atom_ty(*one)
+                        .unwrap_or_else(|_| self.empty()),
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
+            [] => {
+                self.error(
+                    ErrorCode::UnknownTagMember,
+                    format!(
+                        "the qualified `{}::{}` names no member of `{}` [F9.5]",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(head_ty)
+                    ),
+                    tail.span,
+                    "unknown member",
+                );
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                }
+            },
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the qualified `{}::{}` matches several members of `{}` [F9.5]; name a \
+                         head that carries one",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(head_ty)
+                    ),
+                )
+                .with_primary(tail.span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                }
+            },
+        }
+    }
+
+    fn directed_atom_val(&mut self, def: DefId, span: Span, expected: Option<Ty>) -> Val {
+        let own = self.decls.atoms.get(&def).copied();
+        let label = self.package.def(def).name.clone();
+        let atom = match expected.and_then(|expected| self.probe_label(&label, own, expected, span))
+        {
+            Some(DirectedLabel::Directed(atom)) => Some(atom),
+            Some(DirectedLabel::Refused) => None,
+            None => own,
+        };
+        match atom {
+            Some(atom) => Val {
+                ty: self
+                    .decls
+                    .universe
+                    .atom_ty(atom)
+                    .unwrap_or_else(|_| self.empty()),
+                diverges: false,
+                poisoned: false,
+            },
+            // a refusal poisoned the span already; the empty type keeps
+            // the downstream boundaries silent
+            None => Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            },
+        }
+    }
+
+    fn def_value(&mut self, def: DefId, span: Span, expected: Option<Ty>) -> Val {
         match self.package.def(def).kind {
             DefKind::Fn => match self.decls.fns.get(&def).cloned() {
                 Some(sig) if sig.generics.is_empty() => self.fn_atom_of(&sig),
@@ -2386,22 +2645,7 @@ impl Bodies<'_> {
                         "tag with a payload used bare",
                     );
                 }
-                match self.decls.atoms.get(&def).copied() {
-                    Some(atom) => Val {
-                        ty: self
-                            .decls
-                            .universe
-                            .atom_ty(atom)
-                            .unwrap_or_else(|_| self.empty()),
-                        diverges: false,
-                        poisoned: false,
-                    },
-                    None => Val {
-                        ty: self.empty(),
-                        diverges: false,
-                        poisoned: false,
-                    },
-                }
+                self.directed_atom_val(def, span, expected)
             },
             DefKind::Case => {
                 // A bare case is the unit form, like a tag; a payload
@@ -2430,22 +2674,7 @@ impl Bodies<'_> {
                         poisoned: false,
                     };
                 }
-                match self.decls.atoms.get(&def).copied() {
-                    Some(atom) => Val {
-                        ty: self
-                            .decls
-                            .universe
-                            .atom_ty(atom)
-                            .unwrap_or_else(|_| self.empty()),
-                        diverges: false,
-                        poisoned: false,
-                    },
-                    None => Val {
-                        ty: self.empty(),
-                        diverges: false,
-                        poisoned: false,
-                    },
-                }
+                self.directed_atom_val(def, span, expected)
             },
             DefKind::Const | DefKind::Var => self.const_ty(def, span),
             DefKind::Struct | DefKind::Enum | DefKind::TypeAlias | DefKind::Trait => {
@@ -2907,7 +3136,7 @@ impl Bodies<'_> {
                                 diverges: false,
                                 poisoned: false,
                             },
-                            Res::Def(def) => self.def_value(*def, name.span),
+                            Res::Def(def) => self.def_value(*def, name.span, Some(field_ty)),
                             _ => Val {
                                 ty: self.empty(),
                                 diverges: false,
@@ -3504,13 +3733,42 @@ impl Bodies<'_> {
                                 poisoned: false,
                             };
                         }
-                        let callee_val = self.def_value(def, only.span);
+                        let callee_val = self.def_value(def, only.span, None);
                         return self.indirect_call(callee_val, args, trailing.as_deref(), *span);
                     }
                 },
                 [_head, method] => {
                     if let Some(Res::TraitMethod(method_id)) = self.res.get(method.span) {
                         return self.qualified_call(*method_id, args, trailing.as_deref(), *span);
+                    }
+                    // The qualified label's call form (F9.5): a payloaded
+                    // tag or case constructs through the same case-call
+                    // door as the bare spelling; a unit label keeps the
+                    // bare-case refusal there.
+                    if let Some(Res::Def(def)) = self.res.get(method.span)
+                        && matches!(self.package.def(*def).kind, DefKind::Tag | DefKind::Case)
+                    {
+                        let def = *def;
+                        let payloaded = self
+                            .decls
+                            .cases
+                            .get(&def)
+                            .is_some_and(|case| !matches!(case.payload, EnumPayload::None))
+                            || self.decls.structs.contains_key(&def);
+                        if payloaded {
+                            return self.case_call(def, method, args, trailing.as_deref(), *span);
+                        }
+                        self.error(
+                            ErrorCode::InferenceFailed,
+                            format!("`{}` is a bare label; it constructs by name", method.name),
+                            method.span,
+                            "unit label called as a function",
+                        );
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: false,
+                        };
                     }
                 },
                 _ => {},
@@ -5680,7 +5938,7 @@ impl Bodies<'_> {
             match self.res.get(name.span) {
                 Some(Res::Def(def)) if self.decls.foreign_consts.contains_key(def) => {
                     let def = *def;
-                    return self.def_value(def, name.span);
+                    return self.def_value(def, name.span, None);
                 },
                 _ => {
                     self.solve_reported = true;
@@ -6905,8 +7163,258 @@ impl Bodies<'_> {
     /// Whether the solve that just failed already reported its precise
     /// diagnostic (the tuple distribution cap); a generic fallback then
     /// stays silent so the golden carries one code, not two.
+    /// Whether a qualified pattern label already reported its refusal,
+    /// consumed by the caller about to print the unknown-pattern word.
+    fn take_pattern_label_reported(&mut self) -> bool {
+        std::mem::take(&mut self.pattern_label_reported)
+    }
+
     fn take_solve_reported(&mut self) -> bool {
         std::mem::take(&mut self.solve_reported)
+    }
+
+    /// The type def a name carries for the walked file (F9.5): the
+    /// file's own shadowing tag declaration beats the first declaration
+    /// per label; the foreign-defs pass reads the shared namespace.
+    fn type_def_of(&self, name: &str) -> Option<DefId> {
+        match self.file {
+            Some(file) => self.package.lookup_type_in(file, name),
+            None => self.package.lookup_type(name),
+        }
+    }
+
+    /// The directed test label (F9.5): a single-segment written test
+    /// type naming no declaration probes the operand's own members by
+    /// label. One member carrying it answers the test's set; none keeps
+    /// the solve refusal; several report the ambiguity.
+    /// The `is` test against a written type: the operand's value plus
+    /// the tested set the solve (or the directed label probe, F9.5)
+    /// answers. A declared tag label disjoint from the operand's union
+    /// in value position is the unknown-member refusal, not the
+    /// constant-false story; every other provably-disjoint test keeps
+    /// the constant-`==` ruling (a value/assert-position compile error,
+    /// a condition-position refinement).
+    fn is_expr(&mut self, expr: &Expr, ty: &Type, span: Span) -> Val {
+        let operand = self.expr(expr, None);
+        let Some(solved) = self.solve_here(ty).or_else(|| {
+            // the directed test label (F9.5): an undeclared
+            // single-segment label probes the operand's own
+            // members before the solve refusal
+            self.is_test_label_probe(ty, operand.ty)
+        }) else {
+            if !self.take_solve_reported() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "the `is` test against `{}` does not solve",
+                        decls::render_type(ty)
+                    ),
+                    ty.span(),
+                    "unsolvable test type",
+                );
+            }
+            return Val {
+                ty: self.bool_ty(),
+                diverges: false,
+                poisoned: false,
+            };
+        };
+        if self.cond_depth == 0
+            && !operand.poisoned
+            && self.is_tagged_test_label(ty)
+            && !self.decls.universe.is_empty(operand.ty)
+            && !self.decls.universe.is_empty(solved)
+            && self.decls.universe.is_disjoint(operand.ty, solved)
+        {
+            self.error(
+                ErrorCode::UnknownTagMember,
+                format!(
+                    "the tested label `{}` names no member of `{}` [F9.5]",
+                    decls::render_type(ty),
+                    self.decls.universe.render(operand.ty)
+                ),
+                ty.span(),
+                "unknown member",
+            );
+            return Val {
+                ty: self.bool_ty(),
+                diverges: false,
+                poisoned: true,
+            };
+        }
+        self.is_tests.insert(span, solved);
+        // A provably-disjoint test computes a constant false, so in
+        // value/assert position it is a compile error — the same
+        // ruling as the constant `==` [B9 carve-out 2]. In
+        // condition position (if/match guard/while, any depth) the
+        // test refines legitimately: the kept branch narrows to
+        // empty, which is sound dead code, and a match arm covering
+        // nothing is the exhaustiveness story.
+        if self.cond_depth == 0
+            && !operand.poisoned
+            && !self.decls.universe.is_empty(operand.ty)
+            && !self.decls.universe.is_empty(solved)
+            && self.decls.universe.is_disjoint(operand.ty, solved)
+        {
+            self.error(
+                ErrorCode::TypeMismatch,
+                format!(
+                    "the `is` test against `{}` is always false over `{}` [B2]",
+                    self.decls.universe.render(solved),
+                    self.decls.universe.render(operand.ty)
+                ),
+                ty.span(),
+                "always false",
+            );
+        }
+        Val {
+            ty: self.bool_ty(),
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
+    fn is_test_label_probe(&mut self, ty: &Type, operand: Ty) -> Option<Ty> {
+        let Type::Path { path, args, .. } = ty else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let [only] = path.segments.as_slice() else {
+            return None;
+        };
+        if only.name == "none" && !self.package.declares("none") {
+            return None;
+        }
+        if self.type_def_of(&only.name).is_some() {
+            return None;
+        }
+        let labeled: Vec<TypeId> = self
+            .decls
+            .universe
+            .members(operand)
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == only.name)
+            })
+            .collect();
+        match labeled.as_slice() {
+            [one] => self.decls.universe.atom_ty(*one).ok(),
+            [] => None,
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the tested label `{}` matches several members of `{}` [F9.5]; qualify \
+                         which declaration you mean",
+                        only.name,
+                        self.decls.universe.render(operand)
+                    ),
+                )
+                .with_primary(only.span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                self.solve_reported = true;
+                None
+            },
+        }
+    }
+
+    /// Whether the written test type is a bare tag-family label (F9.5):
+    /// its disjointness against the operand reports unknown-member, not
+    /// the constant-false story a set-level test keeps.
+    fn is_tagged_test_label(&self, ty: &Type) -> bool {
+        let Type::Path { path, args, .. } = ty else {
+            return false;
+        };
+        if !args.is_empty() {
+            return false;
+        }
+        let [only] = path.segments.as_slice() else {
+            return false;
+        };
+        self.type_def_of(&only.name)
+            .is_some_and(|def| matches!(self.package.def(def).kind, DefKind::Tag | DefKind::Case))
+    }
+
+    /// The qualified `type::label` solved as a type (F9.5): the head's
+    /// own members carrying the label name the member's type. None
+    /// reports unknown-member naming the head; several report the
+    /// ambiguity naming both declarations; a head that does not solve
+    /// keeps the quiet solve refusal.
+    fn solve_qualified(
+        &mut self,
+        head: &Ident,
+        tail: &Ident,
+        subst: &FxHashMap<String, Ty>,
+        generics: &[GenericParam],
+    ) -> Option<Ty> {
+        let head_path = Path {
+            span: head.span,
+            segments: vec![head.clone()],
+        };
+        let head_ty = Type::Path {
+            span: head.span,
+            path: head_path,
+            args: Vec::new(),
+            delim: Delim::Bracket,
+        };
+        let solved = self.solve_with(&head_ty, subst, generics)?;
+        let labeled = self.members_labeled(solved, &tail.name);
+        match labeled.as_slice() {
+            [one] => self.decls.universe.atom_ty(*one).ok(),
+            [] => {
+                self.error(
+                    ErrorCode::UnknownTagMember,
+                    format!(
+                        "the qualified `{}::{}` names no member of `{}` [F9.5]",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(solved)
+                    ),
+                    tail.span,
+                    "unknown member",
+                );
+                self.solve_reported = true;
+                None
+            },
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the qualified `{}::{}` matches several members of `{}` [F9.5]; name a \
+                         head that carries one",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(solved)
+                    ),
+                )
+                .with_primary(tail.span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                self.solve_reported = true;
+                None
+            },
+        }
     }
 
     fn solve_with(
@@ -6920,7 +7428,14 @@ impl Bodies<'_> {
                 span, path, args, ..
             } => {
                 let [only] = path.segments.as_slice() else {
-                    return None
+                    // The qualified `type::label` (F9.5): the head's own
+                    // members carrying the label name the member's type;
+                    // none reports unknown-member and several the
+                    // ambiguity, both keyed to the qualified spelling.
+                    if let [head, tail] = path.segments.as_slice() {
+                        return self.solve_qualified(head, tail, subst, generics);
+                    }
+                    return None;
                 };
                 // The callee's substitution binds first: a called function's
                 // own variables must not be captured by the caller's
@@ -6950,8 +7465,7 @@ impl Bodies<'_> {
                     return None;
                 }
                 let def = self
-                    .package
-                    .lookup_type(&only.name)
+                    .type_def_of(&only.name)
                     .or_else(|| self.decls.foreign_type(&only.name))?;
                 if !args.is_empty() {
                     if let Err(mismatch) =
@@ -6994,12 +7508,19 @@ impl Bodies<'_> {
                         if !shape.params.is_empty() {
                             return None;
                         }
+                        // the case labels are the enum's own written
+                        // members: they resolve under the enum's
+                        // declaring file, never the use site's shadow
+                        // map (F9.5)
+                        let decl_file = self.file;
+                        self.file = Some(self.package.def(def).span.file);
                         let mut union: Option<Ty> = None;
                         for (name, ..) in &shape.cases {
                             let case_def = self
-                                .package
-                                .lookup_type(name)
-                                .or_else(|| self.decls.foreign_type(name))?;
+                                .type_def_of(name)
+                                .or_else(|| self.decls.foreign_type(name));
+                            self.file = decl_file;
+                            let case_def = case_def?;
                             let atom = self.decls.atoms.get(&case_def).copied()?;
                             let ty = self.decls.universe.atom_ty(atom).ok()?;
                             union = Some(match union {
@@ -7013,7 +7534,15 @@ impl Bodies<'_> {
                     DefKind::TypeAlias => {
                         let (params, body) = self.decls.aliases.get(&def)?.clone();
                         if params.is_empty() {
-                            self.solve_with(&body, subst, generics)
+                            // the body is the alias declaration's own
+                            // text: its tag labels resolve under the
+                            // alias's declaring file (F9.5), never the
+                            // use site's shadow map
+                            let decl_file = self.file;
+                            self.file = Some(self.package.def(def).span.file);
+                            let solved = self.solve_with(&body, subst, generics);
+                            self.file = decl_file;
+                            solved
                         } else {
                             None // generic aliases resolve through use-site args
                         }
@@ -7696,8 +8225,7 @@ impl Bodies<'_> {
         let mut unminted = false;
         for (name, ..) in &shape.cases {
             match self
-                .package
-                .lookup_type(name)
+                .type_def_of(name)
                 .or_else(|| self.decls.foreign_type(name))
                 .and_then(|def| self.decls.atoms.get(&def).copied())
             {

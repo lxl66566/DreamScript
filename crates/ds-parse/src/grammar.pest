@@ -184,8 +184,10 @@ pat_wild = { "_" ~ !ident_cont }
 pat_ident = { ident ~ !(h ~ ("::" | "(" | "{")) }
 pat_neg = @{ "-" }
 pat_literal = { pat_neg? ~ (float_lit | int_lit | string_lit | raw_string | char_lit | byte_lit | kw_true | kw_false) }
-// A qualified or tail-taking name pattern: one path parse for both shapes.
-pat_head = { path ~ h ~ (pat_call | pat_struct) }
+// A qualified or tail-taking name pattern: one path parse for every shape.
+// A bare qualified `type::label` (F9.5) carries no call or struct tail —
+// `pat_ident`'s exclusion of the `::`-taking spellings routes them here.
+pat_head = { path ~ h ~ (pat_call | pat_struct)? }
 pat_call = { "(" ~ sp ~ (pattern ~ (sp ~ "," ~ sp ~ pattern)* ~ sp ~ ","?)? ~ sp ~ ")" }
 pat_struct = { "{" ~ sp ~ (pat_field ~ (sp ~ "," ~ sp ~ pat_field)* ~ sp ~ ","?)? ~ sp ~ "}" }
 pat_field = { ident ~ (h ~ ":" ~ sp ~ pattern)? }

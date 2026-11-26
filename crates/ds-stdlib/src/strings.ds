@@ -1,6 +1,6 @@
 // The @std string face: the pure string operations that left the
-// ambient core as the reserved package's own source (the
-// library-boundary round). Every declaration here names a builtin core
+// ambient core as the reserved package's own source. Every declaration
+// here names a builtin core
 // native the lowering routes by name at the callee resolution seam, so
 // the package owns the spelling while the engine owns the seam. The
 // face rides composed into the @std bundle's core member (beside the
@@ -21,17 +21,17 @@ pub extern fn trim (s: string) -> string
 pub extern fn parse_int (s: string) -> int | parse_err
 pub extern fn parse_float (s: string) -> float | parse_err
 pub extern fn split (s: string, sep: char) -> list[string]
-// The checked slice (B8): the chars between the two positions, none
+// The checked slice: the chars between the two positions, none
 // outside `0 <= start <= end` and the string's char count — never
 // clamping and never a trap.
 pub extern fn substring (s: string, start: int, end: int) -> string | none
 pub extern fn to_upper (s: string) -> string
 pub extern fn to_lower (s: string) -> string
-// The checked char read (B8): the char at the position, none outside
+// The checked char read: the char at the position, none outside
 // the string's range — the old total spelling answered the empty
 // string instead.
 pub extern fn char_at (s: string, i: int) -> char | none
-// The string search family (the 2026-11-21 pure-builtin round):
+// The string search family:
 // `contains` answers the membership read, the empty needle always
 // occurring; `index_of` answers the first occurrence's char index
 // (substring's indexing, so the answer composes with the checked
@@ -43,13 +43,13 @@ pub extern fn contains (haystack: string, needle: string) -> bool
 pub extern fn index_of (haystack: string, needle: string) -> int | none
 pub extern fn replace (haystack: string, needle: string, with: string) -> string
 
-// The zero-copy parsing face (ruled 2026-11-25): one view over a
+// The zero-copy parsing face: one view over a
 // counted share of a base string — the `s` field's Ref word is the
 // share, safe under precise counting with no model change — carrying
 // the half-open char range [start, end) into it. Every position is a
 // char index, the checked reads' own vocabulary, so a view composes
 // with `char_at` and `substring` with no boundary translation, and a
-// free `len` owns the dot position [F3], so the range spells its two
+// free `len` owns the dot position, so the range spells its two
 // bounds instead of a length. Construction validates the range against
 // the base's char count (the checked-API convention: the none member
 // outside it, never clamping and never a trap), the members answer

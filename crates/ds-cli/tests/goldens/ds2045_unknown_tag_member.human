@@ -1,0 +1,10 @@
+error[DS2045]: a bare `page` names no member of `int | marker` [F9.5]
+ --> tests/fixtures/negative/ds2045_unknown_tag_member.ds:11:16
+   |
+11 | const bad: u = page
+   |                ^^^^ unknown member
+error[DS2045]: the qualified `u::page` names no member of `int | marker` [F9.5]
+ --> tests/fixtures/negative/ds2045_unknown_tag_member.ds:12:21
+   |
+12 | const worse: u = u::page
+   |                     ^^^^ unknown member

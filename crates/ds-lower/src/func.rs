@@ -6148,6 +6148,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn path_value(&mut self, path: &Path, span: Span, ty: Ty) -> Result<Place, LowerError> {
+        if let [_head, tail] = path.segments.as_slice()
+            && let Some(&atom) = self.analyzed.checked.directed_tags.get(&tail.span)
+            && matches!(
+                self.res.get(tail.span),
+                Some(Res::Def(def))
+                    if matches!(
+                        self.analyzed.package.def(*def).kind,
+                        ds_check::DefKind::Tag | ds_check::DefKind::Case
+                    )
+            )
+        {
+            // The qualified `type::label` use (F9.5): the head's member
+            // the checker picked is the value's atom, recorded at the
+            // label's span.
+            let dst = self.temp_word(SlotType::Tag)?;
+            let tag = self.shapes.tag_id(atom)?;
+            self.emit(Op::TagNew {
+                dst: Slot::body(dst),
+                tag,
+            });
+            return Ok(Place {
+                base: dst,
+                shape: PlaceShape::Word(SlotType::Tag),
+            });
+        }
         let [only] = path.segments.as_slice() else {
             return Err(LowerError::unsupported(
                 span,
@@ -6169,12 +6194,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 let kind = self.analyzed.package.def(*def).kind;
                 match kind {
                     ds_check::DefKind::Tag | ds_check::DefKind::Case => {
+                        // The directed probe (F9.5) may resolve a bare
+                        // label to another declaration's atom than the one
+                        // name resolution bound; the checker's record is
+                        // the value's truth.
                         let atom = self
                             .analyzed
-                            .decls
-                            .atoms
-                            .get(def)
+                            .checked
+                            .directed_tags
+                            .get(&only.span)
                             .copied()
+                            .or_else(|| self.analyzed.decls.atoms.get(def).copied())
                             .ok_or_else(|| mismatch("a tag construction"))?;
                         let dst = self.temp_word(SlotType::Tag)?;
                         let tag = self.shapes.tag_id(atom)?;
@@ -6306,14 +6336,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn is_value(&mut self, expr: &Expr, ty: &Type, span: Span) -> Result<Place, LowerError> {
         let operand = self.value(expr)?;
         let operand_ty = self.val(expr.span())?.ty;
-        // A nominal written type tests its one atom; any other written
-        // type tests the members the checker solved for the test.
-        let atom = self.type_atom(ty);
-        let tested: &[TypeId] = match &atom {
-            Ok(atom) => std::slice::from_ref(atom),
-            Err(path_err) => self
-                .solved_is_members(span)
-                .ok_or_else(|| path_err.clone())?,
+        // The checker's solved test is the site's truth (F9.5: a
+        // type-position label resolves per file, so the first namespace
+        // holder the nominal spelling finds may be another declaration's
+        // atom); the nominal path spelling covers only the shapes the
+        // checker recorded no solve for.
+        let nominal;
+        let tested: &[TypeId] = match self.solved_is_members(span) {
+            Some(members) => members,
+            None => {
+                let atom = self.type_atom(ty)?;
+                nominal = vec![atom];
+                &nominal
+            },
         };
         let members = self.members(operand_ty);
         // the operand's member set decides the test: its whole coverage
@@ -6399,11 +6434,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         })
     }
 
-    /// The tested members of a written type the nominal path cannot name
-    /// (a written fn type, a union spelling): the checker solved the
-    /// `is` test and recorded it keyed by the expression's span, so the
-    /// solution's members are what the TAG_TESTs discriminate by.
-    /// Anything else keeps the path spelling's refusal.
+    /// The tested members of one `is` test, from the checker's solved
+    /// record keyed by the expression's span: the solution's members
+    /// are what the TAG_TESTs discriminate by, the authority the nominal
+    /// path spelling only backs up (a written type the checker recorded
+    /// no solve for).
     fn solved_is_members(&self, span: Span) -> Option<&'a [TypeId]> {
         let &solved = self.analyzed.checked.is_tests.get(&span)?;
         Some(self.members(solved))

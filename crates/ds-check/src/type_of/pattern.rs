@@ -89,6 +89,7 @@ impl Bodies<'_> {
             },
             Pattern::Path { span, path } => match self.pattern_path_atom(path) {
                 Some(atom) => self.case_cover(*span, atom, &members, scrut, covered),
+                None if self.take_pattern_label_reported() => {},
                 None => self.error(
                     ErrorCode::UnresolvedName,
                     format!("pattern `{}` names no declared atom", path.text()),
@@ -98,12 +99,14 @@ impl Bodies<'_> {
             },
             Pattern::Call { span, path, args } => {
                 let Some(atom) = self.pattern_path_atom(path) else {
-                    self.error(
-                        ErrorCode::UnresolvedName,
-                        format!("pattern `{}` names no declared atom", path.text()),
-                        *span,
-                        "unknown pattern",
-                    );
+                    if !self.take_pattern_label_reported() {
+                        self.error(
+                            ErrorCode::UnresolvedName,
+                            format!("pattern `{}` names no declared atom", path.text()),
+                            *span,
+                            "unknown pattern",
+                        );
+                    }
                     return;
                 };
                 let payload = self.payload_tys(path, atom);
@@ -324,7 +327,41 @@ impl Bodies<'_> {
         // when the type namespace carries it [F9]: bare tags are
         // constructor values, so the type entry wins over any
         // same-named local and nothing binds.
+        //
+        // The remaining scrutinee directs the label first (F9.5): one
+        // expected member carrying the label is the atom, an expected
+        // union without it refuses unknown-member when the label is a
+        // declaration of this compile, and several refuse ambiguous.
+        if arm
+            && let Some(()) =
+                self.directed_pattern_label(&name.name, name.span, members, scrut, covered)
+        {
+            return;
+        }
         if arm && let Some(atom) = self.unit_pattern_atom(&name.name) {
+            // the applied-head escape keeps today's member reading: a
+            // unit case over an applied generic enum head tests over
+            // every application, though the head is opaque to the label
+            // probe
+            let is_member = self
+                .decls
+                .universe
+                .atom_ty(atom)
+                .is_ok_and(|ty| self.decls.universe.contains(scrut, ty))
+                || self.case_of_applied_head(atom, scrut);
+            if !is_member {
+                self.error(
+                    ErrorCode::UnknownTagMember,
+                    format!(
+                        "a bare `{}` names no member of `{}` [F9.5]",
+                        name.name,
+                        self.decls.universe.render(scrut)
+                    ),
+                    name.span,
+                    "unknown member",
+                );
+                return;
+            }
             self.case_cover(name.span, atom, members, scrut, covered);
             return;
         }
@@ -441,23 +478,95 @@ impl Bodies<'_> {
         match path.segments.as_slice() {
             [only] => self.unit_pattern_atom(&only.name),
             [head, tail] => {
-                // A qualified case path tests the CASE's own minted atom
-                // [B3], never the enum's name. A linked enum and its
-                // cases answer through the name index the linked
-                // install filled.
                 let def = self
-                    .package
-                    .lookup_type(&head.name)
+                    .type_def_of(&head.name)
                     .or_else(|| self.decls.foreign_type(&head.name))?;
-                let shape = self.decls.enums.get(&def)?;
-                let (case_name, ..) = shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
-                let case_def = self
-                    .package
-                    .lookup_type(case_name)
-                    .or_else(|| self.decls.foreign_type(case_name))?;
-                self.decls.atoms.get(&case_def).copied()
+                if self.package.def(def).kind == DefKind::Enum {
+                    // A qualified case path tests the CASE's own minted
+                    // atom [B3], never the enum's name. A linked enum and
+                    // its cases answer through the name index the linked
+                    // install filled; the cases are the enum's own written
+                    // members, so they resolve under its declaring file
+                    // (F9.5).
+                    let shape = self.decls.enums.get(&def)?;
+                    let (case_name, ..) =
+                        shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
+                    let enum_file = self.package.def(def).span.file;
+                    let case_def = self
+                        .package
+                        .lookup_type_in(enum_file, case_name)
+                        .or_else(|| self.decls.foreign_type(case_name))?;
+                    let atom = self.decls.atoms.get(&case_def).copied()?;
+                    self.directed_tags.insert(tail.span, atom);
+                    return Some(atom);
+                }
+                if matches!(
+                    self.package.def(def).kind,
+                    DefKind::Tag | DefKind::TypeAlias
+                ) {
+                    return self.qualified_pattern_label(head, tail);
+                }
+                None
             },
             _ => None,
+        }
+    }
+
+    /// The qualified `type::label` in a pattern (F9.5): the head's own
+    /// members carrying the label pick the atom, recorded at the
+    /// label's span for the lowering. None reports unknown-member
+    /// naming the head and several the ambiguity naming both
+    /// declarations; the latch keeps the caller's unknown-pattern word
+    /// from doubling the report.
+    fn qualified_pattern_label(&mut self, head: &Ident, tail: &Ident) -> Option<TypeId> {
+        let Some(head_ty) = self.head_type_of(head) else {
+            return None;
+        };
+        let labeled = self.members_labeled(head_ty, &tail.name);
+        match labeled.as_slice() {
+            [one] => {
+                self.directed_tags.insert(tail.span, *one);
+                Some(*one)
+            },
+            [] => {
+                self.error(
+                    ErrorCode::UnknownTagMember,
+                    format!(
+                        "the qualified `{}::{}` names no member of `{}` [F9.5]",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(head_ty)
+                    ),
+                    tail.span,
+                    "unknown member",
+                );
+                self.pattern_label_reported = true;
+                None
+            },
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the qualified `{}::{}` matches several members of `{}` [F9.5]; name a \
+                         head that carries one",
+                        head.name,
+                        tail.name,
+                        self.decls.universe.render(head_ty)
+                    ),
+                )
+                .with_primary(tail.span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                self.pattern_label_reported = true;
+                None
+            },
         }
     }
 
@@ -482,15 +591,70 @@ impl Bodies<'_> {
 
     /// The member atom a bare identifier names in a pattern: the
     /// predeclared `none`, or a type-namespace constructor's atom —
-    /// aliases and traits carry none, so those names bind instead.
+    /// aliases and traits carry none, so those names bind instead. The
+    /// declaring file's own shadowing tag declaration answers first
+    /// (F9.5).
     fn unit_pattern_atom(&self, name: &str) -> Option<TypeId> {
         if name == "none" && !self.package.declares("none") {
             return Some(TypeId::NONE);
         }
         let def = self
-            .package
-            .lookup_type(name)
+            .type_def_of(name)
             .or_else(|| self.decls.foreign_type(name))?;
         self.decls.atoms.get(&def).copied()
+    }
+
+    /// The directed pattern label (F9.5): the remaining scrutinee's
+    /// members carrying the bare label pick the atom. One member wins —
+    /// even when the label names no declaration of this compile; none
+    /// or several report and leave the arm uncovered.
+    fn directed_pattern_label(
+        &mut self,
+        name: &str,
+        span: Span,
+        members: &[TypeId],
+        scrut: Ty,
+        covered: &mut Vec<TypeId>,
+    ) -> Option<()> {
+        let labeled: Vec<TypeId> = members
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == name)
+            })
+            .collect();
+        match labeled.as_slice() {
+            [one] => {
+                self.directed_tags.insert(span, *one);
+                self.case_cover(span, *one, members, scrut, covered);
+                Some(())
+            },
+            [] => None,
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the pattern label `{}` matches several members of `{}` [F9.5]; qualify \
+                         which declaration you mean",
+                        name,
+                        self.decls.universe.render(scrut)
+                    ),
+                )
+                .with_primary(span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                Some(())
+            },
+        }
     }
 }

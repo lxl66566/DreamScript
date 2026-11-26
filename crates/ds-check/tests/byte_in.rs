@@ -94,9 +94,16 @@ fn the_ambient_declares_byte() {
         "expected clean, got:\n{}",
         diags.join("\n")
     );
-    // The ambient occupies both namespaces; a user redeclaration of the
-    // same name in the type namespace is the duplicate [G3, F9].
+    // A user redeclaration of the ambient's label in the type namespace
+    // is the cross-file tag shadow (F9.5): a distinct atom, its own
+    // file's uses reading it first, the refusal only within one file.
     let diags = check_ambient("tag byte\n");
+    assert!(
+        diags.is_empty(),
+        "the shadow declares clean, got:\n{}",
+        diags.join("\n")
+    );
+    let diags = check_ambient("tag byte\ntag byte\n");
     assert_eq!(
         diags.first().map(String::as_str),
         Some("DS2005 `byte` is already defined")

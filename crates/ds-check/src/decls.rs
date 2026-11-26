@@ -188,6 +188,11 @@ pub struct CaseDecl {
 pub struct Decls {
     /// The atom and trait registry (B1).
     pub universe: Universe,
+    /// The file whose declarations the walk is minting or converting,
+    /// `None` in the foreign installs and the serve replay: a tag
+    /// label's atom resolves through the declaring FILE's shadow entry
+    /// first (F9.5), and only the local walks carry a file.
+    pub current_file: Option<ds_diag::FileId>,
     /// The trait instance environment (B6).
     pub instances: InstanceEnv,
     /// The declaring impl item's span for every declared instance, keyed
@@ -470,13 +475,16 @@ where
         None => (Decls::default(), None),
     };
     let mut diags = Vec::new();
+    decls.current_file = None;
     for ast in &trees {
+        decls.current_file = Some(ast.file);
         for block in &ast.blocks {
             for item in &block.items {
                 reserve_item(package, item, &mut decls);
             }
         }
     }
+    decls.current_file = None;
     // The serve's name-addressed rows resolve over the merged walk's
     // universe — the one moment every name the rows carry exists: the
     // def atoms the reserve pass minted and the mints this step replays.
@@ -490,12 +498,14 @@ where
     }
     for (index, ast) in trees.iter().enumerate() {
         let served_item = index < served_files;
+        decls.current_file = Some(ast.file);
         for block in &ast.blocks {
             for item in &block.items {
                 shape_item(package, item, &mut decls, &mut diags, served_item);
             }
         }
     }
+    decls.current_file = None;
     // The import-bound definitions (G4): a linked function's signature
     // registers from the link pass's surface exactly like an extern's — a
     // call site checks against the written types — and its link fact
@@ -1042,7 +1052,7 @@ fn install_foreign_case(
         // `none` maps to the predeclared none atom exactly like a local
         // case's mint, so the linked case's values are the consumer's
         // own `none` words
-        let atom = match declare_unit_name(decls, name) {
+        let atom = match declare_foreign_unit_name(decls, name) {
             Some(atom) => Some(atom),
             None => decls.atoms.get(&def).copied(),
         };
@@ -1354,7 +1364,7 @@ fn package_coherence(decls: &mut Decls, diags: &mut Vec<Diagnostic>) {
 use crate::resolve::Resolutions;
 
 /// The definition an item declares, in its kind's namespace (F9).
-fn item_def(package: &Package, item: &Item) -> Option<DefId> {
+fn item_def(package: &Package, decls: &Decls, item: &Item) -> Option<DefId> {
     let name = item_name(item);
     if matches!(
         item.kind,
@@ -1365,9 +1375,20 @@ fn item_def(package: &Package, item: &Item) -> Option<DefId> {
             | ItemKind::Trait(_)
             | ItemKind::Platform(_)
     ) {
-        package.lookup_type(name)
+        type_def_for_use(package, decls, name)
     } else {
         package.lookup_value(name)
+    }
+}
+
+/// The type def a name carries for the walk's current file (F9.5): the
+/// file's own shadowing tag declaration beats the first declaration per
+/// label. The foreign installs carry no file and read the shared
+/// namespace alone.
+fn type_def_for_use(package: &Package, decls: &Decls, name: &str) -> Option<DefId> {
+    match decls.current_file {
+        Some(file) => package.lookup_type_in(file, name),
+        None => package.lookup_type(name),
     }
 }
 
@@ -1384,7 +1405,7 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
         reserve_impl_fns(package, imp, item.span, decls);
         return;
     }
-    let Some(def) = item_def(package, item) else {
+    let Some(def) = item_def(package, decls, item) else {
         return; // a duplicate definition was reported at collection
     };
     match &item.kind {
@@ -1394,10 +1415,9 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             // installs as its shared base stay skipped (see `is_served`).
             match &t.payload {
                 EnumPayload::None => {
-                    if let Some(id) = declare_unit_name(decls, &t.name.name) {
-                        decls.atoms.insert(def, id);
-                        decls.defs_of_atoms.insert(id, def);
-                    }
+                    let id = declare_unit_name(decls, &t.name.name);
+                    decls.atoms.insert(def, id);
+                    decls.defs_of_atoms.insert(id, def);
                 },
                 // A payloaded tag is the minted payload case lifted to a
                 // declaration: a struct-shaped atom carrying its payload
@@ -1405,7 +1425,15 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                 // pattern. The payload spells named fields alone — a
                 // tuple payload has no field-name tier to ride.
                 EnumPayload::Struct(fields) => {
-                    if let Ok(id) = decls.universe.declare_struct(&t.name.name) {
+                    // the re-keyed mint (F9.5): the declaring
+                    // declaration's own atom, never a name lookup. `none`
+                    // is the predeclared unit atom (B4) with no payload
+                    // of its own: a payloaded declaration of the name
+                    // claims no atom, the construction refusing at its
+                    // own seam.
+                    if let Some(id) = (t.name.name != "none")
+                        .then(|| decls.universe.mint_payload_tag(&t.name.name))
+                    {
                         decls.atoms.insert(def, id);
                         decls.defs_of_atoms.insert(id, def);
                         if !is_served(decls, def) {
@@ -1475,20 +1503,21 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                 if generic && !matches!(case.payload, EnumPayload::None) {
                     continue;
                 }
-                // A duplicate case name keeps the first def; the
-                // collection pass already reported both spans. The
-                // def's name span proves this item owns the def.
-                let Some(case_def) = package
-                    .lookup_type(&case.name.name)
+                // The def's name span proves this item owns the def; a
+                // cross-file same-label case resolves through its own
+                // file's shadow entry first (F9.5).
+                let Some(case_def) = type_def_for_use(package, decls, &case.name.name)
                     .filter(|&d| package.def(d).span == case.name.span)
                 else {
                     continue;
                 };
                 let atom = match &case.payload {
-                    EnumPayload::None => declare_unit_name(decls, &case.name.name),
-                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
-                        decls.universe.declare_struct(&case.name.name).ok()
-                    },
+                    EnumPayload::None => Some(declare_unit_name(decls, &case.name.name)),
+                    // the re-keyed mint (F9.5): the declaring case's own
+                    // atom, never a name lookup; a payloaded case named
+                    // `none` keeps today's atom-less skip (B4)
+                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => (case.name.name != "none")
+                        .then(|| decls.universe.mint_payload_tag(&case.name.name)),
                 };
                 if let Some(id) = atom {
                     decls.atoms.insert(case_def, id);
@@ -1698,8 +1727,7 @@ fn shape_item(
             }
         },
         ItemKind::Enum(e) => {
-            let Some(def) = package
-                .lookup_type(&e.name.name)
+            let Some(def) = type_def_for_use(package, decls, &e.name.name)
                 .filter(|&d| package.def(d).span == e.name.span)
             else {
                 return
@@ -1713,8 +1741,7 @@ fn shape_item(
                 // payloads), so a minted payload case IS a struct atom for
                 // the set algebra and the lowerer [B3].
                 for case in &e.cases {
-                    let Some(case_def) = package
-                        .lookup_type(&case.name.name)
+                    let Some(case_def) = type_def_for_use(package, decls, &case.name.name)
                         .filter(|&d| package.def(d).span == case.name.span)
                     else {
                         continue
@@ -1775,8 +1802,7 @@ fn shape_item(
             }
         },
         ItemKind::Tag(t) => {
-            let Some(def) = package
-                .lookup_type(&t.name.name)
+            let Some(def) = type_def_for_use(package, decls, &t.name.name)
                 .filter(|&d| package.def(d).span == t.name.span)
             else {
                 return
@@ -2111,16 +2137,27 @@ fn path_def_expr(
         return Some(TypeExpr::Trait(trait_id));
     }
     // A non-generic enum names the union of its minted case atoms [B3].
+    // The union's labels and an alias's body are the declaration's own
+    // text: they resolve under the declaring file's shadow map (F9.5),
+    // never the use site's.
     if let Some(shape) = decls.enums.get(&def) {
         if shape.params.is_empty() {
-            return enum_case_union(package, &shape.cases, decls);
+            let saved = decls.current_file;
+            decls.current_file = Some(package.def(def).span.file);
+            let union = enum_case_union(package, &shape.cases, decls);
+            decls.current_file = saved;
+            return union;
         }
         return None;
     }
     if let Some((params, body)) = decls.aliases.get(&def).cloned()
         && params.is_empty()
     {
-        return conv_expr(package, &body, decls, diags);
+        let saved = decls.current_file;
+        decls.current_file = Some(package.def(def).span.file);
+        let expr = conv_expr(package, &body, decls, diags);
+        decls.current_file = saved;
+        return expr;
     }
     None
 }
@@ -2140,8 +2177,7 @@ fn enum_case_union(
     }
     let mut union: Option<TypeExpr> = None;
     for (name, ..) in cases {
-        let atom = package
-            .lookup_type(name)
+        let atom = type_def_for_use(package, decls, name)
             .or_else(|| decls.foreign_type(name))
             .and_then(|def| decls.atoms.get(&def).copied())?;
         let expr = TypeExpr::Atom(atom);
@@ -2156,18 +2192,30 @@ fn enum_case_union(
 /// The atom a single-segment type path names as a CONSTRUCTOR: declared
 /// atoms only (aliases and traits are sets, not constructors).
 fn atom_of_path(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeId> {
-    let def = package.lookup_type(&name.name)?;
+    let def = type_def_for_use(package, decls, &name.name)?;
     decls.atoms.get(&def).copied()
 }
 
-/// Mints the unit atom for one tag (or unit enum case). The universe
+/// Mints the unit atom for one local tag (or unit enum case) (F9.5): the
+/// atom is the declaring declaration's own, so the mint never refuses and
+/// two declarations may share a label as distinct atoms. The universe
 /// predeclares `none` as its distinguished unit atom (B4) with no def, so
 /// a `tag none` (or `enum e { none }`) restating the name maps onto the
 /// predeclared atom instead of minting a second — a skipped mint would
 /// silently orphan the def and every written `none` type or value would
-/// stop solving. Any other refused name is a collection-level duplicate
-/// that was already reported; the def keeps the first item's atom.
-fn declare_unit_name(decls: &mut Decls, name: &str) -> Option<TypeId> {
+/// stop solving.
+fn declare_unit_name(decls: &mut Decls, name: &str) -> TypeId {
+    if name == "none" {
+        return TypeId::NONE;
+    }
+    decls.universe.mint_tag(name)
+}
+
+/// The linked case's unit mint keeps the name-keyed contract (F9.5 keeps
+/// the serve boundary name-addressed): a label already declared in this
+/// compile reuses that atom, `none` maps onto the predeclared atom, and
+/// any other refused name leaves the def for the replayed atom.
+fn declare_foreign_unit_name(decls: &mut Decls, name: &str) -> Option<TypeId> {
     match decls.universe.declare_tag(name) {
         Ok(id) => Some(id),
         Err(_) if name == "none" => Some(TypeId::NONE),

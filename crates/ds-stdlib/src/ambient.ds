@@ -1,9 +1,9 @@
 // The stdlib ambient: the checked-declaration layer of the stdlib (the
 // runtime half is the ds-vm builtin core plus the platform handler the
 // host installs behind the platform declaration below). Registered as a package member
-// before the user's sources; every declaration is `pub` [G4] because
+// before the user's sources; every declaration is `pub` because
 // the member's names are the std's surface to other files, not a private
-// file. The package namespace is two [G3, F9] —
+// file. The package namespace is two —
 // types and values — so `struct map` and `fn map` coexist, and a name may
 // be redeclared by a corpus file only in the other namespace. The
 // fallible natives' failure taxonomy is ambient-owned (io_err, net_err,
@@ -38,16 +38,16 @@
 // so the two readings stay namespace-identical while the migration
 // runs.
 
-// The default platform (H5, E1): the `ds` CLI is this platform's
+// The default platform: the `ds` CLI is this platform's
 // provider, and the checker verifies the package's world usage stays
 // inside what it provides. The `proc` capability is the CLI process
-// surface (ruled 2026-11-21): string argv, the environment read, and
+// surface: string argv, the environment read, and
 // process spawn.
 platform "std" provides <console, fsys, net, time, proc>
 
 pub trait Copyable { }
 
-// The show derive's target (G1, F6): one member answering the
+// The show derive's target: one member answering the
 // construction spelling; `#[derive(show)]` synthesizes the impl.
 pub trait show {
   fn show(self) -> string
@@ -72,7 +72,7 @@ impl show for char {
 impl show for string {
   fn show(self) -> string { "$self" }
 }
-// The bytes representation (2026-11-18): `show` renders the payload as
+// The bytes representation: `show` renders the payload as
 // a byte list — `bytes[1, 2, 255]`, empty printing `bytes[]` — one
 // decimal per payload byte over the `list[byte]` bridge. The body
 // carries no trapping op (the `concat` extern and a for-in walk, never
@@ -91,8 +91,8 @@ impl show for bytes {
   }
 }
 
-// The ord derive's target (G1, B9's ruling that ordering is never
-// structural): one member answering the field-order lexicographic
+// The ord derive's target: ordering is never structural, so one
+// member answers the field-order lexicographic
 // comparison; `#[derive(ord)]` synthesizes the impl. The primitives
 // carry ord themselves, each part's sort key an explicit compare
 // native: float through `total_compare` (the IEEE total order, the one
@@ -125,20 +125,20 @@ impl ord for byte {
   fn compare(self, other: Self) -> int { byte_compare(self, other) }
 }
 // Bytes order lexicographically over the payload, a shorter prefix
-// first (2026-11-18), through the collection's own compare native.
+// first, through the collection's own compare native.
 impl ord for bytes {
   fn compare(self, other: Self) -> int { bytes_compare(self, other) }
 }
 
-// The hash derive's target (G1, B9's ruling that hash stays consistent
-// with universal structural `==`): one member answering the content
+// The hash derive's target: hash stays consistent with universal
+// structural `==`, one member answering the content
 // hash; `#[derive(hash)]` synthesizes the impl. Every primitive part
 // carries hash itself: int and bool mix their own word, byte through
 // its decimal text (the atom sits outside the int conversion family),
 // string and char through the FNV-1a native over their bytes, and
 // float through the fold native (which normalizes -0.0 to +0.0 and
 // every NaN payload to the one canonical NaN, the bit-structural
-// equality B9 pins).
+// equality the hash contract requires).
 pub trait hash {
   fn hash(self) -> int
 }
@@ -161,17 +161,17 @@ impl hash for byte {
   fn hash(self) -> int { str_hash(str(self)) }
 }
 // Bytes hash their payload content through the FNV-1a native, the one
-// scheme the hash family folds under (2026-11-18).
+// scheme the hash family folds under.
 impl hash for bytes {
   fn hash(self) -> int { bytes_hash(self) }
 }
 
-// The clone derive's target (G1): one member answering the shallow
+// The clone derive's target: one member answering the shallow
 // duplicate; `#[derive(clone)]` synthesizes the impl. The primitives
 // carry clone themselves (the one-word atom answers itself, byte's
 // included), so the derived body is a construction over the borrowed
 // receiver whose Ref parts dup through the placement pass — a count
-// bump per reference, never a deep copy (C4).
+// bump per reference, never a deep copy).
 pub trait clone {
   fn clone(self) -> Self
 }
@@ -197,7 +197,7 @@ impl clone for bytes {
   fn clone(self) -> Self { self }
 }
 
-// The receiverless member's ambient slice (the 2026-11-15 ruling):
+// The receiverless member's ambient slice:
 // every primitive carries `default` in its own impl, callable as
 // `int.default()` through the type-keyed surface with no instance
 // word, so a `#[derive(default)]` field dispatches through its own
@@ -212,7 +212,7 @@ impl char { fn default() -> char { '\0' } }
 impl byte { fn default() -> byte { b'\0' } }
 impl bytes { fn default() -> bytes { bytes_of(list[byte]()) } }
 
-// The collection face's member tier (H5.5): the inherent members the
+// The collection face's member tier: the inherent members the
 // runtime seam lowers over the builtin collections. A member whose
 // parameter or answer spans the collection's own type variable has no
 // static word kind (the free generic fn's Raw-word shape is the free
@@ -252,8 +252,8 @@ impl[t] list[t] {
 }
 
 // The channel face: the net handle's plain receiver discipline (the
-// word is a shared handle, the mutation the object's own state — D1's
-// one shared-state exception). `send` answers unit, `recv` the payload;
+// word is a shared handle, the mutation the object's own state, the
+// language's one shared-state exception). `send` answers unit, `recv` the payload;
 // both park the calling fiber when the buffer cannot serve it, the
 // wake delivering at the parked call site.
 impl[t] chan[t] {
@@ -281,7 +281,7 @@ pub tag float
 pub tag bool
 pub tag string
 pub tag char
-// The b'x' literal's atom [F6]: its own u8 width class, outside
+// The b'x' literal's atom: its own u8 width class, outside
 // the int conversion family.
 pub tag byte
 // The byte sequence's collection atom: one immutable byte string per
@@ -294,7 +294,7 @@ pub tag u32
 
 pub struct list[t]
 pub struct map[k, v]
-// The bounded channel (the 2026-11-21 shared-state ruling): the one
+// The bounded channel: the one
 // inter-fiber shared-state vocabulary — no lock, mutex or atomic ever
 // enters the language. One opaque word behind one heap object on the
 // creating fiber's store (the one owning heap): the word copies into a
@@ -309,7 +309,7 @@ pub struct map[k, v]
 // parked on is the honest deadlock: no sender, no answer.
 pub struct chan[t]
 
-// The read-side aliasing container (ruled 2026-11-25): the library
+// The read-side aliasing container: the library
 // shape for cyclic graphs, node trees, ECS, and cross-call cursors —
 // no language change. One opaque word behind one heap object on the
 // owning fiber's store, the payload a slot array of one element word
@@ -318,7 +318,7 @@ pub struct chan[t]
 // so the handle keeps scalar provenance through every value position),
 // `remove` tombstones the slot onto the free list with the generation
 // bumping at the removal, and a stale handle — any copy taken before it
-// — traps deterministically instead of naming the reused element. Elements stage one word this round (a scalar or reference
+// — traps deterministically instead of naming the reused element. Elements stage one word (a scalar or reference
 // word; a multi-word record or a deinit-carrying value refuses at the
 // insert's staging), and a reference element is a counted share: the
 // arena's store owns one edge count per element, released at the
@@ -346,7 +346,7 @@ pub enum json {
   json_object { fields: map[string, json] }
 }
 
-// The failure taxonomy of the fallible natives (ruled 2026-11-21):
+// The failure taxonomy of the fallible natives:
 // `io_err` and `net_err` are aliases over branchable unit tags, each
 // native failure landing on its class and the classes a platform cannot
 // discriminate portably folding into the `*_other` floors — which alone
@@ -409,7 +409,7 @@ pub struct net_handle: ~Copyable {
   deinit { net_close(self.conn) }
 }
 
-// The comptime reflection vocabulary (G1, G2): the one record `fields`
+// The comptime reflection vocabulary: the one record `fields`
 // answers over declared data — a struct's fields and an enum's cases
 // share the (name, type, tag) triple. A field's record: its declared
 // name, its type as a type value, and its nominal tag name when its
@@ -470,10 +470,10 @@ extern fn arena_at[t] (a: mut arena[t], h: int) -> t
 // The bytes collection's native face: `bytes_of` is the construction
 // seam (the `list[byte]` bridge in — one payload byte per element word),
 // `byte_list` the bridge back out (one word per byte), `byte_at`
-// the checked indexed read (B8's convention: the in-range byte under
+// the checked indexed read (the checked-API convention: the in-range byte under
 // the ok discriminant, none outside the payload's range — never a
 // clamp and never a trap), and the two string bridges one UTF-8 face
-// each way (2026-11-18): `utf8_encode` takes the string's own bytes,
+// each way: `utf8_encode` takes the string's own bytes,
 // and `utf8_decode` validates UTF-8 on the way back, an invalid
 // sequence answering the taxonomy's utf8_err tag.
 pub extern fn bytes_of (xs: list[byte]) -> bytes
@@ -481,7 +481,7 @@ pub extern fn byte_list (b: bytes) -> list[byte]
 pub extern fn byte_at (b: bytes, i: int) -> byte | none
 pub extern fn utf8_encode (s: string) -> bytes
 pub extern fn utf8_decode (b: bytes) -> string | utf8_err
-// The generic count over the free tier's instance table [H3]: one
+// The generic count over the free tier's instance table: one
 // spelling for `s.len()` and `xs.len()` alike.
 pub extern fn len[t] (xs: t) -> int
 // The float math family: IEEE f64 semantics over the float type, total
@@ -508,7 +508,7 @@ pub extern fn tan (x: float) -> float
 // `max`/`min` names are the int pair's (one declaration per
 // value-namespace name — overloads refuse), so the float pair spells
 // the same comparison bodies through the dot call; the generic
-// ord-routed spelling rides the later linked-surface rounds. The
+// ord-routed pair does not exist yet. The
 // comparison answers the partial order: a NaN first operand poisons
 // the answer, a NaN second operand loses.
 impl float {
@@ -522,7 +522,7 @@ impl float {
 
 // The core string face's own concatenation seam: the `+` and `+=`
 // spellings lower through it beside the interpolation's STRCAT, the
-// free spelling the F3 receiver fallback routes `xs.concat(ys)`'s
+// free spelling the receiver fallback routes `xs.concat(ys)`'s
 // member-name twin behind, and the bytes show body below calls it —
 // the core body's same-file call pins it here. The pure string
 // operations over the face (the checked slice and char read, the
@@ -539,18 +539,18 @@ pub extern fn concat (a: string, b: string) -> string
 // `code_of` reads the char's scalar.
 pub extern fn char_of (code: int) -> string | none
 pub extern fn code_of (c: char) -> int
-// The byte and u32 width bridges (2026-11-19): byte sits outside the int
-// conversion family [F6] and u32 carries no literal or constructor, so
+// The byte and u32 width bridges: byte sits outside the int
+// conversion family and u32 carries no literal or constructor, so
 // crossing either width is not expressible in ds source — the json face's
 // byte/u32 readers build their values through these. `byte_of`/`u32_of`
-// answer the in-range word or none (B8's convention); the read-back pair
+// answer the in-range word or none (the checked-API convention); the read-back pair
 // answers the word's number for the json_int construction.
 pub extern fn byte_of (n: int) -> byte | none
 pub extern fn int_of_byte (b: byte) -> int
 pub extern fn u32_of (n: int) -> u32 | none
 pub extern fn int_of_u32 (v: u32) -> int
-// The trap primitive's own spelling (the 2026-11-17 die split's builtin,
-// index 69): private to this file [G4], so no user compile gains a bare
+// The trap primitive's own spelling (the builtin behind `die` and the
+// abort below): private to this file, so no user compile gains a bare
 // trap — the member below routes through it the way every native-keyed
 // extern does, the lowerer reading the callee by name alone. The
 // message rides the Die trap out to the drive, so the CLI's trap report
@@ -566,15 +566,14 @@ extern fn trap (msg: string) -> u32
 // expects, so a statement position or a handler arm takes it while a
 // block tail against an annotated return refuses.
 pub extern fn panic[t] (msg: string) -> t
-// The u32 width's trapping construction (ruled 2026-11-19, B7's family):
+// The u32 width's trapping construction:
 // the receiverless member answers the in-range word and traps out of
 // range naming the value and the range — the checked `u32_of` above
 // stays the fallible form. It rides the u32 type's own static tier (the
 // `int.default()` precedent, called `u32.of(x)`): a free fn named `u32`
-// cannot carry the ruling's bare call form, since a call-form name in
-// both namespaces is F9's ambiguity error and the runtime plan binds a
-// top-level fn's name through the type namespace first — the bare form
-// waits on an author ruling over F9's priority.
+// cannot carry the bare call form `u32(x)`, since a call-form name in
+// both namespaces is the two-namespace ambiguity error and a top-level
+// fn's name binds through the type namespace first.
 impl u32 {
   fn of (n: int) -> u32 {
     const w = u32_of(n)
@@ -609,7 +608,7 @@ pub extern fn bytes_hash (b: bytes) -> int
 pub extern fn println (msg: string) -> ()
 pub extern fn print (msg: string) -> ()
 // The console face's stderr twins and stdin read (the CLI process
-// surface, 2026-11-21): the error stream mirrors the stdout pair, and
+// surface): the error stream mirrors the stdout pair, and
 // `read_line` answers one stdin line per call, the checked none member
 // at end of input.
 pub extern fn eprintln (msg: string) -> ()
@@ -627,7 +626,7 @@ pub extern fn write_file (path: string, contents: string) -> () | io_err
 pub extern fn file_exists (path: string) -> bool
 pub extern fn fs_list (dir: string) -> list[string] | io_err
 pub extern fn file_size (path: string) -> int | io_err
-// The fsys path round: `mkdir` creates one directory a single level deep
+// The fsys path face: `mkdir` creates one directory a single level deep
 // (`already_exists` the branchable outcome), `remove` deletes one entry
 // whatever it is (a directory only once empty, the non-empty directory
 // answering the `io_other` floor), and `fs_size` answers the entry's byte
@@ -646,7 +645,7 @@ pub extern fn time () -> int
 pub extern fn mono () -> int
 // The parking sleep: parks the calling fiber for at least the given
 // nanoseconds (a negative span answering at once) — the timer-only
-// wait over the deadline wheel, the 2026-11-21 timer ruling; under no
+// wait over the deadline wheel; under no
 // installed reactor the blocking twin sleeps the thread. The promised
 // `timeout`/`firstof`/`interleave` combinators layer over this op as
 // ordinary library code.
@@ -658,7 +657,7 @@ pub extern fn sleep (nanos: int) -> ()
 // clamped past it; the calendar math and the fixed-shape formatting
 // compose in @std ds source over this word.
 pub extern fn utc_offset (unix_seconds: int) -> int
-// The process face (the CLI process surface, 2026-11-21): `args`
+// The process face (the CLI process surface): `args`
 // answers the process arguments the host staged (`ds run`'s `--args`
 // words) as a list of strings, `env` reads one process environment
 // variable into the checked none member when unset, and `proc_run`
@@ -683,7 +682,7 @@ pub extern fn http_get (url: string) -> string
 // The json face (`json`, `parse_json`, `to_json`, the typed readers)
 // is the @std package's own member, std/json.ds beside this core.
 pub extern fn cancel[t] (e: t) -> ()
-// The E4 extraction family: calls type locally against the checked
+// The extraction family: calls type locally against the checked
 // receiver (unwrap_or's fallback is eager, unwrap_or_else's lambda runs
 // only on the none side), composed with `?` for early exits.
 pub extern fn unwrap_or[t] (x: t?, y: t) -> t
@@ -736,7 +735,7 @@ pub fn close_conn (h: net_handle) -> () {
 
 
 
-// The net face's server half (the server surface round): the same
+// The net face's server half: the same
 // discipline as the connection half over the package-owned linear
 // `net_listener`, whose one inline word is the listener table's key.
 // `net_listen` answers this type directly — the total spelling for
@@ -751,7 +750,7 @@ pub fn close_conn (h: net_handle) -> () {
 // failed accept (the configured wait's bound expiring with no pending
 // connection among its classes) halts on the net error line too; a
 // non-halting accept needs a union member holding a deinit-carrying
-// handle, which C5 refuses (an open author question). The deinit
+// handle, which the checker refuses (an open author question). The deinit
 // closes the listener (a binding dropped without an explicit
 // close_listener still ends clean), and `net_listener_close` is
 // idempotent because the deinit may fire on a handle the owner already
@@ -765,15 +764,15 @@ pub extern fn net_listen (host: string, port: int) -> net_listener
 pub extern fn net_accept (lid: int) -> net_handle
 pub extern fn net_listener_close (lid: int) -> ()
 pub extern fn net_local_addr (lid: int) -> string
-// The server half's tls upgrade (the tls capability's own op, the
-// 2026-11-23 ruling): the accepted connection upgraded over the
+// The server half's tls upgrade (the tls capability's own op): the
+// accepted connection upgraded over the
 // host-pinned rustls server identity, registering with its session so
 // it owns the same `net_handle` face in full — the send/recv over the
 // tls records, the closing deinit the plain accepted connection's
 // own. The host pins the identity (no default exists, a server
 // certificate being the host's own), the unprovisioned call answering
 // its own net_err; the tls-omitting host keeps the op unserved. The
-// total spelling `accept` keeps is this op's too (C5: the handle is
+// total spelling `accept` keeps is this op's too (the handle is
 // deinit-carrying, so a union member holding it refuses), so a failed
 // accept or handshake halts on the net error line; a non-halting
 // upgrade needs the same optional-over-linear union seam.

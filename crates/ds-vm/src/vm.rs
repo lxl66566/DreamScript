@@ -1828,7 +1828,7 @@ fn ret_hit(
     // outlives the chain move
     let caller = &callinfo[callinfo.len() - 2];
     let (caller_fp, caller_module, caller_func) = (caller.fp, caller.module, caller.func);
-    let Some(caller_fn) = versions
+    let Some(caller_def) = versions
         .pinned(caller_module)
         .functions()
         .get(caller_func as usize)
@@ -1836,7 +1836,7 @@ fn ret_hit(
         return RetHit::General;
     };
     let return_pc = meta.return_pc;
-    if return_pc.0 as usize >= caller_fn.code.len() {
+    if return_pc.0 as usize >= caller_def.code.len() {
         return RetHit::General;
     }
     stack[fp + 1] = Word::Slot(value);
@@ -1847,7 +1847,7 @@ fn ret_hit(
         };
         meta.clear_arena_active();
     }
-    let restore = (caller_fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
+    let restore = (caller_fp + caller_def.layout.frame_size() as usize).max(fp + 2);
     stack.truncate(restore);
     callinfo.pop();
     RetHit::Resume {
@@ -2250,6 +2250,9 @@ fn write_slot(
 }
 
 /// DIVI64 [B7]: zero divide and `MIN / -1` are distinct traps.
+// the ok_or_else form keeps the overflow value off the success path;
+// the eager ok_or form regresses the arith kernels' instruction count
+#[allow(clippy::unnecessary_lazy_evaluations)]
 fn int_div(x: i64, y: i64) -> Result<i64, Trap> {
     if y == 0 {
         return Err(Trap::DivideByZero);
@@ -2258,6 +2261,7 @@ fn int_div(x: i64, y: i64) -> Result<i64, Trap> {
 }
 
 /// MODI64 [B7]: same trap split as [`int_div`].
+#[allow(clippy::unnecessary_lazy_evaluations)]
 fn int_mod(x: i64, y: i64) -> Result<i64, Trap> {
     if y == 0 {
         return Err(Trap::DivideByZero);
@@ -7789,15 +7793,17 @@ impl Vm {
         hasher.mix(u64::from(funcref.func()));
         hasher.mix(u64::from(nargs));
         hasher.mix(owner.map_or(0, |row| u64::from(row.0) + 1));
+        // the truncated high hash bits only spread the slot choice;
+        // the mask keeps the index inside the table on every pointer width
+        #[allow(clippy::cast_possible_truncation)]
         let at = hasher.finish() as usize & (WORD_CACHE_SLOTS - 1);
-        if let Some(entry) = word_cache[at].as_ref() {
-            if entry.funcref == funcref
-                && entry.owner == owner
-                && entry.nargs == nargs
-                && entry.stamp == stamp
-            {
-                return Ok((entry.version, entry.func));
-            }
+        if let Some(entry) = word_cache[at].as_ref()
+            && entry.funcref == funcref
+            && entry.owner == owner
+            && entry.nargs == nargs
+            && entry.stamp == stamp
+        {
+            return Ok((entry.version, entry.func));
         }
         let resolved = StackState::resolve_func_word(registry, funcref, owner, nargs)?;
         word_cache[at] = Some(WordCallee {
@@ -9206,6 +9212,11 @@ impl Vm {
                                 read_i64(&self.stack, fp, rhs, slots, body_len)
                                     .map_err(|e| (e, at))?,
                             );
+                            // the ok_or_else form keeps the overflow
+                            // value off the success path; the eager ok_or
+                            // form regresses the arith kernels' instruction
+                            // count
+                            #[allow(clippy::unnecessary_lazy_evaluations)]
                             let result = match op {
                                 OP_ADD_I64 => x.checked_add(y).ok_or_else(|| Trap::IntegerOverflow),
                                 OP_SUB_I64 => x.checked_sub(y).ok_or_else(|| Trap::IntegerOverflow),
@@ -11467,8 +11478,8 @@ impl Vm {
                         let chain_len = self.callinfo.len();
                         let at_drive_edge =
                             chain_len < 2 || (boundary != usize::MAX && chain_len == boundary);
-                        if !at_drive_edge {
-                            if let RetHit::Resume {
+                        if !at_drive_edge
+                            && let RetHit::Resume {
                                 version,
                                 func,
                                 pc: at,
@@ -11482,11 +11493,11 @@ impl Vm {
                                 slots,
                                 body_len,
                                 src,
-                            ) {
-                                active = Active { version, func };
-                                pc = at;
-                                continue 'transfer;
-                            }
+                            )
+                        {
+                            active = Active { version, func };
+                            pc = at;
+                            continue 'transfer;
                         }
                         let value = read_value(&self.stack, fp, src, slots, body_len)
                             .map_err(|e| (e, pc))?;

@@ -337,7 +337,7 @@ fn bare_tag_arms_are_member_tests() {
         ))
         .last()
         .map(String::as_str),
-        Some("DS2001 pattern `on` is not a member of `int | io_err`")
+        Some("DS2045 a bare `on` names no member of `int | io_err` [F9.5]")
     );
 }
 
@@ -998,8 +998,10 @@ fn field_access_needs_one_struct() {
 fn difference_types_erase_to_the_solved_shape() {
     // `io_err - io_err` erases entirely [B1]: the annotation solves to
     // `empty`, and nothing inhabits it — no any fallback.
+    // the directed label against the erased set refuses unknown-member
+    // (F9.5), rendering the empty shape the difference solved to
     assert_eq!(check("const x: io_err - io_err = io_err\n"), [
-        "DS2001 `annotated binding` has type `io_err`, not contained in `empty` [B2]"
+        "DS2045 a bare `io_err` names no member of `empty` [F9.5]"
     ]);
 }
 
@@ -1247,19 +1249,16 @@ fn lambda_literals_match_the_expected_fn_type_arity() {
         )),
         ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
     );
-    // An annotated binding keeps its own refusal: the lambda types with
-    // no fn-typed expectation and the boundary containment catches the
-    // distinct fn atoms.
+    // An annotated binding directs its initializer (F9.5): the lambda
+    // checks its shape against the expected fn type and the arity
+    // refusal is the sharper diagnostic.
     assert_eq!(
         check(concat!(
             "fn main() -> () {\n",
             "  const g: fn(int) -> int = () => 3\n",
             "}\n",
         )),
-        [
-            "DS2001 `annotated binding` has type `fn() -> int`, not contained in `fn(int) -> int` \
-             [B2]"
-        ]
+        ["DS2007 the lambda takes 0 parameters, the expected fn type takes 1"]
     );
     // The arity-matched spellings stay clean, block and written both.
     clean(concat!(
@@ -1755,18 +1754,19 @@ fn always_false_is_tests_report_only_in_value_position() {
             "  b\n",
             "}\n",
         )),
-        ["DS2001 the `is` test against `io_err` is always false over `string` [B2]"]
+        ["DS2045 the tested label `io_err` names no member of `string` [F9.5]"]
     );
     // The operand's flow-refined current type is what the test meets: in
     // the else branch `x` is narrowed away from int, so `is int` there is
-    // still honest refinement (condition), but its value use reports.
+    // still honest refinement (condition), but its value use reports the
+    // unknown-member refusal (F9.5).
     assert_eq!(
         check(concat!(
             "fn f(x: int | string) -> bool {\n",
             "  if x is int { true } else { x is io_err }\n",
             "}\n",
         )),
-        ["DS2001 the `is` test against `io_err` is always false over `string` [B2]"]
+        ["DS2045 the tested label `io_err` names no member of `string` [F9.5]"]
     );
     // Condition positions stay quiet: if, while, and match guards.
     clean("fn f(x: string) -> int {\n  if x is io_err { 1 } else { 0 }\n}\n");

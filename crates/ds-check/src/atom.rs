@@ -155,8 +155,12 @@ pub enum AtomKind {
 /// A declared atom: name plus shape.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AtomDecl {
-    /// Declared name, unique across atoms and traits in one universe (both
-    /// appear in type positions, so they share one namespace).
+    /// Declared label. Unique across atoms and traits for every family
+    /// but the tags: a tag atom's identity is its declaring declaration
+    /// plus label (F9.5), so two declarations may share a label and stay
+    /// distinct atoms, and the universe's name index answers the first
+    /// holder of a label — the address serve rows and the scalar decode
+    /// resolve through.
     pub name: String,
     /// Declared shape.
     pub kind: AtomKind,

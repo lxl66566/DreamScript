@@ -735,10 +735,7 @@ impl FnLower<'_, '_, '_> {
     ) -> Result<(), LowerError> {
         match pat {
             Pattern::Call { path, args, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Ok(());
-                };
-                let Some(atom) = self.path_atom(&only.name) else {
+                let Some(atom) = self.pattern_head_atom(path) else {
                     return Ok(());
                 };
                 let layout = self.shapes.shape(scrut.ty)?;
@@ -764,10 +761,7 @@ impl FnLower<'_, '_, '_> {
                 Ok(())
             },
             Pattern::Struct { path, fields, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Ok(());
-                };
-                let Some(atom) = self.path_atom(&only.name) else {
+                let Some(atom) = self.pattern_head_atom(path) else {
                     return Ok(());
                 };
                 let layout = self.shapes.shape(scrut.ty)?;
@@ -835,10 +829,7 @@ impl FnLower<'_, '_, '_> {
             Pattern::Call { path, args, .. } => (path, Some(args)),
             _ => return false,
         };
-        let [only] = path.segments.as_slice() else {
-            return false;
-        };
-        let Some(atom) = self.path_atom(&only.name) else {
+        let Some(atom) = self.pattern_head_atom(path) else {
             return false;
         };
         if self.members(scrut.ty) != [atom] {
@@ -912,12 +903,9 @@ impl FnLower<'_, '_, '_> {
                 "a single-member scrutinee has no tags to test",
             )),
             Pattern::Struct { path, fields, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(mismatch("a pattern path"));
-                };
                 // the checker proved the pattern's atom is the
                 // scrutinee's sole member, so the fields classify
-                if self.path_atom(&only.name).is_none() {
+                if self.pattern_head_atom(path).is_none() {
                     return Err(mismatch("a pattern's member atom"));
                 }
                 let shape = self.shapes.shape(scrut.ty)?;
@@ -1161,12 +1149,9 @@ impl FnLower<'_, '_, '_> {
                 Ok(())
             },
             Pattern::Struct { path, fields, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(mismatch("a pattern path"));
-                };
-                let Some(_atom) = self.path_atom(&only.name) else {
+                if self.pattern_head_atom(path).is_none() {
                     return Err(mismatch("a pattern's member atom"));
-                };
+                }
                 let shape = self.shapes.shape(scrut.ty)?;
                 let Shape::Struct(s) = &*shape else {
                     return Err(mismatch("a struct pattern's scrutinee"));
@@ -1266,10 +1251,7 @@ impl FnLower<'_, '_, '_> {
         let Pattern::Struct { path, .. } = pat else {
             return Err(mismatch("a nested struct sub-pattern"));
         };
-        let [only] = path.segments.as_slice() else {
-            return Err(mismatch("a pattern path"));
-        };
-        let Some(atom) = self.path_atom(&only.name) else {
+        let Some(atom) = self.pattern_head_atom(path) else {
             return Err(mismatch("a struct sub-pattern's atom"));
         };
         let shape = self.shapes.atom_shape(atom)?;
@@ -1410,6 +1392,12 @@ impl FnLower<'_, '_, '_> {
         match pat {
             Pattern::Wildcard(_) => Ok(Vec::new()),
             Pattern::Binding { name, .. } => {
+                // The directed probe (F9.5) may resolve an arm's bare label
+                // to another declaration's atom than the first namespace
+                // holder; the checker's record is the arm's truth.
+                if let Some(&atom) = self.analyzed.checked.directed_tags.get(&name.span) {
+                    return Ok(vec![atom]);
+                }
                 Ok(self.binding_atom(&name.name).into_iter().collect())
             },
             Pattern::Or { pats, .. } => {
@@ -1428,30 +1416,8 @@ impl FnLower<'_, '_, '_> {
                 }
                 Ok(atoms)
             },
-            Pattern::Path { path, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(LowerError::unsupported(
-                        pattern_span(pat),
-                        "a multi-segment pattern path",
-                        "qualified patterns are not in the M3 contract",
-                    ));
-                };
-                self.path_atom(&only.name)
-                    .map(|atom| vec![atom])
-                    .ok_or_else(|| mismatch("a pattern's member atom"))
-            },
-            Pattern::Struct { path, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(LowerError::unsupported(
-                        pattern_span(pat),
-                        "a multi-segment pattern path",
-                        "qualified patterns are not in the M3 contract",
-                    ));
-                };
-                self.path_atom(&only.name)
-                    .map(|atom| vec![atom])
-                    .ok_or_else(|| mismatch("a pattern's member atom"))
-            },
+            Pattern::Path { path, .. } => self.label_pattern_atoms(path),
+            Pattern::Struct { path, .. } => self.label_pattern_atoms(path),
             Pattern::Tuple { .. } => Err(LowerError::unsupported(
                 pattern_span(pat),
                 "a tuple pattern in a member-test position",
@@ -1462,18 +1428,7 @@ impl FnLower<'_, '_, '_> {
             // dispatch jumps in on the case's tag and the section tests
             // the pattern's payload sub-patterns over the case's claimed
             // region offsets
-            Pattern::Call { path, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(LowerError::unsupported(
-                        pattern_span(pat),
-                        "a multi-segment pattern path",
-                        "qualified patterns are not in the M3 contract",
-                    ));
-                };
-                self.path_atom(&only.name)
-                    .map(|atom| vec![atom])
-                    .ok_or_else(|| mismatch("a pattern's member atom"))
-            },
+            Pattern::Call { path, .. } => self.label_pattern_atoms(path),
             Pattern::Literal { .. } | Pattern::Str { .. } | Pattern::RawStr { .. } => {
                 Err(LowerError::unsupported(
                     pattern_span(pat),
@@ -1482,6 +1437,41 @@ impl FnLower<'_, '_, '_> {
                      payload or bind the member and compare in the arm body",
                 ))
             },
+        }
+    }
+
+    /// The member atoms a pattern's head path tests: a bare label reads
+    /// the name-namespace atom, a qualified `type::label` (F9.5) the
+    /// member the checker picked and recorded at the label's span.
+    fn label_pattern_atoms(&self, path: &Path) -> Result<Vec<TypeId>, LowerError> {
+        match path.segments.as_slice() {
+            [only] => self
+                .path_atom(&only.name)
+                .map(|atom| vec![atom])
+                .ok_or_else(|| mismatch("a pattern's member atom")),
+            [_head, tail] => self
+                .analyzed
+                .checked
+                .directed_tags
+                .get(&tail.span)
+                .map(|&atom| vec![atom])
+                .ok_or_else(|| mismatch("a pattern's member atom")),
+            _ => Err(LowerError::unsupported(
+                path.span,
+                "a multi-segment pattern path",
+                "qualified patterns past two segments are not in the contract",
+            )),
+        }
+    }
+
+    /// The member atom a pattern's head path names: a bare label reads the
+    /// name namespace, a qualified `type::label` (F9.5) the member the
+    /// checker recorded at the label's span.
+    fn pattern_head_atom(&self, path: &Path) -> Option<TypeId> {
+        match path.segments.as_slice() {
+            [only] => self.path_atom(&only.name),
+            [_head, tail] => self.analyzed.checked.directed_tags.get(&tail.span).copied(),
+            _ => None,
         }
     }
 
@@ -1621,10 +1611,7 @@ impl FnLower<'_, '_, '_> {
                 Ok(())
             },
             Pattern::Struct { path, fields, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(mismatch("a pattern path"));
-                };
-                let Some(atom) = self.path_atom(&only.name) else {
+                let Some(atom) = self.pattern_head_atom(path) else {
                     return Err(mismatch("a pattern's member atom"));
                 };
                 let PlaceShape::Span(underlying) = scrut.place.shape else {
@@ -1766,10 +1753,7 @@ impl FnLower<'_, '_, '_> {
                 Ok(())
             },
             Pattern::Call { path, args, .. } => {
-                let [only] = path.segments.as_slice() else {
-                    return Err(mismatch("a pattern path"));
-                };
-                let Some(atom) = self.path_atom(&only.name) else {
+                let Some(atom) = self.pattern_head_atom(path) else {
                     return Err(mismatch("a pattern's member atom"));
                 };
                 let PlaceShape::Span(underlying) = scrut.place.shape else {

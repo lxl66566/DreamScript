@@ -1288,6 +1288,69 @@ fn none_fields_items_check_with_the_none_only_rejections() {
     }
 }
 
+/// Ambient stdlib stubs for tag_resolution: the failure taxonomy both
+/// unions ride, the timeout and refused labels the file shadows or
+/// coexists with, and the primitives its bodies touch.
+const TAG_RESOLUTION_AMBIENT: &str = concat!(
+    "pub tag int\n",
+    "pub tag string\n",
+    "pub tag bool\n",
+    "pub tag not_found\n",
+    "pub tag permission_denied\n",
+    "pub tag already_exists\n",
+    "pub tag timed_out\n",
+    "pub tag unexpected_eof\n",
+    "pub tag io_other { msg: string }\n",
+    "pub type io_err = not_found | permission_denied | already_exists | timed_out | \
+     unexpected_eof | io_other\n",
+    "pub tag timeout\n",
+    "pub tag refused\n",
+    "pub tag addr_in_use\n",
+    "pub tag reset\n",
+    "pub tag net_other { msg: string }\n",
+    "pub type net_err = timeout | refused | addr_in_use | reset | net_other\n",
+);
+
+/// tag_resolution.ds: the F9.5 phase-1 re-key round — the fn/tag
+/// coexistence and the directed spellings check clean beside the
+/// shadowing declaration, the three unknown-member refusals and the
+/// ambiguity refusal land at their own items, and the same-file
+/// redeclaration keeps DS2005.
+#[test]
+fn tag_resolution_items_check_with_the_directed_refusals() {
+    let rejects = gate(
+        "../../conformance/tag_resolution.ds",
+        TAG_RESOLUTION_AMBIENT,
+    );
+    let ids: Vec<&str> = rejects.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "unknown-binding",
+            "unknown-match",
+            "unknown-is",
+            "ambiguous",
+            "refused",
+        ],
+        "the reject class is the three unknown-member spellings, the ambiguous label, and the \
+         same-file redeclaration"
+    );
+    for (id, _what, diag) in &rejects {
+        let code = match id.as_str() {
+            "unknown-binding" | "unknown-match" | "unknown-is" => "DS2045",
+            "ambiguous" => "DS2046",
+            _ => "DS2005",
+        };
+        assert_eq!(diag.code.as_str(), code, "`{id}` refuses at its own span");
+    }
+    let ambiguous = rejects
+        .iter()
+        .find(|(id, ..)| id == "ambiguous")
+        .map(|(_, _, d)| d)
+        .unwrap();
+    assert_eq!(ambiguous.labels.len(), 3, "the use plus both declarations");
+}
+
 /// The corpus header discipline over every conformance file, not only
 /// the gated ones: the unresolved-filtered stage count equals the item
 /// count (a mismatch makes `item_stages` answer None, so the whole file

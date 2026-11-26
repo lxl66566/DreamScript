@@ -1,0 +1,145 @@
+// source: todo item 126, the F9.5 phase-1 checker re-key (ruled 2026-11-25, item 125)
+// purpose: tag atoms key to their declaring declaration plus label and tag names leave the value namespace — a fn shares the ambient's timeout label with the call form meaning the fn, the directed positions (annotated bindings, match arms, is tests) resolve a bare label against the expected union's members, a declared label outside the expected union refuses unknown-member (DS2045), two same-label members of one union refuse ambiguous naming both declarations (DS2046), the shadowing file's own alias reads its own atom while the ambient's alias keeps the ambient's, an undirected bare label keeps the first declaration, and a same-file redeclaration keeps the refusal
+// items:
+// timeout: stage: typecheck
+// refused: stage: run
+// my-err: stage: typecheck
+// both: stage: typecheck
+// read-class: stage: typecheck
+// fn-tag-call: stage: typecheck
+// fn-tag-value: stage: typecheck
+// ambient-members: stage: typecheck
+// own-shadow: stage: typecheck
+// ambient-keeps-its-own: stage: typecheck
+// qualified-own: stage: typecheck
+// qualified-ambient: stage: typecheck
+// undirected: stage: typecheck
+// cond-is: stage: typecheck
+// none-sentinel: stage: typecheck
+// unknown-binding: stage: reject the annotated binding's declared label sits outside io_err (DS2045)
+// unknown-match: stage: reject the match arm's declared label sits outside io_err (DS2045)
+// unknown-is: stage: reject the is test's declared label sits outside io_err at value position (DS2045)
+// ambiguous: stage: reject the label carries two members of one union, both declarations named (DS2046)
+// refused: stage: reject a same-file redeclaration of a label keeps the refusal (DS2005)
+
+// A fn beside the ambient's `pub tag timeout`: the value namespace holds
+// fns and consts, so the label coexists across the two namespaces and the
+// call form always means the fn.
+fn timeout(n: int) -> int { n }
+
+// The shadowing declaration (F9.5): a distinct atom beside the ambient's
+// own `pub tag refused`, its identity its declaring declaration plus
+// label. Within this file the label names this one declaration; the
+// ambient file's bodies keep theirs.
+tag refused
+
+type my_err = refused | io_err
+
+type both = net_err | my_err
+
+fn read_class(e: io_err) -> string {
+  match e {
+    not_found => "not_found"
+    permission_denied => "permission_denied"
+    already_exists => "already_exists"
+    timed_out => "timed_out"
+    unexpected_eof => "unexpected_eof"
+    io_other { msg } => msg
+  }
+}
+
+fn fn_tag_call() -> int {
+  // the call form always means the fn, never the ambient's tag
+  timeout(4)
+}
+
+fn fn_tag_value() -> int {
+  // a bare use is value-first: the fn binding
+  const f = timeout
+  f(5)
+}
+
+fn ambient_members(e: net_err) -> string {
+  // the ambient's union resolves its own atoms: the shadow elsewhere
+  // never rewrites another declaration's members, so the refused arm
+  // tests the ambient's atom, not this file's
+  match e {
+    timeout => "timeout"
+    refused => "refused"
+    addr_in_use => "addr_in_use"
+    reset => "reset"
+    net_other { msg } => msg
+  }
+}
+
+fn own_shadow() -> my_err {
+  // the expected union carries exactly one refused — the shadowing
+  // declaration's own atom, this file's written body
+  refused
+}
+
+fn ambient_keeps_its_own() -> net_err {
+  // the ambient's alias expanded from a shadowing file still binds the
+  // ambient's atom: the expected member wins the directed label
+  refused
+}
+
+fn qualified_own() -> my_err {
+  // the qualified spelling picks the head's own member: the shadowing
+  // declaration this file owns
+  my_err::refused
+}
+
+fn qualified_ambient() -> net_err {
+  // the ambient's union keeps the ambient's own declaration under the
+  // same qualified spelling
+  net_err::refused
+}
+
+fn undirected() -> io_err {
+  const bare = not_found
+  bare
+}
+
+fn cond_is(e: io_err) -> () {
+  // in condition position the test refines; no constant-false story
+  if e is refused {
+    ()
+  } else {
+    ()
+  }
+}
+
+fn none_sentinel() -> int | none {
+  // the global reserved sentinel is untouched
+  none
+}
+
+fn unknown_binding() -> io_err {
+  // declared label, expected union without it: unknown-member, never an
+  // inference
+  refused
+}
+
+fn unknown_match(e: io_err) -> string {
+  match e {
+    refused => "never"
+    rest => read_class(rest)
+  }
+}
+
+fn unknown_is(e: io_err) -> bool {
+  // value position: the disjoint tag label is the unknown-member
+  // refusal, not the constant-false story
+  e is refused
+}
+
+fn ambiguous() -> both {
+  // two same-label members of one expected union: the shadow's atom and
+  // the ambient's own, the qualified spelling the escape hatch
+  refused
+}
+
+// a same-file redeclaration keeps today's refusal: within one module a
+// label names at most one tag declaration
+tag refused

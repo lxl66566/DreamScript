@@ -9,7 +9,10 @@
 //! uninitialized state never reaches a use; the lattice base is pinned by
 //! a unit test inside the affine pass instead). DS2012 is pinned here on
 //! both of its surface routes: the tuple expression and the tuple type
-//! annotation. The fn-only round adds its retirement classes: DS1013
+//! annotation. The tag re-key round adds DS2045 with both of its routes
+//! (the bare and qualified spellings of an unknown member) and DS2014's
+//! fn-versus-tag arm retires into the constructor collision the fixture
+//! narrows to. The fn-only round adds its retirement classes: DS1013
 //! (a lambda named at the top level), DS2015 (`self` as a type name), and
 //! DS2016 (the annotated receiver). The namespace round adds the second
 //! DS2014 route: the call-form collision between the type and value
@@ -123,6 +126,11 @@ const CASES: &[Case] = &[
         stem: "ds2014_namespace_call_collision",
         human: include_str!("goldens/ds2014_namespace_call_collision.human"),
         json: include_str!("goldens/ds2014_namespace_call_collision.json"),
+    },
+    Case {
+        stem: "ds2045_unknown_tag_member",
+        human: include_str!("goldens/ds2045_unknown_tag_member.human"),
+        json: include_str!("goldens/ds2045_unknown_tag_member.json"),
     },
     Case {
         stem: "ds2015_lowercase_self_type",

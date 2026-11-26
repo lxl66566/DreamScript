@@ -215,6 +215,10 @@ error_codes! {
     LinkedConstEvalRefusal => "DS2043", Type,
     /// A linked package's exported trait member whose declared default body cannot cross the link seam: the body did not plan, demands runtime evidence, or carries an effect row the consumer cannot replay.
     LinkedDefaultBodyRefusal => "DS2044", Type,
+    /// A bare tag label matches no member of the expected type (F9.5): the directed positions (match arms, `is` tests, annotated bindings, parameters, fields, returns) resolve a label against the expected union's members, and no member carries it.
+    UnknownTagMember => "DS2045", Type,
+    /// A bare tag label matches several members of one expected union (F9.5): two declarations sharing a label both sit in the expected set, and the qualified spelling `type::label` is the escape hatch.
+    AmbiguousTagMember => "DS2046", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -353,6 +357,8 @@ mod tests {
             ("NoneTypedField", "DS2042", ErrorClass::Type),
             ("LinkedConstEvalRefusal", "DS2043", ErrorClass::Type),
             ("LinkedDefaultBodyRefusal", "DS2044", ErrorClass::Type),
+            ("UnknownTagMember", "DS2045", ErrorClass::Type),
+            ("AmbiguousTagMember", "DS2046", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

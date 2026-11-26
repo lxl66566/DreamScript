@@ -1,4 +1,4 @@
-// The @std serialization driver face (the 2026-11-21 ruling): the two
+// The @std serialization driver face: the two
 // traits every format driver implements over its own document type,
 // the derive synthesis's closed target — one derivation serving every
 // format, the json face the first driver (its impls live in the json

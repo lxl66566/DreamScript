@@ -694,10 +694,11 @@ fn the_type_keyed_families_refuse_a_variable_part() {
 /// application of a user generic struct has no runtime representation
 /// whatever the body reads, so even the families whose synthesized
 /// bodies never dispatch through the variable wait on the same
-/// per-instantiation frame seam. The checker's own construction door
-/// rides beside it: a concretely annotated literal still refuses, since
-/// the struct-literal arm reads in-scope type parameters alone and the
-/// expected type never reaches it.
+/// per-instantiation frame seam. The annotated literal rides beside it:
+/// the binding annotation threads its expected type into the
+/// initializer, so the struct-literal arm's expected-application
+/// substitution solves `pair[int]` at check time and the construction
+/// refuses at lowering's runtime-value door instead.
 #[test]
 fn the_lifted_default_product_refuses_at_the_construction() {
     lift_mirror_refuses_at_lowering(concat!(
@@ -710,7 +711,7 @@ fn the_lifted_default_product_refuses_at_the_construction() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    let rendered = refusals(concat!(
+    lift_mirror_refuses_at_lowering(concat!(
         "tag int\n",
         "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int {\n",
@@ -718,11 +719,6 @@ fn the_lifted_default_product_refuses_at_the_construction() {
         "  0\n",
         "}\n",
     ));
-    assert!(
-        rendered.iter().any(|r| r
-            .contains("constructing generic `pair` needs an expected type or in-scope parameters")),
-        "the annotated literal names the checker's own construction door: {rendered:?}"
-    );
 }
 
 /// The enum families' second door, ahead of any runtime question: a

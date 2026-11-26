@@ -1,19 +1,19 @@
-// The @std json face (the serialization substrate's interim step, the
-// 2026-11-21 ruling): the typed value family over the JSON grammar
+// The @std json face (the serialization substrate's interim step): the
+// typed value family over the JSON grammar
 // with its own parser, serializer, and the typed readers and writers
 // the from_json/to_json walks consume — the same ds source that lived
 // at the ambient core's tail, now the reserved package's own member.
 // Every undeclaring registration composes this file back after the
 // core (the merged reading), and an entry script session over the
 // implicit @std graph composes it back too (the bare spellings staying
-// load-bearing while the driver rounds run), so both readings stay
+// load-bearing while the migration runs), so both readings stay
 // namespace-identical with the pre-migration ambient; a package
 // compile declaring the dep binds these names through the linked
 // surface alone. The collection seams stay the ambient core's own
 // private externs at their pinned positions, and the @std bundle
 // composes this file into its core member so the face's free seam
 // calls stay same-file there too; the object walk iterates keys
-// through the ruled `keys` member.
+// through the `keys` member.
 
 // ---- the json face (the `json` enum's own parser and serializer) ----
 // Ordinary ds source over the string block's primitives: the walk reads
@@ -444,7 +444,7 @@ pub fn to_json (v: json) -> string {
 // ---- the json face's decode surface ----
 // The typed readers a target's decode walks consume: one reader per
 // case, a wrong shape answering parse_err (the face's own failure
-// member), and the object member answering the E4 optional so a walk
+// member), and the object member answering the optional so a walk
 // none-tests the missing key into the same parse_err. The number
 // split is kept here as the reader keeps it: json_as_int reads
 // json_int alone and json_as_float reads json_float alone, the two
@@ -505,7 +505,7 @@ pub fn json_as_object (v: json) -> map[string, json] | parse_err {
   }
 }
 
-// The width-bridging readers (2026-11-19): a json number reads as a byte
+// The width-bridging readers: a json number reads as a byte
 // (0-255) or a u32 through the checked bridge natives — an out-of-range
 // number answers parse_err like a wrong shape — and a one-character json
 // string reads as a char (any other length a wrong shape).
@@ -541,7 +541,7 @@ pub fn json_as_char (v: json) -> char | parse_err {
   }
 }
 
-// The bytes representation (2026-11-19): a json array of numbers, one
+// The bytes representation: a json array of numbers, one
 // element per payload byte — the exact round-trip of the writer below,
 // consistent with the show impl's byte-list rendering. Every element
 // must be an in-range json number; anything else answers parse_err.
@@ -558,7 +558,7 @@ pub fn json_as_bytes (v: json) -> bytes | parse_err {
   bytes_of(out)
 }
 
-// The encode half the to_json walk dispatches through (2026-11-19):
+// The encode half the to_json walk dispatches through:
 // byte and u32 write as json numbers, char as its one-character json
 // string, and bytes as the array of numbers the reader above takes
 // back — one construction per value the case vocabulary alone cannot
@@ -579,7 +579,7 @@ pub fn json_of_bytes (b: bytes) -> json {
 
 
 // ---- the json driver over the serialization face ----
-// The json face is the driver face's first driver (2026-11-21): the
+// The json face is the driver face's first driver: the
 // document type's empty-document seed (the encode walk's receiver) and
 // the encoder/decoder impls delegating to this file's own readers and
 // constructions above, so the derive synthesis targets the driver
