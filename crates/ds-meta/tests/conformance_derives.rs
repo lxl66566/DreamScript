@@ -193,11 +193,6 @@ fn derives_rejects_carry_the_ruled_refusal_classes() {
             "a derive applies to a struct, enum, or tag declaration [G1]",
         ),
         (
-            "gen-cell",
-            "DS2029",
-            "derive `show` refuses a generic declaration [G1]",
-        ),
-        (
             "fj-tag",
             "DS2026",
             "derive `from_json` refuses the declaration `fj_tag`: a tag declares no members, so \

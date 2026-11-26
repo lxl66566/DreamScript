@@ -377,21 +377,21 @@ fn eq_refused(span: Span) -> Diagnostic {
     )
 }
 
-/// A generic declaration refuses: the synthesized member's body reads
-/// its parts through the declaration's own type variables, while the
-/// runtime seam lowers one member body per impl — a receiver whose
-/// shape spans those variables needs the JIT's per-instantiation
-/// frames, never the interpreter's.
+/// A generic enum refuses: the synthesized member's body matches or
+/// constructs its cases over the declaration's own type variables, and
+/// a case over a generic head resolves no atom in any spelling — the
+/// pattern layer's seam, ahead of any runtime question. A generic
+/// struct passes: its parts dispatch through the added bound and the
+/// runtime seam owns the refusal.
 fn generic_refused(span: Span, family: &str) -> Diagnostic {
     Diagnostic::error(
         ErrorCode::DeriveGenericRefused,
-        format!("derive `{family}` refuses a generic declaration [G1]"),
+        format!("derive `{family}` refuses a generic enum [G1]"),
     )
-    .with_primary(span, "this declaration carries its own type parameters")
+    .with_primary(span, "this enum carries its own type parameters")
     .with_note(
-        "the synthesized member reads its parts through the declaration's type variables; the \
-         runtime seam lowers one body per impl, and per-instantiation frames are the JIT \
-         specialization tier's",
+        "a case over a generic head resolves no atom in any spelling; the pattern seam is the \
+         checker's, ahead of any runtime question",
     )
 }
 
@@ -414,13 +414,8 @@ fn show_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "show"));
         return None;
@@ -591,6 +586,26 @@ fn check_part(
         },
         Type::Optional { inner, .. } => check_part(inner, span, family, part, what, linear, diags),
         _ => Some(()),
+    }
+}
+
+/// Whether a part's type mentions one of the declaration's own type
+/// parameters: every json read or write over such a part stages the
+/// variable's own type-keyed member, and the json members are never
+/// bound, so the json families refuse the part at the attribute — the
+/// trait families dispatch through the added bound instead.
+fn mentions_param(ty: &Type, params: &[String]) -> bool {
+    match ty {
+        Type::Path { path, args, .. } => {
+            let named = match path.segments.as_slice() {
+                [only] => params.contains(&only.name),
+                _ => false,
+            };
+            named || args.iter().any(|arg| mentions_param(arg, params))
+        },
+        Type::Optional { inner, .. } | Type::Paren { inner, .. } => mentions_param(inner, params),
+        Type::Tuple { items, .. } => items.iter().any(|item| mentions_param(item, params)),
+        _ => false,
     }
 }
 
@@ -771,7 +786,7 @@ fn printable(ty: &Type) -> bool {
 /// the standard missing-impl diagnostic over the part's own span: a
 /// float part orders through the ambient's `total_compare`-backed impl,
 /// a string, char, or byte part through its own compare-native-backed
-/// impl. Refuses exactly like `show`: a generic declaration at the
+/// impl. Refuses exactly like `show`: a generic enum at the
 /// attribute, a non-data declaration, a function-typed or `~Copyable`
 /// part.
 fn ord_impl(
@@ -781,13 +796,8 @@ fn ord_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "ord"));
         return None;
@@ -1184,7 +1194,7 @@ fn sign_expr(mint: &mut Mint, index: usize, other_index: usize) -> Expr {
 /// `float_hash`-backed impl, a string or char part through its own
 /// content-hash-native-backed impl. An enum folds its case index first,
 /// a tag answers the seed constant. Refuses exactly like `show` and
-/// `ord`: a generic declaration at the attribute, a non-data
+/// `ord`: a generic enum at the attribute, a non-data
 /// declaration, a function-typed or `~Copyable` part.
 fn hash_impl(
     item: &Item,
@@ -1193,13 +1203,8 @@ fn hash_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "hash"));
         return None;
@@ -1442,7 +1447,7 @@ fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
 /// struct answers the empty construction — its `Self` spans the one
 /// reserved unit word, so the construction carries zero dispatches and
 /// the member's return keeps the ABI's one-word minimum. Refuses
-/// otherwise exactly like `hash`: a generic declaration at the
+/// otherwise exactly like `hash`: a generic enum at the
 /// attribute, a non-data declaration, a function-typed or `~Copyable`
 /// part.
 fn clone_impl(
@@ -1452,13 +1457,8 @@ fn clone_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "clone"));
         return None;
@@ -1828,7 +1828,7 @@ fn unread_annotation(span: Span, union: &str, case: &str) -> Diagnostic {
 /// one-argument head that is not the empty-construction shape) fails at
 /// the synthesized call with the standard diagnostic, the family
 /// precedent. Refuses otherwise exactly like `clone`: a generic
-/// declaration at the attribute, a non-data declaration, a
+/// enum at the attribute, a non-data declaration, a
 /// function-typed or `~Copyable` part.
 fn default_impl(
     item: &Item,
@@ -1838,13 +1838,8 @@ fn default_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "default"));
         return None;
@@ -1870,7 +1865,8 @@ fn default_impl(
                     diags,
                 )?;
             }
-            let body = match struct_default_body(&decl.name, &fields, mint, unions) {
+            let params: Vec<String> = decl.generics.iter().map(|p| p.name.name.clone()).collect();
+            let body = match struct_default_body(&decl.name, &fields, mint, unions, &params) {
                 Ok(body) => body,
                 Err(refused) => {
                     // A `None` because-clause rides the duplicate the
@@ -1930,7 +1926,9 @@ fn default_impl(
                     for (part, ty, span) in payload_parts(&case.payload, &case.name.name) {
                         check_part(ty, span, "default", &part, "case part", linear, diags)?;
                     }
-                    match case_default(&case.name.name, &case.payload, unions, mint) {
+                    let params: Vec<String> =
+                        decl.generics.iter().map(|p| p.name.name.clone()).collect();
+                    match case_default(&case.name.name, &case.payload, unions, mint, &params) {
                         Ok(body) => body,
                         Err(why) => {
                             if let Some(because) = why.refusal() {
@@ -1990,6 +1988,10 @@ enum NoDefault {
     /// union inside the brackets; an optional rides the fn-type
     /// carrier).
     Arg,
+    /// A bare type variable of the declaration being derived: no
+    /// default value of a variable exists (the type-keyed surface
+    /// dispatches no bound), so the key refuses naming the part.
+    Variable,
     /// A duplicate member annotation the collection already refused:
     /// the reading site refuses over it with no second diagnostic.
     AlreadyRefused,
@@ -2015,6 +2017,7 @@ impl NoDefault {
                 "the type-expression key spells no default construction for this shape".to_owned()
             },
             Self::Arg => "the constructor brackets spell no key for this type argument".to_owned(),
+            Self::Variable => "a type variable carries no default value".to_owned(),
             // The collection reported the duplicate; the because-clause
             // never renders.
             Self::AlreadyRefused => "a duplicate `#[default]` member annotation".to_owned(),
@@ -2051,21 +2054,27 @@ fn default_member(mint: &mut Mint) -> Member {
 /// receiverless call; a parenthesized type keys by its inner shape; the
 /// unit type answers the unit value. Every other shape refuses — a
 /// union names the open ruling, anything else names the unkeyed shape.
-fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<Expr, NoDefault> {
+fn default_value(
+    ty: &Type,
+    mint: &mut Mint,
+    unions: &UnionDefaults,
+    params: &[String],
+) -> Result<Expr, NoDefault> {
     match ty {
-        Type::Paren { inner, .. } => default_value(inner, mint, unions),
+        Type::Paren { inner, .. } => default_value(inner, mint, unions, params),
         Type::Path { path, args, .. } => {
             let [only] = path.segments.as_slice() else {
                 return Err(NoDefault::Unkeyed);
             };
             match args.as_slice() {
+                [] if params.contains(&only.name) => Err(NoDefault::Variable),
                 [] => match unions.member(&only.name) {
                     // The bare name of a union this file annotates:
                     // the member's construction answers over the
                     // dispatch (the union-default ruling).
                     Err(_) => Err(NoDefault::AlreadyRefused),
                     Ok(None) => Ok(type_keyed_call(&only.name, "default", mint)),
-                    Ok(Some(case)) => case_default(&case.name, &case.payload, unions, mint),
+                    Ok(Some(case)) => case_default(&case.name, &case.payload, unions, mint, params),
                 },
                 [arg] if only.name == "list" => {
                     let index = bracket_arg(arg, mint)?;
@@ -2119,7 +2128,7 @@ fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<E
             let span = mint.span();
             let elements = items
                 .iter()
-                .map(|item| default_value(item, mint, unions))
+                .map(|item| default_value(item, mint, unions, params))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Expr::Tuple {
                 span,
@@ -2146,7 +2155,7 @@ fn default_value(ty: &Type, mint: &mut Mint, unions: &UnionDefaults) -> Result<E
                 // members: a choice outside the spelled union names no
                 // canonical member of it.
                 Ok(Some(case)) if members.contains(&case.name) => {
-                    case_default(&case.name, &case.payload, unions, mint)
+                    case_default(&case.name, &case.payload, unions, mint, params)
                 },
                 Ok(None | Some(_)) => Err(NoDefault::Union),
             }
@@ -2239,6 +2248,7 @@ fn case_default(
     payload: &EnumPayload,
     unions: &UnionDefaults,
     mint: &mut Mint,
+    params: &[String],
 ) -> Result<Expr, NoDefault> {
     // One minted span shared by the construction's path and its
     // identifier: resolution records the case's name use at the
@@ -2257,7 +2267,7 @@ fn case_default(
             let args = items
                 .iter()
                 .map(|ty| {
-                    let value = default_value(ty, mint, unions)?;
+                    let value = default_value(ty, mint, unions, params)?;
                     Ok(CallArg {
                         span: mint.span(),
                         name: None,
@@ -2280,7 +2290,7 @@ fn case_default(
                         span: mint.span(),
                         name: field.name.name.clone(),
                     };
-                    let value = default_value(&field.ty, mint, unions)?;
+                    let value = default_value(&field.ty, mint, unions, params)?;
                     Ok(CallArg {
                         span: mint.span(),
                         name: Some(name),
@@ -2307,6 +2317,7 @@ fn struct_default_body(
     fields: &[&FieldDecl],
     mint: &mut Mint,
     unions: &UnionDefaults,
+    params: &[String],
 ) -> Result<Expr, RefusedField> {
     let path_span = mint.span();
     let path = Path {
@@ -2323,11 +2334,12 @@ fn struct_default_body(
                 span: mint.span(),
                 name: field.name.name.clone(),
             };
-            let value = default_value(&field.ty, mint, unions).map_err(|why| RefusedField {
-                span: field.span,
-                name: field.name.name.clone(),
-                because: why.refusal(),
-            })?;
+            let value =
+                default_value(&field.ty, mint, unions, params).map_err(|why| RefusedField {
+                    span: field.span,
+                    name: field.name.name.clone(),
+                    because: why.refusal(),
+                })?;
             Ok((field_name, Some(value)))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2593,7 +2605,7 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
 /// carrying none fails at the synthesized call with the standard
 /// missing-member diagnostic, the bare-name precedent); a shape the
 /// walk cannot spell refuses at the attribute. Refuses otherwise like
-/// the other families: a generic declaration, a non-data declaration, a
+/// the other families: a generic enum, a non-data declaration, a
 /// function-typed or `~Copyable` part; a tag carries no members to
 /// walk, so it refuses naming itself.
 fn from_json_impl(
@@ -2603,13 +2615,8 @@ fn from_json_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "from_json"));
         return None;
@@ -2624,6 +2631,7 @@ fn from_json_impl(
                     StructMember::Deinit { .. } => None,
                 })
                 .collect();
+            let params: Vec<String> = decl.generics.iter().map(|p| p.name.name.clone()).collect();
             for field in &fields {
                 check_part(
                     &field.ty,
@@ -2634,6 +2642,17 @@ fn from_json_impl(
                     linear,
                     diags,
                 )?;
+                if mentions_param(&field.ty, &params) {
+                    diags.push(part_refused(
+                        field.span,
+                        "from_json",
+                        "field",
+                        &field.name.name,
+                        "a type variable carries no json member (the members are type-keyed, \
+                         never bound)",
+                    ));
+                    return None;
+                }
             }
             // the shared failure value: one construction feeds every
             // none-test's early return (the per-site spelling would
@@ -3581,7 +3600,7 @@ fn narrow_test(mint: &mut Mint, name: &str, member: &str, fail: &str) -> Stmt {
 /// an optional payload field) narrows at its consumer: the presence
 /// narrow over the element or payload binder, absence contributing
 /// nothing (the decode mirror). Refuses
-/// otherwise like from_json: a generic declaration, a non-data
+/// otherwise like from_json: a generic enum, a non-data
 /// declaration, a function-typed or `~Copyable` part; a tag
 /// carries no members to walk, so it refuses naming itself.
 fn to_json_impl(
@@ -3591,13 +3610,8 @@ fn to_json_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    let generics = match &item.kind {
-        ItemKind::Struct(decl) => Some(&decl.generics),
-        ItemKind::Enum(decl) => Some(&decl.generics),
-        _ => None,
-    };
-    if let Some(generics) = generics
-        && !generics.is_empty()
+    if let ItemKind::Enum(decl) = &item.kind
+        && !decl.generics.is_empty()
     {
         diags.push(generic_refused(attr.span, "to_json"));
         return None;
@@ -3612,6 +3626,7 @@ fn to_json_impl(
                     StructMember::Deinit { .. } => None,
                 })
                 .collect();
+            let params: Vec<String> = decl.generics.iter().map(|p| p.name.name.clone()).collect();
             for field in &fields {
                 check_part(
                     &field.ty,
@@ -3622,6 +3637,17 @@ fn to_json_impl(
                     linear,
                     diags,
                 )?;
+                if mentions_param(&field.ty, &params) {
+                    diags.push(part_refused(
+                        field.span,
+                        "to_json",
+                        "field",
+                        &field.name.name,
+                        "a type variable carries no json member (the members are type-keyed, \
+                         never bound)",
+                    ));
+                    return None;
+                }
             }
             let mut fresh = 0;
             let seed = doc_seed_local(mint);
@@ -4475,7 +4501,12 @@ fn impl_item(
     let span = attr.span;
     // A generic declaration derives per instantiation: the impl declares
     // the same parameters with the trait added to whatever bound the
-    // declaration wrote, and the target applies them in order.
+    // declaration wrote, and the target applies them in order. The
+    // written bound rides the structure-only minted copy — resolution
+    // records name uses by span, and the written declaration already
+    // used the original's. An inherent member carries no trait to add,
+    // so its parameters pass through plainly — the target still applies
+    // them.
     let impl_generics: Vec<TypeParam> = match member.trait_name {
         Some(trait_name) => generics
             .iter()
@@ -4483,7 +4514,7 @@ fn impl_item(
                 let bound = match &p.bound {
                     Some(written) => Some(Type::Intersect {
                         span: p.span,
-                        left: Box::new(written.clone()),
+                        left: Box::new(minted_type(written, mint)),
                         right: Box::new(trait_type(mint, trait_name)),
                     }),
                     None => Some(trait_type(mint, trait_name)),
@@ -4495,7 +4526,7 @@ fn impl_item(
                 }
             })
             .collect(),
-        None => Vec::new(),
+        None => generics.to_vec(),
     };
     // The target is a name use, so it mints its own span: two families
     // expanding one item each synthesize an impl, and the declaration's

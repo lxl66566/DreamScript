@@ -18,7 +18,7 @@
 // res: stage: typecheck
 // holder: stage: reject a ~Copyable-headed part refuses structural derivation, naming the part [G1, B9]
 // not-data: stage: reject a derive applies only to a struct, enum, or tag declaration [G1]
-// gen-cell: stage: reject a generic declaration refuses: the runtime seam lowers one member body per impl [G1]
+// gen-cell: stage: typecheck
 // named-cell: stage: run
 // fj-cell: stage: run
 // fj-inner: stage: run

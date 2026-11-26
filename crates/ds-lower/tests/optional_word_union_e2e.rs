@@ -125,6 +125,29 @@ fn the_optional_payload_field_narrows_over_the_binder() {
     assert_eq!(runs("opt_payload", probe), "9\n0\n0\n");
 }
 
+/// A struct field spelled `t | none` enters the universe atom exactly
+/// like the `t?` spelling (B4: one optional, two spellings), so it
+/// constructs and narrows both sides — before the conversion carried
+/// the predeclared member, the field silently missed its atom and the
+/// construction refused at lowering over the wrong vocabulary.
+#[test]
+fn the_union_spelled_optional_field_constructs_like_the_sugar() {
+    let probe = concat!(
+        "struct cell { v: int | none }\n",
+        "fn spell(c: cell) -> string {\n",
+        "  match c.v {\n",
+        "    none => { \"empty\" }\n",
+        "    n => { \"full ${n}\" }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> () {\n",
+        "  println(spell(cell { v: none }))\n",
+        "  println(spell(cell { v: 5 }))\n",
+        "}\n",
+    );
+    assert_eq!(runs("opt_union_field", probe), "empty\nfull 5\n");
+}
+
 /// An is-narrowed binder whose physical words keep a wider union's
 /// layout re-spans into the callee's own region at the call: the
 /// optional payload field's multi-word span interleaves the wider

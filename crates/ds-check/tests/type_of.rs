@@ -42,6 +42,27 @@ fn clean(source: &str) {
     );
 }
 
+/// Byte-offset span of the `nth` (0-based) occurrence of `needle`.
+fn span_of(source: &str, file: ds_diag::FileId, needle: &str, nth: usize) -> ds_diag::Span {
+    let mut from = 0;
+    for _ in 0..nth {
+        let found = source[from..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("occurrence {nth} of {needle:?} not found from {from}"));
+        from += found + needle.len();
+    }
+    let start = source[from..]
+        .find(needle)
+        .unwrap_or_else(|| panic!("occurrence {nth} of {needle:?} not found from {from}"))
+        + from;
+    let end = start + needle.len();
+    ds_diag::Span::new(
+        file,
+        u32::try_from(start).unwrap(),
+        u32::try_from(end).unwrap(),
+    )
+}
+
 #[test]
 fn boundary_annotation_checks_by_containment() {
     // The written signature anchors the algebra [B2]: the body's final
@@ -1791,6 +1812,84 @@ fn none_restatement_maps_onto_the_predeclared_atom() {
     ));
     // Optional sugar still meets the predeclared member.
     clean("tag none\nfn f(x: int?) -> int | none { x }\n");
+}
+
+/// A field whose type solves to the `none` atom alone refuses at the
+/// field's own span [B4]: `none` is the optional's absent member, never a
+/// standalone field type, and the silent drop used to surface later as a
+/// lowering refusal over the wrong vocabulary. Every spelling that folds
+/// to the none-only set hears the refusal — the paren, the optional of
+/// none, the union of none with itself, an alias of none, and a payload
+/// slot beside the named fields.
+#[test]
+fn a_none_typed_field_refuses_at_the_field_span() {
+    let refusal = "DS2042 field `x` cannot be typed `none`: `none` is the optional's absent \
+                   member, a member of `t?` and `t | none` spellings, never a standalone field \
+                   type";
+    for (label, source) in [
+        ("bare", "struct s { x: none }\n"),
+        ("paren", "struct s { x: (none) }\n"),
+        ("optional of none", "struct s { x: none? }\n"),
+        ("union of none with itself", "struct s { x: none | none }\n"),
+        ("alias of none", "type n = none\nstruct s { x: n }\n"),
+        ("tag payload", "tag t { x: none }\n"),
+        ("case payload", "enum e { bad { x: none } }\n"),
+    ] {
+        assert_eq!(check(source), [refusal], "{label}: the door refuses once");
+    }
+    assert_eq!(
+        check("enum e { box(none) }\n"),
+        [
+            "DS2042 case `box`'s payload slot cannot be typed `none`: `none` is the optional's \
+             absent member, a member of `t?` and `t | none` spellings, never a standalone field \
+             type"
+        ],
+        "a positional slot hears the same refusal over the case's name"
+    );
+    // The bare spelling's label sits on the whole field, `name: type`.
+    let combined = format!("{PRELUDE}struct s {{ x: none }}\n");
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", &combined);
+    let ast = parse(&files, file).unwrap_or_else(|d| panic!("parses: {d:?}"));
+    let diags = type_check(&files, &[ast]).diags;
+    let field = span_of(&combined, file, "x: none", 0);
+    let [label] = &diags[0].labels[..] else {
+        panic!("the refusal carries one label: {:#?}", diags[0].labels);
+    };
+    assert_eq!(label.span, field, "the refusal labels the field's own span");
+    assert_eq!(label.label, "none-typed field");
+}
+
+/// The nearby spellings stay clean: a lone unit-tag field and a
+/// case-payloaded field check and construct, the optional spellings
+/// (`t?` and `t | none`) carry their present side, and a zero-case
+/// enum's empty set is the conversion layer's own spelling — none of
+/// them is the none-only set.
+#[test]
+fn nearby_field_spellings_stay_clean() {
+    clean(concat!(
+        "tag quiet\n",
+        "enum shade { red, blue }\n",
+        "enum wav { on, blip { times: int } }\n",
+        "struct s {\n",
+        "  a: quiet\n",
+        "  b: shade\n",
+        "  c: int?\n",
+        "  d: int | none\n",
+        "  f: wav\n",
+        "}\n",
+        "const v = s { a: quiet, b: red, c: none, d: none, f: on }\n",
+    ));
+    clean("enum void {}\nstruct s { e: void }\n");
+}
+
+/// `none` applied with type arguments is a unit-tag head that takes
+/// none, the same refusal a local tag's application hears, instead of
+/// the field silently missing its atom.
+#[test]
+fn a_none_headed_application_refuses_like_a_tags() {
+    let refusal = "DS2040 `none` is a tag and takes no type arguments";
+    assert_eq!(check("struct s { x: none[int] }\n"), [refusal]);
 }
 
 /// The script-entry fold's synthesized `main` checks through a lambda node

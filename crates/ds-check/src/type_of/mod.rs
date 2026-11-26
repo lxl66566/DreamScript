@@ -3748,8 +3748,12 @@ impl Bodies<'_> {
                 if param.bound.as_ref().is_some_and(decls::linear_marker) {
                     self.linear_vars.insert(var_atoms[index], false);
                 }
-                if let Some(trait_id) = param.bound.as_ref().and_then(|b| self.trait_of_type(b)) {
-                    self.assumptions.push((trait_id, ty));
+                if let Some(bound) = &param.bound {
+                    let mut arms = Vec::new();
+                    self.bound_traits(bound, &mut arms);
+                    for trait_id in arms {
+                        self.assumptions.push((trait_id, ty));
+                    }
                 }
             }
         }
@@ -3848,18 +3852,21 @@ impl Bodies<'_> {
         // evidence demands from (H3).
         let mut call_bounds: GenericCallBounds = Vec::new();
         for ((index, param), &ty) in sig.generics.iter().enumerate().zip(solved.iter()) {
-            let Some(trait_id) = param.bound.as_ref().and_then(|b| self.trait_of_type(b)) else {
-                continue;
-            };
-            if self.decls.universe.is_empty(ty) {
-                continue;
+            let mut arms = Vec::new();
+            if let Some(bound) = &param.bound {
+                self.bound_traits(bound, &mut arms);
             }
-            let served = if self.trait_satisfied(trait_id, ty, span) {
-                self.instance_resolution(trait_id, ty).solved()
-            } else {
-                None
-            };
-            call_bounds.push((var_atoms[index], trait_id, served, ty));
+            for trait_id in arms {
+                if self.decls.universe.is_empty(ty) {
+                    continue;
+                }
+                let served = if self.trait_satisfied(trait_id, ty, span) {
+                    self.instance_resolution(trait_id, ty).solved()
+                } else {
+                    None
+                };
+                call_bounds.push((var_atoms[index], trait_id, served, ty));
+            }
         }
         if !call_bounds.is_empty() {
             self.generic_call_bounds.insert(span, call_bounds);
@@ -6616,6 +6623,24 @@ impl Bodies<'_> {
         self.decls.traits.get(&def).copied()
     }
 
+    /// The trait arms one written bound carries: a bare trait path, or
+    /// every arm of an intersection — a derive's synthesized bound
+    /// intersects the family's trait with whatever the declaration
+    /// wrote, and a hand-written intersection spells the same shape.
+    fn bound_traits(&self, ty: &Type, out: &mut Vec<TraitId>) {
+        match ty {
+            Type::Intersect { left, right, .. } => {
+                self.bound_traits(left, out);
+                self.bound_traits(right, out);
+            },
+            other => {
+                if let Some(trait_id) = self.trait_of_type(other) {
+                    out.push(trait_id);
+                }
+            },
+        }
+    }
+
     /// Whether a type is exactly one minted type variable (the checker's
     /// `$name` atoms): an inference hole, not a data type.
     fn is_var_ty(&self, ty: Ty) -> bool {
@@ -6801,8 +6826,12 @@ impl Bodies<'_> {
                 if param.bound.as_ref().is_some_and(decls::linear_marker) {
                     self.linear_vars.insert(var, false);
                 }
-                if let Some(trait_id) = param.bound.as_ref().and_then(|b| self.trait_of_type(b)) {
-                    self.assumptions.push((trait_id, ty));
+                if let Some(bound) = &param.bound {
+                    let mut arms = Vec::new();
+                    self.bound_traits(bound, &mut arms);
+                    for trait_id in arms {
+                        self.assumptions.push((trait_id, ty));
+                    }
                 }
             }
         }

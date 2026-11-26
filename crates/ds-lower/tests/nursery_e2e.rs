@@ -668,12 +668,14 @@ fn main() -> () {
     );
 }
 
-/// A member whose payload is itself a union still refuses: the flat
-/// staging has no static span for a union word, so the site names the
-/// value shape whose seam it waits on.
+/// A member whose payload is itself a union rides the child's cancel
+/// into the join like any optional slot (the union's own
+/// tag-plus-region span): the none-carrying spelling once dropped out
+/// of the case's atom and the cancel path refused at lowering over the
+/// wrong vocabulary.
 #[test]
-fn a_union_payloaded_member_refuses() {
-    refused(
+fn a_union_payloaded_member_rides_the_cancel_into_the_join() {
+    let (_, out) = run_main(
         r#"
 enum wrap {
   carrier(int | none)
@@ -690,13 +692,28 @@ fn f(x: int | none) -> int | wrap {
 
 fn main() -> () {
   match f(1) {
-    carrier => println("c"),
-    v => println("kept ${v}")
+    carrier(n) => {
+      match n {
+        none => println("inner-none")
+        v => println("inner-some ${v}")
+      }
+    }
+    v => println("kept")
+  }
+  match f(none) {
+    carrier(n) => {
+      match n {
+        none => println("second-none")
+        v => println("second-some ${v}")
+      }
+    }
+    v => println("kept2")
   }
 }
 "#,
-        "anything else waits on the seam its own value shape names",
+        false,
     );
+    assert_eq!(out, "inner-some 1\nsecond-none\n");
 }
 
 /// A `?` inside a nursery body refuses: the early return would skip the

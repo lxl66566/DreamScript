@@ -190,34 +190,46 @@ fn non_data_items_and_plain_packages() {
     .expect("the unattributed package lowers");
 }
 
-/// A generic declaration refuses at the attribute: the synthesized
-/// member's body reads its parts through the declaration's own type
-/// variables, while the runtime seam lowers one body per impl (the
-/// per-instantiation frames are the JIT tier's), so the boundary is
-/// named at the derive, never as a late lowering error.
+/// A generic struct passes the attribute: `impl_item` synthesizes the
+/// bounded generic impl and the file checks clean (the parts dispatch
+/// through the bound's evidence), so the refusal the old attribute
+/// gate owned is the runtime seam's — lowering refuses the member's
+/// receiver frame, the same door the hand-written mirrors below pin.
+/// A written bound on the declaration derives the same way: the
+/// synthesis intersects it with the family's trait and the checker
+/// reads every arm of the intersection.
 #[test]
-fn a_generic_declaration_refuses() {
-    let rendered = refusals(concat!(
+fn a_generic_struct_derives_and_meets_the_runtime_door() {
+    lift_mirror_refuses_at_lowering(concat!(
         "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
         "#[derive(show)]\n",
-        "struct cell[t] { v: t }\n",
+        "struct pair[t] { a: t, b: t }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 1, "{rendered:?}");
-    assert!(rendered[0].contains("DS2029"), "{}", rendered[0]);
-    assert!(
-        rendered[0].contains("derive `show` refuses a generic declaration"),
-        "{}",
-        rendered[0]
-    );
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "#[derive(show)]\n",
+        "struct box[t: show] { v: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
 }
 
 /// The ord family refuses its own carve-outs, each naming the family:
-/// a function-typed part, a `~Copyable` part, and a generic declaration
-/// at the attribute. Every primitive part carries an ambient impl, so
-/// a part with no impl (a user type without one) is the honest
-/// boundary: the impl synthesizes and the call fails with the standard
-/// missing-impl diagnostic over the part's own span.
+/// a function-typed part and a `~Copyable` part. Every primitive part
+/// carries an ambient impl, so a part with no impl (a user type
+/// without one) is the honest boundary: the impl synthesizes and the
+/// call fails with the standard missing-impl diagnostic over the
+/// part's own span. A generic struct carries no carve-out: the parts
+/// dispatch through the added bound and the runtime seam owns the
+/// refusal.
 #[test]
 fn the_ord_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -243,7 +255,7 @@ fn the_ord_family_refuses_its_carve_outs() {
         "struct named { v: plain }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 4, "the four ord refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 3, "the three ord refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `ord` refuses the field `cb`: a function-typed part")),
@@ -258,24 +270,17 @@ fn the_ord_family_refuses_its_carve_outs() {
     assert!(
         rendered
             .iter()
-            .any(|r| r.contains("DS2029")
-                && r.contains("derive `ord` refuses a generic declaration")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered
-            .iter()
             .any(|r| r.contains("DS2013") && r.contains("no instance of `ord` for `plain`")),
         "{rendered:?}"
     );
 }
 
 /// The hash family refuses its own carve-outs, each naming the family:
-/// a function-typed part, a `~Copyable` part, and a generic declaration
-/// at the attribute. Every primitive part carries an ambient impl, so a
-/// part with no impl (a user type without one) is the honest boundary:
-/// the impl synthesizes and the call fails with the standard
-/// missing-impl diagnostic over the part's own span.
+/// a function-typed part and a `~Copyable` part. Every primitive part
+/// carries an ambient impl, so a part with no impl (a user type
+/// without one) is the honest boundary: the impl synthesizes and the
+/// call fails with the standard missing-impl diagnostic over the
+/// part's own span.
 #[test]
 fn the_hash_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -299,7 +304,7 @@ fn the_hash_family_refuses_its_carve_outs() {
         "struct named { v: plain }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 4, "the four hash refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 3, "the three hash refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `hash` refuses the field `cb`: a function-typed part")),
@@ -314,24 +319,17 @@ fn the_hash_family_refuses_its_carve_outs() {
     assert!(
         rendered
             .iter()
-            .any(|r| r.contains("DS2029")
-                && r.contains("derive `hash` refuses a generic declaration")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered
-            .iter()
             .any(|r| r.contains("DS2013") && r.contains("no instance of `hash` for `plain`")),
         "{rendered:?}"
     );
 }
 
 /// The clone family refuses its own carve-outs, each naming the family:
-/// a function-typed part, a `~Copyable` part, and a generic declaration
-/// at the attribute. Every primitive part carries an ambient-impl shape
-/// in the probe, so a part with no impl (a user type without one) is the
-/// honest boundary: the impl synthesizes and the call fails with the
-/// standard missing-impl diagnostic over the part's own span.
+/// a function-typed part and a `~Copyable` part. Every primitive part
+/// carries an ambient-impl shape in the probe, so a part with no impl
+/// (a user type without one) is the honest boundary: the impl
+/// synthesizes and the call fails with the standard missing-impl
+/// diagnostic over the part's own span.
 #[test]
 fn the_clone_family_refuses_its_carve_outs() {
     let rendered = refusals(concat!(
@@ -355,7 +353,7 @@ fn the_clone_family_refuses_its_carve_outs() {
         "struct named { v: plain }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 4, "the four clone refusals: {rendered:?}");
+    assert_eq!(rendered.len(), 3, "the three clone refusals: {rendered:?}");
     assert!(
         rendered.iter().any(|r| r.contains("DS2026")
             && r.contains("derive `clone` refuses the field `cb`: a function-typed part")),
@@ -370,23 +368,19 @@ fn the_clone_family_refuses_its_carve_outs() {
     assert!(
         rendered
             .iter()
-            .any(|r| r.contains("DS2029")
-                && r.contains("derive `clone` refuses a generic declaration")),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered
-            .iter()
             .any(|r| r.contains("DS2013") && r.contains("no instance of `clone` for `plain`")),
         "{rendered:?}"
     );
 }
 
 /// The generic-enum cause, per family: each of the seven refuses a
-/// declaration carrying its own type parameters at the attribute, the
-/// enum shape identically to the struct shape (the guard fires at each
-/// family head before any part walk, so no trait or json face needs to
-/// resolve). One refusal per family names its own family.
+/// generic enum at the attribute — the synthesized member's match arms
+/// and constructions read the cases over the declaration's own type
+/// variables, and a case over a generic head resolves no atom in any
+/// spelling (the synthesized unit-case arms fail too, where a
+/// hand-written impl passes), so the pattern seam is the door, ahead
+/// of any runtime question and before any trait or json face needs to
+/// resolve. One refusal per family names its own family.
 #[test]
 fn the_generic_enum_cause_refuses_per_family() {
     let rendered = refusals(concat!(
@@ -410,36 +404,10 @@ fn the_generic_enum_cause_refuses_per_family() {
     ] {
         assert!(
             rendered.iter().any(|r| r.contains("DS2029")
-                && r.contains(&format!("derive `{family}` refuses a generic declaration"))),
+                && r.contains(&format!("derive `{family}` refuses a generic enum"))),
             "the {family} family names its own refusal: {rendered:?}"
         );
     }
-}
-
-/// A written bound on the declaration's own parameter does not lift the
-/// refusal: the blocker is the runtime receiver frame a concrete
-/// instantiation would need, never a missing bound — the synthesis
-/// already adds the family's trait to whatever bound the declaration
-/// wrote, so spelling it by hand changes nothing.
-#[test]
-fn a_written_bound_does_not_lift_the_generic_refusal() {
-    let rendered = refusals(concat!(
-        "tag int\n",
-        "tag string\n",
-        "trait show {\n",
-        "  fn show(self) -> string\n",
-        "}\n",
-        "#[derive(show)]\n",
-        "struct box[t: show] { v: t }\n",
-        "fn main() -> int { 0 }\n",
-    ));
-    assert_eq!(rendered.len(), 1, "{rendered:?}");
-    assert!(
-        rendered[0].contains("DS2029")
-            && rendered[0].contains("derive `show` refuses a generic declaration"),
-        "{}",
-        rendered[0]
-    );
 }
 
 /// One lift probe through the whole pipeline: the source checks clean
@@ -475,8 +443,9 @@ fn lift_mirror_refuses_at_lowering(source: &str) {
 }
 
 /// The `show` family's lift door, pinned as the hand-written mirror of
-/// exactly what a lifted derive would synthesize (the bounded generic
-/// impl `impl_item` already builds): a fields-carrying generic struct's
+/// exactly what the admitted derive synthesizes (the bounded generic
+/// impl `impl_item` builds; the real-derive pins above ride the same
+/// door): a fields-carrying generic struct's
 /// impl checks clean — the receiver `self: pair[t]` is a solved head and
 /// the parts dispatch through the bound's runtime evidence — while
 /// lowering refuses at the member's receiver frame, because a concrete
@@ -524,6 +493,173 @@ fn the_lifted_show_product_refuses_at_the_receiver_frame() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
+}
+
+/// The admitted families' real products meet the same runtime door:
+/// each family over a generic struct checks clean and lowering
+/// refuses — the receiver frame for the trait families (the parts
+/// dispatch through the added bound), the construction for `default`
+/// (a receiverless member building the application value from
+/// concrete parts), the union member for `from_json` (the member's
+/// answer spans the application plus `parse_err`).
+#[test]
+fn the_admitted_generic_families_meet_their_runtime_doors() {
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "trait ord {\n",
+        "  fn compare(self, other: Self) -> int\n",
+        "}\n",
+        "#[derive(ord)]\n",
+        "struct pair[t] { a: t, b: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "trait hash {\n",
+        "  fn hash(self) -> int\n",
+        "}\n",
+        "#[derive(hash)]\n",
+        "struct pair[t] { a: t, b: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "trait clone {\n",
+        "  fn clone(self) -> Self\n",
+        "}\n",
+        "#[derive(clone)]\n",
+        "struct pair[t] { a: t, b: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "impl int {\n",
+        "  fn default() -> int { 0 }\n",
+        "}\n",
+        "#[derive(default)]\n",
+        "struct box[t] { n: int }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct map[k, v]\n",
+        "tag parse_err { pos: int }\n",
+        "enum json { jnull, jint { v: int } }\n",
+        "impl json {\n",
+        "  fn default() -> json { jnull }\n",
+        "}\n",
+        "trait decoder {\n",
+        "  fn dec_object(self) -> map[string, json] | parse_err\n",
+        "  fn dec_member(self, key: string) -> json | none\n",
+        "  fn dec_int(self) -> int | parse_err\n",
+        "}\n",
+        "impl decoder for json {\n",
+        "  fn dec_object(self) -> map[string, json] | parse_err { parse_err(pos: 0) }\n",
+        "  fn dec_member(self, key: string) -> json | none { none }\n",
+        "  fn dec_int(self) -> int | parse_err { 0 }\n",
+        "}\n",
+        "#[derive(from_json)]\n",
+        "struct gen[t] { n: int }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct map[k, v]\n",
+        "enum json { jnull, jint { v: int } }\n",
+        "impl[k, v] map[k, v] {\n",
+        "  fn set (mut self, key: k, value: v) -> map[k, v]\n",
+        "}\n",
+        "trait encoder {\n",
+        "  fn enc_int (self, value: int) -> Self\n",
+        "  fn enc_object (self, fields: map[string, Self]) -> Self\n",
+        "}\n",
+        "impl json {\n",
+        "  fn default() -> json { jnull }\n",
+        "}\n",
+        "impl encoder for json {\n",
+        "  fn enc_int (self, value: int) -> json { jint(v: value) }\n",
+        "  fn enc_object (self, fields: map[string, json]) -> json { jnull }\n",
+        "}\n",
+        "#[derive(to_json)]\n",
+        "struct gen[t] { n: int }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+}
+
+/// The type-keyed families' variable-part doors, the trait families'
+/// contrast: no default value of a type variable exists (the key
+/// refuses the bare variable and a variable inside a tuple, while a
+/// `t?` or `list[t]` field constructs empty and derives clean), and
+/// no json member sits behind a variable (the members are type-keyed,
+/// never bound, so any part mentioning a variable refuses) — while
+/// the trait families dispatch through the added bound and the same
+/// `v: t` field checks clean.
+#[test]
+fn the_type_keyed_families_refuse_a_variable_part() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "#[derive(default)]\n",
+        "struct gen[t] { v: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    let [one] = rendered.as_slice() else {
+        panic!("one default variable-part refusal: {rendered:?}")
+    };
+    assert!(
+        one.contains("DS2026")
+            && one.contains(
+                "derive `default` refuses the field `v`: a type variable carries no default value"
+            ),
+        "{one}"
+    );
+
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "#[derive(default)]\n",
+        "struct gen[t] { p: (t, int) }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert!(
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains("refuses the field `p`: a type variable carries no default value")),
+        "a variable inside a tuple reads its default: {rendered:?}"
+    );
+
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "struct list[t]\n",
+        "#[derive(default)]\n",
+        "struct gen[t] { xs: list[t], v: t? }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert!(
+        rendered.is_empty(),
+        "the empty constructions derive clean: {rendered:?}"
+    );
+
+    for family in ["from_json", "to_json"] {
+        let source = format!(
+            "tag int\nstruct list[t]\n#[derive({family})]\nstruct gen[t] {{ v: t, xs: list[t] \
+             }}\nfn main() -> int {{ 0 }}\n"
+        );
+        let rendered = refusals(&source);
+        assert_eq!(
+            rendered.len(),
+            1,
+            "one {family} variable-part refusal: {rendered:?}"
+        );
+        assert!(
+            rendered[0].contains("DS2026")
+                && rendered[0].contains(&format!(
+                    "derive `{family}` refuses the field `v`: a type variable carries no json \
+                     member (the members are type-keyed, never bound)"
+                )),
+            "{}",
+            rendered[0]
+        );
+    }
 }
 
 /// The `default` and `clone` families' lift door, the receiverless
@@ -649,8 +785,9 @@ fn an_unconsumed_attribute_refuses_at_lowering() {
 /// fails at the synthesized call with the standard diagnostic (the
 /// family precedent), and the attribute-level classes — a union naming
 /// its un-annotated ambiguity, a union inside the constructor brackets,
-/// the shapes spelling no key, a payloaded or empty enum, a generic
-/// declaration — refuse naming the part or the declaration.
+/// the shapes spelling no key, a payloaded or empty enum, a type
+/// variable (no default value of a variable exists) — refuse naming
+/// the part or the declaration.
 #[test]
 fn the_default_family_refuses_its_boundaries() {
     let missing = concat!(
@@ -824,11 +961,14 @@ fn the_default_family_refuses_its_boundaries() {
     );
     let rendered = refusals(generic);
     let [one] = rendered.as_slice() else {
-        panic!("one generic refusal: {rendered:?}")
+        panic!("one variable-part refusal: {rendered:?}")
     };
     assert!(
-        one.contains("DS2029") && one.contains("derive `default` refuses a generic declaration"),
-        "the one-body-per-impl seam refuses: {one}"
+        one.contains("DS2026")
+            && one.contains(
+                "derive `default` refuses the field `v`: a type variable carries no default value"
+            ),
+        "no default value of a variable exists: {one}"
     );
 }
 
@@ -887,11 +1027,11 @@ fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
 
 /// The from_json family refuses its own carve-outs at the attribute,
 /// each naming the family and the refusing shape: a function-typed or
-/// `~Copyable` part (the shared part refusal), a generic declaration
-/// (the runtime seam's one-member-body boundary), a tag (no members to
-/// walk), and a tuple field (a shape spelling no read over the typed
-/// readers). The attribute-level refusals need no json face: the family
-/// refuses before any name resolves. The optional list field — once the
+/// `~Copyable` part (the shared part refusal), a type-variable part
+/// (the json members are type-keyed, never bound), a tag (no members
+/// to walk), and a tuple field (a shape spelling no read over the
+/// typed readers). The attribute-level refusals need no json face: the
+/// family refuses before any name resolves. The optional list field — once the
 /// family's own refusal — now expands clean: the decode walk mirrors
 /// to_json's statement-position member row, the presence narrow's
 /// catchall arm carrying the array walk. So do the tuple payload and
@@ -933,8 +1073,10 @@ fn the_from_json_family_refuses_its_carve_outs() {
         "{rendered:?}"
     );
     assert!(
-        rendered.iter().any(|r| r.contains("DS2029")
-            && r.contains("derive `from_json` refuses a generic declaration")),
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains(
+                "derive `from_json` refuses the field `v`: a type variable carries no json member"
+            )),
         "{rendered:?}"
     );
     assert!(
@@ -1404,11 +1546,10 @@ fn an_encode_walk_past_the_frame_cap_refuses_at_lowering() {
 /// The to_json family refuses from_json's mirror classes at the
 /// attribute, each naming the family and the refusing shape: a
 /// function-typed or `~Copyable` part (the shared part refusal), a
-/// generic declaration (the runtime seam's one-member-body boundary),
+/// type-variable part (the json members are type-keyed, never bound),
 /// a tag (no members to walk), and a tuple field (a shape spelling no
-/// json write). The
-/// attribute-level refusals need no json face: the family refuses
-/// before any name resolves. The
+/// json write). The attribute-level refusals need no json face: the
+/// family refuses before any name resolves. The
 /// optional list field — the decode mirror's refusal — expands clean:
 /// the encode walk's member rows are statement-position, so the
 /// presence narrow carries the array walk the value-position else
@@ -1451,8 +1592,10 @@ fn the_to_json_family_refuses_its_carve_outs() {
         "{rendered:?}"
     );
     assert!(
-        rendered.iter().any(|r| r.contains("DS2029")
-            && r.contains("derive `to_json` refuses a generic declaration")),
+        rendered.iter().any(|r| r.contains("DS2026")
+            && r.contains(
+                "derive `to_json` refuses the field `v`: a type variable carries no json member"
+            )),
         "{rendered:?}"
     );
     assert!(

@@ -1536,7 +1536,10 @@ fn shape_item(
                         EnumPayload::None => Vec::new(),
                         EnumPayload::Tuple(types) => types
                             .iter()
-                            .filter_map(|t| conv_expr(package, t, decls, diags))
+                            .filter_map(|t| {
+                                let subject = format!("case `{}`'s payload slot", case.name.name);
+                                field_expr(package, t, t.span(), &subject, decls, diags)
+                            })
                             .map(Field::positional)
                             .collect(),
                         EnumPayload::Struct(fields) => {
@@ -1560,7 +1563,10 @@ fn shape_item(
                         EnumPayload::None => Vec::new(),
                         EnumPayload::Tuple(types) => types
                             .iter()
-                            .filter_map(|t| conv_expr(package, t, decls, diags))
+                            .filter_map(|t| {
+                                let subject = format!("case `{}`'s payload slot", case.name.name);
+                                field_expr(package, t, t.span(), &subject, decls, diags)
+                            })
                             .map(Field::positional)
                             .collect(),
                         EnumPayload::Struct(fields) => {
@@ -1668,11 +1674,46 @@ fn universe_fields(
 ) -> Vec<Field> {
     let mut out = Vec::with_capacity(fields.len());
     for field in fields {
-        if let Some(expr) = conv_expr(package, &field.ty, decls, diags) {
+        let subject = format!("field `{}`", field.name.name);
+        if let Some(expr) = field_expr(package, &field.ty, field.span, &subject, decls, diags) {
             out.push(Field::named(&field.name.name, expr));
         }
     }
     out
+}
+
+/// One field type's conversion behind the none door: a written type
+/// whose solution is the `none` atom alone refuses at its own span —
+/// `none` is the optional's absent member [B4], never a field's whole
+/// type, and a field that enters no atom would surface later as a
+/// lowering refusal over the wrong vocabulary.
+fn field_expr(
+    package: &Package,
+    ty: &Type,
+    span: Span,
+    subject: &str,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<TypeExpr> {
+    let expr = conv_expr(package, ty, decls, diags)?;
+    let none_alone = decls
+        .universe
+        .solve(&expr)
+        .is_ok_and(|solved| decls.universe.members(solved) == [TypeId::NONE]);
+    if none_alone {
+        diags.push(
+            Diagnostic::error(
+                ErrorCode::NoneTypedField,
+                format!(
+                    "{subject} cannot be typed `none`: `none` is the optional's absent member, a \
+                     member of `t?` and `t | none` spellings, never a standalone field type"
+                ),
+            )
+            .with_primary(span, "none-typed field"),
+        );
+        return None;
+    }
+    Some(expr)
 }
 
 /// A written type application's shape refusal against its head
@@ -1747,7 +1788,22 @@ fn conv_expr(
             if args.is_empty() {
                 path_expr(package, only, decls, diags)?
             } else {
-                let def = package.lookup_type(&only.name)?;
+                let Some(def) = package.lookup_type(&only.name) else {
+                    // `none` applied with type arguments: the predeclared
+                    // unit atom takes none, the same refusal a local
+                    // tag's application hears, instead of the field
+                    // silently missing its atom.
+                    if only.name == "none" && !package.declares("none") {
+                        diags.push(
+                            Diagnostic::error(
+                                ErrorCode::TypeApplicationMismatch,
+                                ApplicationMismatch::Kind { word: "tag" }.message(&only.name),
+                            )
+                            .with_primary(*span, "type application"),
+                        );
+                    }
+                    return None;
+                };
                 if let Err(mismatch) = check_application(package, def, args.len(), decls) {
                     diags.push(
                         Diagnostic::error(
@@ -1819,6 +1875,13 @@ fn path_expr(
     decls: &mut Decls,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<TypeExpr> {
+    // `none` is the universe's predeclared unit atom [B4] with no def,
+    // so both namespace lookups miss the name; the optional arm unions
+    // this same atom for `t?`, and a package declaration claiming the
+    // name keeps its own resolution below.
+    if name.name == "none" && !package.declares("none") {
+        return Some(TypeExpr::Atom(TypeId::NONE));
+    }
     // An import-bound type the shape pass names ahead of the linked
     // mint loop: its def sits outside the local type namespace (the
     // link pass's registration), so the foreign table answers by
