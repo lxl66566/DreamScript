@@ -930,7 +930,11 @@ fn plan_item(
     let Pattern::Binding { name, .. } = &local.pat else {
         return;
     };
-    let Some(def) = analyzed.package.lookup(&name.name) else {
+    // The planned item is a value binding, so its def reads the value
+    // namespace: a fn sharing an ambient tag's label plans under its own
+    // def, and a call the checker resolved to the fn lowers as the fn
+    // call.
+    let Some(def) = analyzed.package.lookup_value(&name.name) else {
         return;
     };
     if !analyzed.checked.def_types.contains_key(&def) {
@@ -1232,7 +1236,11 @@ where
                         if generics.is_empty() || local.mutable {
                             continue;
                         }
-                        let Some(def) = analyzed.package.lookup(&name.name) else {
+                        // The body's def reads the value namespace, the
+                        // plan's own registration reading: a generic fn
+                        // sharing an ambient tag's label keeps its bounds
+                        // under its own def.
+                        let Some(def) = analyzed.package.lookup_value(&name.name) else {
                             continue;
                         };
                         if !analyzed.checked.def_types.contains_key(&def) {

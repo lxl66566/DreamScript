@@ -382,7 +382,7 @@ where
             if ds_check::ConstFact::of_expr(&local.init).is_some() {
                 continue; // plain: the literal is the fact
             }
-            let Some(def) = analyzed.package.lookup(&name.name) else {
+            let Some(def) = analyzed.package.lookup_value(&name.name) else {
                 continue;
             };
             if analyzed.package.def(def).vis != ds_check::Vis::Pub {
@@ -635,7 +635,7 @@ where
         {
             continue;
         }
-        let Some(def) = analyzed.package.lookup(&name.name) else {
+        let Some(def) = analyzed.package.lookup_value(&name.name) else {
             continue;
         };
         fns.push(ComptimeFn {
@@ -748,7 +748,7 @@ impl<'a> Admission<'a> {
                 let ds_parse::Pattern::Binding { name, .. } = &local.pat else {
                     continue;
                 };
-                let Some(def) = analyzed.package.lookup(&name.name) else {
+                let Some(def) = analyzed.package.lookup_value(&name.name) else {
                     continue;
                 };
                 let Expr::Lambda { params, .. } = &local.init else {
