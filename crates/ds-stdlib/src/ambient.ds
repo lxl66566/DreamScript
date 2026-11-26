@@ -646,10 +646,21 @@ pub extern fn mono () -> int
 // The parking sleep: parks the calling fiber for at least the given
 // nanoseconds (a negative span answering at once) — the timer-only
 // wait over the deadline wheel; under no
-// installed reactor the blocking twin sleeps the thread. The promised
-// `timeout`/`firstof`/`interleave` combinators layer over this op as
-// ordinary library code.
+// installed reactor the blocking twin sleeps the thread.
 pub extern fn sleep (nanos: int) -> ()
+// The timer race: `timeout(nanos, thunk)` runs the callable as the
+// calling fiber's racer while the caller parks on the deadline. The
+// racer's answer is the call's answer when it lands first; a deadline
+// that passes first cuts the racer — at its park or its teardown
+// drain, its kept deinits firing — and the call answers the io
+// taxonomy's own `timed_out` member, so `?`, `.err`, and match handle
+// the deadline through the ordinary error machinery and io-handling
+// callers absorb it by set containment. A deadline already past
+// answers the failure member at once and the racer never runs; the
+// answer spans one word beside the member (a scalar, a reference, a
+// one-field record, or a tag-only union); a racer that never parks
+// spins past its deadline until the shutdown guard owns it.
+pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out
 // The local offset read (the datetime face's one world touch): the
 // host's local UTC offset for the timestamp, seconds east of UTC
 // (west negative) — seconds, not the clock pair's nanoseconds, the

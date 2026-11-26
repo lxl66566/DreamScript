@@ -850,6 +850,16 @@ pub const BUILTIN_LN: u32 = 104;
 pub const BUILTIN_EXP: u32 = 105;
 /// `tan(x: float) -> float`.
 pub const BUILTIN_TAN: u32 = 106;
+/// `timeout(nanos: int, thunk: fn() -> t) -> t` — the timer capability's
+/// race: the callable runs as the calling fiber's racer while the caller
+/// parks on the deadline, the first to finish winning (the two-word
+/// platform span delivered at the parked call site: the racer's one
+/// answer word under the ok discriminant, the `timed_out` class tag
+/// with the inert unit word on expiry, so the call's `t | timed_out`
+/// union handles the deadline through the ordinary error machinery).
+/// Intercepted at `CALL` sites like the channel natives; the body is
+/// the never-run placeholder.
+pub const BUILTIN_TIMEOUT: u32 = 107;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -1006,6 +1016,18 @@ pub enum ChannelNative {
     Recv,
 }
 
+/// The timer native: like the channel natives, the dispatcher intercepts
+/// it at `CALL` and `CALLT` sites — the race needs the run queue, the
+/// deadline wheel, and the cancel cut, none of which a native body sees —
+/// so the table body is a placeholder that refuses if some path ever runs
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerNative {
+    /// `timeout(nanos, thunk)`: spawn the callable as the racer, park the
+    /// caller on the deadline.
+    Timeout,
+}
+
 /// A native's result: one word on the caller's overlay slot 0, a
 /// fallible native's two-word tag+payload span on overlay slots 0 and 1,
 /// the span channel — a discriminant plus a multi-word payload on
@@ -1143,6 +1165,10 @@ pub struct NativeFunction {
     /// and `CALLT` sites (the channel step is the dispatcher's, like
     /// the control switch); `None` for every ordinary native.
     pub channel: Option<ChannelNative>,
+    /// Marks the timer native the dispatcher intercepts at `CALL` and
+    /// `CALLT` sites (the race is the dispatcher's, like the channel
+    /// step); `None` for every ordinary native.
+    pub timer: Option<TimerNative>,
     /// The body.
     pub func: NativeFn,
 }
@@ -3506,6 +3532,7 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
         result_words: 1,
         control: None,
         channel: None,
+        timer: None,
         func,
     }
 }
@@ -3558,6 +3585,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: str_int_fn,
         },
         NativeFunction {
@@ -3567,6 +3595,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: str_float_fn,
         },
         NativeFunction {
@@ -3576,6 +3605,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: str_bool_fn,
         },
         reserved_entry(builtin_reserved_5),
@@ -3591,6 +3621,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: substring_fn,
         },
         NativeFunction {
@@ -3600,6 +3631,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: concat_fn,
         },
         NativeFunction {
@@ -3609,6 +3641,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: to_upper_fn,
         },
         NativeFunction {
@@ -3618,6 +3651,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: to_lower_fn,
         },
         NativeFunction {
@@ -3627,6 +3661,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: trim_fn,
         },
         NativeFunction {
@@ -3636,6 +3671,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: parse_int_fn,
         },
         NativeFunction {
@@ -3645,6 +3681,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: split_fn,
         },
         NativeFunction {
@@ -3654,6 +3691,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: char_at_fn,
         },
         NativeFunction {
@@ -3667,6 +3705,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: parse_float_fn,
         },
         NativeFunction {
@@ -3676,6 +3715,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_new_fn,
         },
         reserved_entry(builtin_reserved_21),
@@ -3689,6 +3729,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::Resume),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3698,6 +3739,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::NurseryJoin),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3707,6 +3749,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_push_fn,
         },
         NativeFunction {
@@ -3716,6 +3759,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_new_fn,
         },
         reserved_entry(builtin_reserved_29),
@@ -3729,6 +3773,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_set_fn,
         },
         reserved_entry(builtin_reserved_32),
@@ -3747,6 +3792,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::NurseryOpen),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3756,6 +3802,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::NurserySpawn),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3765,6 +3812,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: Some(ControlNative::NurseryBoundary),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3778,6 +3826,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::NurseryCancel),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         NativeFunction {
@@ -3787,6 +3836,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: join_fn,
         },
         reserved_entry(builtin_reserved_46),
@@ -3799,6 +3849,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: total_compare_fn,
         },
         NativeFunction {
@@ -3808,6 +3859,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: str_compare_fn,
         },
         NativeFunction {
@@ -3817,6 +3869,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: char_compare_fn,
         },
         NativeFunction {
@@ -3826,6 +3879,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: byte_compare_fn,
         },
         NativeFunction {
@@ -3835,6 +3889,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: str_hash_fn,
         },
         NativeFunction {
@@ -3844,6 +3899,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: float_hash_fn,
         },
         NativeFunction {
@@ -3853,6 +3909,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: char_hash_fn,
         },
         NativeFunction {
@@ -3865,6 +3922,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: Some(ControlNative::ReplPark),
             channel: None,
+            timer: None,
             func: fiber_control_bounce_fn,
         },
         reserved_entry(builtin_reserved_57), /* was parse_json; the reader lives in @std ds
@@ -3876,6 +3934,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: char_of_fn,
         },
         reserved_entry(builtin_reserved_59), /* was map_keys; the generic body lives in
@@ -3887,6 +3946,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: code_of_fn,
         },
         NativeFunction {
@@ -3896,6 +3956,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: bytes_of_fn,
         },
         NativeFunction {
@@ -3905,6 +3966,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: byte_list_fn,
         },
         NativeFunction {
@@ -3914,6 +3976,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: byte_at_fn,
         },
         NativeFunction {
@@ -3923,6 +3986,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: bytes_eq_fn,
         },
         NativeFunction {
@@ -3932,6 +3996,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: bytes_compare_fn,
         },
         NativeFunction {
@@ -3941,6 +4006,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: bytes_hash_fn,
         },
         NativeFunction {
@@ -3950,6 +4016,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: utf8_encode_fn,
         },
         NativeFunction {
@@ -3959,6 +4026,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: utf8_decode_fn,
         },
         NativeFunction {
@@ -3968,6 +4036,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: trap_fn,
         },
         NativeFunction {
@@ -3977,6 +4046,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_eq_fn,
         },
         NativeFunction {
@@ -3986,6 +4056,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_eq_fn,
         },
         NativeFunction {
@@ -3995,6 +4066,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: byte_of_fn,
         },
         NativeFunction {
@@ -4004,6 +4076,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: int_of_byte_fn,
         },
         NativeFunction {
@@ -4013,6 +4086,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: u32_of_fn,
         },
         NativeFunction {
@@ -4022,6 +4096,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: int_of_u32_fn,
         },
         NativeFunction {
@@ -4031,6 +4106,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: sqrt_fn,
         },
         NativeFunction {
@@ -4040,6 +4116,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: sin_fn,
         },
         NativeFunction {
@@ -4049,6 +4126,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: cos_fn,
         },
         NativeFunction {
@@ -4058,6 +4136,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: atan2_fn,
         },
         NativeFunction {
@@ -4067,6 +4146,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: floor_fn,
         },
         NativeFunction {
@@ -4076,6 +4156,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: ceil_fn,
         },
         NativeFunction {
@@ -4085,6 +4166,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: pow_fn,
         },
         NativeFunction {
@@ -4094,6 +4176,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: abs_fn,
         },
         NativeFunction {
@@ -4103,6 +4186,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: contains_fn,
         },
         NativeFunction {
@@ -4112,6 +4196,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 2,
             control: None,
             channel: None,
+            timer: None,
             func: index_of_fn,
         },
         NativeFunction {
@@ -4121,6 +4206,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: replace_fn,
         },
         NativeFunction {
@@ -4130,6 +4216,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: Some(ChannelNative::New),
+            timer: None,
             func: chan_refuse_fn,
         },
         NativeFunction {
@@ -4142,6 +4229,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: Some(ChannelNative::Send),
+            timer: None,
             func: chan_refuse_fn,
         },
         NativeFunction {
@@ -4151,6 +4239,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: Some(ChannelNative::Recv),
+            timer: None,
             func: chan_refuse_fn,
         },
         reserved_entry(builtin_reserved_90),
@@ -4164,6 +4253,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_set_fn,
         },
         NativeFunction {
@@ -4173,6 +4263,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_remove_fn,
         },
         NativeFunction {
@@ -4183,6 +4274,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_insert_fn,
         },
         NativeFunction {
@@ -4192,6 +4284,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: list_clear_fn,
         },
         NativeFunction {
@@ -4201,6 +4294,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_remove_fn,
         },
         NativeFunction {
@@ -4210,6 +4304,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_contains_fn,
         },
         NativeFunction {
@@ -4219,6 +4314,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: map_entries_fn,
         },
         NativeFunction {
@@ -4228,6 +4324,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: arena_new_fn,
         },
         NativeFunction {
@@ -4237,6 +4334,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: arena_insert_fn,
         },
         NativeFunction {
@@ -4246,6 +4344,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: arena_remove_fn,
         },
         NativeFunction {
@@ -4255,6 +4354,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: arena_at_fn,
         },
         NativeFunction {
@@ -4264,6 +4364,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: round_fn,
         },
         NativeFunction {
@@ -4273,6 +4374,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: trunc_fn,
         },
         NativeFunction {
@@ -4282,6 +4384,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: log_fn,
         },
         NativeFunction {
@@ -4291,6 +4394,7 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: exp_fn,
         },
         NativeFunction {
@@ -4300,19 +4404,35 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             result_words: 1,
             control: None,
             channel: None,
+            timer: None,
             func: tan_fn,
+        },
+        NativeFunction {
+            name: "timeout",
+            // the deadline's nanoseconds, then the callable's word (the
+            // scalar FuncRef or a closure object's `Ref`); the answer
+            // spans two overlay words — the discriminant plus the
+            // payload word — exactly a fallible native's own shape
+            params: &[SlotType::I64, SlotType::Fn],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            channel: None,
+            timer: Some(TimerNative::Timeout),
+            func: chan_refuse_fn,
         },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_TAN, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_TAN as usize + 1);
+    // BUILTIN_TIMEOUT, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_TIMEOUT as usize + 1);
     fns
 }
 
-/// The channel natives' placeholder body: the dispatcher intercepts
-/// every `CALL` and `CALLT` site ahead of the body, so a body that runs
-/// names hand-assembled code that bypassed the interception — the same
-/// refusal the control natives' bounce carries, as a trap.
+/// The intercepted natives' placeholder body (the channel steps and the
+/// timer race): the dispatcher intercepts every `CALL` and `CALLT` site
+/// ahead of the body, so a body that runs names hand-assembled code that
+/// bypassed the interception — the same refusal the control natives'
+/// bounce carries, as a trap.
 fn chan_refuse_fn(
     _heaps: &mut Heaps,
     _out: &mut OutputSink,
@@ -5187,7 +5307,8 @@ mod tests {
         assert_eq!(fns[BUILTIN_LN as usize].name, "ln");
         assert_eq!(fns[BUILTIN_EXP as usize].name, "exp");
         assert_eq!(fns[BUILTIN_TAN as usize].name, "tan");
-        assert_eq!(fns.len(), BUILTIN_TAN as usize + 1);
+        assert_eq!(fns[BUILTIN_TIMEOUT as usize].name, "timeout");
+        assert_eq!(fns.len(), BUILTIN_TIMEOUT as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [

@@ -1386,13 +1386,17 @@ const TAG_RESOLUTION_AMBIENT: &str = concat!(
     "pub tag reset\n",
     "pub tag net_other { msg: string }\n",
     "pub type net_err = timeout | refused | addr_in_use | reset | net_other\n",
+    "pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out\n",
 );
 
-/// tag_resolution.ds: the F9.5 phase-1 re-key round — the fn/tag
-/// coexistence and the directed spellings check clean beside the
-/// shadowing declaration, the three unknown-member refusals and the
-/// ambiguity refusal land at their own items, and the same-file
-/// redeclaration keeps DS2005.
+/// tag_resolution.ds: the F9.5 phase-1 re-key round — reworked at the
+/// timer race's landing (the ambient's own `timeout` fn beside its tag):
+/// the call form means the fn, the directed spellings and the qualified
+/// timeout escape check clean beside the shadowing declaration, the
+/// three unknown-member refusals and the ambiguity refusal land at their
+/// own items, and the same-file redeclaration, the same-package fn
+/// redeclaration, and the bare value-position label (the unapplied
+/// generic) keep their refusals.
 #[test]
 fn tag_resolution_items_check_with_the_directed_refusals() {
     let rejects = gate(
@@ -1403,19 +1407,23 @@ fn tag_resolution_items_check_with_the_directed_refusals() {
     assert_eq!(
         ids,
         [
+            "timeout",
             "unknown-binding",
             "unknown-match",
             "unknown-is",
             "ambiguous",
             "refused",
+            "fn-tag-value",
         ],
-        "the reject class is the three unknown-member spellings, the ambiguous label, and the \
-         same-file redeclaration"
+        "the reject class is the same-package fn redeclaration, the three unknown-member \
+         spellings, the ambiguous label, the same-file redeclaration, and the bare value-position \
+         label"
     );
     for (id, _what, diag) in &rejects {
         let code = match id.as_str() {
             "unknown-binding" | "unknown-match" | "unknown-is" => "DS2045",
             "ambiguous" => "DS2046",
+            "fn-tag-value" => "DS2002",
             _ => "DS2005",
         };
         assert_eq!(diag.code.as_str(), code, "`{id}` refuses at its own span");

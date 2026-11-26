@@ -24,7 +24,7 @@ fn clean_pass() -> int | net_err {
 fn cut_pass() -> int | net_err {
   nursery {
     spawn {
-      cancel(timeout)
+      cancel(net_err::timeout)
     }
     spawn {
       const held = resource { name: "cut" }

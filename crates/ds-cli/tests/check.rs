@@ -163,12 +163,15 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // zero noise — the fallible io spellings extract their io_err classes
     // over the ambient taxonomy (the whole-file run golden sits beside)
     assert_corpus_clean("io_fallible.ds", 0);
-    // the five errors are the file's own reject items: the three
-    // unknown-member spellings, the ambiguous label naming both
-    // declarations, and the same-file redeclaration — the fn/tag
-    // coexistence and the directed spellings check clean beside the
-    // shadowing declaration (the F9.5 phase-1 round)
-    assert_corpus_clean("tag_resolution.ds", 5);
+    // the seven errors are the file's own reject items: the same-package
+    // fn redeclaration of the ambient's `timeout`, the bare value-position
+    // label as the unapplied generic, the three unknown-member spellings,
+    // the ambiguous label naming both declarations, and the same-file
+    // redeclaration — the call form, the directed spellings, and the
+    // qualified timeout escape check clean beside the shadowing
+    // declaration (the F9.5 phase-1 round, reworked at the timer race's
+    // landing)
+    assert_corpus_clean("tag_resolution.ds", 7);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a

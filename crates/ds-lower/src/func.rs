@@ -37,7 +37,8 @@ use crate::{
     },
     place::{AffineFacts, Hook, Owned, Placement, State},
     shape::{
-        MemberField, MemberShape, Shape, Shapes, SpanWords, StructShape, expr_members, shape_words,
+        MemberField, MemberShape, Shape, Shapes, SpanWords, StructShape, UnionShape, expr_members,
+        shape_words,
     },
 };
 
@@ -5672,6 +5673,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // records the one word Raw and the ABI slide admits the
             // pairing whatever the receiver's concrete kind
             Callee::Foreign { def: None, .. } if default_dispatch => Some(vec![SlotType::Raw]),
+            // the timer race's staged words are its two parameters — the
+            // deadline's i64 and the callable-defaulted `Fn` slot, which
+            // admits a closure's `Ref` word (the generic table's own
+            // spelling of a lambda parameter)
+            Callee::Builtin(native) if native.name == "timeout" => {
+                Some(vec![SlotType::I64, SlotType::Fn])
+            },
             Callee::Builtin(_) | Callee::Evidence(_) | Callee::Foreign { def: None, .. } => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
             // a bound extern's staged words are its written signature's

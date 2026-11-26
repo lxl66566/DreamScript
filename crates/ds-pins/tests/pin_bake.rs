@@ -130,27 +130,32 @@ const KERNELS: &[Kernel] = &[
 /// recorded by `PIN_BAKE_RECORD=1` on the committed tree. Every
 /// [`KERNELS`] entry must appear here exactly once — a kernel without
 /// a pin or a pin without a kernel fails the gate.
+// Re-baselined 2026-11-26 at the timer race's landing: the native
+// dispatch's third marker field and the answered-deadline VM shapes
+// moved the whole-process counts by up to 1.4% (mostly down, a
+// widened wake enum flipping an inlining decision), the loop kernels
+// by under 0.005%.
 const PINS: &[(&str, u64)] = &[
-    ("scalar_loop::scalar_loop::scalar_dispatch", 6_283_592_550),
-    ("strcat_temp::strcat_temp::serving_cats", 8_676_084_812),
-    ("strcat_temp::strcat_temp::claiming_cats", 15_271_084_717),
-    ("string_temp::string_temp::borrowing_loads", 4_601_079_434),
-    ("string_temp::string_temp::claiming_loads", 16_581_077_375),
+    ("scalar_loop::scalar_loop::scalar_dispatch", 6_193_645_039),
+    ("strcat_temp::strcat_temp::serving_cats", 8_696_137_543),
+    ("strcat_temp::strcat_temp::claiming_cats", 15_221_138_237),
+    ("string_temp::string_temp::borrowing_loads", 4_596_132_583),
+    ("string_temp::string_temp::claiming_loads", 16_566_130_797),
     (
         "loop_claims::loop_claims::reset_held_to_overwrite",
-        4_531_077_577,
+        4_531_130_996,
     ),
     (
         "loop_claims::loop_claims::reset_released_at_use",
-        9_061_077_690,
+        9_061_131_072,
     ),
     (
         "loop_claims::loop_claims::rebuild_held_to_overwrite",
-        11_161_085_436,
+        11_161_138_944,
     ),
     (
         "loop_claims::loop_claims::rebuild_released_at_use",
-        11_161_084_052,
+        11_161_138_748,
     ),
 ];
 

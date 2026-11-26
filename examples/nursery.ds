@@ -13,7 +13,7 @@ fn fetch_body(u: string) -> string | net_err {
     refused
   } else {
     if u == "https://slow.example" {
-      timeout
+      net_err::timeout
     } else {
       "body of ${u}"
     }
@@ -25,7 +25,7 @@ fn fetch_all(urls: list[string]) -> int | net_err {
     for u in urls {
       spawn {
         match fetch_body(u) {
-          timeout => cancel(timeout)
+          timeout => cancel(net_err::timeout)
           refused => cancel(refused)
           addr_in_use => cancel(addr_in_use)
           reset => cancel(reset)

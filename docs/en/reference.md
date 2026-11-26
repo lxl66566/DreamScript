@@ -1093,9 +1093,7 @@ pub extern fn sin(x: float) -> float
 The parking sleep: parks the calling fiber for at least the given
 nanoseconds (a negative span answering at once) — the timer-only
 wait over the deadline wheel; under no
-installed reactor the blocking twin sleeps the thread. The promised
-`timeout`/`firstof`/`interleave` combinators layer over this op as
-ordinary library code.
+installed reactor the blocking twin sleeps the thread.
 
 ```ds
 pub extern fn sleep(nanos: int) -> ()
@@ -1166,6 +1164,25 @@ moves backward, the word whose differences measure elapsed time.
 
 ```ds
 pub extern fn time() -> int
+```
+
+#### `timeout`
+
+The timer race: `timeout(nanos, thunk)` runs the callable as the
+calling fiber's racer while the caller parks on the deadline. The
+racer's answer is the call's answer when it lands first; a deadline
+that passes first cuts the racer — at its park or its teardown
+drain, its kept deinits firing — and the call answers the io
+taxonomy's own `timed_out` member, so `?`, `.err`, and match handle
+the deadline through the ordinary error machinery and io-handling
+callers absorb it by set containment. A deadline already past
+answers the failure member at once and the racer never runs; the
+answer spans one word beside the member (a scalar, a reference, a
+one-field record, or a tag-only union); a racer that never parks
+spins past its deadline until the shutdown guard owns it.
+
+```ds
+pub extern fn timeout[t](nanos: int, thunk: fn() -> t) -> t | timed_out
 ```
 
 #### `total_compare`

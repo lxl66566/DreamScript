@@ -119,6 +119,22 @@ fn a_recursive_nursery_block_drains_the_interlock_iteratively() {
 }
 
 #[test]
+fn the_timeout_surface_races_answers_and_handles_the_deadline() {
+    // the racer's one answer word re-spanned into the call's
+    // `t | timed_out` union at the parked call across the answering
+    // shapes, and the deadline answered as the io taxonomy's own
+    // member: a past deadline at once, a real one cutting a parked
+    // racer with the `.err` fallback, a `?`-propagating helper, the
+    // race under a nursery block, a nested race, and a looping racer
+    // landing inside its deadline — run-stage, exit 0
+    run_golden(
+        "timeout_surface.ds",
+        "scalar 41\nclosure hello thunk\nnamed 5\none field 4\nat once -9\nfallback \
+         12\ngreen\nblock 5 6\nnested 7\nloop 1000000\n0\n",
+    );
+}
+
+#[test]
 fn the_union_default_annotation_answers_the_member_construction() {
     // the `#[default]`-annotated case answers the union's default() — a
     // payloaded struct case through per-part defaults, a tuple case the

@@ -984,3 +984,28 @@ fn a_large_terminating_computation_passes_the_budget() {
     )));
     assert_eq!(out, "1999999000000\n");
 }
+
+#[test]
+fn the_timer_race_refuses_at_the_fence() {
+    // a world-touching builtin core row: the fenced VM's builtin table
+    // drops it, so the slice's own load refuses the call as a compile
+    // error exactly the platform natives' unserved ops
+    let rendered = evaluate_refused(
+        "timer_fence",
+        &source(concat!(
+            "tag timed_out\n",
+            "extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out\n",
+            "fn bounded(comptime t: type) -> int {\n",
+            "  timeout(1000, () => 5).err((e) => 0)\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${bounded(int)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("comptime fence refuses world-touching calls")
+            && rendered.contains("`timeout`"),
+        "the fence names the timer race's world touch: {rendered}"
+    );
+}

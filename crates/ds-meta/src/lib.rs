@@ -262,6 +262,13 @@ where
     registry.install_platform(Platform::new(ds_lower::platform_name(asts), &[]));
     registry.install_native(COMPTIME_MODULE, ds_vm::comptime::comptime_module());
     let mut vm = Vm::new(registry);
+    // the fence's builtin row: the world-touching builtin core rows
+    // drop out of the fenced VM's table, so the slice's load refuses
+    // them as compile errors
+    vm.install_native_module(
+        ds_vm::native::BUILTIN_MODULE,
+        ds_vm::comptime::fenced_builtin_module(),
+    );
     // Phase one registers every site's arguments (and their field
     // closures) into the reflection table BEFORE the table reaches the
     // VM — the natives answer from the installed snapshot, so a later
@@ -418,6 +425,10 @@ where
     registry.install_platform(Platform::new(ds_lower::platform_name(asts), &[]));
     registry.install_native(COMPTIME_MODULE, ds_vm::comptime::comptime_module());
     let mut vm = Vm::new(registry);
+    vm.install_native_module(
+        ds_vm::native::BUILTIN_MODULE,
+        ds_vm::comptime::fenced_builtin_module(),
+    );
     let mut reflection = Reflection::new(analyzed);
     let guard = ds_vm::comptime::set_reflection(reflection.table_mut());
     let install = vm.install_dsmod(slice.into_module());
@@ -615,6 +626,20 @@ fn fence_refusal(error: &LoadError, sites: &[ConstSite]) -> Diagnostic {
                  refuses world-touching calls as compile errors"
             ),
         ),
+        // the world-touching builtin rows the fenced table drops: the
+        // timer race parks the calling fiber against the clock, the
+        // same world refusal the unserved platform ops take
+        LoadError::UnresolvedCallee { module, index, .. }
+            if *module == ds_vm::native::BUILTIN_MODULE
+                && *index == ds_vm::native::BUILTIN_TIMEOUT =>
+        {
+            site_refusal(
+                &sites[0],
+                "the initializer calls the world surface (`timeout`: the timer race parks the \
+                 calling fiber against the clock); the evaluation fence refuses world-touching \
+                 calls as compile errors",
+            )
+        },
         other => Diagnostic::error(
             ErrorCode::LinkedConstEvalRefusal,
             format!("the evaluation slice does not install: {other:?}"),
@@ -1806,6 +1831,30 @@ fn fence_diagnostic(error: &LoadError, fns: &[ComptimeFn], sites: &[CallSite]) -
                 ),
             )
             .with_primary(primary, "the comptime function")
+            .with_secondary(sites[0].span, "evaluated at this comptime call")
+        },
+        // the world-touching builtin rows the fenced table drops: the
+        // timer race parks the calling fiber against the clock, the
+        // same world refusal the unserved platform ops take
+        LoadError::UnresolvedCallee {
+            func,
+            module,
+            index,
+        } if *module == ds_vm::native::BUILTIN_MODULE
+            && *index == ds_vm::native::BUILTIN_TIMEOUT =>
+        {
+            Diagnostic::error(
+                ErrorCode::ComptimeFenceRefusal,
+                "this comptime function calls the world surface (`timeout`: the timer race parks \
+                 the calling fiber against the clock); the comptime fence refuses world-touching \
+                 calls as compile errors [G1]",
+            )
+            .with_primary(
+                fns.iter()
+                    .find(|f| f.name == *func)
+                    .map_or(sites[0].span, |f| f.span),
+                "the comptime function",
+            )
             .with_secondary(sites[0].span, "evaluated at this comptime call")
         },
         LoadError::UnresolvedCallee { func, module, .. } => Diagnostic::error(

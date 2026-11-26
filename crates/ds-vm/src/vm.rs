@@ -80,13 +80,14 @@ use crate::{
     module::{ModuleRegistry, ModuleVersion, VersionIdx},
     native::{
         ChannelNative, ControlNative, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, NativeFunction,
-        NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_NONE,
+        NativeResult, OutputSink, PLATFORM_CANCELLED, PLATFORM_IO_OK, PLATFORM_IO_TIMED_OUT,
+        PLATFORM_NONE, TimerNative,
     },
-    nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState},
+    nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState, Race},
     object::{ChanPop, ChanSender, Heaps, Objects},
     program::{Const, ConstFuncRef, ConstKind},
     reactor::Reactor,
-    sched::{SchedState, WaitEntry, WorldWait},
+    sched::{SchedState, WaitEntry, Wake, WorldWait},
     value::{ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word},
 };
 
@@ -1221,6 +1222,18 @@ enum EagerPass {
 /// A native answer's head word — the word the switch payload delivers
 /// onto the parked call site (the full answer overlays after the
 /// switch).
+/// The timer race's failure span: the io failure taxonomy's `timed_out`
+/// class tag over the inert unit word, the deadline's answer to the
+/// parked call — the same class discriminant the bounded platform
+/// waits answer, so the call site's union re-spans it onto the
+/// `timed_out` member the ambient declares in the io taxonomy.
+fn timeout_failure_span() -> NativeResult {
+    NativeResult::Tag {
+        tag: PLATFORM_IO_TIMED_OUT,
+        payload: Value::I64(0),
+    }
+}
+
 fn native_head_word(result: &NativeResult) -> Value {
     match result {
         NativeResult::Word(value) => *value,
@@ -1275,6 +1288,17 @@ enum ChanStep {
     /// The step parked the caller: the waiter already entered the
     /// channel's own data; the arm performs the fiber park.
     Park,
+}
+
+/// The timer race's outcome for the `CALL` arm: a deadline already
+/// past answers the failure span in place (the drive advancing past
+/// the call exactly an ordinary native's answer), a live one parks the
+/// caller on the deadline wheel and the drive ends with the event.
+enum TimerOutcome {
+    /// The failure span overlaid; advance past the call.
+    Answered,
+    /// The caller parked; the drive ends with the event.
+    Parked(DriveOutcome),
 }
 
 /// The channel step behind a `CALL` site for the dispatch arm: the
@@ -3886,6 +3910,16 @@ impl Vm {
         &self.registry
     }
 
+    /// Replaces one installed native module's table: the comptime
+    /// fence's builtin row (a world-touching builtin dropped so the
+    /// evaluation slice's own load refuses the call, the same compile
+    /// error an unserved platform op takes). A same-named prior install
+    /// is replaced, the registry's own discipline; the generation bump
+    /// re-keys the CALL-site caches.
+    pub fn install_native_module(&mut self, name: &str, functions: Vec<NativeFunction>) {
+        self.registry.install_native(name, functions);
+    }
+
     /// Installs a bound-artifact module under its manifest name (H5):
     /// the same replacement discipline a native table takes, so a host
     /// or a dev session installs ahead of the module installs whose
@@ -4505,6 +4539,7 @@ impl Vm {
         slot.segment.truncate(0);
         slot.resume = None;
         slot.state = FiberState::Dead;
+        self.end_race_of(fiber);
     }
 
     /// Tears down every open nursery whose owner's death released it:
@@ -5087,7 +5122,16 @@ impl Vm {
                         self.switch_in(child, Value::Tag(PLATFORM_NONE));
                         self.cancel_current()
                     } else if state == FiberState::WorldParked {
-                        break; // waiting on the world, a later sweep owns it
+                        // a parked timeout's racer runs under the
+                        // contained pass before the sweep waits on the
+                        // world: the owner's answer is the racer's
+                        match self.start_racer(child) {
+                            Some(step) => {
+                                self.drive_swept(step);
+                                continue;
+                            },
+                            None => break, // waiting on the world, a later sweep owns it
+                        }
                     } else if !self.pool[child.index()].resumable() {
                         break; // interrupted mid-trap (already ledgered)
                     } else if self.sched.deliveries.contains_key(&child) {
@@ -5139,6 +5183,10 @@ impl Vm {
                 }
                 frame.cursor += 1;
             }
+            // the racers the sweep owes the executor run here, before the
+            // wait: a racer that landed answers its owner, and a woken
+            // owner keeps the frame open without a reactor wait
+            self.drive_frame_racers();
             // the sweep is done: waiting children keep the frame open.
             // Under the raised cancel flag the next sweep cuts them —
             // no reactor wait stands between a first failure and its
@@ -5162,6 +5210,83 @@ impl Vm {
             }
             frame.cursor = 0;
         }
+    }
+
+    /// The racers a block's sweep drives in the executor's stead: no
+    /// executor loop runs while a join drive stands, so a racer that
+    /// woke (its own sleep, a channel hand-off) and a ready racer whose
+    /// owner parked inside this drive run here — contained exactly like
+    /// the executor's own owned children, their owners being the frame's
+    /// parked children or racers parked under them.
+    fn drive_frame_racers(&mut self) {
+        loop {
+            let woken = self
+                .sched
+                .run_queue
+                .iter()
+                .copied()
+                .find(|&fiber| self.is_racer(fiber) && self.owned_parked_child(fiber));
+            let step = match woken {
+                Some(racer) => {
+                    self.sched.take_ready(racer);
+                    match self.enter_woken(racer) {
+                        Ok(Woken::Step(step)) => Some(step),
+                        Ok(Woken::Completed(_) | Woken::Quiet) => None,
+                        Err(trap) => {
+                            self.host_release();
+                            self.trap_child(racer, &trap);
+                            None
+                        },
+                    }
+                },
+                None => self
+                    .ready_racer()
+                    .map(|racer| self.switch_in(racer, Value::Tag(PLATFORM_NONE))),
+            };
+            if let Some(step) = step {
+                self.drive_swept(step);
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// The contained pass over a fiber a sweep entered itself (a racer):
+    /// no host drive stands over a sweep, so the pass keeps every
+    /// outcome — the unreachable `Err` ledgers like a contained child's.
+    fn drive_swept(&mut self, step: (Active, CodePc)) {
+        if let Err(trap) = self.drive_owned_child(step, None) {
+            self.host_release();
+            self.trap_child(self.current, &trap);
+        }
+    }
+
+    /// Whether `fiber` runs as the racer of an open race.
+    fn is_racer(&self, fiber: FiberId) -> bool {
+        self.pool[fiber.index()]
+            .nursery
+            .is_some_and(|id| self.nurseries[id.index()].race.is_some())
+    }
+
+    /// The next racer still waiting for its first entry, its owner a live
+    /// parked fiber — the eager start's scan over the races alone.
+    fn ready_racer(&self) -> Option<FiberId> {
+        self.nurseries
+            .iter()
+            .enumerate()
+            .filter(|(_, nursery)| nursery.state == NurseryState::Open && nursery.race.is_some())
+            .filter(|(_, nursery)| self.owner_parked(nursery))
+            .find_map(|(slot, nursery)| {
+                let id = NurseryId(u32::try_from(slot).expect("nursery pool fits u32 ids"));
+                nursery
+                    .children
+                    .first()
+                    .filter(|&&racer| {
+                        self.pool[racer.index()].nursery == Some(id)
+                            && self.pool[racer.index()].state == FiberState::Ready
+                    })
+                    .copied()
+            })
     }
 
     /// Consumes a driven nursery — the in-flight mark down, the slot Dead,
@@ -5774,10 +5899,17 @@ impl Vm {
         }
     }
 
-    /// Ledgers a fiber's death into its nursery, if it has one.
+    /// Ledgers a fiber's death into its nursery, if it has one. A
+    /// racer's death resolves its race.
     fn record_child_outcome(&mut self, fiber: FiberId, outcome: ChildOutcome) {
-        if let Some(n) = self.pool[fiber.index()].nursery {
-            self.nurseries[n.index()].record(fiber, outcome);
+        let Some(n) = self.pool[fiber.index()].nursery else {
+            return;
+        };
+        self.nurseries[n.index()].record(fiber, outcome);
+        if self.nurseries[n.index()].race.is_some()
+            && let Some(outcome) = self.nurseries[n.index()].outcome(fiber)
+        {
+            self.resolve_race(n, fiber, &outcome);
         }
     }
 
@@ -5790,6 +5922,9 @@ impl Vm {
             let nursery = &mut self.nurseries[n.index()];
             nursery.record(fiber, ChildOutcome::Trapped(trap.clone()));
             nursery.cancelled = true;
+            if nursery.race.is_some() {
+                self.resolve_race(n, fiber, &ChildOutcome::Trapped(trap.clone()));
+            }
         }
     }
 
@@ -5798,7 +5933,9 @@ impl Vm {
     /// host's shutdown standing (the 2026-11-24 signal ruling) — the
     /// cut is the same sentinel death either way. Only nurseries with
     /// live children are ever cancelled, so a stale id cannot fire
-    /// here.
+    /// here. A timeout racer's own nursery is its race's: the wheel's
+    /// deadline door raises the same flag, so the racer observes its
+    /// deadline exactly a user cancel's flag — never the clock here.
     fn cancel_requested(&self) -> bool {
         self.shutdown
             || self.pool[self.current.index()]
@@ -6172,6 +6309,12 @@ impl Vm {
     /// and the fiber — still `WorldParked` — moves to `Suspended` on
     /// the run queue in wake order.
     fn finish_wait(&mut self, token: u64, result: NativeResult) {
+        self.finish_wait_with(token, Wake::Answer(result));
+    }
+
+    /// [`Self::finish_wait`] over either wake: an answer, or a failure
+    /// the woken fiber dies with at its resume point.
+    fn finish_wait_with(&mut self, token: u64, wake: Wake) {
         let Some(entry) = self.sched.waits.remove(&token) else {
             return;
         };
@@ -6184,7 +6327,7 @@ impl Vm {
         let fiber = entry.fiber;
         if self.pool[fiber.index()].state == FiberState::WorldParked {
             self.pool[fiber.index()].state = FiberState::Suspended;
-            self.sched.deliveries.insert(fiber, result);
+            self.sched.deliveries.insert(fiber, wake);
             self.sched.push_ready(fiber);
         }
     }
@@ -6386,6 +6529,13 @@ impl Vm {
             self.finish_wait(token, NativeResult::Word(Value::I64(0)));
             return;
         }
+        // the timer race's deadline door: the wheel's firing is the
+        // deadline itself — no readiness to consume, the racer's cut and
+        // the owner's answer resolve the wait
+        if let WorldWait::Timeout { .. } = entry.wait {
+            self.expire_race(token, fiber);
+            return;
+        }
         let target = entry.wait.target();
         let op = entry.wait.op_name();
         if entry.wait.deadline().is_some_and(|at| at <= Instant::now()) {
@@ -6450,7 +6600,9 @@ impl Vm {
                 },
                 // the timer-only wait completed at its own arm above; the
                 // arm keeps this match total
-                WorldWait::Sleep { .. } => unreachable!("the sleep completed at its own arm"),
+                WorldWait::Sleep { .. } | WorldWait::Timeout { .. } => {
+                    unreachable!("the timer-only waits completed at their own arms")
+                },
                 WorldWait::Recv { conn: id, max, .. } => {
                     let Some(event) = ready.filter(|event| event.read) else {
                         return;
@@ -6745,8 +6897,12 @@ impl Vm {
                         };
                         // a sleep never touched the reactor: the wheel
                         // still owes it, and the branch above answers a
-                        // reactor-less wait without one
-                        if matches!(entry.wait, WorldWait::Sleep { .. }) {
+                        // reactor-less wait without one (the timer race's
+                        // wait rides the same wheel)
+                        if matches!(
+                            entry.wait,
+                            WorldWait::Sleep { .. } | WorldWait::Timeout { .. }
+                        ) {
                             continue;
                         }
                         let result = self.wait_error_span(
@@ -6836,12 +6992,21 @@ impl Vm {
                 None => Woken::Quiet,
             });
         }
-        let Some(result) = self.sched.deliveries.remove(&fiber) else {
+        let Some(wake) = self.sched.deliveries.remove(&fiber) else {
             return Ok(Woken::Quiet);
         };
         if !self.pool[fiber.index()].resumable() {
             return Ok(Woken::Quiet);
         }
+        // a staged failure: the fiber is entered so the trap attributes
+        // at its parked call, and nothing answers
+        let result = match wake {
+            Wake::Answer(result) => result,
+            Wake::Fault(trap) => {
+                self.switch_in(fiber, Value::Tag(PLATFORM_NONE));
+                return Err(trap);
+            },
+        };
         let final_delivery = self.pool[fiber.index()]
             .resume
             .as_ref()
@@ -6887,7 +7052,7 @@ impl Vm {
                 if fiber != host_fiber && self.owned_parked_child(fiber) {
                     match self.enter_woken(fiber) {
                         Ok(Woken::Step(step)) => {
-                            if let Some(answer) = self.drive_owned_child(step, host_fiber)? {
+                            if let Some(answer) = self.drive_owned_child(step, Some(host_fiber))? {
                                 return Ok(ExecutorStep::HostAnswer(answer));
                             }
                         },
@@ -7003,7 +7168,7 @@ impl Vm {
             return Ok(EagerPass::Idle);
         };
         let step = self.switch_in(child, Value::Tag(PLATFORM_NONE));
-        match self.drive_owned_child(step, host_fiber)? {
+        match self.drive_owned_child(step, Some(host_fiber))? {
             Some(answer) => Ok(EagerPass::Host(answer)),
             None => Ok(EagerPass::Drove),
         }
@@ -7017,11 +7182,13 @@ impl Vm {
     /// answer — the nursery ledger holds the span the boundary collects.
     /// The host drive answers its own fiber alone, so a child's step
     /// never leaves this pass for the host loop; `Some` answers the host
-    /// fiber's death value, `Err` its own trap.
+    /// fiber's death value, `Err` its own trap. `host_fiber` is `None`
+    /// under a sweep that starts a racer itself: no host drive stands, so
+    /// every outcome stays contained.
     fn drive_owned_child(
         &mut self,
         step: (Active, CodePc),
-        host_fiber: FiberId,
+        host_fiber: Option<FiberId>,
     ) -> Result<Option<FrameAnswer>, Trap> {
         let (active, pc) = step;
         match self.drive_step(active, pc) {
@@ -7034,7 +7201,7 @@ impl Vm {
                     Ok(None)
                 },
                 Ok(DriveOutcome::Died(answer)) => {
-                    if self.current == host_fiber {
+                    if host_fiber == Some(self.current) {
                         return Ok(Some(answer));
                     }
                     Ok(None)
@@ -7044,7 +7211,7 @@ impl Vm {
                     unreachable!("the interlock loop drains its own frames")
                 },
                 Err((trap, _at)) => {
-                    if self.current == host_fiber {
+                    if host_fiber == Some(self.current) {
                         return Err(trap);
                     }
                     self.host_release();
@@ -7195,6 +7362,7 @@ impl Vm {
         let fiber = &mut self.pool[self.current.index()];
         fiber.state = FiberState::Dead;
         fiber.resume = None;
+        self.end_race_of(self.current);
         let live = resumer.filter(|&r| self.pool[r.index()].resumable());
         if let (Some(&target), Value::Ref(word)) = (live.as_ref(), value) {
             self.claims[target.index()].acquire(word);
@@ -10321,6 +10489,22 @@ impl Vm {
                                         },
                                         ChanOutcome::Parked(event) => return Ok(event),
                                     }
+                                } else if let Some(timer) = nf.timer {
+                                    // the timer race: the staged callable
+                                    // becomes the racer; a live deadline
+                                    // parks the caller, a past one answers
+                                    // the failure span in place
+                                    match self
+                                        .timeout_switch(
+                                            timer, &active, pc.0, fp, &f.layout, boundary,
+                                        )
+                                        .map_err(|e| (e, pc))?
+                                    {
+                                        TimerOutcome::Answered => {
+                                            pc.0 += 1;
+                                        },
+                                        TimerOutcome::Parked(event) => return Ok(event),
+                                    }
                                 } else {
                                     let mut heaps = Heaps::new(
                                         self.current,
@@ -11990,8 +12174,293 @@ impl Vm {
             .is_some_and(|f| f.state == FiberState::WorldParked)
         {
             self.pool[fiber.index()].state = FiberState::Suspended;
-            self.sched.deliveries.insert(fiber, result);
+            self.sched.deliveries.insert(fiber, Wake::Answer(result));
             self.sched.push_ready(fiber);
+        }
+    }
+
+    // -- The timer race ------------------------------------------------------
+
+    /// The timer race behind a `CALL` site — the only site shape the
+    /// lowerer emits (the fallible span re-spans into the call's union
+    /// after the call, so a tail transfer has no position for the
+    /// re-span and the lowering refuses a bare tail like every fallible
+    /// native's). A deadline already past answers the failure span at
+    /// once (no racer spawns, the caller never parks); a live one opens
+    /// the race's own nursery — the calling fiber its owner, the
+    /// callable's fiber its one child, born ready — and the caller parks
+    /// on the deadline wheel. The racer starts under the park's drive
+    /// (the executor's eager start, or the sweep that meets the parked
+    /// owner), never here: a racer entered from a host drive's own step
+    /// would hand that drive its death.
+    fn timeout_switch(
+        &mut self,
+        _timer: TimerNative,
+        active: &Active,
+        pc: u32,
+        fp: usize,
+        caller: &FrameLayout,
+        boundary: usize,
+    ) -> Result<TimerOutcome, Trap> {
+        // a hosted reentry frame cannot park: refusing here leaves no
+        // racer behind the refused call
+        if self.reentry_live(boundary) {
+            return Err(Trap::ReentrancyRefused);
+        }
+        let nanos = control_i64(&self.stack, fp, caller, 0)?;
+        if nanos <= 0 {
+            let failure = timeout_failure_span();
+            overlay_native(failure, &mut self.stack, caller, fp)?;
+            return Ok(TimerOutcome::Answered);
+        }
+        let thunk = control_word(&self.stack, fp, caller, 1)?;
+        let deadline = Instant::now() + Duration::from_nanos(nanos.cast_unsigned());
+        let nursery = self.open_fresh_nursery();
+        let racer = match thunk {
+            // a scalar FuncRef names a non-capturing callable: its entry
+            // takes no arguments
+            Value::Fn(fref) => self.spawn_ref_into(Some(nursery), fref, &[]),
+            // a closure word: its capture block stages into the racer's
+            // frame, one acquired count per `Ref` capture claimed for the
+            // racer (the spawn seam's own hand-off)
+            Value::Ref(obj) => self.spawn_closure_into(Some(nursery), obj, &[]),
+            staged => Err(Trap::CallLayout(SlideError::TypeMismatch {
+                index: 1,
+                staged: staged.slot_type(),
+                expected: SlotType::Fn,
+            })),
+        };
+        if let Err(trap) = racer {
+            // nothing of the race stands: the slot closes before the
+            // refusal surfaces
+            self.tear_down_nursery(nursery.index());
+            return Err(trap);
+        }
+        self.nurseries[nursery.index()].race = Some(Race { expired: false });
+        self.pool[self.current.index()].race = Some(nursery);
+        let wait = WorldWait::Timeout { deadline };
+        match self
+            .park_world(active, CodePc(pc), ParkKind::World(wait))
+            .map_err(|(trap, _)| trap)?
+        {
+            event @ DriveOutcome::WorldPark(_) => Ok(TimerOutcome::Parked(event)),
+            _ => unreachable!("a park answers the park event"),
+        }
+    }
+
+    /// The open race `owner` waits on, `None` when it stands in none —
+    /// the fiber's link names an ended race, whose slot another may hold.
+    fn race_of(&self, owner: FiberId) -> Option<NurseryId> {
+        let id = self.pool[owner.index()].race?;
+        self.nurseries
+            .get(id.index())
+            .filter(|nursery| {
+                nursery.state == NurseryState::Open
+                    && nursery.race.is_some()
+                    && nursery.owner == Some(owner)
+            })
+            .map(|_| id)
+    }
+
+    /// The scheduler token of `owner`'s standing race wait, if any.
+    fn race_wait_of(&self, owner: FiberId) -> Option<u64> {
+        self.sched
+            .waits
+            .iter()
+            .find(|(_, entry)| {
+                entry.fiber == owner && matches!(entry.wait, WorldWait::Timeout { .. })
+            })
+            .map(|(token, _)| *token)
+    }
+
+    /// Starts the racer of the race `owner` waits on, when it still stands
+    /// ready: the first entry's step, for the caller's contained pass.
+    fn start_racer(&mut self, owner: FiberId) -> Option<(Active, CodePc)> {
+        let nursery = self.race_of(owner)?;
+        let racer = *self.nurseries[nursery.index()].children.first()?;
+        (self.pool[racer.index()].state == FiberState::Ready)
+            .then(|| self.switch_in(racer, Value::Tag(PLATFORM_NONE)))
+    }
+
+    /// The wheel's deadline door: the race `owner` waits on expired. The
+    /// racer's own nursery takes the raised cancel flag — the standard
+    /// sentinel observation point cuts a looping racer at its next
+    /// backward branch — and a racer the scheduler meets parked is cut
+    /// inline here; its cancel death resolves the race and the owner
+    /// takes the failure span at the parked call. The wait finishes
+    /// here only when no racer stood to resolve it. The wheel fires only
+    /// between the racer's yields, so a racer that never parks cannot
+    /// be cut by the deadline — the same cooperative limit the
+    /// shutdown flag has.
+    fn expire_race(&mut self, token: u64, owner: FiberId) {
+        if let Some(nursery) = self.race_of(owner) {
+            let slot = nursery.index();
+            self.nurseries[slot].cancelled = true;
+            if let Some(race) = self.nurseries[slot].race.as_mut() {
+                race.expired = true;
+            }
+            if let Some(&racer) = self.nurseries[slot].children.first() {
+                self.cut_race_racer(racer);
+            }
+        }
+        if self.sched.waits.contains_key(&token) {
+            self.finish_wait_with(token, Wake::Answer(timeout_failure_span()));
+        }
+    }
+
+    /// Cuts the racer where the scheduler meets it — a park, never a run.
+    /// Every nursery the racer owns raises its cancel flag first, so a
+    /// drive standing over the racer's own block cuts that block's
+    /// children instead of running them on past the deadline. The
+    /// racer's waits drop, then the cancel cut runs on its own context:
+    /// the kept frames' hooks fire, the claims drain, the fiber dies
+    /// cancelled. A live resumer re-parks with the sentinel and enters
+    /// through the ordinary wake.
+    fn cut_race_racer(&mut self, racer: FiberId) {
+        for nursery in &mut self.nurseries {
+            if nursery.state == NurseryState::Open && nursery.owner == Some(racer) {
+                nursery.cancelled = true;
+            }
+        }
+        let fiber = &self.pool[racer.index()];
+        let parked = matches!(
+            fiber.state,
+            FiberState::Ready
+                | FiberState::Suspended
+                | FiberState::Preempted
+                | FiberState::WorldParked
+        ) && fiber.resume.is_some();
+        if !parked {
+            return;
+        }
+        self.cancel_wait(racer);
+        self.sched.take_ready(racer);
+        self.switch_in(racer, Value::Tag(PLATFORM_NONE));
+        if let Some((active, pc)) = self.cancel_current() {
+            let resumer = self.current;
+            let fiber = &mut self.pool[resumer.index()];
+            fiber.resume = Some(ResumePoint {
+                version: active.version,
+                func: active.func,
+                pc,
+            });
+            fiber.state = FiberState::Suspended;
+            self.sched.deliveries.insert(
+                resumer,
+                Wake::Answer(NativeResult::Word(Value::Tag(PLATFORM_CANCELLED))),
+            );
+            self.sched.push_ready(resumer);
+        }
+        self.host_release();
+    }
+
+    /// A racer's death resolves its race: the slot closes, and the owner
+    /// takes the outcome at its parked call — the two-word answer span
+    /// (the racer's one answer word under the ok discriminant, a `Ref`
+    /// answer's claim crossing to the owner, the count the racer's death
+    /// left in flight), the failure span with the `timed_out` class tag
+    /// once a deadline door expired the race, or the racer's own trap
+    /// re-raised on the owner the way a nursery boundary re-raises a
+    /// child's. An unexpired cancel ends a race its owner's death
+    /// already closed: nothing is delivered, the user cancel keeping
+    /// its own `NurseryCancelled` member.
+    fn resolve_race(&mut self, nursery: NurseryId, racer: FiberId, outcome: &ChildOutcome) {
+        let slot = nursery.index();
+        let expired = self.nurseries[slot]
+            .race
+            .as_ref()
+            .is_some_and(|race| race.expired);
+        let Some(owner) = self.nurseries[slot].owner else {
+            self.close_race(slot);
+            return;
+        };
+        let wake = match outcome {
+            ChildOutcome::Completed(span) => match span.as_slice() {
+                [word] => {
+                    if let Value::Ref(word) = word {
+                        self.claims[owner.index()].acquire(*word);
+                    }
+                    Some(Wake::Answer(NativeResult::Tag {
+                        tag: PLATFORM_IO_OK,
+                        payload: *word,
+                    }))
+                },
+                words => Some(Wake::Fault(Trap::RetSpanTooWide {
+                    span: u16::try_from(words.len()).expect("answer widths fit u16"),
+                    caller_area: 2,
+                })),
+            },
+            ChildOutcome::Cancelled if expired => Some(Wake::Answer(timeout_failure_span())),
+            ChildOutcome::Trapped(trap) => {
+                // the racer's kept frames die here: the hooks fire, and a
+                // cancel payload's `Ref` words cross to the owner — the
+                // re-raised trap's delivery lands their counts at the
+                // owner's own boundary
+                let held = Self::payload_words(outcome);
+                self.child_death_walk(racer, &held, Some(owner));
+                Some(Wake::Fault(trap.clone()))
+            },
+            ChildOutcome::Cancelled => None,
+        };
+        self.close_race(slot);
+        if let Some(wake) = wake {
+            self.deliver_race(owner, wake);
+        }
+    }
+
+    /// Closes a resolved race's slot: no drive ever stands over it, so
+    /// the consumed shape is the release door's own.
+    fn close_race(&mut self, slot: usize) {
+        let nursery = &mut self.nurseries[slot];
+        nursery.driving = false;
+        nursery.state = NurseryState::Dead;
+        nursery.outcomes.clear();
+        nursery.race = None;
+    }
+
+    /// Hands a resolved race's outcome to its owner: the parked call's
+    /// wait ends with the wake. A wait already gone (the owner's own cut
+    /// or release took it) drops the delivery — the words' claims then
+    /// die at the owner's own drain door while it still lives, or here
+    /// through the walk's no-ledger dec once it is dead.
+    fn deliver_race(&mut self, owner: FiberId, wake: Wake) {
+        if let Some(token) = self.race_wait_of(owner) {
+            self.finish_wait_with(token, wake);
+            return;
+        }
+        if self.pool[owner.index()].state != FiberState::Dead {
+            return;
+        }
+        let words: Vec<RefId> = match &wake {
+            Wake::Answer(
+                NativeResult::Word(Value::Ref(word))
+                | NativeResult::Tag {
+                    payload: Value::Ref(word),
+                    ..
+                },
+            ) => vec![*word],
+            Wake::Fault(Trap::NurseryCancelled { payload }) => payload
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Ref(word) => Some(*word),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for word in words {
+            self.claims[owner.index()].release(word);
+            let _ = self.heaps_walk().dec_walk(word);
+        }
+    }
+
+    /// What the death of `fiber` ends: the race it owned. The racer
+    /// releases cold — the hooks of the frames it kept fire, no sentinel,
+    /// exactly an abandoned nursery's children at a release door — and a
+    /// race the racer itself owned folds in through the same door.
+    fn end_race_of(&mut self, fiber: FiberId) {
+        if let Some(race) = self.race_of(fiber) {
+            self.tear_down_nursery(race.index());
         }
     }
 }

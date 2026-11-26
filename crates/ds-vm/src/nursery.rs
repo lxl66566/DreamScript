@@ -95,6 +95,21 @@ pub enum JoinOutcome {
     Failed(Vec<ChildOutcome>),
 }
 
+/// A timeout race: the state a nursery carries while one `timeout` call
+/// stands over it. The racer is the nursery's one child, the owner the
+/// fiber parked at the call; whichever finishes first ends the race and
+/// the slot closes at the racer's death.
+#[derive(Debug)]
+pub(crate) struct Race {
+    /// Whether a deadline door observed the deadline pass — the wheel's
+    /// firing raising the racer's own cancel flag. The racer's cancel
+    /// death then answers its owner with the failure span; an unexpired
+    /// cancel belongs to an owner that died first, a user cancel
+    /// keeping its own `NurseryCancelled` member, and nothing is
+    /// delivered.
+    pub(crate) expired: bool,
+}
+
 /// A pool slot that is no nursery child.
 const NOT_A_CHILD: u32 = u32::MAX;
 
@@ -126,6 +141,9 @@ pub(crate) struct Nursery {
     /// exit, so an open nursery whose owner is dead is abandoned — no drive
     /// will ever consume it and the release door tears it down.
     pub(crate) owner: Option<FiberId>,
+    /// The timeout race this nursery runs, `None` for an ordinary
+    /// nursery (a block's, the fork-join combinators', the host's root).
+    pub(crate) race: Option<Race>,
 }
 
 impl Nursery {
@@ -139,6 +157,7 @@ impl Nursery {
             state: NurseryState::Open,
             driving: false,
             owner,
+            race: None,
         }
     }
 

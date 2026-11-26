@@ -482,7 +482,7 @@ const _ = nursery {
 }
 ```
 
-Cancellation is nursery-scoped and cooperative: an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight, and teardown walks the kept frames with each deinit firing exactly once, `defer` (scope-exit sugar, non-normative) in teardown. The timer capability: `time()` the wall clock, `mono()` monotonic nanoseconds against a process-fixed origin (differences measure elapsed), `sleep(nanos)` parking the calling fiber; `firstof(thunks)` answers the first arrival of a raced thunk list and `interleave(thunks)` collects in arrival order, both @std combinators over the timer capability and the bounded channel; `timeout` stays queued on the value-reflection seam; supervision is a library pattern.
+Cancellation is nursery-scoped and cooperative: an explicit cancel terminates a yielding child at its next resume, so a linear consume is never interrupted mid-flight, and teardown walks the kept frames with each deinit firing exactly once, `defer` (scope-exit sugar, non-normative) in teardown. The timer capability: `time()` the wall clock, `mono()` monotonic nanoseconds against a process-fixed origin (differences measure elapsed), `sleep(nanos)` parking the calling fiber; `firstof(thunks)` answers the first arrival of a raced thunk list and `interleave(thunks)` collects in arrival order, both @std combinators over the timer capability and the bounded channel; `timeout(nanos, thunk)` races the thunk against the deadline and answers `t | timed_out` — the deadline is the io taxonomy's own member, so `?`, `.err`, and `match` handle it and a losing racer is cut at its park with its kept deinits firing; supervision is a library pattern.
 
 ## The runtime
 

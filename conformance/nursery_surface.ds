@@ -31,7 +31,7 @@ fn guarded(n: int) -> int | net_err {
 fn guarded_cancel(n: int) -> int | net_err {
   nursery {
     spawn {
-      cancel(timeout)
+      cancel(net_err::timeout)
     }
     spawn {
       var i = 0

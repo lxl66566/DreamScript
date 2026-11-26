@@ -1,0 +1,71 @@
+// source: M7, the timer capability's timeout round
+// purpose: the timer race's answering shapes over the timer capability: the racer's one answer word re-spanned into the call's `t | timed_out` union at the parked call (a scalar, a string from a closure thunk, a `?`-propagating named fn, a one-field record, a tag-only union), the deadline answered as the io taxonomy's own `timed_out` member through `.err` and match (a past deadline at once, a real deadline cutting a parked racer), the race inside a nursery block's children with a parked racer waking first, a nested race, and a looping racer landing inside its deadline
+// items:
+// box: stage: run
+// red: stage: run
+// green: stage: run
+// pick: stage: run
+// napper: stage: run
+// looped: stage: run
+// raced: stage: run
+// helper: stage: run
+// main: stage: run
+
+struct box { v: int }
+
+tag red
+tag green
+
+fn pick() -> red | green {
+  green
+}
+
+fn napper() -> int {
+  sleep(10000000)
+  5
+}
+
+fn looped() -> int {
+  var i: int = 0
+  while i < 1000000 {
+    i += 1
+  }
+  i
+}
+
+fn raced() -> list[int] {
+  nursery {
+    spawn { timeout(500000000, () => napper()).err((e) => -1) }
+    spawn { timeout(500000000, () => 6).err((e) => -1) }
+  }
+}
+
+fn helper() -> int | timed_out {
+  timeout(500000000, napper)?
+}
+
+fn main() -> () {
+  println("scalar ${timeout(500000000, () => 41).err((e) => 0)}")
+  const name = "thunk"
+  println("closure ${timeout(500000000, () => "hello ${name}").err((e) => "none")}")
+  println("named ${helper().err((e) => -5)}")
+  const held = timeout(500000000, () => box { v: 4 }).err((e) => box { v: 0 })
+  println("one field ${held.v}")
+  const at_once = timeout(0, () => 9).err((e) => -9)
+  println("at once ${at_once}")
+  const slow = timeout(20000000) {
+    sleep(2000000000)
+    11
+  }.err((e) => 12)
+  println("fallback ${slow}")
+  match timeout(500000000, pick).err((e: timed_out) => red) {
+    red => println("red")
+    green => println("green")
+  }
+  const ys = raced()
+  const first = ys.get(0).ok((v: int) => v).err((_: none) => -1)
+  const second = ys.get(1).ok((v: int) => v).err((_: none) => -1)
+  println("block ${first} ${second}")
+  println("nested ${timeout(500000000, () => timeout(500000000, () => 7).err((e) => 0)).err((e) => 0)}")
+  println("loop ${timeout(500000000, looped).err((e) => -1)}")
+}

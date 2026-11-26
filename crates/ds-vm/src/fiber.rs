@@ -141,6 +141,11 @@ pub(crate) struct Fiber {
     /// `None` = the root fiber or a detached spawn (no live root nursery —
     /// the host is the supervisor).
     pub(crate) nursery: Option<NurseryId>,
+    /// The timeout race this fiber waits on as its owner, `None` when it
+    /// stands in none. Every reader validates the id against the slot
+    /// (open, a race, this owner), so a value left behind by an ended
+    /// race names nothing.
+    pub(crate) race: Option<NurseryId>,
 }
 
 impl Fiber {
@@ -158,6 +163,7 @@ impl Fiber {
             state: FiberState::Ready,
             resumer: None,
             nursery: None,
+            race: None,
         }
     }
 

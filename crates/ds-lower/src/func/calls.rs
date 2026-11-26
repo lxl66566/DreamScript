@@ -14,6 +14,29 @@ struct NativeMember {
     window: bool,
 }
 
+/// How a classed fallible call constructs its success value at the ok
+/// arm: the shape the union's own success member(s) dictate.
+enum SuccessShape {
+    /// One member carrying one payload word: TagNew the member and
+    /// adopt the span's word 1 as the payload.
+    Payload {
+        /// The success member's atom.
+        atom: TypeId,
+        /// The member's one payload field.
+        field: MemberField,
+    },
+    /// One bare member (a unit value over the native's inert unit word,
+    /// or a bare tag): TagNew it, the span's word 1 inert.
+    Bare {
+        /// The success member's atom.
+        atom: TypeId,
+    },
+    /// A tag-only union answer: the native's answer word is already the
+    /// union's own value (its tag names the member), adopted whole off
+    /// the span's word 1 with no re-span.
+    Adopt,
+}
+
 impl<'a> FnLower<'a, '_, '_> {
     // ---- calls ------------------------------------------------------------------
 
@@ -1808,7 +1831,9 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Callee::Builtin(native) = target
             && matches!(
                 native.shape,
-                NativeShape::Fallible { .. } | NativeShape::Checked
+                NativeShape::Fallible { .. }
+                    | NativeShape::FallibleByResultType { .. }
+                    | NativeShape::Checked
             )
         {
             return self.native_span_result(native, ty, tail, callee_span, &staged);
@@ -2619,7 +2644,10 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         if tail {
-            let (what, reason) = if matches!(native.shape, NativeShape::Fallible { .. }) {
+            let (what, reason) = if matches!(
+                native.shape,
+                NativeShape::Fallible { .. } | NativeShape::FallibleByResultType { .. }
+            ) {
                 (
                     "a tail call to a fallible native",
                     "CALLT-to-fallible stays unsupported: the two-word platform span re-spans \
@@ -2651,6 +2679,13 @@ impl<'a> FnLower<'a, '_, '_> {
                 classes,
                 staged,
             );
+        }
+        if let NativeShape::FallibleByResultType {
+            fail_payload,
+            classes,
+        } = native.shape
+        {
+            return self.keyed_native_result(native, ty, fail_payload, classes, staged);
         }
         self.checked_native_result(Callee::Builtin(native), ty, staged, staged.len())
     }
@@ -3547,6 +3582,26 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(())
     }
 
+    /// The timer race's one-word answer boundary: `timeout` adopts
+    /// exactly one word from its racer, so the answer's member set
+    /// spanning more (a tuple, a multi-field struct, a union with a
+    /// payload region) refuses at the call.
+    fn guard_race_answer(&mut self, members: &[TypeId]) -> Result<(), LowerError> {
+        let wide = matches!(
+            self.shapes.member_words(members),
+            Ok(ref words) if words.len() > 1
+        );
+        if wide {
+            return Err(LowerError::unsupported(
+                no_span(), // re-pointed at the call site
+                "a timeout answer wider than one word",
+                "the timer race adopts exactly one word from its racer; a scalar, a reference, a \
+                 one-field record, or a tag-only union lowers, a wider answer type does not",
+            ));
+        }
+        Ok(())
+    }
+
     /// Emits one dispatch site's evidence words into the overlay span at
     /// the recorded staged index: a constant word per Kimm store, a frame
     /// word per Mov — neither counted, neither a binder.
@@ -4046,6 +4101,11 @@ impl<'a> FnLower<'a, '_, '_> {
                 // the call's own checked result type's words (`chan_recv`
                 // answering the payload type's one word)
                 NativeShape::TotalByResultType => self.shapes.words(ty),
+                // call_impl routes the keyed fallible span through its
+                // own re-span path; this generic copy never sees it
+                NativeShape::FallibleByResultType { .. } => {
+                    Err(mismatch("a fallible native result"))
+                },
                 NativeShape::TaglessTotal => Err(mismatch("a tag-less-total native result")),
             },
             Callee::Generic(generic) => match generic.shape {
@@ -4059,7 +4119,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 // type's words with no discriminant (partition's
                 // two-list tuple: two Ref words the destructuring binds)
                 NativeShape::TotalByResultType | NativeShape::TaglessTotal => self.shapes.words(ty),
-                NativeShape::Fallible { .. } | NativeShape::Checked => {
+                NativeShape::Fallible { .. }
+                | NativeShape::Checked
+                | NativeShape::FallibleByResultType { .. } => {
                     Err(mismatch("a generic builtin result"))
                 },
             },
@@ -4149,9 +4211,69 @@ impl<'a> FnLower<'a, '_, '_> {
         staged: &[SlotType],
     ) -> Result<Place, LowerError> {
         if matches!(&*self.shapes.shape(ty)?, Shape::Union(_)) {
-            return self.classed_native_union(native, ty, payload, fail_payload, classes, staged);
+            let shape = self.shapes.shape(ty)?;
+            let Shape::Union(u) = &*shape else {
+                unreachable!("the union shape matched above")
+            };
+            let class_members = self.class_members_of(u, fail_payload, classes)?;
+            let success = self.static_success_plan(u, &class_members, payload)?;
+            return self.classed_native_union(
+                native,
+                ty,
+                payload,
+                success,
+                fail_payload,
+                classes,
+                staged,
+            );
         }
         self.fallible_total_result(native, ty, payload, fail_payload, err_prefix, staged)
+    }
+
+    /// A statically-payloaded fallible native's success plan: exactly
+    /// one member outside the class set carrying the native's one
+    /// payload word, or the unit value over the native's inert unit
+    /// word (`net_send`'s `()`).
+    fn static_success_plan(
+        &self,
+        u: &UnionShape,
+        class_members: &[(u8, MemberShape)],
+        payload: SlotType,
+    ) -> Result<SuccessShape, LowerError> {
+        let is_class = |atom: TypeId| {
+            class_members
+                .iter()
+                .any(|(_, member): &(u8, MemberShape)| member.atom == atom)
+        };
+        let mut success: Vec<&MemberShape> = u
+            .members
+            .iter()
+            .filter(|member| !is_class(member.atom))
+            .filter(|member| member.fields.len() == 1 && member.fields[0].slot() == payload)
+            .collect();
+        if success.is_empty() && payload == SlotType::I64 {
+            success = u
+                .members
+                .iter()
+                .filter(|member| !is_class(member.atom))
+                .filter(|member| self.is_unit_member(member.atom))
+                .collect();
+        }
+        let [ok] = success.as_slice() else {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a fallible native call",
+                "the union's success member must be exactly the native's one payload word, or the \
+                 unit value over the native's inert unit word",
+            ));
+        };
+        Ok(match ok.fields.as_slice() {
+            [field] => SuccessShape::Payload {
+                atom: ok.atom,
+                field: field.clone(),
+            },
+            _ => SuccessShape::Bare { atom: ok.atom },
+        })
     }
 
     /// The total spelling of a fallible native's span: extracts the
@@ -4288,8 +4410,8 @@ impl<'a> FnLower<'a, '_, '_> {
     /// One fallible native call over the success-typed union spelling:
     /// the checked call type is the failure union itself (`string |
     /// io_err`, `int | parse_err`), so the two-word platform span
-    /// re-spans into it — success constructs the payload member from
-    /// overlay word 1, failure the class member the discriminant's
+    /// re-spans into it — success constructs the union's success value
+    /// per [`SuccessShape`], failure the class member the discriminant's
     /// error-class mapping names (each discriminant paired with the
     /// ambient failure-taxonomy member it lands on; a bare member adopts
     /// no word, a one-field member adopts word 1 as its payload — the
@@ -4297,7 +4419,10 @@ impl<'a> FnLower<'a, '_, '_> {
     /// `I64`). The union must carry every class member plus exactly one
     /// success member holding the native's one payload word (the unit
     /// value over the native's inert unit word, `net_send`'s `()`) —
-    /// the same span-to-union discipline the checked reads use
+    /// except a result-type-keyed native, whose success members are the
+    /// union's own non-class members (the timer race answering a
+    /// tag-only union over its deadline member). The same
+    /// span-to-union discipline the checked reads use
     /// ([`fn checked_native_result`](Self::checked_native_result)). A
     /// bare class member's native-born message count dies inside its
     /// failure arm; a scalar failure word is inert.
@@ -4306,6 +4431,7 @@ impl<'a> FnLower<'a, '_, '_> {
         native: &'static Native,
         ty: Ty,
         payload: SlotType,
+        success: SuccessShape,
         fail_payload: SlotType,
         classes: &'static [(u8, &'static str)],
         staged: &[SlotType],
@@ -4316,63 +4442,16 @@ impl<'a> FnLower<'a, '_, '_> {
         };
         // the class members the mapping names, each bare or carrying
         // exactly the failure payload's one word
-        let mut class_members: Vec<(u8, &MemberShape)> = Vec::new();
-        for (tag, name) in classes {
-            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
-                let _ = name;
-                return Err(LowerError::unsupported(
-                    no_span(),
-                    "a fallible native call",
-                    "the union must carry the failure taxonomy's members by their ambient names; \
-                     a differently named error set has no class mapping",
-                ));
-            };
-            let Some(member) = u.member(atom) else {
-                return Err(LowerError::unsupported(
-                    no_span(),
-                    "a fallible native call",
-                    "the union must carry the failure taxonomy's whole member set; every class \
-                     member the native answers must be a member",
-                ));
-            };
-            match member.fields.as_slice() {
-                [] => {},
-                [field] if field.slot() == fail_payload => {},
-                _ => {
-                    return Err(LowerError::unsupported(
-                        no_span(),
-                        "a fallible native call",
-                        "every class member is a bare tag, or carries exactly the class's one \
-                         failure payload word (the *_other message, the parse position)",
-                    ));
-                },
-            }
-            class_members.push((*tag, member));
-        }
-        let success: Vec<_> = u
-            .members
-            .iter()
-            .filter(|m| !class_members.iter().any(|(_, c)| c.atom == m.atom))
-            .filter(|m| m.fields.len() == 1 && m.fields[0].slot() == payload)
-            .collect();
-        let mut success = success;
-        if success.is_empty() && payload == SlotType::I64 {
-            success = u
-                .members
-                .iter()
-                .filter(|m| !class_members.iter().any(|(_, c)| c.atom == m.atom))
-                .filter(|m| self.is_unit_member(m.atom))
-                .collect();
-        }
-        let [ok] = success.as_slice() else {
-            return Err(LowerError::unsupported(
-                no_span(),
-                "a fallible native call",
-                "the union's success member must be exactly the native's one payload word, or the \
-                 unit value over the native's inert unit word",
-            ));
+        let class_members = self.class_members_of(u, fail_payload, classes)?;
+        let success_len = match success {
+            SuccessShape::Payload { .. } | SuccessShape::Bare { .. } => 1,
+            SuccessShape::Adopt => {
+                // a tag-only union answer: every non-class member is a
+                // success member by construction
+                u.members.len() - class_members.len()
+            },
         };
-        if success.len() + class_members.len() != u.members.len() {
+        if success_len + class_members.len() != u.members.len() {
             return Err(LowerError::unsupported(
                 no_span(),
                 "a fallible native call",
@@ -4473,20 +4552,42 @@ impl<'a> FnLower<'a, '_, '_> {
             self.rc.restore(base.clone());
         }
         self.bind_label(ok_lbl);
-        let tag = self.shapes.tag_id(ok.atom)?;
-        self.emit(Op::TagNew {
-            dst: Slot::body(result.base),
-            tag,
-        });
-        self.zero_init_member(result.base, &u.words, &ok.fields)?;
-        if let [field] = ok.fields.as_slice() {
-            self.emit(Op::Mov {
-                dst: Slot::body(result.base + field.word),
-                src: Slot::overlay(1),
-            });
-            if field.slot() == SlotType::Ref {
-                self.rc.produced(result.base + field.word);
-            }
+        match success {
+            SuccessShape::Payload { atom, field } => {
+                let tag = self.shapes.tag_id(atom)?;
+                self.emit(Op::TagNew {
+                    dst: Slot::body(result.base),
+                    tag,
+                });
+                self.zero_init_member(result.base, &u.words, std::slice::from_ref(&field))?;
+                self.emit(Op::Mov {
+                    dst: Slot::body(result.base + field.word),
+                    src: Slot::overlay(1),
+                });
+                if field.slot() == SlotType::Ref {
+                    self.rc.produced(result.base + field.word);
+                }
+            },
+            SuccessShape::Bare { atom } => {
+                // a bare member (a unit value over the native's inert
+                // unit word, or a bare tag): the span's payload word
+                // stays unread
+                let tag = self.shapes.tag_id(atom)?;
+                self.emit(Op::TagNew {
+                    dst: Slot::body(result.base),
+                    tag,
+                });
+                self.zero_init_member(result.base, &u.words, &[])?;
+            },
+            SuccessShape::Adopt => {
+                // a tag-only union answer: the racer's answer word is
+                // already the union's own value — its tag names the
+                // member — so it crosses whole with no re-span
+                self.emit(Op::Mov {
+                    dst: Slot::body(result.base),
+                    src: Slot::overlay(1),
+                });
+            },
         }
         let arm_ok = self.rc.take();
         let mut arms: Vec<(State, bool)> =
@@ -4506,6 +4607,123 @@ impl<'a> FnLower<'a, '_, '_> {
         self.arm_epilogue(dying.last().expect("the ok arm's dying set"));
         self.bind_label(join);
         Ok(result)
+    }
+
+    /// The class members the error-class mapping names over the call's
+    /// own union: each class member present by its ambient name, bare or
+    /// carrying exactly the failure payload's one word.
+    fn class_members_of(
+        &self,
+        u: &UnionShape,
+        fail_payload: SlotType,
+        classes: &'static [(u8, &'static str)],
+    ) -> Result<Vec<(u8, MemberShape)>, LowerError> {
+        let mut class_members: Vec<(u8, MemberShape)> = Vec::new();
+        for (tag, name) in classes {
+            let Some(atom) = self.analyzed.decls.universe.atom_by_name(name) else {
+                let _ = name;
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a fallible native call",
+                    "the union must carry the failure taxonomy's members by their ambient names; \
+                     a differently named error set has no class mapping",
+                ));
+            };
+            let Some(member) = u.member(atom) else {
+                return Err(LowerError::unsupported(
+                    no_span(),
+                    "a fallible native call",
+                    "the union must carry the failure taxonomy's whole member set; every class \
+                     member the native answers must be a member",
+                ));
+            };
+            match member.fields.as_slice() {
+                [] => {},
+                [field] if field.slot() == fail_payload => {},
+                _ => {
+                    return Err(LowerError::unsupported(
+                        no_span(),
+                        "a fallible native call",
+                        "every class member is a bare tag, or carries exactly the class's one \
+                         failure payload word (the *_other message, the parse position)",
+                    ));
+                },
+            }
+            class_members.push((*tag, member.clone()));
+        }
+        Ok(class_members)
+    }
+
+    /// A result-type-keyed fallible native's union path (the timer
+    /// race): the success members are the union's own non-class members,
+    /// the payload's word kind resolving from them — exactly the
+    /// `reduce` keying's derivation over the call's result type, over a
+    /// span instead of a bare word. The one-word answer boundary guards
+    /// the members first (a wider answer refusing at the call), then the
+    /// shared classed machinery re-spans the platform span into the
+    /// union: `?`, `.err`, and match handle the deadline through the
+    /// ordinary error machinery, the `timed_out` class landing on the io
+    /// taxonomy's own member so io-handling callers absorb it by set
+    /// containment.
+    fn keyed_native_result(
+        &mut self,
+        native: &'static Native,
+        ty: Ty,
+        fail_payload: SlotType,
+        classes: &'static [(u8, &'static str)],
+        staged: &[SlotType],
+    ) -> Result<Place, LowerError> {
+        let shape = self.shapes.shape(ty)?;
+        let Shape::Union(u) = &*shape else {
+            return Err(LowerError::unsupported(
+                no_span(), // re-pointed at the call site
+                "a timeout call's result",
+                "the call answers `t | timed_out` and the deadline's member must be handled or \
+                 propagate; a total spelling has no member for the deadline",
+            ));
+        };
+        let class_members = self.class_members_of(u, fail_payload, classes)?;
+        let is_class = |atom: TypeId| {
+            class_members
+                .iter()
+                .any(|(_, member): &(u8, MemberShape)| member.atom == atom)
+        };
+        let success_members: Vec<MemberShape> = u
+            .members
+            .iter()
+            .filter(|member| !is_class(member.atom))
+            .cloned()
+            .collect();
+        if success_members.is_empty() {
+            return Err(LowerError::unsupported(
+                no_span(),
+                "a fallible native call",
+                "the union must be exactly the success member plus the failure taxonomy's class \
+                 members; a wider union has no member mapping for the native's failure classes",
+            ));
+        }
+        let answer: Vec<TypeId> = success_members.iter().map(|member| member.atom).collect();
+        self.guard_race_answer(&answer)?;
+        let (success, payload) = match success_members.as_slice() {
+            [only] => match only.fields.as_slice() {
+                // a bare member: the unit value or a bare tag over the
+                // span's inert payload word
+                [] => (SuccessShape::Bare { atom: only.atom }, SlotType::I64),
+                [field] => (
+                    SuccessShape::Payload {
+                        atom: only.atom,
+                        field: field.clone(),
+                    },
+                    field.slot(),
+                ),
+                // the width guard refused every wider member first
+                _ => unreachable!("the answer guard bounded the success member"),
+            },
+            // a tag-only union answer: the racer's word is the union's
+            // own tagged value, adopted whole off the span's payload
+            _ => (SuccessShape::Adopt, SlotType::Tag),
+        };
+        self.classed_native_union(native, ty, payload, success, fail_payload, classes, staged)
     }
 
     /// Records the words a fallible native's result span lands on: word 0

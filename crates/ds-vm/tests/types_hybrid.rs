@@ -47,8 +47,8 @@ use ds_vm::{
         BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
         BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND, BUILTIN_SORT, BUILTIN_STR_BOOL,
         BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL,
-        BUILTIN_TAN, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
-        BUILTIN_UTF8_ENCODE,
+        BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF,
+        BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
     },
     platform::{
         OP_CLOSE_RAW, OP_COUNT, OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_OPEN_FILE, OP_PRINT,
@@ -1147,9 +1147,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     for index in BUILTIN_ROUND..=BUILTIN_TAN {
         assert!(reg.resolve_native("builtin", index).is_some());
     }
+    // the timer race (107): the intercepted `timeout` seam, its step the
+    // dispatcher's own like the channel triple
+    assert!(reg.resolve_native("builtin", BUILTIN_TIMEOUT).is_some());
     assert!(
-        reg.resolve_native("builtin", 107).is_none(),
-        "107 table entries: the core's, the list block, the fiber pair, the push, the map block,
+        reg.resolve_native("builtin", 108).is_none(),
+        "108 table entries: the core's, the list block, the fiber pair, the push, the map block,
      the generic container closes, the reentrant combinators, the nursery seams, the join,
      the partition, the fork-join combinator, the fork-join fold, the float sort key, the
      string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1160,7 +1163,8 @@ fn both_native_modules_are_installed_and_resolvable() {
      byte/u32 width bridges, the float math family and its completion, the string
      search triple, the bounded channel's intercepted send/recv/construct triple, the
      ord-routed list sort's reserved slot, the collection member round, the arena
-     face's construct/store/remove/read seams"
+     face's construct/store/remove/read seams, the timer race's intercepted
+     timeout seam"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

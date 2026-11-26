@@ -151,6 +151,26 @@ pub(crate) enum NativeShape {
     /// the table records as the keying, resolved from the call's result
     /// type like the instance keying resolves from the evidence.
     TotalByResultType,
+    /// The two-word platform span whose success payload's word kind is
+    /// the call's own result union's success member (`timeout`): the
+    /// table records the keying and the failure taxonomy alone, the
+    /// payload's kind resolving from the call's union exactly
+    /// [`NativeShape::TotalByResultType`] resolves from the result
+    /// type. The union must be exactly the success members plus the
+    /// class members; the success members span at most one word (a
+    /// scalar, a reference, a one-field record, or the bare members of
+    /// a tag-only union), and the failure classes land on the members
+    /// the ambient names — the deadline's failure riding the io
+    /// taxonomy's own `timed_out` tag, so io-handling callers absorb it
+    /// by set containment for free.
+    FallibleByResultType {
+        /// The failure payload's word kind: the inert unit word beside
+        /// a bare class tag.
+        fail_payload: SlotType,
+        /// The error-class mapping: one discriminant per failure class,
+        /// paired with the ambient member name it lands on.
+        classes: &'static [(u8, &'static str)],
+    },
     /// The tag-less multi-word total: the answer's N words carry no
     /// discriminant, their kinds the call's own checked result type's
     /// (`partition`'s two-list tuple, one `Ref` per list) — the
@@ -680,6 +700,21 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: 89,
         shape: NativeShape::TotalByResultType,
+    },
+    Native {
+        // the timer race: the deadline's failure class the io taxonomy's
+        // own `timed_out` tag, the success payload's kind the call's own
+        // result union's success member (the keying `reduce` takes from
+        // the result type); the call site re-spans the two-word platform
+        // span into the `t | timed_out` union so `?`, `.err`, and match
+        // handle the deadline through the ordinary error machinery
+        name: "timeout",
+        module: NativeModule::Builtin,
+        index: 107,
+        shape: NativeShape::FallibleByResultType {
+            fail_payload: SlotType::I64,
+            classes: &[(IO_TIMED_OUT, "timed_out")],
+        },
     },
     Native {
         // the read-side aliasing container's seams: the constructor
@@ -1619,7 +1654,9 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. }
+                | NativeShape::FallibleByResultType { .. }
+                | NativeShape::Checked => 2,
                 // no monomorphic resident yet; the floor is the resident
                 // generic body's two list refs
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,
@@ -1679,7 +1716,9 @@ mod drift {
                 NativeShape::Total(_)
                 | NativeShape::TotalByInstance
                 | NativeShape::TotalByResultType => 1,
-                NativeShape::Fallible { .. } | NativeShape::Checked => 2,
+                NativeShape::Fallible { .. }
+                | NativeShape::FallibleByResultType { .. }
+                | NativeShape::Checked => 2,
                 // the resident tag-less total answers two list refs; a
                 // wider fold joining the shape widens its own floor
                 NativeShape::TaglessTotal => TAGLESS_TOTAL_FLOOR,

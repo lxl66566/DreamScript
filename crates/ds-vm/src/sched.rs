@@ -24,6 +24,7 @@ use crate::{
     fiber::FiberId,
     native::NativeResult,
     reactor::{Direction, IoHandle},
+    vm::Trap,
 };
 
 /// What one parked fiber waits for: the pending world op itself, in the
@@ -131,6 +132,14 @@ pub enum WorldWait {
     /// completion, answering the unit word (the time face's op, the
     /// 2026-11-21 timer ruling).
     Sleep { deadline: Instant },
+    /// `timeout(nanos, thunk)`: the calling fiber parks until its racer
+    /// answers or the deadline passes — no IO interest, the wheel's firing
+    /// the deadline door (the racer's completion ends the wait through the
+    /// fiber's own delivery, leaving a stale token the pop drops). The
+    /// parked fiber is the race's owner; the race itself is nursery
+    /// state, and the wait carries no nanos because the failure answer
+    /// is the bare `timed_out` class span.
+    Timeout { deadline: Instant },
 }
 
 /// Which handle table one close seam closed: the close natives note
@@ -288,7 +297,8 @@ impl WorldWait {
             | Self::TlsAccept { deadline, .. }
             | Self::ProcRead { deadline, .. }
             | Self::ProcWait { deadline, .. }
-            | Self::Sleep { deadline } => Some(*deadline),
+            | Self::Sleep { deadline }
+            | Self::Timeout { deadline, .. } => Some(*deadline),
             Self::Accept { .. } => None,
         }
     }
@@ -310,7 +320,8 @@ impl WorldWait {
             Self::Fetch { .. }
             | Self::TlsFetch { .. }
             | Self::TlsAccept { .. }
-            | Self::Sleep { .. } => None,
+            | Self::Sleep { .. }
+            | Self::Timeout { .. } => None,
         }
     }
 
@@ -368,7 +379,7 @@ impl WorldWait {
             | Self::Connect { .. }
             | Self::Fetch { .. }
             | Self::TlsFetch { .. } => Some(Direction::Write),
-            Self::Sleep { .. } => None,
+            Self::Sleep { .. } | Self::Timeout { .. } => None,
         }
     }
 
@@ -387,6 +398,7 @@ impl WorldWait {
             Self::ProcRead { pipe, .. } => pipe.op_name(),
             Self::ProcWait { .. } => "proc_wait",
             Self::Sleep { .. } => "time_sleep",
+            Self::Timeout { .. } => "timeout",
         }
     }
 
@@ -398,6 +410,16 @@ impl WorldWait {
     pub fn is_proc(&self) -> bool {
         matches!(self, Self::ProcRead { .. } | Self::ProcWait { .. })
     }
+}
+
+/// What a wake hands a woken fiber at its resume point.
+#[derive(Clone, Debug)]
+pub(crate) enum Wake {
+    /// The completed op's answer, overlaid at the parked call site.
+    Answer(NativeResult),
+    /// A failure the fiber dies with at its resume point: it is entered
+    /// so the trap attributes at the parked call, and nothing answers.
+    Fault(Trap),
 }
 
 /// One live wait: the parked fiber, the pending op, and the IO handle
@@ -424,8 +446,9 @@ pub(crate) struct SchedState {
     /// The ready fibers in wake order (FIFO).
     pub(crate) run_queue: VecDeque<FiberId>,
     /// The completed answers awaiting delivery at each woken fiber's
-    /// resume point — the parked call site's overlay words.
-    pub(crate) deliveries: HashMap<FiberId, NativeResult>,
+    /// resume point — the parked call site's overlay words — and the
+    /// failures a woken fiber dies with there instead.
+    pub(crate) deliveries: HashMap<FiberId, Wake>,
     /// The staged cancel-cuts: fibers whose wait the cancel discipline
     /// deregistered (a raised flag, the host's shutdown) and whose
     /// sentinel cut the next entry performs in place of a wake's
@@ -593,6 +616,20 @@ mod tests {
         assert_eq!(wait.direction(), None, "no readiness direction");
         assert_eq!(wait.op_name(), "time_sleep");
         assert_eq!(wait, WorldWait::Sleep { deadline: at });
+    }
+
+    /// The timeout race's wait shape: the deadline the whole of the wait,
+    /// no IO interest and no handle, like the sleep it rides beside.
+    #[test]
+    fn the_timeout_wait_names_no_io_interest() {
+        let at = Instant::now() + Duration::from_millis(5);
+        let wait = WorldWait::Timeout { deadline: at };
+        assert_eq!(wait.deadline(), Some(at));
+        assert_eq!(wait.conn(), None, "no deregistration target");
+        assert_eq!(wait.direction(), None, "no readiness direction");
+        assert_eq!(wait.op_name(), "timeout");
+        assert_eq!(wait.target(), "");
+        assert!(!wait.watches(CloseSeam::NetConn, 0));
     }
 
     /// The close-wake filter: each seam names only its own table's

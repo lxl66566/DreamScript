@@ -46,7 +46,7 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
     for url in urls {
       spawn {
         match fetch_body(url) {
-          timeout => cancel(timeout)
+          timeout => cancel(net_err::timeout)
           refused => cancel(refused)
           addr_in_use => cancel(addr_in_use)
           reset => cancel(reset)
@@ -61,12 +61,12 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
 // the retry loop's shapes (for over a range, the leading-binding arm,
 // break) lower and run; only the fetch callee waits
 fn with_retry(n: int, url: url) -> page | net_err {
-  var last: net_err = timeout
+  var last: net_err = net_err::timeout
   var done: page? = none
   for i in 0..n {
     match fetch_body(url) {
       timeout => {
-        last = timeout
+        last = net_err::timeout
       }
       refused => {
         last = refused
