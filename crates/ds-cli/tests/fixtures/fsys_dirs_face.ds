@@ -1,5 +1,5 @@
-// purpose: the fsys path round's user face through the real ambient and
-// the CLI host's $host.ds provision — mkdir's single-level create
+// purpose: the fsys path round's user face through the real ambient —
+// mkdir's single-level create
 // (already_exists the branchable outcome), remove's one-entry removal
 // (a file, then the emptied directory, the non-empty directory folding
 // into the io_other floor, the missing path answering not_found), and

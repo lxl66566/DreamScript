@@ -58,8 +58,8 @@ pub enum Capability {
     Tls,
     /// The process surface (the CLI process surface, ruled 2026-11-21):
     /// string argv, the environment read, process spawn (the piped
-    /// capture half and its linear `proc_handle`), and the `exit(code)`
-    /// host member's seam.
+    /// capture half and its linear `proc_handle`), and the
+    /// deliberate-status `exit(code)` row.
     Proc,
 }
 
@@ -152,7 +152,8 @@ pub const OP_ARGS: u32 = 20;
 pub const OP_ENV: u32 = 21;
 /// `proc_run`: proc (spawn one child, answer its exit status).
 pub const OP_PROC_RUN: u32 = 22;
-/// `exit`: proc (the `exit(code)` host member's deliberate-status seam).
+/// `exit`: proc (the deliberate-status row: the native never answers,
+/// the status riding the trap out to the drive).
 pub const OP_EXIT: u32 = 23;
 /// `mono`: time (the monotonic clock read, the 2026-11-21 timer ruling).
 pub const OP_MONO: u32 = 24;
@@ -207,8 +208,7 @@ pub const OP_MKDIR: u32 = 39;
 /// `remove`: fsys (removes one entry — a file or link over
 /// `remove_file`, a directory over the empty-only `remove_dir`).
 pub const OP_REMOVE: u32 = 40;
-/// `fs_size`: fsys (the entry's byte count, `file_size`'s fallible
-/// form).
+/// `fs_size`: fsys (the entry's byte count, the same read as `file_size`).
 pub const OP_FS_SIZE: u32 = 41;
 /// `utc_offset`: time (the host's local UTC offset for a timestamp,
 /// seconds east — the datetime face's one world touch; the calendar

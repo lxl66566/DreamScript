@@ -4,8 +4,11 @@
 //! declaration member registered beside the ambient — never ambient or
 //! `@std` source), and the halt policy — what the trap prints and which
 //! exit code follows — is the host's own, riding the trap report
-//! beside the io/net/utf8 halt rows. A compile without the provision
-//! (the check driver, a `--no-ambient` run, an embedder's bare VM)
+//! beside the io/net/utf8 halt rows. The ambient's `panic` spelling
+//! rides the same primitive for every source that registers the
+//! ambient — library packages included — with the same report above
+//! it; `die` alone stays the host's provision, and a compile without
+//! it (the check driver, a `--no-ambient` run, an embedder's bare VM)
 //! keeps the boundary the ambient shed left: `die` is an unknown name
 //! at the checker, never a callee that checks clean.
 
@@ -178,4 +181,48 @@ fn a_die_line_reports_and_rolls_back_in_the_repl() {
     let stdout = text(&out.stdout);
     assert!(out.status.success(), "the session exits cleanly: {stdout}");
     in_order(&stdout, &["trap: die: repl boom", "42"]);
+}
+
+/// The ambient `panic` rides the same trap row as the host's `die`:
+/// the entry resolves the spelling from the ambient (the check is
+/// clean with no provision), the halt prints through the same trap
+/// report, and a `--no-ambient` run keeps the name unknown with the
+/// rest of the ambient face.
+#[test]
+fn the_ambient_panic_rides_the_same_trap_row() {
+    let file = script(
+        "panic",
+        "panics.ds",
+        "fn main() -> () {\n  println(\"before\")\n  panic(\"boom\")\n           \
+         println(\"unreachable\")\n}\n",
+    );
+    let out = run(&["check", file.to_str().expect("temp path is UTF-8")]);
+    assert!(out.status.success(), "the ambient spelling checks: {out:?}");
+    let out = run(&["run", file.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(out.status.code(), Some(1), "the panic run exits failed");
+    assert_eq!(text(&out.stdout), "before\n", "nothing runs past the panic");
+    let err = text(&out.stderr);
+    in_order(&err, &["trap: die: boom", "panics::main"]);
+    let out = run(&[
+        "run",
+        "--no-ambient",
+        file.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "the bare run exits failed");
+    in_order(&text(&out.stderr), &["error[DS2004]: unknown name `panic`"]);
+}
+
+/// The abort call takes statement and handler positions: a block tail
+/// against an annotated return refuses, the generic answer never
+/// unifying into the declared type.
+#[test]
+fn a_panic_block_tail_against_an_annotated_return_refuses() {
+    let file = script(
+        "panic_tail",
+        "panics.ds",
+        "fn bail() -> int {\n  panic(\"refused\")\n}\n\nfn main() -> () {\n           bail()\n}\n",
+    );
+    let out = run(&["check", file.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(out.status.code(), Some(1), "the block tail refuses");
+    in_order(&text(&out.stderr), &["error[DS2001]"]);
 }

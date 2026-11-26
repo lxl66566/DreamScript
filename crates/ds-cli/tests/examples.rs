@@ -196,9 +196,11 @@ fn mutation_runs_the_fallible_parse_extraction() {
 
 #[test]
 fn files_round_trip_runs_through_the_success_typed_read() {
-    // the round trip's read leg rides the ambient's string | io_err
-    // signature: the `.err` handler extracts at run level, and the
-    // written file landing before the read proves the legs ordered
+    // every fallible leg rides the ambient's io_err union: the write's
+    // `is` narrowing and the size's `?` extraction stay silent on the
+    // success path while the read's `.err` handler extracts at run
+    // level, and the written file landing before the read proves the
+    // legs ordered
     let dir = support::guarded_dir("ds_cli_files_example-");
     let mut command = ds();
     command

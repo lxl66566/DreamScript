@@ -280,3 +280,14 @@ fn the_place_chains_store_and_the_compound_operator_folds_through_them() {
         "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 211\n0\n",
     );
 }
+/// The non-handle io spellings answer the io_err union: a failed write,
+/// list, and size over an absent parent each land on the not_found class
+/// and extract through the `.ok` handler, `?`, and match — no error line
+/// prints and the run exits clean where the total spelling halted.
+#[test]
+fn the_fallible_io_spellings_answer_the_io_err_union() {
+    run_golden(
+        "io_fallible.ds",
+        "write refused\nlist refused\nsize not_found\n0\n",
+    );
+}

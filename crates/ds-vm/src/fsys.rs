@@ -40,9 +40,8 @@
 //! link over `remove_file`, a directory over the empty-only
 //! `remove_dir` (a non-empty directory refuses on the `io_other` floor,
 //! the walk over `fs_list` emptying it first); `fs_size` answers the
-//! entry's byte count (`file_size`'s fallible form — the caller branches
-//! on the missing path instead of halting). Each failure lands on its
-//! `io_err` class like every fsys native.
+//! entry's byte count, the same read as the path face's `file_size`.
+//! Each failure lands on its `io_err` class like every fsys native.
 
 use std::{fs::File, io};
 
@@ -232,9 +231,9 @@ pub(crate) fn remove_fn(
     })
 }
 
-/// `fs_size(path: string) -> int | io_err`: the entry's byte count,
-/// `file_size`'s fallible form — the caller branches on the missing
-/// path instead of halting.
+/// `fs_size(path: string) -> int | io_err`: the entry's byte count, the
+/// same read as the path face's `file_size` — the caller branches on
+/// the missing path instead of halting.
 pub(crate) fn fs_size_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,

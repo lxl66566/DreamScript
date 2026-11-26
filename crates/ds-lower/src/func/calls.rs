@@ -1193,8 +1193,10 @@ impl<'a> FnLower<'a, '_, '_> {
             if self.ambient_extern(def, AmbientExtern::Cancel) {
                 return self.cancel_call(&arg_exprs, callee_span);
             }
-            if self.ambient_extern(def, AmbientExtern::Die) {
-                return self.die_call(&arg_exprs, ty, callee_span);
+            if self.ambient_extern(def, AmbientExtern::Die)
+                || self.ambient_extern(def, AmbientExtern::Panic)
+            {
+                return self.trap_call(&arg_exprs, ty, callee_span);
             }
             if self.ambient_extern(def, AmbientExtern::Exit) {
                 return self.exit_call(&arg_exprs, ty, callee_span);
@@ -4114,7 +4116,8 @@ impl<'a> FnLower<'a, '_, '_> {
     /// failure union itself (`string | io_err`, `int | parse_err`), so
     /// the span re-spans into it per member over the error-class mapping
     /// ([`fn classed_native_union`](Self::classed_native_union)); a total
-    /// spelling (the ambient's `fs_list`/`write_file` rows) extracts the
+    /// spelling (a deinit-carrying handle row such as `open_file`, or a
+    /// file-owned extern declaring the success type alone) extracts the
     /// payload into the call's result temp, and failure prints
     /// `<prefix><detail>` through println and halts on the discriminant
     /// — the M3 stand-in for the unhandled-failure handler the `error`

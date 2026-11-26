@@ -5,10 +5,11 @@
 // nothing leaks), the time op's clock word, the bytes collection's
 // members over the reads (the list[byte] bridges, the checked byte_at
 // read, the payload count), and the ambient's own json
-// reader/writer pair. The reads answer the io_err union (`?` and the
-// annotated `.err` handler extract), while `open_file` keeps the total
-// spelling: an io failure there prints the error line and halts. The
-// script runs with the fixture's directory as the working directory.
+// reader/writer pair. The reads and the probe write answer the io_err
+// union (`?`, the annotated `.err` handler, and `is` narrowing
+// extracting), while `open_file` keeps the total spelling: an io
+// failure there prints the error line and halts. The script runs with
+// the fixture's directory as the working directory.
 
 fn read_head(path: string) -> int | io_err {
   const f = open_file(path)
@@ -45,7 +46,10 @@ fn sum_reads(path: string, count: int) -> int {
   total
 }
 
-write_file("file_time_probe.txt", "probe bytes")
+const written = write_file("file_time_probe.txt", "probe bytes")
+if written is io_err {
+  println("probe write failed")
+}
 const t0 = time()
 println("head ${read_head("file_time_probe.txt").err((_: io_err) => -1)}")
 println("bytes ${read_probe("file_time_probe.txt").err((_: io_err) => "x")}")

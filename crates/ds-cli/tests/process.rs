@@ -247,40 +247,47 @@ fn the_host_owns_the_exit_code() {
     assert_eq!(out.status.code(), Some(1), "a trap exits 1");
 }
 
-/// The un-hosted `exit` spelling refuses at the checker: the check
-/// driver and a `--no-ambient` run never register the host member, so
-/// the name stays unknown — the deliberate status is the host's own
-/// provision, never a builtin or ambient declaration.
+/// The `exit` spelling is an ambient declaration beside the proc face:
+/// the check driver resolves it with no host provision (which
+/// capability serves the module is an install concern the check never
+/// sees), while a `--no-ambient` run keeps the name unknown. The
+/// capability refusal itself rides the install — an embedder whose
+/// platform omits `proc` refuses the module naming the capability (the
+/// entry session's own pin) — and the CLI's run always serves the
+/// capability, so the deliberate status works wherever the ambient
+/// does.
 #[test]
-fn exit_stays_unknown_without_the_host_provision() {
-    let source = source_file("exit_refusal", "fn main() -> () {\n  exit(3)\n}\n");
+fn exit_checks_from_the_ambient_and_refuses_without_it() {
+    // the trailing statement keeps the generic call out of tail
+    // position (a sole generic-extern call cannot unify its answer)
+    let source = source_file(
+        "exit_refusal",
+        "fn main() -> () {\n  exit(3)\n  println(\"unreachable\")\n}\n",
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_ds"))
         .env("DS_CACHE", test_cache())
         .arg("check")
         .arg(&source)
         .output()
         .expect("the ds binary runs");
-    assert_eq!(out.status.code(), Some(1), "the check exits failed");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("error[DS2004]: unknown name `exit`"),
-        "the check refuses the un-hosted spelling: {err}"
-    );
+    assert!(out.status.success(), "the ambient spelling checks: {out:?}");
+    assert_eq!(out.stderr, b"", "the check is silent");
 
     let out = ds_run(&source, &["--no-ambient"]);
     assert_eq!(out.status.code(), Some(1), "the bare run exits failed");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("error[DS2004]: unknown name `exit`"),
-        "the bare run refuses the un-hosted spelling: {err}"
+        "the bare run refuses the un-ambiented spelling: {err}"
     );
 }
 
-/// The host member's name collides like any ambient face: a script
-/// redeclaring `exit` refuses as a duplicate against the provision's
-/// declaration, so no shadowing spelling routes around the host's seam.
+/// The spelling's name collides like any ambient face: a script
+/// redeclaring `exit` refuses as a duplicate against the ambient's
+/// declaration, so no shadowing spelling routes around the proc
+/// capability's op row.
 #[test]
-fn a_redeclared_exit_refuses_against_the_host_member() {
+fn a_redeclared_exit_refuses_against_the_ambient_member() {
     let source = source_file(
         "exit_redeclared",
         "extern fn exit[t](code: int) -> t\n\nfn main() -> () {\n  exit(3)\n}\n",
@@ -289,8 +296,8 @@ fn a_redeclared_exit_refuses_against_the_host_member() {
     assert_eq!(out.status.code(), Some(1), "the collision exits failed");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("error[DS2005]: `exit` is already defined") && err.contains("$host.ds"),
-        "the redeclaration names the host member: {err}"
+        err.contains("error[DS2005]: `exit` is already defined") && err.contains("ambient.ds"),
+        "the redeclaration names the ambient member: {err}"
     );
 }
 

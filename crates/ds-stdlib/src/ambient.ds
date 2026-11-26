@@ -528,13 +528,21 @@ pub extern fn u32_of (n: int) -> u32 | none
 pub extern fn int_of_u32 (v: u32) -> int
 // The trap primitive's own spelling (the 2026-11-17 die split's builtin,
 // index 69): private to this file [G4], so no user compile gains a bare
-// trap — the `die` convenience stays the CLI host's provision — while the
-// member below routes through it the way every native-keyed extern does,
-// the lowerer reading the callee by name alone. The message rides the
-// Die trap out to the drive, so the CLI's trap report prints a u32
-// range failure exactly like `die`; the declared return is the member's
-// own checking surface — the primitive never answers.
+// trap — the member below routes through it the way every native-keyed
+// extern does, the lowerer reading the callee by name alone. The
+// message rides the Die trap out to the drive, so the CLI's trap report
+// prints a u32 range failure exactly like `die`; the declared return is
+// the member's own checking surface — the primitive never answers.
 extern fn trap (msg: string) -> u32
+// The policy-free abort over the trap primitive: the deliberate-bug
+// spelling every source sharing the ambient reaches, library packages
+// included. The message rides the Die trap out to the drive — the
+// engine prints nothing and decides no exit code, the host's policy
+// applying above it (the CLI's `die` provision rides the same
+// primitive) — and the return generic answers whatever the call site
+// expects, so a statement position or a handler arm takes it while a
+// block tail against an annotated return refuses.
+pub extern fn panic[t] (msg: string) -> t
 // The u32 width's trapping construction (ruled 2026-11-19, B7's family):
 // the receiverless member answers the in-range word and traps out of
 // range naming the value and the range — the checked `u32_of` above
@@ -585,10 +593,25 @@ pub extern fn eprintln (msg: string) -> ()
 pub extern fn eprint (msg: string) -> ()
 pub extern fn read_line () -> string | none
 pub extern fn read_file (path: string) -> string | io_err
-pub extern fn write_file (path: string, contents: string) -> ()
+// The path face answers the io_err union the way `read_file` does: each
+// platform failure lands on its class, so `?`, the `.ok`/`.err` handlers,
+// and match extract a real member and a handled failure neither prints
+// nor halts. `write_file` answers the unit member, `fs_list` the sorted
+// entry names, and `file_size` the entry's byte count. None of the three
+// sits in tail position (a tail call to a fallible native refuses at
+// lowering).
+pub extern fn write_file (path: string, contents: string) -> () | io_err
 pub extern fn file_exists (path: string) -> bool
-pub extern fn fs_list (dir: string) -> list[string]
-pub extern fn file_size (path: string) -> int
+pub extern fn fs_list (dir: string) -> list[string] | io_err
+pub extern fn file_size (path: string) -> int | io_err
+// The fsys path round: `mkdir` creates one directory a single level deep
+// (`already_exists` the branchable outcome), `remove` deletes one entry
+// whatever it is (a directory only once empty, the non-empty directory
+// answering the `io_other` floor), and `fs_size` answers the entry's byte
+// count — each failure landing on its io_err class.
+pub extern fn mkdir (path: string) -> () | io_err
+pub extern fn remove (path: string) -> () | io_err
+pub extern fn fs_size (path: string) -> int | io_err
 pub extern fn open_file (path: string) -> file_handle
 pub extern fn read_raw (fd: int, n: int) -> bytes | io_err
 pub extern fn close_raw (fd: int) -> ()
@@ -619,11 +642,16 @@ pub extern fn utc_offset (unix_seconds: int) -> int
 // spawns one child over the argument list — inheriting the standard
 // streams — and answers its exit status, a spawn failure riding the
 // io_err union and a child ended without a status code answering -1.
-// The `exit(code)` spelling is the CLI host's own provision beside
-// `die` (the host owns the exit code), never an ambient declaration.
+// `exit(code)` ends the process with a deliberate status — the proc
+// capability's own op row, so a host refusing the capability refuses
+// the spelling. The engine prints nothing and decides no exit code (the
+// installing host owns what the status means), the call never answers,
+// and the return generic answers whatever the call site expects,
+// `panic`'s own shape.
 pub extern fn args () -> list[string]
 pub extern fn env (name: string) -> string | none
 pub extern fn proc_run (cmd: string, args: list[string]) -> int | io_err
+pub extern fn exit[t] (code: int) -> t
 pub extern fn net_connect (host: string, port: int) -> net_handle
 pub extern fn net_send (conn: int, data: string) -> () | net_err
 pub extern fn net_recv (conn: int, max_bytes: int) -> string | net_err

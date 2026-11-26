@@ -202,8 +202,8 @@ pub(crate) struct Native {
 /// value, element and pair words opaque to the natives), the file-IO
 /// surface including `fs_list` and the path round (`mkdir`'s
 /// single-level create, `remove`'s one-entry removal, `fs_size`'s byte
-/// count — the CLI host's provision declares the spellings beside the
-/// ambient's face), and the TCP surface. The ambient's
+/// count — @std's ambient path face declares the spellings beside the
+/// file readers), and the TCP surface. The ambient's
 /// generic reads and counts (`len`, `list_len`, `list_get`,
 /// `list_concat`, `map_len`, `map_get`) stay out of the monomorphic
 /// table on purpose: their ambient spellings are generic, so a
@@ -938,9 +938,10 @@ pub(crate) const NATIVES: &[Native] = &[
         },
     },
     Native {
-        // the `exit(code)` host member's seam (the CLI process surface):
-        // the unit shape only satisfies the call site's width check,
-        // the native never answers — the status rides the trap out
+        // the `exit(code)` spelling's seam (the proc capability's
+        // deliberate-status row): the unit shape only satisfies the call
+        // site's width check, the native never answers — the status rides
+        // the trap out
         name: "exit",
         module: NativeModule::Platform,
         index: 23,
@@ -1155,8 +1156,8 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::I64),
     },
     Native {
-        // the fsys path round (the CLI host's provision declares the
-        // spellings beside the ambient's face): `mkdir` creates one
+        // the fsys path round (@std's ambient path face declares the
+        // spellings beside the file readers): `mkdir` creates one
         // directory, a single level — `already_exists` the branchable
         // outcome — and answers the unit word over the ok member
         name: "mkdir",
@@ -1184,9 +1185,9 @@ pub(crate) const NATIVES: &[Native] = &[
         },
     },
     Native {
-        // `fs_size` answers the entry's byte count — `file_size`'s
-        // fallible form, the caller branching on the missing path
-        // instead of halting
+        // `fs_size` answers the entry's byte count — the same read as
+        // `file_size`, the caller branching on the missing path instead
+        // of halting
         name: "fs_size",
         module: NativeModule::Platform,
         index: 41,

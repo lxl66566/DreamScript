@@ -1,0 +1,40 @@
+// source: todo item 121, the fallible io spellings (ruled 2026-11-24)
+// purpose: the three non-handle io spellings answer the io_err union instead of halting — a failed write, list, and size over an absent parent each landing on the not_found class and extracted through the .ok handler, ?, and match
+// items:
+// write-failed: stage: run
+// list-failed: stage: run
+// size-failed: stage: run
+// main: stage: run
+
+// `write_file` answers `() | io_err`: the `.ok` handler covers the unit
+// member alone, the `.err` handler every class.
+fn write_failed() -> string {
+  const written = write_file("io_fallible_absent/probe.txt", "bytes")
+  written.ok((_: ()) => "written").err((_: io_err) => "write refused")
+}
+
+// `fs_list` answers `list[string] | io_err`: `?` propagates the classes
+// into the enclosing return union.
+fn list_failed() -> string | io_err {
+  const names = fs_list("io_fallible_absent")?
+  "listed ${names.len()}"
+}
+
+// `file_size` answers `int | io_err`: match reads the class off the tag.
+fn size_failed() -> string {
+  match file_size("io_fallible_absent/probe.txt") {
+    not_found => "size not_found"
+    permission_denied => "size permission_denied"
+    already_exists => "size already_exists"
+    timed_out => "size timed_out"
+    unexpected_eof => "size unexpected_eof"
+    io_other { msg } => "size other"
+    size => "size ${size}"
+  }
+}
+
+fn main() -> () {
+  println(write_failed())
+  println(list_failed().err((_: io_err) => "list refused"))
+  println(size_failed())
+}

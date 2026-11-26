@@ -160,6 +160,9 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // are the conformance suite's whole-file golden, the traps the
     // ds-lower place_assign suite's)
     assert_corpus_clean("place_stores.ds", 0);
+    // zero noise — the fallible io spellings extract their io_err classes
+    // over the ambient taxonomy (the whole-file run golden sits beside)
+    assert_corpus_clean("io_fallible.ds", 0);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a

@@ -1,6 +1,6 @@
 //! The process face of the CLI process surface (ruled 2026-11-21, H5):
 //! the `proc` capability's ops — string argv, environment-variable
-//! read, process spawn, and the `exit(code)` host member's seam —
+//! read, process spawn, and the deliberate-status `exit(code)` row —
 //! served by the platform handler the host installs. Every op is total
 //! at the type level: answers ride union spans (`args` is total by
 //! contract, `env` and the spawn read answer the checked/fallible
@@ -132,9 +132,9 @@ pub(crate) fn proc_run_fn(
     })
 }
 
-/// The `exit(code)` host member's seam: the deliberate process status
-/// rides the trap out to the drive, the CLI host's exit-code policy
-/// above it — the engine decides none (the die split's own rule). A
+/// The `exit(code)` deliberate-status row: the process status rides the
+/// trap out to the drive, the installing host's exit-code policy above
+/// it — the engine decides none (the die split's own rule). A
 /// negative status traps (ruled 2026-11-22, the trapping-arithmetic
 /// precedent: a deliberate failure never reads as clean success), the
 /// message riding the Die trap out like the u32 range failure's own

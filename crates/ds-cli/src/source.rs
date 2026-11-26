@@ -44,41 +44,24 @@ const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 /// The `$` stem keeps it outside every plausible user stem.
 pub(crate) const HOST_FILE: &str = "$host.ds";
 
-/// The host provision's text: the `die` and `exit` spellings'
-/// declarations plus the fsys path round's — `mkdir` (one directory,
-/// a single level), `remove` (one entry, whatever it is), and
-/// `fs_size` (the entry's byte count, `file_size`'s fallible form) —
-/// `pub` like every ambient face `[G4]` because the member's names are
-/// the host's surface to the entry files, not a private one. `die`
-/// routes to the builtin core's bare trap primitive (the 2026-11-17
-/// split); `exit` routes to the proc capability's deliberate-status
-/// seam (the CLI process surface, 2026-11-21) — what either prints and
-/// which exit code follows is this host's own policy. The path round's
-/// members answer the io_err union the ambient owns (the file face's
-/// own failure taxonomy), each platform failure landing on its class,
-/// so `?`, the `.err` handler, and match extract a real member;
-/// un-provisioned compiles keep the names unknown, the die split's
-/// discipline.
-pub(crate) const HOST_SOURCE: &str =
-    "pub extern fn die[t](msg: string) -> t\npub extern fn exit[t](code: int) -> t\npub extern fn \
-     mkdir(path: string) -> () | io_err\npub extern fn remove(path: string) -> () | io_err\npub \
-     extern fn fs_size(path: string) -> int | io_err\n";
+/// The host provision's text: the `die` spelling's declaration, `pub`
+/// like every ambient face `[G4]` because the member's name is the
+/// host's surface to the entry files, not a private one. `die` routes to
+/// the builtin core's bare trap primitive (the 2026-11-17 split) — what
+/// it prints and which exit code follows is this host's own policy,
+/// which is why it stays here while the policy-free `panic` and the
+/// deliberate-status `exit` are ambient declarations; an un-provisioned
+/// compile keeps the name unknown, the die split's discipline.
+pub(crate) const HOST_SOURCE: &str = "pub extern fn die[t](msg: string) -> t\n";
 
 /// The entry session's declared rows: the ambient's table plus the die
-/// and exit spellings' trap rows and the fsys path round's error|world
-/// rows — the host's own declarations, so the rows ride with them (a
-/// declared row is a lower bound; trap alone never fences or refuses
-/// the pooled bodies).
+/// spelling's trap row — the host's own declaration, so the row rides
+/// with it (a declared row is a lower bound; trap alone never fences or
+/// refuses the pooled bodies).
 static SESSION_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
-    let world = EffectRow::of(Effect::World);
-    let error = EffectRow::of(Effect::Error);
     ds_stdlib::declared_rows()
         .clone()
         .with("die", EffectRow::of(Effect::Trap))
-        .with("exit", EffectRow::of(Effect::Trap))
-        .with("mkdir", error | world)
-        .with("remove", error | world)
-        .with("fs_size", error | world)
 });
 
 /// The entry session's rows when the ambient serves: the host member's
@@ -1392,6 +1375,53 @@ mod tests {
                 .iter()
                 .any(|row| row.name.starts_with("list[json_null")),
             "the unminted row rides the module's table"
+        );
+    }
+
+    /// `exit(code)` rides the proc capability's op row: the compiled
+    /// module installs under a platform serving `proc` and answers the
+    /// deliberate status out of the engine, while a platform refusing
+    /// the capability refuses the module at install. The entry links
+    /// the whole ambient face, so the walk names the first frame the
+    /// refused capability leaves unserved — the pin is the capability
+    /// the refusal reports, the exit op the served install runs.
+    #[test]
+    fn exit_rides_the_proc_capability_op_row() {
+        const EXITS: &str = "fn main() -> () {\n  exit(3)\n  println(\"unreachable\")\n}\n";
+        let compiled = compile_script(&script_inputs("exits"), EXITS, false, true)
+            .expect("the exit program compiles");
+        let bytes = ds_mod::write(compiled.lowered.module());
+
+        let without_proc = || {
+            let mut registry = ds_vm::ModuleRegistry::new();
+            registry.install_platform(ds_vm::Platform::new("std", &[
+                ds_vm::Capability::Console,
+                ds_vm::Capability::Fsys,
+                ds_vm::Capability::Net,
+                ds_vm::Capability::Time,
+                ds_vm::Capability::Tls,
+            ]));
+            ds_vm::Vm::new(registry)
+        };
+        let module = ds_mod::read(&bytes).expect("the module reads back");
+        let err = without_proc().install_dsmod(module).unwrap_err();
+        let ds_vm::LoadError::UnprovidedPlatformOp { platform, capability, .. } = err else {
+            panic!("the install names the platform op: {err:?}");
+        };
+        assert_eq!(platform, "std", "the refusal names the platform");
+        assert_eq!(
+            capability, "proc",
+            "a host refusing the proc capability refuses the module at install"
+        );
+
+        let mut vm = fresh_vm();
+        let module = ds_mod::read(&bytes).expect("the module reads back");
+        vm.install_dsmod(module)
+            .expect("a proc-serving host installs the module");
+        assert_eq!(
+            vm.run("exits", "main", &[]).unwrap_err(),
+            ds_vm::Trap::Exit { code: 3 },
+            "the engine hands the deliberate status out and decides nothing"
         );
     }
 

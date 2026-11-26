@@ -25,10 +25,15 @@ pub(super) enum AmbientExtern {
     /// extern). The declaration is the provider's own code; the
     /// primitive it routes to is the builtin core's `trap`.
     Die,
-    /// An `exit` spelling's declaration (the CLI process surface,
-    /// 2026-11-21): the same host-member shape as `Die` — the generic
-    /// one-parameter extern the host provision serves — routing to the
-    /// proc capability's deliberate-status seam.
+    /// The ambient `panic` extern: the policy-free abort over the same
+    /// `trap` primitive, the same generic one-parameter shape, served to
+    /// every source that registers the ambient.
+    Panic,
+    /// An `exit` spelling's declaration: the same generic one-parameter
+    /// shape as `Die`, served by the ambient (or a file-owned extern)
+    /// and routing to the proc capability's deliberate-status seam —
+    /// the platform FuncRef the install validates against the host's
+    /// served capabilities.
     Exit,
     /// The ambient `sort[t: ord]` extern (todo item 101): the generic
     /// one-parameter declaration whose declared ord bound routes the
@@ -46,6 +51,7 @@ impl AmbientExtern {
             Self::Str => "str",
             Self::Cancel => "cancel",
             Self::Die => "die",
+            Self::Panic => "panic",
             Self::Exit => "exit",
             Self::Sort => "sort",
         }
@@ -744,13 +750,13 @@ impl FnLower<'_, '_, '_> {
         Ok(self.unit_value(span)?.place)
     }
 
-    /// The `die(msg)` call (the 2026-11-17 split): the one string word
-    /// stages to the builtin core's bare trap primitive, the message
-    /// riding the trap out to the drive — the engine prints nothing and
-    /// decides no exit code, the host's halt policy applying above it.
-    /// The call never answers, so the call's own checked type names a
+    /// The `die(msg)` and `panic(msg)` calls: the one string word stages
+    /// to the builtin core's bare trap primitive, the message riding the
+    /// trap out to the drive — the engine prints nothing and decides no
+    /// exit code, the host's halt policy applying above it. The call
+    /// never answers, so the call's own checked type names a
     /// placeholder span no later instruction reads (the trap fires first).
-    pub(super) fn die_call(
+    pub(super) fn trap_call(
         &mut self,
         args: &[&Expr],
         ty: Ty,
@@ -760,8 +766,9 @@ impl FnLower<'_, '_, '_> {
         let [message] = args else {
             return Err(LowerError::unsupported(
                 span,
-                "a `die` call",
-                "stage exactly the message; the spelling is `die(msg: string)`",
+                "an abort call",
+                "stage exactly the message; the spelling is `die(msg: string)` or `panic(msg: \
+                 string)`",
             ));
         };
         let tp = self.value(message)?;
@@ -769,7 +776,7 @@ impl FnLower<'_, '_, '_> {
         if addr.slot_ty != SlotType::Ref {
             return Err(LowerError::unsupported(
                 message.span(),
-                "a `die` message",
+                "an abort message",
                 "the message must be the one string word the declaration names",
             ));
         }
@@ -777,14 +784,13 @@ impl FnLower<'_, '_, '_> {
         self.temp_span(ty)
     }
 
-    /// The `exit(code)` call (the CLI process surface's host member,
-    /// ruled 2026-11-21): the one i64 word stages to the proc
+    /// The `exit(code)` call: the one i64 word stages to the proc
     /// capability's exit op, the deliberate status riding the trap out
-    /// to the drive exactly like `die`'s message — the engine prints
-    /// nothing and decides no exit code, the host's policy applying
-    /// above it. The call never answers, so the call's own checked type
-    /// names a placeholder span no later instruction reads (the trap
-    /// fires first).
+    /// to the drive exactly like the abort spellings' message — the
+    /// engine prints nothing and decides no exit code, the host's policy
+    /// applying above it. The call never answers, so the call's own
+    /// checked type names a placeholder span no later instruction reads
+    /// (the trap fires first).
     pub(super) fn exit_call(
         &mut self,
         args: &[&Expr],

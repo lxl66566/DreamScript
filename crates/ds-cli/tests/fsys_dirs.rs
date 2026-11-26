@@ -1,8 +1,7 @@
-//! End-to-end through the `ds` binary over the real ambient and the CLI
-//! host's `$host.ds` provision: the fsys path round — `mkdir`'s
-//! single-level create, `remove`'s one-entry removal, and `fs_size`'s
-//! byte count — each failure answering the io_err union the ambient
-//! owns, the is-narrowing reading its class.
+//! End-to-end through the `ds` binary over the real ambient: the fsys
+//! path round — `mkdir`'s single-level create, `remove`'s one-entry
+//! removal, and `fs_size`'s byte count — each failure answering the
+//! io_err union the ambient owns, the is-narrowing reading its class.
 
 use std::{
     env, fs,
@@ -46,7 +45,7 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// and the emptied directory's sweep — every handled failure printed
 /// nothing beyond its own report line.
 #[test]
-fn the_fsys_path_round_runs_through_the_host_provision() {
+fn the_fsys_path_round_runs_through_the_ambient() {
     let dir = workdir("face");
     let out = run(
         ds_in(&dir).arg("run").arg(fixture("fsys_dirs_face.ds")),

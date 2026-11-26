@@ -105,6 +105,9 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("file_exists", "fsys")
         .with("fs_list", "fsys")
         .with("file_size", "fsys")
+        .with("mkdir", "fsys")
+        .with("remove", "fsys")
+        .with("fs_size", "fsys")
         .with("net_connect", "net")
         .with("net_send", "net")
         .with("net_recv", "net")
@@ -123,6 +126,7 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
         .with("args", "proc")
         .with("env", "proc")
         .with("proc_run", "proc")
+        .with("exit", "proc")
 });
 
 /// The ambient functions' world-capability attribution (E1, H5): the
@@ -134,7 +138,8 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 /// world-bearing platform.
 ///
 /// * `console`: the printing pair, the stderr twins, and the stdin read.
-/// * `fsys`: the file readers, writers, and the handle face (`open_file`, `read_raw`, `close_raw`).
+/// * `fsys`: the file readers, writers, the path round (`mkdir`, `remove`, `fs_size`), and the
+///   handle face (`open_file`, `read_raw`, `close_raw`).
 /// * `net`: the TCP surface, its linear handle face (`net_connect` answering `net_handle`, the
 ///   ds-source `send`/`recv`/`close_conn` handlers over it), the server half (`net_listen`
 ///   answering the `net_listener` handle with the ds-source `accept`/`close_listener` handlers over
@@ -143,7 +148,7 @@ static WORLD_CAPS: LazyLock<WorldCaps> = LazyLock::new(|| {
 ///   (the 2026-11-21 timer ruling), and the local UTC offset read the datetime face composes over.
 /// * `proc`: the CLI process surface — string argv, the environment read, process spawn (the piped
 ///   capture half answering the linear `proc_handle` over the idempotent `proc_close` seam), and
-///   the `exit(code)` host member's seam.
+///   the deliberate-status `exit(code)` row.
 ///
 /// The table is built on first read and shared: a consumer that must own
 /// one clones it.
@@ -391,6 +396,9 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("file_exists", world)
         .with("fs_list", error | world)
         .with("file_size", error | world)
+        .with("mkdir", error | world)
+        .with("remove", error | world)
+        .with("fs_size", error | world)
         .with("net_connect", error | world)
         .with("net_send", error | world)
         .with("net_recv", error | world)
@@ -423,12 +431,15 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
         .with("args", world)
         .with("env", world)
         .with("proc_run", error | world)
+        .with("exit", EffectRow::of(Effect::Trap) | world)
         .with("parse_int", error)
         .with("cancel", EffectRow::of(Effect::Cancel))
         // the trap primitive's private spelling (the u32 conversion's
-        // seam): the row rides the declared table the same way the host
-        // provision's die row rides the session rows
+        // seam) and the policy-free abort over it: the rows ride the
+        // declared table the same way the host provision's die row rides
+        // the session rows
         .with("trap", EffectRow::of(Effect::Trap))
+        .with("panic", EffectRow::of(Effect::Trap))
 });
 
 /// The ambient functions' declared effect rows (E1) — the failure and
@@ -444,7 +455,8 @@ static DECLARED_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
 /// * `cancel`: the nursery's internal effect (E1, E2) — `cancel`.
 /// * `trap`: the trap primitive's private spelling (B7, E4) — the seam the `u32` explicit-call
 ///   conversion routes its out-of-range failure through, the same row the CLI host's `die`
-///   provision declares for its own member.
+///   provision declares for its own member and `panic` carries as the policy-free abort; `exit`
+///   adds `world` beside it, the deliberate status riding the proc capability's op row.
 ///
 /// Every other ambient function is row-pure: the combinators run their
 /// lambdas inside the enclosing definition's extent (D3), which the
@@ -505,6 +517,11 @@ mod tests {
             "read_raw",
             "close_raw",
             "read_exact",
+            "panic",
+            "exit",
+            "mkdir",
+            "remove",
+            "fs_size",
             "close_file",
             "net_connect",
             "send",
@@ -574,6 +591,13 @@ mod tests {
         assert_eq!(rows.row("write_file").render(), "error | world");
         assert_eq!(rows.row("fs_list").render(), "error | world");
         assert_eq!(rows.row("file_size").render(), "error | world");
+        for name in ["mkdir", "remove", "fs_size"] {
+            assert_eq!(
+                rows.row(name).render(),
+                "error | world",
+                "the path round answers the io_err union"
+            );
+        }
         for name in ["net_connect", "net_send", "net_recv", "http_get"] {
             assert_eq!(rows.row(name).render(), "error | world");
         }
@@ -599,6 +623,29 @@ mod tests {
             "trap",
             "the trap primitive's private spelling rows trap, the die row's own"
         );
+        assert_eq!(
+            rows.row("panic").render(),
+            "trap",
+            "the abort rides the trap primitive's row"
+        );
+        assert_eq!(
+            rows.row("exit").render(),
+            "trap | world",
+            "the deliberate status rides the proc capability's op row and never answers"
+        );
+        let caps = world_caps();
+        assert_eq!(
+            caps.bit("exit"),
+            caps.bit("args"),
+            "the deliberate status is a proc op"
+        );
+        for name in ["mkdir", "remove", "fs_size"] {
+            assert_eq!(
+                caps.bit(name),
+                caps.bit("read_file"),
+                "`{name}` is an fsys op"
+            );
+        }
         assert!(rows.row("cons").is_pure(), "the combinators are row-pure");
         assert!(
             rows.row("concat").is_pure(),

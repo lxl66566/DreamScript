@@ -46,5 +46,5 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 
 ## Files and net
 
-- `files.ds` — a write/read round trip through the file-IO natives, the read's failure handled through `.err`.
+- `files.ds` — a write/read round trip through the file-IO natives, every fallible leg answering the `io_err` union (the write narrowed through `is`, the read handled through `.err`, the size extracted through `?`).
 - `net.ds` — a TCP client flow over the linear net_handle: connect, send/recv, close — skipped with instructions and exit 0 when no port is staged with `--args`.

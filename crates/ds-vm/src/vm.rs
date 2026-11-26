@@ -359,8 +359,8 @@ pub enum Trap {
         /// The message the spelling staged.
         message: String,
     },
-    /// The `exit(code)` host member's deliberate process status (the
-    /// CLI process surface, ruled 2026-11-21): like `Die`, the engine
+    /// The `exit(code)` deliberate process status (the proc capability's
+    /// row, ruled 2026-11-21): like `Die`, the engine
     /// decides nothing — the code rides the trap out and the host's
     /// exit-code policy applies above it. A negative status traps at
     /// the seam (ruled 2026-11-22) and a wider one wraps to its low
