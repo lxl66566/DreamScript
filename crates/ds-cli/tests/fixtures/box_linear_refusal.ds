@@ -1,0 +1,13 @@
+struct owned: ~Copyable {
+  n: int
+  deinit { println("owned ${self.n} dies") }
+}
+
+struct holder {
+  h: box[owned]
+}
+
+fn main() -> int {
+  const b = box[owned](owned { n: 1 })
+  b.get().n
+}

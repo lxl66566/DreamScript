@@ -1,0 +1,12 @@
+struct node {
+  v: int
+  next: node
+}
+
+fn probe(n: node) -> int {
+  n.v
+}
+
+fn main() -> int {
+  0
+}

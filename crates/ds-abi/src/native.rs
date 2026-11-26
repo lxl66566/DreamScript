@@ -420,6 +420,17 @@ pub const BUILTIN_LIST_CONTAINS: u32 = 110;
 /// point (the interpolation hole and the `show` impl stage a char through it, the same seat
 /// `str_int` gives the integer width).
 pub const BUILTIN_STR_CHAR: u32 = 111;
+/// `box_new(x: element words) -> box[t]` — the owning container's construction seam: one heap
+/// object holding one value's whole word span inline, one owned count per `Ref` word. The value
+/// stages variadic over its whole span.
+pub const BUILTIN_BOX_NEW: u32 = 112;
+/// `box_get(b: box[t]) -> t` — the copy-out read: the held value's whole word span handed out
+/// under one fresh count per `Ref` word, the container keeping its own.
+pub const BUILTIN_BOX_GET: u32 = 113;
+/// `box_set(b: mut box[t], x: element words) -> ` — the in-place store: the held words'
+/// `Ref` counts release, the incoming span stores under its own counts. The member tier's
+/// `box[t].set` re-answers the receiver's word after the unit answer.
+pub const BUILTIN_BOX_SET: u32 = 114;
 
 // The comptime reflection module's rows.
 
@@ -2034,6 +2045,37 @@ pub const NATIVES: &[Native] = &[
         index: OP_UTC_OFFSET,
         params: &[SlotType::I64],
         variadic: false,
+        shape: NativeShape::Total(SlotType::I64),
+    },
+    // the owning container's seams: the constructor adopts the value's whole word span into one
+    // fresh object (acquiring one count per `Ref` word, the staged words' own counts dying at the
+    // call's window flush), the read hands the span out under fresh counts, and the store releases
+    // the held span's counts before adopting the incoming one
+    Native {
+        name: "box_new",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_BOX_NEW,
+        params: &[SlotType::Raw],
+        variadic: true,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "box_get",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_BOX_GET,
+        params: &[SlotType::Ref],
+        variadic: false,
+        shape: NativeShape::TotalByResultType,
+    },
+    Native {
+        name: "box_set",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_BOX_SET,
+        params: &[SlotType::Ref, SlotType::Raw],
+        variadic: true,
         shape: NativeShape::Total(SlotType::I64),
     },
 ];

@@ -479,6 +479,17 @@ fn the_block_fn_surface_calls_siblings_and_persists_captures() {
         "fib(10) = 55\ncounter = 3\nnested = 3\n0\n",
     );
 }
+#[test]
+fn the_box_surface_moves_stores_and_walks_the_recursive_chain() {
+    // the constructor moves one value in, the handle copies and moves,
+    // get/set answer through the member tier, the recursive chain
+    // declared through `box` walks to six and dies with the wrapper's
+    // deinit, and the name stands beside the error box face
+    run_golden(
+        "box_surface.ds",
+        "held 3\ncopied 3 3\nset 41\nsplit 82\ntotal 6\nboxed negative input\nchain 7 dies\n0\n",
+    );
+}
 
 #[test]
 fn the_float_surface_answers_the_family_and_the_ordering_pair() {

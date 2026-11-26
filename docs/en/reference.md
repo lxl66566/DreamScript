@@ -90,6 +90,23 @@ generational-reference trigger measures against this vocabulary.
 pub struct arena[t] { }
 ```
 
+#### `box`
+
+The owning container: the explicit pointer to one heap-held value —
+the recursion spelling a self-containing field refuses inline. One
+opaque word behind one heap object holding the value's whole word
+span, one owned count per reference word: `box[t](v)` moves v in,
+`b.get()` copies the held value out, `b.set(x)` replaces it in place
+through the mut window. A `~Copyable` value refuses the container —
+the container's death owns counts, never claims, so the value's
+deinit has no firing position — and a declaration spelling its
+recursion through `box` lays out, where the same recursion without it
+keeps the cyclic-field refusal.
+
+```ds
+pub struct box[t] { }
+```
+
 #### `chan`
 
 The bounded channel: the one
@@ -1538,6 +1555,16 @@ impl[t] arena[t] {
   fn remove(mut self, h: int) -> ()
   fn at(mut self, h: int) -> t
 }
+```
+
+The owning container's member tier: the runtime seam lowers over the
+heap application. `get` copies the held value out (the container
+keeps its edge), `set` replaces it in place through the mut window
+and answers the receiver; the held value's whole span stages at both
+seams.
+
+```ds
+impl[t] box[t] { fn get(self) -> t, fn set(mut self, x: t) -> box[t] }
 ```
 
 The channel face: the net handle's plain receiver discipline (the

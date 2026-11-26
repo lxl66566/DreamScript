@@ -50,6 +50,7 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "arena_insert" => {
                 self.shapes.arena_element(ty)
             },
+            Callee::Builtin(native) if native.name == "box_set" => self.shapes.box_element(ty),
             _ => None,
         }
     }
@@ -510,6 +511,69 @@ impl<'a> FnLower<'a, '_, '_> {
             self.rc.produced(arena);
             return Ok(Place {
                 base: arena,
+                shape: PlaceShape::Word(SlotType::Ref),
+            });
+        }
+        // the owning container's construction `box[t](v)`: the held
+        // value's whole word span stages to `box_new`, whose Ref answer
+        // the frame owns — the element type never reaches the code,
+        // every box one Ref word
+        if one_param_fieldless && head.name.as_str() == "box" {
+            let [value] = args else {
+                return Err(mismatch("the box constructor's value"));
+            };
+            let elem = self.val(span)?.ty;
+            let elem = self
+                .shapes
+                .box_element(elem)
+                .ok_or_else(|| mismatch("the box constructor's element type"))?;
+            let held = self.value(&value.value)?;
+            let claim = self.deinit_claim(held.ty, value.value.span())?;
+            if claim.is_some() {
+                return Err(LowerError::unsupported(
+                    value.value.span(),
+                    "a deinit-carrying box value",
+                    "the container's death owns counts, never claims, so the value's hook has no \
+                     firing position; per-span deinit claims own the seam",
+                ));
+            }
+            let mut held = held;
+            if held.ty != elem {
+                let temp = self.temp_span(elem)?;
+                self.widen_into(&temp, elem, &held, value.value.span())?;
+                held = TypedPlace {
+                    place: temp,
+                    ty: elem,
+                };
+            }
+            let elem_slots: Vec<SlotType> = self.shapes.words(elem)?.to_vec();
+            self.overlay_site(&elem_slots, &[SlotType::Ref]);
+            let addrs = self.word_addrs(&held.place, held.ty)?;
+            for (index, word) in addrs.iter().enumerate() {
+                let at = u8::try_from(index).expect("the element span fits the overlay");
+                self.emit(Op::Mov {
+                    dst: Slot::overlay(at),
+                    src: Slot::body(word.slot),
+                });
+                self.rc.staged_native(word.slot, false);
+            }
+            let native = crate::native::lookup("box_new")
+                .expect("the box surface is covered by the native table");
+            self.rc.native_open();
+            let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: u8::try_from(elem_slots.len()).expect("the element span fits a call"),
+            });
+            self.rc.native_done(&mut self.code);
+            let boxed = self.temp_word(SlotType::Ref)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(boxed),
+                src: Slot::overlay(0),
+            });
+            self.rc.produced(boxed);
+            return Ok(Place {
+                base: boxed,
                 shape: PlaceShape::Word(SlotType::Ref),
             });
         }

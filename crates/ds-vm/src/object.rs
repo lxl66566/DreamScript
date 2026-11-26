@@ -70,6 +70,7 @@ use crate::{
 };
 
 mod arena;
+mod cell;
 mod chan;
 mod heaps;
 mod list;
@@ -185,6 +186,19 @@ enum Object {
     /// foreign element's inc posts through the pending queue), released
     /// at the remove or by the death cascade.
     Arena(ArenaData),
+    /// The owning container (`box[t]`): one heap object behind one
+    /// `Ref` word, the held value's whole word span inline. One owned
+    /// count per `Ref` word, exactly a list's edge contract; the store
+    /// replaces the span in place, releasing the held words' counts,
+    /// and the death cascade decs the held words whole.
+    Cell(CellData),
+}
+
+/// The owning container's payload: the held value's whole word span,
+/// replaced whole by the store.
+#[derive(Debug)]
+pub(crate) struct CellData {
+    pub(crate) words: Vec<Value>,
 }
 
 /// A channel's payload: the bound, the FIFO buffer, and the fibers

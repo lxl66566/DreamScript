@@ -1,0 +1,82 @@
+// source: item 156, the owning container round 2026-11-27
+// purpose: the `box[t]` owning pointer end to end: the constructor moves one value in, the handle copies and moves linearly, `get` copies the held value out, `set` replaces it in place through the mut window, a recursive chain declared through `box` builds walks and dies with the wrapper's deinit firing, and the name stands beside the error box face untouched
+// items:
+// node: stage: run
+// chain: stage: run
+// total: stage: run
+// link: stage: run
+// hold: stage: run
+// twice: stage: run
+// wrapped: stage: run
+// main: stage: run
+
+struct node {
+  v: int
+  next: box[node] | none
+}
+
+struct chain: ~Copyable {
+  id: int
+  head: box[node] | none
+  deinit { println("chain ${self.id} dies") }
+}
+
+fn total(head: box[node] | none) -> int {
+  var acc = 0
+  var cur: box[node] | none = head
+  var go = true
+  while go {
+    match cur {
+      none => { go = false }
+      b => {
+        const n = b.get()
+        acc = acc + n.v
+        cur = n.next
+      }
+    }
+  }
+  acc
+}
+
+fn link(tail: box[node] | none, v: int) -> box[node] {
+  box[node](node { v: v, next: tail })
+}
+
+fn hold(n: int) -> box[int] {
+  box[int](n)
+}
+
+fn twice(b: box[int]) -> int {
+  const inner = b.get()
+  inner * 2
+}
+
+fn wrapped(n: int) -> int | box_err {
+  if n >= 0 {
+    n
+  } else {
+    box_err.of(utf8_err, "negative input")
+  }
+}
+
+fn main() -> int {
+  const b0 = box[int](3)
+  println("held ${b0.get()}")
+  const kept = b0
+  println("copied ${kept.get()} ${b0.get()}")
+  var movable = hold(10)
+  movable.set(41)
+  println("set ${movable.get()}")
+  println("split ${twice(movable)}")
+  var xs: box[node] | none = none
+  xs = link(xs, 1)
+  xs = link(xs, 2)
+  xs = link(xs, 3)
+  const c = chain { id: 7, head: xs }
+  println("total ${total(c.head)}")
+  const boxed = wrapped(-1)
+  if boxed is box_err {
+    println("boxed ${boxed.msg}")
+  }
+  0
+}

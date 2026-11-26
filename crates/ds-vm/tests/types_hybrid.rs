@@ -33,10 +33,10 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_ARENA_AT, BUILTIN_ARENA_NEW, BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE,
-        BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF, BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ,
-        BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV,
-        BUILTIN_CHAN_RECV_DEADLINE, BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT,
+        BUILTIN_ARENA_AT, BUILTIN_ARENA_NEW, BUILTIN_BOX_NEW, BUILTIN_BOX_SET, BUILTIN_BYTE_AT,
+        BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF, BUILTIN_BYTES_COMPARE,
+        BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW,
+        BUILTIN_CHAN_RECV, BUILTIN_CHAN_RECV_DEADLINE, BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT,
         BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH, BUILTIN_COLLECT, BUILTIN_CONS,
         BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD,
         BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_CLEAR,
@@ -1169,9 +1169,14 @@ fn both_native_modules_are_installed_and_resolvable() {
     // the char conversion native (111): the scalar-to-text seat beside
     // the str trio
     assert!(reg.resolve_native("builtin", BUILTIN_STR_CHAR).is_some());
+    // the owning container's seams (112-114): the construct/read/store
+    // trio over the container's own object kind
+    for index in BUILTIN_BOX_NEW..=BUILTIN_BOX_SET {
+        assert!(reg.resolve_native("builtin", index).is_some());
+    }
     assert!(
-        reg.resolve_native("builtin", 112).is_none(),
-        "112 table entries: the core's, the list block, the fiber pair, the push, the map
+        reg.resolve_native("builtin", 115).is_none(),
+        "115 table entries: the core's, the list block, the fiber pair, the push, the map
  block, the generic container closes, the reentrant combinators, the nursery seams, the
  join, the partition, the fork-join combinator, the fork-join fold, the float sort key,
  the string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1183,7 +1188,8 @@ fn both_native_modules_are_installed_and_resolvable() {
  channel's intercepted send/recv/construct triple, the ord-routed list sort's reserved
  slot, the collection member round, the arena face's construct/store/remove/read seams,
  the timer race's intercepted timeout seam, the channel deadlines' intercepted
- deadline twin seams, the list membership read, the char conversion's str_char seat"
+ deadline twin seams, the list membership read, the char conversion's str_char seat,
+ the owning container's construct/read/store trio"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

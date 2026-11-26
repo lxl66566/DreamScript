@@ -128,10 +128,10 @@ fn main() -> () {
         "an enum's cases carry no field offsets",
     ),
     (
-        "struct box[t] { item: t }
+        "struct slot[t] { item: t }
 
 fn main() -> () {
-  for comptime f in fields(box) {
+  for comptime f in fields(slot) {
     println(f.name)
   }
 }

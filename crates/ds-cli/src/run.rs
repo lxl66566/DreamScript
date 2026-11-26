@@ -674,6 +674,9 @@ fn describe_staged_site(site: &StagedSite) -> String {
         StagedSite::MapWord { fiber } => {
             format!("a map key or value on fiber {fiber}'s heap")
         },
+        StagedSite::CellWord { fiber } => {
+            format!("an owning container's held word on fiber {fiber}'s heap")
+        },
         StagedSite::FrameSlot { fiber } => format!("a frame slot of fiber {fiber}"),
     }
 }

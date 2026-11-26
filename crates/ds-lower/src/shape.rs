@@ -1372,6 +1372,31 @@ impl<'a> Shapes<'a> {
         self.heap_arg(ty, "arena", 0)
     }
 
+    /// The element type of one whole-box application: the construction
+    /// and the store's staging read it (the held value's whole word
+    /// span). `None` for any other type — a union of boxes, a non-box
+    /// application, a non-application.
+    pub(crate) fn box_element(&self, ty: Ty) -> Option<Ty> {
+        self.heap_arg(ty, "box", 0)
+    }
+
+    /// Whether one declared atom is a whole-box application: the
+    /// equality plan's refusal reads it (the container's word has no
+    /// content compare of its own).
+    pub(crate) fn atom_is_box(&self, atom: TypeId) -> bool {
+        let universe = &self.universe;
+        let Ok(decl) = universe.atom_decl(atom) else {
+            return false;
+        };
+        matches!(
+            &decl.kind,
+            ds_check::AtomKind::Apply(ctor, _)
+                if universe.atom_decl(*ctor).is_ok_and(|ctor| {
+                    ds_check::import::heap_ref(&ctor.name).is_some_and(|row| row.name == "box")
+                })
+        )
+    }
+
     /// The value type of one whole-map application: the map value
     /// channel's staging reads it (a bare member value re-spans into the
     /// value type's whole span before the store). `None` for any other

@@ -249,6 +249,7 @@ impl Objects {
             let owned = match self.heap.payload_mut::<Object>(header) {
                 Object::List(data) => std::mem::take(&mut data.elems),
                 Object::Closure(closure) => std::mem::take(&mut closure.captures),
+                Object::Cell(data) => std::mem::take(&mut data.words),
                 Object::Map(data) => {
                     let vstride = data.vstride;
                     for key in data.keys.drain(..) {
@@ -398,6 +399,13 @@ impl Objects {
                     for word in &mut map.values {
                         if let Value::Fn(func) = word {
                             visit(StagedSite::MapWord { fiber: owner }, func)?;
+                        }
+                    }
+                },
+                Object::Cell(data) => {
+                    for word in &mut data.words {
+                        if let Value::Fn(func) = word {
+                            visit(StagedSite::CellWord { fiber: owner }, func)?;
                         }
                     }
                 },

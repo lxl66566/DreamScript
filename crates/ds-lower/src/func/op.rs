@@ -646,6 +646,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if *slot == SlotType::Ref {
                     if let Some(word) = self.collection_ty_word(lty)? {
                         self.collection_eq_word(word, lhs, rhs, span)?
+                    } else if self.shapes.box_element(lty).is_some() {
+                        return Err(box_eq_refusal());
                     } else {
                         self.scalar_eq_word(lhs, rhs, span, *slot)?
                     }
@@ -820,10 +822,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let shape = self.shapes.shape(ty)?;
         match &*shape {
             Shape::Word(slot) => {
-                if *slot == SlotType::Ref
-                    && let Some(word) = self.collection_ty_word(ty)?
-                {
-                    return Ok(vec![word]);
+                if *slot == SlotType::Ref {
+                    if let Some(word) = self.collection_ty_word(ty)? {
+                        return Ok(vec![word]);
+                    }
+                    if self.shapes.box_element(ty).is_some() {
+                        return Err(box_eq_refusal());
+                    }
                 }
                 Ok(vec![WordEq::Scalar(eq_op(*slot)?)])
             },
@@ -864,6 +869,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => {
                 if let Some(word) = self.collection_atom_word(atom)? {
                     return Ok(vec![word]);
+                }
+                if self.shapes.atom_is_box(atom) {
+                    return Err(box_eq_refusal());
                 }
                 let shape = self.shapes.atom_shape(atom)?;
                 let Shape::Word(slot) = &*shape else {
@@ -971,6 +979,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => {
                 if let Some(word) = self.collection_atom_word(atom)? {
                     return Ok(vec![word]);
+                }
+                if self.shapes.atom_is_box(atom) {
+                    return Err(box_eq_refusal());
                 }
                 let shape = self.shapes.atom_shape(atom)?;
                 let Shape::Word(slot) = &*shape else {
@@ -1286,6 +1297,19 @@ pub(super) fn list_refusal() -> LowerError {
         "a structural equality over list elements",
         "the content compare covers int, float, bool, string, bytes, struct, tuple, and nested \
          collection elements; callable and union elements have no content equality",
+    )
+}
+
+/// The named refusal a box word answers in an equality plan: the chain
+/// has no content compare over the container's word, and two handles
+/// may share one held value, so the held values compare through their
+/// own `get` reads.
+pub(super) fn box_eq_refusal() -> LowerError {
+    LowerError::unsupported(
+        no_span(),
+        "a structural equality over box values",
+        "the chain compares held values through their own reads (`b.get()`), never the \
+         container's word",
     )
 }
 

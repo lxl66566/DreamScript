@@ -217,7 +217,7 @@ fn a_generic_struct_derives_and_meets_the_runtime_door() {
         "  fn show(self) -> string\n",
         "}\n",
         "#[derive(show)]\n",
-        "struct box[t: show] { v: t }\n",
+        "struct packet[t: show] { v: t }\n",
         "fn main() -> int { 0 }\n",
     ));
 }
@@ -592,7 +592,7 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "  fn default() -> int { 0 }\n",
         "}\n",
         "#[derive(default)]\n",
-        "struct box[t] { n: int }\n",
+        "struct packet[t] { n: int }\n",
         "fn main() -> int { 0 }\n",
     ));
     lift_mirror_lowers(concat!(
@@ -730,10 +730,10 @@ fn the_type_keyed_families_refuse_a_variable_part() {
 fn the_lifted_default_product_lowers_at_the_construction() {
     lift_mirror_lowers(concat!(
         "tag int\n",
-        "struct box[t] { n: int }\n",
-        "impl[t] box[t] {\n",
-        "  fn default() -> box[t] {\n",
-        "    box { n: 0 }\n",
+        "struct packet[t] { n: int }\n",
+        "impl[t] packet[t] {\n",
+        "  fn default() -> packet[t] {\n",
+        "    packet { n: 0 }\n",
         "  }\n",
         "}\n",
         "fn main() -> int { 0 }\n",
@@ -975,9 +975,9 @@ fn the_default_family_refuses_its_boundaries() {
     // for dispatches the same way, the family precedent
     let applied_fields = concat!(
         "tag int\n",
-        "struct box[t] { v: t }\n",
+        "struct packet[t] { v: t }\n",
         "#[derive(default)]\n",
-        "struct holder { b: box[int] }\n",
+        "struct holder { b: packet[int] }\n",
         "fn main() -> int { 0 }\n",
     );
     let rendered = refusals(applied_fields);
@@ -985,7 +985,7 @@ fn the_default_family_refuses_its_boundaries() {
         panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains("DS2004") && one.contains("type `box` carries no member `default`"),
+        one.contains("DS2004") && one.contains("type `packet` carries no member `default`"),
         "a fields-carrying head dispatches its own member, the missing one reporting: {one}"
     );
 
@@ -1006,7 +1006,7 @@ fn the_default_family_refuses_its_boundaries() {
     let generic = concat!(
         "tag int\n",
         "#[derive(default)]\n",
-        "struct box[t] { v: t }\n",
+        "struct packet[t] { v: t }\n",
     );
     let rendered = refusals(generic);
     let [one] = rendered.as_slice() else {

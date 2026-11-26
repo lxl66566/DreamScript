@@ -468,6 +468,46 @@ impl<'a> Heaps<'a> {
         self.claimed_alloc(id)
     }
 
+    /// Allocates a fresh owning container over `words` on the running
+    /// fiber's store, the birth count claimed for the caller's frame:
+    /// one count per `Ref` word acquires here (a foreign word's inc
+    /// posting through the pending funnel), the staged words' own
+    /// counts dying at the call's window flush, so the fresh object's
+    /// edges are its own.
+    pub(crate) fn alloc_cell(&mut self, words: &[Value]) -> Result<Value, Trap> {
+        let mut held = Vec::with_capacity(words.len());
+        for value in words {
+            if let Value::Ref(word) = value {
+                self.inc_edge(*word)?;
+            }
+            held.push(*value);
+        }
+        let id = self.current.alloc_cell(held);
+        Ok(self.claimed_alloc(id))
+    }
+
+    /// The held word span of owning container `cell`, one fresh count
+    /// per `Ref` word retained for the reading frame (the container
+    /// keeps its own) — the checked list read-out's contract.
+    pub(crate) fn cell_get(&mut self, cell: RefId) -> Result<Vec<Value>, Trap> {
+        let words = self.store(cell)?.cell_words(cell.id())?;
+        for value in &words {
+            if let Value::Ref(word) = value {
+                self.inc(*word)?;
+            }
+        }
+        Ok(words)
+    }
+
+    /// Replaces owning container `cell`'s whole held span, routed: the
+    /// mutation lands on the container's store, the incoming span's
+    /// acquired counts beside it and the held span's releases routed
+    /// after the swap.
+    pub(crate) fn cell_set(&mut self, cell: RefId, words: &[Value]) -> Result<(), Trap> {
+        self.store(cell)?.set_cell(cell.id(), words)?;
+        self.settle(cell.fiber())
+    }
+
     /// Stores one element word into arena `arena`, routed: the mutation
     /// and the element's edge count land on the arena's store (a
     /// foreign element's inc posting through the pending funnel).

@@ -1517,7 +1517,7 @@ version = \"1.0.0\"
         "pub enum mixed[t] {\n",
         "  one { v: t },\n",
         "}\n",
-        "pub struct box[t] {\n",
+        "pub struct slot[t] {\n",
         "  v: t,\n",
         "}\n",
         "pub struct guard: ~Copyable {\n",
@@ -2799,7 +2799,7 @@ fn the_uncarried_type_shapes_refuse() {
         (
             "generic-struct",
             concat!(
-                "import @shapes (box)\n",
+                "import @shapes (slot)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",

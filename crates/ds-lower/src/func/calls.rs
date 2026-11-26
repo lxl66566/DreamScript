@@ -543,6 +543,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "arena_insert" => {
                 Some((1usize, "an arena_insert element"))
             },
+            Callee::Builtin(native) if native.name == "box_set" => {
+                Some((1usize, "a box_set value"))
+            },
             Callee::Generic(generic) if generic.name == "cons" => Some((0usize, "a cons element")),
             _ => None,
         };

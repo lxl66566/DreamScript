@@ -76,6 +76,7 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   precedence, and trap-edge items are self-contained under the ambient.
 #[test]
 fn the_corpus_checks_clean_under_the_stdlib_ambient() {
+    assert_corpus_clean("box_surface.ds", 0);
     assert_corpus_clean("types_hybrid.ds", 0);
     assert_corpus_clean("generics_coherent_traits.ds", 2);
     assert_corpus_clean("syntax_ts_heart.ds", 5);

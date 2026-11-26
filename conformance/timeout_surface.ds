@@ -1,7 +1,7 @@
 // source: M7, the timer capability's timeout round
 // purpose: the timer race's answering shapes over the timer capability: the racer's one answer word re-spanned into the call's `t | timed_out` union at the parked call (a scalar, a string from a closure thunk, a `?`-propagating named fn, a one-field record, a tag-only union), the deadline answered as the io taxonomy's own `timed_out` member through `.err` and match (a past deadline at once, a real deadline cutting a parked racer), the race inside a nursery block's children with a parked racer waking first, a nested race, and a looping racer landing inside its deadline
 // items:
-// box: stage: run
+// chip: stage: run
 // red: stage: run
 // green: stage: run
 // pick: stage: run
@@ -11,7 +11,7 @@
 // helper: stage: run
 // main: stage: run
 
-struct box { v: int }
+struct chip { v: int }
 
 tag red
 tag green
@@ -49,7 +49,7 @@ fn main() -> () {
   const name = "thunk"
   println("closure ${timeout(500000000, () => "hello ${name}").err((e) => "none")}")
   println("named ${helper().err((e) => -5)}")
-  const held = timeout(500000000, () => box { v: 4 }).err((e) => box { v: 0 })
+  const held = timeout(500000000, () => chip { v: 4 }).err((e) => chip { v: 0 })
   println("one field ${held.v}")
   const at_once = timeout(0, () => 9).err((e) => -9)
   println("at once ${at_once}")

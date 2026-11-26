@@ -176,6 +176,11 @@ pub enum StagedSite {
         /// The fiber owning the map's heap.
         fiber: u32,
     },
+    /// The owning container's held word.
+    CellWord {
+        /// The fiber owning the container's heap.
+        fiber: u32,
+    },
     /// A parked frame's slot word, in the fiber's value-stack segment.
     FrameSlot {
         /// The fiber whose segment holds the frame.

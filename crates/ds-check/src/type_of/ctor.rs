@@ -342,7 +342,18 @@ impl Bodies<'_> {
                     .get(&def)
                     .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
         };
-        if !is_list(self) && !is_chan(self) {
+        // the owning container's construction: the one other type
+        // application carrying a value argument — the held value,
+        // `box[t](x)`
+        let is_box = |this: &Self| {
+            head.name.as_str() == "box"
+                && this
+                    .decls
+                    .structs
+                    .get(&def)
+                    .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
+        };
+        if !is_list(self) && !is_chan(self) && !is_box(self) {
             // Construction is fixed per declaration; every type
             // application besides the collection surface is the
             // cross-spelling error.
@@ -398,7 +409,7 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         }
-        if !args.is_empty() && !chan_bound {
+        if !args.is_empty() && !chan_bound && !is_box(self) {
             self.error(
                 ErrorCode::TypeMismatch,
                 "the empty-list constructor takes no arguments; build with a list literal `[...]` \
@@ -439,6 +450,51 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         };
+        // the owning container's construction: the held value stages
+        // against the written element type and moves in; a `~Copyable`
+        // value refuses — the box object owns one count per `Ref` word
+        // and its death has no position to fire a user deinit, so a
+        // linear value's hook would die with the container
+        if is_box(self) {
+            if trailing.is_some() {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "the box constructor takes no trailing block".to_owned(),
+                    span,
+                    "trailing block",
+                );
+                self.solve_reported = true;
+                return Some(self.empty_val());
+            }
+            let [value] = args else {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "the box constructor takes the value alone: `box[t](x)`".to_owned(),
+                    span,
+                    "constructor arguments",
+                );
+                self.solve_reported = true;
+                return Some(self.empty_val());
+            };
+            let val = self.expr(&value.value, None);
+            self.expect_contains(val, elem, value.value.span(), "the box value");
+            if !crate::linearity::ty_copyable(self.decls, elem, &self.linear_vars) {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    "a `~Copyable` value refuses the box: the container's death owns counts, \
+                     never claims, so the value's deinit has no firing position"
+                        .to_owned(),
+                    value.value.span(),
+                    "non-copyable box value",
+                );
+            }
+            let ty = self.applied_box_ty(elem)?;
+            return Some(Val {
+                ty,
+                diverges: false,
+                poisoned: false,
+            });
+        }
         // the arena's construction (the read-side aliasing container):
         // the empty-arena spelling `arena[t]()` — one more type
         // application constructing by call form, the element type the
@@ -633,6 +689,14 @@ impl Bodies<'_> {
     /// The applied `list[t]` type over one element type.
     pub(super) fn applied_list_ty(&mut self, elem: Ty) -> Option<Ty> {
         let def = self.package.lookup_type("list")?;
+        let ctor = self.decls.atoms.get(&def).copied()?;
+        let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
+        self.decls.universe.atom_ty(atom).ok()
+    }
+
+    /// The applied `box[t]` type over the element type.
+    pub(super) fn applied_box_ty(&mut self, elem: Ty) -> Option<Ty> {
+        let def = self.package.lookup_type("box")?;
         let ctor = self.decls.atoms.get(&def).copied()?;
         let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
         self.decls.universe.atom_ty(atom).ok()

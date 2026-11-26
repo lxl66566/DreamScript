@@ -454,13 +454,13 @@ fn a_deinit_value_inside_an_enum_member_payload_refuses() {
 fn a_generic_struct_deinit_value_refuses_at_the_application_seam() {
     refused(
         &source(concat!(
-            "struct box[t]: ~Copyable {\n",
+            "struct packet[t]: ~Copyable {\n",
             "  v: int\n",
             "  deinit { println(\"gone\") }\n",
             "}\n",
             "\n",
-            "fn mk () -> box[int] {\n",
-            "  box { v: 3 }\n",
+            "fn mk () -> packet[int] {\n",
+            "  packet { v: 3 }\n",
             "}\n",
             "\n",
             "fn main() -> int {\n",

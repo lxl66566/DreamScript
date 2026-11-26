@@ -1,0 +1,50 @@
+// purpose: the `box[t]` owning pointer through `ds run`: a two-child tree
+// declared through `box` builds, walks, and dies (the wrapper's deinit
+// firing at the unique death while the branch cascade frees the tree),
+// the held value crossing calls and instantiating per shape through a
+// generic fn, and the container riding a list element as one `Ref`
+// word per element.
+
+struct twig {
+  v: int
+  left: box[twig] | none
+  right: box[twig] | none
+}
+
+struct tracked: ~Copyable {
+  id: int
+  root: box[twig] | none
+  deinit { println("tracked ${self.id} dies") }
+}
+
+fn size(t: box[twig] | none) -> int {
+  match t {
+    none => 0
+    b => {
+      const w = b.get()
+      1 + size(w.left) + size(w.right)
+    }
+  }
+}
+
+fn leaf(v: int) -> box[twig] | none {
+  box[twig](twig { v: v, left: none, right: none })
+}
+
+fn grab[t](b: box[t]) -> t {
+  b.get()
+}
+
+fn main() -> int {
+  var t: box[twig] | none = none
+  t = box[twig](twig { v: 2, left: leaf(1), right: leaf(3) })
+  const xs = [box[int](5), box[int](6)]
+  println("tree ${size(t)} boxes ${xs[0].get()} ${xs[1].get()}")
+  const r = tracked { id: 4, root: t }
+  match r.root {
+    none => println("root gone")
+    b => println("root ${grab(b).v}")
+  }
+  println("held ${grab(box[string]("hey"))}")
+  0
+}

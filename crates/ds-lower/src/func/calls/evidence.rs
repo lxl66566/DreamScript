@@ -296,6 +296,8 @@ impl<'a> FnLower<'a, '_, '_> {
             ("arena", "insert") => ("arena_insert", false),
             ("arena", "remove") => ("arena_remove", false),
             ("arena", "at") => ("arena_at", false),
+            ("box", "get") => ("box_get", false),
+            ("box", "set") => ("box_set", true),
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;

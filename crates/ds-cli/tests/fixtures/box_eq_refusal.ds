@@ -1,0 +1,9 @@
+fn main() -> int {
+  const a = box[int](1)
+  const b = box[int](1)
+  if a == b {
+    1
+  } else {
+    0
+  }
+}
