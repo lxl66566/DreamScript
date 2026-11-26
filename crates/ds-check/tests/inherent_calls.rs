@@ -588,7 +588,8 @@ fn the_static_surface_refusals_report_their_seams() {
     let (_, analyzed) = analyze_source("missing.ds", missing);
     let rendered = render(&analyzed);
     assert!(
-        rendered.contains("type `point` carries no member `missing`"),
+        rendered.contains("DS2004")
+            && rendered.contains("type `point` carries no member `missing`"),
         "the missing member names its type: {rendered}"
     );
 
@@ -606,10 +607,11 @@ fn the_static_surface_refusals_report_their_seams() {
     let (_, analyzed) = analyze_source("generic.ds", generic);
     let rendered = render(&analyzed);
     assert!(
-        rendered.contains(
-            "member `make` of `list` lives in a generic impl; the type-keyed call needs the \
-             applied receiver `list[...]`, which the bare type name cannot spell"
-        ),
+        rendered.contains("DS2002")
+            && rendered.contains(
+                "member `make` of `list` lives in a generic impl; the type-keyed call needs the \
+                 applied receiver `list[...]`, which the bare type name cannot spell"
+            ),
         "the bare-name call cannot spell a generic impl's type arguments: {rendered}"
     );
 }

@@ -718,18 +718,15 @@ fn the_type_keyed_families_refuse_a_variable_part() {
     }
 }
 
-/// The `default` and `clone` families' lift door, the receiverless
-/// mirror: a member constructing the application value from concrete
-/// parts — no type variable anywhere in the body — still refuses at
-/// lowering's shape pass, at the construction itself. A concrete
-/// application of a user generic struct has no runtime representation
-/// whatever the body reads, so even the families whose synthesized
-/// bodies never dispatch through the variable wait on the same
-/// per-instantiation frame seam. The annotated literal rides beside it:
-/// the binding annotation threads its expected type into the
-/// initializer, so the struct-literal arm's expected-application
+/// The `default` and `clone` families' lift, the receiverless mirror:
+/// a member constructing the application value from concrete parts —
+/// no type variable anywhere in the body — lowers, the ONE body's
+/// construction instantiating at the entering site over the
+/// application's solved field signature. The annotated literal rides
+/// beside it: the binding annotation threads its expected type into
+/// the initializer, so the struct-literal arm's expected-application
 /// substitution solves `pair[int]` at check time and the construction
-/// refuses at lowering's runtime-value door instead.
+/// lays out over the same signature.
 #[test]
 fn the_lifted_default_product_lowers_at_the_construction() {
     lift_mirror_lowers(concat!(
@@ -935,7 +932,7 @@ fn the_default_family_refuses_its_boundaries() {
         panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains("type `triple` carries no member `default`"),
+        one.contains("DS2004") && one.contains("type `triple` carries no member `default`"),
         "a three-argument application dispatches its own member: {one}"
     );
 
@@ -970,7 +967,8 @@ fn the_default_family_refuses_its_boundaries() {
         panic!("one bracket-argument refusal: {rendered:?}")
     };
     assert!(
-        one.contains("the constructor brackets spell no key for this type argument"),
+        one.contains("DS2026")
+            && one.contains("the constructor brackets spell no key for this type argument"),
         "a union inside the brackets refuses naming the argument: {one}"
     );
 
@@ -988,7 +986,7 @@ fn the_default_family_refuses_its_boundaries() {
         panic!("one missing-member refusal: {rendered:?}")
     };
     assert!(
-        one.contains("type `box` carries no member `default`"),
+        one.contains("DS2004") && one.contains("type `box` carries no member `default`"),
         "a fields-carrying head dispatches its own member, the missing one reporting: {one}"
     );
 
@@ -1029,15 +1027,12 @@ fn the_default_family_refuses_its_boundaries() {
 /// over a non-`map` head, three arguments, whatever the arity —
 /// defaults through the applied type's own `default` member (the
 /// instantiated receiverless call), so a head whose generic impl
-/// carries the member synthesizes and CHECKS clean. Lowering that file
-/// refuses inside the impl's own body: constructing a generic
-/// struct's value spans the per-instantiation frames the runtime seam
-/// keeps out of the interpreter (the pre-existing M3 boundary, the
-/// same one a hand-written construction of the same value meets), so
-/// the derive's own product is honest while the body's seam waits on
-/// the JIT tier.
+/// carries the member synthesizes, checks clean, and lowers — the
+/// member bodies' own constructions and the holder literal's
+/// application fields stage over the applications' solved field
+/// signatures, a part-less application its reserved word.
 #[test]
-fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
+fn an_impl_carrying_application_field_lowers_through_the_instantiated_call() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -1063,18 +1058,13 @@ fn an_impl_carrying_application_field_checks_through_the_instantiated_call() {
     let id = files.add_source("applied.ds", source);
     let asts = [parse(&files, id).expect("the probe parses")];
     let analyzed = analyze(&files, &asts);
-    let Err(err) = lower(
+    lower(
         "applied",
         Hash128::compute(source.as_bytes()),
         &analyzed.asts,
         &analyzed,
-    ) else {
-        panic!("the impl bodies' own construction refuses under the M3 contract")
-    };
-    assert!(
-        err.to_string().contains("outside the M3 runtime contract"),
-        "the refusal names the body's runtime seam, never the derive: {err}"
-    );
+    )
+    .expect("the member bodies' constructions and the holder's application fields lower");
 }
 
 /// The from_json family refuses its own carve-outs at the attribute,

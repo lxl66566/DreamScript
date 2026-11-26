@@ -159,3 +159,53 @@ fn the_synthesized_bodies_carry_no_dispatch_uop() {
         "the part-less default constructs"
     );
 }
+
+/// The compound-field lift [H3.5] running: a generic application's
+/// member body constructs its own value — the field-carrying head's
+/// body from concrete parts, both argument shapes answering through
+/// the one member, the part-less head's body the reserved word — and
+/// the derived holder dispatches the applied type-keyed call over its
+/// application field, the field's span staging whole at the literal's
+/// store and the value moving through a generic fn's instance.
+#[test]
+fn a_generic_application_member_body_constructs_its_own_value() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println(s: string) -> ()\n",
+        "impl int { fn default() -> int { 0 } }\n",
+        "#[derive(default)]\n",
+        "struct box[t] { n: int }\n",
+        "#[derive(default)]\n",
+        "struct pair[t, u]\n",
+        "#[derive(default)]\n",
+        "struct holder { p: pair[int, string] }\n",
+        "fn echo[x] (v: x) -> x { v }\n",
+        "fn main() -> int {\n",
+        "  const b = box[int].default()\n",
+        "  println(\"n1=${b.n}\")\n",
+        "  const c = box[string].default()\n",
+        "  println(\"n2=${c.n}\")\n",
+        "  const h = holder.default()\n",
+        "  const x = echo(h.p)\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_source("derive_default_generic", source);
+    let mut vm = run_lowered("derive_default_generic", &lowered, source);
+    assert_eq!(
+        vm.run("derive_default_generic", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main runs clean"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"n1=0\nn2=0\n" as &[u8],
+        "the member bodies construct their own application values"
+    );
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}

@@ -1322,6 +1322,12 @@ impl<'a> Shapes<'a> {
                         None => return Ok(None),
                     }
                 }
+                // a part-less application keeps the reserved word its
+                // value shape carries, so the field's span and the
+                // constructed value agree at the literal's store
+                if slots.is_empty() {
+                    slots.push(SlotType::I64);
+                }
                 Ok(Some(slots))
             },
             // an aliased tuple: the same one-word-per-element rule the
