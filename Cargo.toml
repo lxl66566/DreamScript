@@ -33,6 +33,7 @@ ds-query       = { path = "crates/ds-query" }
 ds-stdlib      = { path = "crates/ds-stdlib" }
 ds-vm          = { path = "crates/ds-vm" }
 gungraun       = "0.20"
+libffi         = "5"
 memchr         = "2"
 memmap2        = "0.9"
 pest           = "2"

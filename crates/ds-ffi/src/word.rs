@@ -3,11 +3,11 @@
 //! the staged words' register classes exactly, so the placements are
 //! enumerated up front — every GP/FP placement of at most
 //! [`crate::MAX_PARAMS`] words spelled as one monomorphized call site,
-//! chosen by the word count and the placement mask. The catch-all arm
-//! serves the all-FP spelling for any wider shape a caller stages,
-//! which is why every face checks the word cap before dispatching —
-//! that check is the one backstop between a wider signature and a
-//! mis-called symbol.
+//! chosen by the word count and the placement mask. The marshaling
+//! face routes a staged signature here exactly when it fits the word
+//! boundary, so the catch-all arm answers the boundary's own top
+//! placement (the all-FP mask at four words); a wider signature calls
+//! through the libffi CIF path and never reaches this macro.
 
 /// One marshaled argument word: the register class with its bit
 /// pattern. A word carries a pointer or a length as an i64 bit-cast —

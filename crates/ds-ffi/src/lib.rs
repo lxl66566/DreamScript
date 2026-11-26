@@ -11,7 +11,8 @@
 //! (pointer, length) word pair, a unit return as the absent word — the
 //! face the language side consumes, the lowering seam admitting the
 //! pair and unit-return shapes and the VM stage marshaling each staged
-//! word per its own kind onto it. Its ABI
+//! word per its own kind onto it, a signature past the fast-path word
+//! boundary riding libffi's CIF path. Its ABI
 //! contract clauses, holding from the first bound library: a bound
 //! extern means panic=abort (a foreign panic cannot unwind through the
 //! interpreter), and a blocking foreign call pins its fiber

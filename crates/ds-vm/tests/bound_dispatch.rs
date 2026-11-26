@@ -101,10 +101,12 @@ fn bound_again(bytes: &[u8], path: &Path) -> BoundModule {
     bound_of(bytes, path).0
 }
 
-/// One entry module calling a bound symbol: `main` stages its two pool
-/// constants into the argument area and calls (or tail-calls) the
-/// symbol, the answer returning from the overlay slot.
+/// One entry module calling a bound symbol: `main` stages every pool
+/// constant but the last into the argument area, one word each, and
+/// calls (or tail-calls) the last constant — the bound symbol — the
+/// answer returning from the overlay slot.
 fn call_module(slots: &[SlotType], consts: Vec<Constant>, tail: bool) -> Module {
+    let nargs = consts.len() - 1;
     let stage = |body: &mut Vec<Uop>, index: u8, kidx: u16| {
         // an i64 constant stages through KIMM, every other scalar through
         // KCONST (the pool-kind rule the install validation pins)
@@ -123,18 +125,19 @@ fn call_module(slots: &[SlotType], consts: Vec<Constant>, tail: bool) -> Module 
     let mut body = vec![Uop::Funcf {
         frame_slots: u16::try_from(slots.len()).expect("the fixture frame fits u16"),
     }];
-    stage(&mut body, 0, 0);
-    stage(&mut body, 1, 1);
+    for position in 0..nargs {
+        stage(
+            &mut body,
+            u8::try_from(position).expect("the staged arguments fit u8"),
+            u16::try_from(position).expect("the constant index fits u16"),
+        );
+    }
+    let callee = k(u16::try_from(nargs).expect("the constant index fits u16"));
+    let nargs = u8::try_from(nargs).expect("the staged arguments fit u8");
     if tail {
-        body.push(Uop::Callt {
-            callee: k(2),
-            nargs: 2,
-        });
+        body.push(Uop::Callt { callee, nargs });
     } else {
-        body.push(Uop::Call {
-            callee: k(2),
-            nargs: 2,
-        });
+        body.push(Uop::Call { callee, nargs });
         body.push(Uop::Ret { src: 0 });
     }
     let main =
@@ -240,6 +243,107 @@ fn the_mixed_gp_fp_sequence_answers() {
         vm.run("app", "main", &[]),
         Ok(FrameAnswer::one(Value::F64(3.5))),
         "the mixed sequence marshals"
+    );
+}
+
+/// A call at the fast-path word boundary answers: four GP words ride
+/// the enumerated transmute's widest all-GP arm.
+#[test]
+fn a_call_at_the_word_boundary_answers_enumerated() {
+    let (bytes, path) = fixture("sum4");
+    let (_, names) = bound_of(&bytes, &path);
+    let index = names
+        .iter()
+        .position(|name| name == "ds_sum4")
+        .expect("the fixture exports ds_sum4");
+    let module = call_module(
+        &[I64, I64, I64, I64],
+        vec![
+            Constant::I64(1),
+            Constant::I64(2),
+            Constant::I64(3),
+            Constant::I64(4),
+            Constant::Bound {
+                module: "math".to_owned(),
+                index: u32::try_from(index).expect("the export index fits u32"),
+                ret: BoundRet::Int,
+            },
+        ],
+        false,
+    );
+    let mut vm = vm_over(bound_again(&bytes, &path), &module);
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(10))),
+        "the boundary call marshals"
+    );
+}
+
+/// The boundary's mixed placement answers: the bool words ride the GP
+/// file and the floats the FP file in one four-word call.
+#[test]
+fn the_mixed_placement_at_the_word_boundary_answers() {
+    let (bytes, path) = fixture("pick4");
+    let (_, names) = bound_of(&bytes, &path);
+    let index = names
+        .iter()
+        .position(|name| name == "ds_pick4")
+        .expect("the fixture exports ds_pick4");
+    let module = call_module(
+        &[SlotType::Bool, F64, SlotType::Bool, F64],
+        vec![
+            Constant::Bool(true),
+            Constant::F64(1.5),
+            Constant::Bool(false),
+            Constant::F64(2.5),
+            Constant::Bound {
+                module: "math".to_owned(),
+                index: u32::try_from(index).expect("the export index fits u32"),
+                ret: BoundRet::Float,
+            },
+        ],
+        false,
+    );
+    let mut vm = vm_over(bound_again(&bytes, &path), &module);
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::F64(1.5))),
+        "the boundary's mixed placement marshals"
+    );
+}
+
+/// A call one word past the fast-path boundary answers through
+/// libffi's CIF path: five GP words marshal onto the same bound
+/// dispatch.
+#[test]
+fn a_call_past_the_word_boundary_answers_through_the_cif() {
+    let (bytes, path) = fixture("sum5");
+    let (_, names) = bound_of(&bytes, &path);
+    let index = names
+        .iter()
+        .position(|name| name == "ds_sum5")
+        .expect("the fixture exports ds_sum5");
+    let module = call_module(
+        &[I64, I64, I64, I64, I64],
+        vec![
+            Constant::I64(1),
+            Constant::I64(2),
+            Constant::I64(3),
+            Constant::I64(4),
+            Constant::I64(5),
+            Constant::Bound {
+                module: "math".to_owned(),
+                index: u32::try_from(index).expect("the export index fits u32"),
+                ret: BoundRet::Int,
+            },
+        ],
+        false,
+    );
+    let mut vm = vm_over(bound_again(&bytes, &path), &module);
+    assert_eq!(
+        vm.run("app", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(15))),
+        "the past-boundary call marshals through the CIF path"
     );
 }
 

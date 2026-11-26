@@ -1044,9 +1044,11 @@ impl<'a> FnLower<'a, '_, '_> {
     /// artifact's native module at the symbol's enumeration index. The
     /// signature must be the marshaling slice's own shape (the scalar
     /// words, a `string`/`bytes` parameter's call-scoped pair, and the
-    /// absent word a unit return rides, at most [`ds_ffi::MAX_PARAMS`]
-    /// C words with a pair counting two); anything richer refuses here
-    /// naming the seam, before any run starts.
+    /// absent word a unit return rides, any C-word arity — within the
+    /// fast-path envelope the enumerated transmute serves the call,
+    /// past it libffi's CIF path does, a pair counting two words);
+    /// anything richer refuses here naming the seam, before any run
+    /// starts.
     pub(in crate::func) fn bound_callee(
         &self,
         def: DefId,
@@ -1082,10 +1084,6 @@ impl<'a> FnLower<'a, '_, '_> {
                 "a C symbol has no generic body; the signature must be monomorphic".to_owned(),
             ));
         }
-        // the cap counts C words, not parameters: a string/bytes
-        // parameter's (pointer, length) pair occupies two, so two pairs
-        // fill the enumerated transmute's envelope exactly
-        let mut words = 0usize;
         for param in &sig.params {
             let Some(ty) = &param.ty else {
                 return Err(refuse(
@@ -1094,23 +1092,13 @@ impl<'a> FnLower<'a, '_, '_> {
                         .to_owned(),
                 ));
             };
-            match marshal_word(ty) {
-                Some(word) => words += word,
-                None => {
-                    return Err(refuse(
-                        "the C-ABI marshaling slice rules int, bool, float, string, and bytes \
-                         parameters; handle and aggregate marshaling is the ownership round's own"
-                            .to_owned(),
-                    ));
-                },
+            if marshal_word(ty).is_none() {
+                return Err(refuse(
+                    "the C-ABI marshaling slice rules int, bool, float, string, and bytes \
+                     parameters; handle and aggregate marshaling is the ownership round's own"
+                        .to_owned(),
+                ));
             }
-        }
-        if words > ds_ffi::MAX_PARAMS {
-            return Err(refuse(format!(
-                "the C-ABI marshaling slice serves at most {} C words, a string or bytes \
-                 parameter's pair occupying two",
-                ds_ffi::MAX_PARAMS
-            )));
         }
         // a unit return rides the absent word; the returning direction of
         // string/bytes marshaling needs an ownership story the round

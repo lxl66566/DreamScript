@@ -584,6 +584,7 @@ dependencies = [
 name = "ds-ffi"
 version = "0.1.0"
 dependencies = [
+ "libffi",
  "thiserror",
 ]
 
@@ -605,7 +606,6 @@ dependencies = [
  "ds-abi",
  "ds-check",
  "ds-diag",
- "ds-ffi",
  "ds-meta",
  "ds-mod",
  "ds-parse",
@@ -1207,6 +1207,25 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libffi"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a8d526bc07aa02e6826944ec446ecd8d228bd97b1cbd21e5bc5e3407a09a585"
+dependencies = [
+ "libc",
+ "libffi-sys",
+]
+
+[[package]]
+name = "libffi-sys"
+version = "4.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab801a4ae9065bfea87f37204a7940523e752056e4a090eaaaab9b47fc826b5"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "linux-raw-sys"

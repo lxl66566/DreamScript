@@ -573,9 +573,16 @@ pub(super) fn invoke_bound(
     };
     let answer = symbol
         .call(&sig, &marshaled)
-        .map_err(|_| Trap::BoundMarshaling {
+        .map_err(|error| Trap::BoundMarshaling {
             symbol: module.name(index).to_owned(),
-            reason: "the enumerated transmute serves at most the marshaling arity cap",
+            reason: match error {
+                ds_ffi::MarshalError::Kind { .. } => {
+                    "a staged word disagrees with its parameter's marshaling encoding"
+                },
+                ds_ffi::MarshalError::Prep => {
+                    "the libffi call interface refused to prepare the marshaled signature"
+                },
+            },
         })?;
     Ok(crate::bound::answer_value(answer, ret))
 }

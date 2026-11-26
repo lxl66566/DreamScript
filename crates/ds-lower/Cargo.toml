@@ -18,9 +18,6 @@ name    = "lower"
 ds-abi              = { path = "../ds-abi" }
 ds-check            = { path = "../ds-check" }
 ds-diag             = { path = "../ds-diag" }
-# the scalar marshaling slice's arity cap (H5), single-sourced beside
-# the transmute that serves it
-ds-ffi              = { path = "../ds-ffi" }
 ds-mod              = { path = "../ds-mod" }
 ds-parse            = { path = "../ds-parse" }
 thiserror.workspace = true

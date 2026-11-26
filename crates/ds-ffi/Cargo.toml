@@ -3,7 +3,7 @@ name                   = "ds-ffi"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-description            = "DreamScript native-library binding: dependency-free loading and C-symbol enumeration (H5)"
+description            = "DreamScript native-library binding: dependency-free loading and C-symbol enumeration, the marshaling face riding libffi past the fast-path arity (H5)"
 readme.workspace       = true
 repository.workspace   = true
 license.workspace      = true
@@ -11,6 +11,7 @@ keywords.workspace     = true
 categories.workspace   = true
 
 [dependencies]
+libffi.workspace    = true
 thiserror.workspace = true
 
 [lints]

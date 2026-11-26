@@ -4,10 +4,11 @@
 //! shape refusing at the seam and naming it: a missing artifact entry,
 //! a symbol the library does not export, and every signature outside the
 //! marshaling slice (string and bytes returns, handle and aggregate
-//! parameters, generics, an inferred parameter, and the C-word arity
-//! cap, a pair counting two). The clean shapes — the scalar words, a
-//! string or bytes parameter's pair, a unit return's absent word —
-//! lower to the pool constant the VM's bound tier dispatches.
+//! parameters, generics, an inferred parameter). The clean shapes — the
+//! scalar words, a string or bytes parameter's pair, a unit return's
+//! absent word — lower to the pool constant the VM's bound tier
+//! dispatches, the C-word arity riding past the fast-path envelope
+//! through libffi's CIF path.
 
 use std::sync::Arc;
 
@@ -282,43 +283,70 @@ fn a_generic_signature_refuses() {
     );
 }
 
-/// A signature wider than the enumerated transmute's arity cap refuses,
-/// naming the cap in C words: five scalar parameters are five words.
+/// One probe's bound constant: ds_add lowering at its enumeration
+/// index with the scalar return word.
+fn bound_constant_lowers(source: &str) {
+    let lowered = lower_probe(source, &[("math", MATH_SYMBOLS)]).expect("the probe lowers");
+    let bound = lowered
+        .module()
+        .functions()
+        .iter()
+        .flat_map(|function| function.constants().iter())
+        .find(|constant| matches!(constant, Constant::Bound { .. }))
+        .expect("the call site's pool carries the bound constant");
+    assert_eq!(
+        bound,
+        &Constant::Bound {
+            module: "math".to_owned(),
+            index: 0,
+            ret: BoundRet::Int,
+        },
+        "the constant addresses ds_add at its enumeration index with the scalar return"
+    );
+}
+
+/// The fast-path envelope's own width lowers: four scalar parameters
+/// stage four C words exactly, the enumerated transmute serving the
+/// call.
 #[test]
-fn a_wide_signature_refuses() {
-    let source = concat!(
+fn a_signature_at_the_fast_path_width_lowers() {
+    bound_constant_lowers(concat!(
+        "tag int\ntag bool\ntag float\ntag byte\ntag string\ntag bytes\n\n",
+        "extern \"math\" fn ds_add (a: int, b: int, c: int, d: int) -> int\n",
+        "\n",
+        "fn main() -> int {\n",
+        "ds_add(1, 2, 3, 4)\n",
+        "}\n",
+    ));
+}
+
+/// A signature past the fast-path width lowers: five scalar parameters
+/// stage five C words, libffi's CIF path serving the call at run time.
+#[test]
+fn a_signature_past_the_fast_path_width_lowers() {
+    bound_constant_lowers(concat!(
         "tag int\ntag bool\ntag float\ntag byte\ntag string\ntag bytes\n\n",
         "extern \"math\" fn ds_add (a: int, b: int, c: int, d: int, e: int) -> int\n",
         "\n",
         "fn main() -> int {\n",
         "ds_add(1, 2, 3, 4, 5)\n",
         "}\n",
-    );
-    refusal(
-        source,
-        &[("math", MATH_SYMBOLS)],
-        &format!("serves at most {} C words", ds_ffi::MAX_PARAMS),
-    );
+    ));
 }
 
-/// The cap counts C words, not parameters: three parameters whose two
-/// pairs stage five C words refuse at the same seam, while two pairs
-/// alone fill the envelope exactly.
+/// The width counts C words, not parameters: three parameters whose two
+/// pairs stage five C words lower the same, each pair staging its
+/// (pointer, length) words at the call.
 #[test]
-fn a_wide_c_word_signature_refuses() {
-    let source = concat!(
+fn a_pair_staged_signature_past_the_fast_path_width_lowers() {
+    bound_constant_lowers(concat!(
         "tag int\ntag bool\ntag float\ntag byte\ntag string\ntag bytes\n\n",
         "extern \"math\" fn ds_add (a: string, b: string, c: int) -> int\n",
         "\n",
         "fn main() -> int {\n",
         "ds_add(\"a\", \"b\", 1)\n",
         "}\n",
-    );
-    refusal(
-        source,
-        &[("math", MATH_SYMBOLS)],
-        &format!("serves at most {} C words", ds_ffi::MAX_PARAMS),
-    );
+    ));
 }
 
 /// A bound extern referenced as a callable value refuses: the fn-value
