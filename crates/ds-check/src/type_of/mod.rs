@@ -247,6 +247,15 @@ pub struct Checked {
     /// member behind the name occurrence itself, so a name-position
     /// consumer reads the selection without re-deriving it.
     pub method_selections: FxHashMap<Span, MethodId>,
+    /// The solved parameter types of every member call site, keyed by
+    /// the call's own span: the site's `Self` and trait-generic
+    /// substitution already applied, the receiver slot typed by the
+    /// call's own receiver binding. A member owns no package def, so
+    /// no `def_types` row serves its signature the way an import-bound
+    /// free fn's does; the lowerer's call-site staging (the widening
+    /// re-span, the width guard) reads this record where a dispatch
+    /// reaches a body no planned def names.
+    pub member_call_params: FxHashMap<Span, Vec<Ty>>,
 }
 
 /// One trait-method call's solved dispatch (B6): the selected trait member
@@ -387,6 +396,7 @@ pub fn analyze_resolved(
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
         method_selections: checked.method_selections,
+        member_call_params: checked.member_call_params,
     };
     Analyzed {
         asts,
@@ -550,6 +560,7 @@ fn analyze_served_over(
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
         method_selections: checked.method_selections,
+        member_call_params: checked.member_call_params,
     };
     Analyzed {
         asts: asts.into(),
@@ -595,6 +606,7 @@ where
     let mut trait_calls = FxHashMap::default();
     let mut inherent_calls = FxHashMap::default();
     let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
+    let mut member_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
     let mut generic_call_bounds: FxHashMap<Span, GenericCallBounds> = FxHashMap::default();
     let mut is_tests = FxHashMap::default();
@@ -618,6 +630,7 @@ where
             is_tests: &mut is_tests,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
+            member_call_params: &mut member_call_params,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -671,6 +684,7 @@ where
             is_tests: &mut is_tests,
             hole_show_dispatches: &mut hole_show_dispatches,
             method_selections: &mut method_selections,
+            member_call_params: &mut member_call_params,
             diags: Vec::new(),
             linear_vars: FxHashMap::default(),
             locals: ScopedMap::default(),
@@ -720,6 +734,7 @@ where
         generic_call_bounds,
         is_tests,
         method_selections,
+        member_call_params,
     }))
 }
 
@@ -836,6 +851,7 @@ struct Bodies<'a> {
     trait_calls: &'a mut FxHashMap<Span, TraitCall>,
     inherent_calls: &'a mut FxHashMap<Span, MethodId>,
     method_selections: &'a mut FxHashMap<Span, MethodId>,
+    member_call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,
     generic_call_bounds: &'a mut FxHashMap<Span, GenericCallBounds>,
     is_tests: &'a mut FxHashMap<Span, Ty>,
@@ -5138,15 +5154,31 @@ impl Bodies<'_> {
             }
         }
         self.type_vars.push(vars);
-        let mut param_tys = Vec::with_capacity(sig.params.len());
-        for param in &sig.params {
-            param_tys.push(param.ty.as_ref().and_then(|t| self.solve_here(t)));
-        }
         // The receiver already filled the `self` parameter [record 6.1];
         // the remaining arguments feed the rest. A receiverless member
         // (the type-keyed surface) has no filled slot, so the written
-        // arguments feed the whole signature.
+        // arguments feed the whole signature. The receiver's own slot
+        // types as the call's Self binding: the declaration leaves
+        // `self` un-annotated, and every other un-annotated parameter
+        // keeps its written spelling to the ordinary solver below.
         let skip = usize::from(sig.params.first().is_some_and(|p| p.name == "self"));
+        let mut param_tys = Vec::with_capacity(sig.params.len());
+        for (index, param) in sig.params.iter().enumerate() {
+            param_tys.push(match param.ty.as_ref() {
+                Some(t) => self.solve_here(t),
+                None if index < skip => Some(self_ty),
+                None => None,
+            });
+        }
+        // The site's solved parameter types, for the call-site staging
+        // a dispatch through a body no planned def names reads (a linked
+        // member's): recorded only when every parameter solves, so a
+        // written type this site could not spell keeps the consuming
+        // side's own fallback.
+        if param_tys.iter().all(Option::is_some) {
+            self.member_call_params
+                .insert(span, param_tys.iter().filter_map(|ty| *ty).collect());
+        }
         // The receiver expression fills the `self` slot, so a `mut self`
         // member checks its exclusivity exactly like a free call's fed
         // `mut` argument [D2, C3] — a dot-call on a `const` binding of a

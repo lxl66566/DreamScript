@@ -55,44 +55,38 @@ use crate::error::LowerError;
 /// not nodes, so no source span sits behind them.
 const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0);
 
-/// The primitive vocabulary: atom name to slot type. These atoms are
-/// declared as ambient `tag` names by the corpus and check like any tag.
-/// `char` shares the string Ref: one scalar value per one-char string
-/// word, the runtime convention the list natives' separator pins.
-/// `byte` shares the integer slot [F6]: the word carries the 0-255
-/// value, while the checker holds it outside the int conversion family.
-/// `u32` shares the integer slot the same way (2026-11-19): the word
-/// carries the 32-bit value the json face's bridge natives move, the
-/// checker keeping the width outside the int conversions — so a union
-/// over u32 claims a payload region and the number rides it.
-/// `bytes` — the immutable byte sequence — shares the string Ref too:
-/// one counted block behind one word, `string`'s shape over raw bytes.
-/// `type` is the builtin comptime type-value atom (G1, G2): one `Tag`
-/// word carrying the evaluator's reflection index — never constructed
-/// at runtime, so the word only ever appears inside comptime evaluation.
-const PRIMITIVES: &[(&str, SlotType)] = &[
-    ("type", SlotType::Tag),
-    ("int", SlotType::I64),
-    ("byte", SlotType::I64),
-    ("u32", SlotType::I64),
-    ("float", SlotType::F64),
-    ("bool", SlotType::Bool),
-    ("string", SlotType::Ref),
-    ("char", SlotType::Ref),
-    ("bytes", SlotType::Ref),
-];
-
-fn primitive_slot(name: &str) -> Option<SlotType> {
-    PRIMITIVES.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
+/// The primitive vocabulary's shape-layer half: each scalar word's
+/// frame slot, keyed by the word itself so the shared word table (the
+/// checker's linked-surface module owns the names) stays the only name
+/// table — a widened primitive lands in both crates in one edit, this
+/// match failing to compile until the new word's slot is mapped.
+const fn scalar_slot(word: ds_check::import::ScalarWord) -> SlotType {
+    use ds_check::import::ScalarWord;
+    match word {
+        // `byte` [F6] and `u32` ride the integer slot: the word carries
+        // the 0-255 or 32-bit value, the checker holding each width
+        // outside the int conversions
+        ScalarWord::Int | ScalarWord::Byte | ScalarWord::U32 => SlotType::I64,
+        ScalarWord::Float => SlotType::F64,
+        ScalarWord::Bool => SlotType::Bool,
+        // `char` shares the string Ref: one scalar value per one-char
+        // string word, the runtime convention the list natives'
+        // separator pins
+        ScalarWord::Str | ScalarWord::Char => SlotType::Ref,
+    }
 }
 
-/// The heap-reference constructors: an application of one of these is a
-/// single RC'd object behind one Ref word — the list and map natives'
-/// objects.
-/// The runtime-owned heap-reference applications: one Ref word whose
-/// object the runtime owns (`list`, `map`, and the bounded `chan` of the
-/// 2026-11-21 shared-state ruling).
-const HEAP_REFS: &[&str] = &["list", "map", "chan"];
+/// The frame slot one primitive atom name maps onto: the shared
+/// primitive word table's row the name spells, each row's slot carried
+/// by its word (`bytes` the string-shaped Ref, the comptime `type`
+/// atom the `Tag` word).
+fn primitive_slot(name: &str) -> Option<SlotType> {
+    match ds_check::import::primitive_word(name)? {
+        ds_check::import::PrimitiveWord::Scalar(word) => Some(scalar_slot(word)),
+        ds_check::import::PrimitiveWord::Bytes => Some(SlotType::Ref),
+        ds_check::import::PrimitiveWord::ComptimeType => Some(SlotType::Tag),
+    }
+}
 
 /// One field of a value's span: the field's name (or `None` for a
 /// primitive member's own payload word), its consecutive word types, and
@@ -874,19 +868,7 @@ impl<'a> Shapes<'a> {
     /// and membership read it. `None` for any other type — a union of
     /// lists, a non-list application, a non-application.
     pub(crate) fn list_element(&self, ty: Ty) -> Option<Ty> {
-        let universe = &self.analyzed.decls.universe;
-        let [only] = universe.members(ty) else {
-            return None
-        };
-        let decl = universe.atom_decl(*only).ok()?;
-        let ds_check::AtomKind::Apply(ctor, args) = &decl.kind else {
-            return None
-        };
-        if !self.heap_ref(*ctor) {
-            return None;
-        }
-        let [element] = &**args else { return None };
-        (universe.atom_decl(*ctor).ok()?.name == "list").then_some(*element)
+        self.heap_arg(ty, "list", 0)
     }
 
     /// The payload type of one whole-channel application: the send's
@@ -895,19 +877,7 @@ impl<'a> Shapes<'a> {
     /// type — a union of channels, a non-chan application, a
     /// non-application.
     pub(crate) fn chan_payload(&self, ty: Ty) -> Option<Ty> {
-        let universe = &self.analyzed.decls.universe;
-        let [only] = universe.members(ty) else {
-            return None
-        };
-        let decl = universe.atom_decl(*only).ok()?;
-        let ds_check::AtomKind::Apply(ctor, args) = &decl.kind else {
-            return None
-        };
-        if !self.heap_ref(*ctor) {
-            return None;
-        }
-        let [payload] = &**args else { return None };
-        (universe.atom_decl(*ctor).ok()?.name == "chan").then_some(*payload)
+        self.heap_arg(ty, "chan", 0)
     }
 
     /// The value type of one whole-map application [F7]: the map value
@@ -915,6 +885,16 @@ impl<'a> Shapes<'a> {
     /// value type's whole span before the store). `None` for any other
     /// type — a union of maps, a non-map application, a non-application.
     pub(crate) fn map_value(&self, ty: Ty) -> Option<Ty> {
+        self.heap_arg(ty, "map", 1)
+    }
+
+    /// One whole-container application's argument type at `position` —
+    /// the one walk the list element, the map value, and the channel
+    /// payload reads share, so the container names and arities live in
+    /// the shared heap-reference word table alone. `None` for any other
+    /// type — a union of containers, a container of the wrong name, a
+    /// non-container application, a non-application.
+    fn heap_arg(&self, ty: Ty, name: &str, position: usize) -> Option<Ty> {
         let universe = &self.analyzed.decls.universe;
         let [only] = universe.members(ty) else {
             return None
@@ -926,8 +906,11 @@ impl<'a> Shapes<'a> {
         if !self.heap_ref(*ctor) {
             return None;
         }
-        let [_, value] = &**args else { return None };
-        (universe.atom_decl(*ctor).ok()?.name == "map").then_some(*value)
+        let row = ds_check::import::heap_ref(&universe.atom_decl(*ctor).ok()?.name)?;
+        if row.name != name || args.len() != row.args {
+            return None;
+        }
+        args.get(position).copied()
     }
 
     /// The builtin instance of a generic call's receiver type [H3]: the
@@ -939,44 +922,31 @@ impl<'a> Shapes<'a> {
     /// single-atom type check, so unions and unresolved variables
     /// answer None and the call site reports the uncovered receiver.
     pub(crate) fn builtin_instance(&self, ty: Ty) -> Option<BuiltinInstance> {
-        let universe = &self.analyzed.decls.universe;
-        let [only] = universe.members(ty) else {
-            return None;
+        let [only] = self.analyzed.decls.universe.members(ty) else {
+            return None
         };
-        let decl = universe.atom_decl(*only).ok()?;
-        match &decl.kind {
-            ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
-                let ctor_name = universe.atom_decl(*ctor).ok()?.name.clone();
-                match ctor_name.as_str() {
-                    "list" => Some(BuiltinInstance::List),
-                    "map" => Some(BuiltinInstance::Map),
-                    _ => None,
-                }
-            },
-            ds_check::AtomKind::Struct(_) => Some(BuiltinInstance::Record),
-            _ => match decl.name.as_str() {
-                "string" => Some(BuiltinInstance::Str),
-                "bytes" => Some(BuiltinInstance::Bytes),
-                "int" => Some(BuiltinInstance::Int),
-                "float" => Some(BuiltinInstance::Float),
-                _ => None,
-            },
-        }
+        self.atom_builtin_instance(*only)
     }
 
-    /// Whether an atom is a heap-reference constructor.
+    /// Whether an atom is a heap-reference constructor: a row of the
+    /// shared heap-reference word table.
     fn heap_ref(&self, ctor: TypeId) -> bool {
         self.analyzed
             .decls
             .universe
             .atom_decl(ctor)
-            .is_ok_and(|decl| HEAP_REFS.contains(&decl.name.as_str()))
+            .is_ok_and(|decl| ds_check::import::heap_ref(&decl.name).is_some())
     }
 
-    /// The builtin instance one declared atom names — the atom-keyed twin
-    /// of [`Shapes::builtin_instance`] (which keys on solved types): the
-    /// `bytes` primitive, or the `list`/`map` heap application. The
-    /// by-type equality plan keys on it per declared field atom.
+    /// The builtin instance one declared atom names — the one vocabulary
+    /// the by-type walk ([`Shapes::builtin_instance`], which keys on
+    /// solved types) and the atom-keyed plan walk share, so a new
+    /// builtin instance lands in both keyings in one edit: the
+    /// heap-reference containers, the record instance a struct value
+    /// names, and the builtin-instance scalars the shared primitive
+    /// word table's rows spell (`string`/`bytes`/`int`/`float` — `char`
+    /// and the widths ride plain scalar words, no collection content
+    /// compare behind them).
     pub(crate) fn atom_builtin_instance(&self, atom: TypeId) -> Option<BuiltinInstance> {
         let universe = &self.analyzed.decls.universe;
         let decl = universe.atom_decl(atom).ok()?;
@@ -988,8 +958,18 @@ impl<'a> Shapes<'a> {
                     _ => None,
                 }
             },
-            _ => match decl.name.as_str() {
-                "bytes" => Some(BuiltinInstance::Bytes),
+            ds_check::AtomKind::Struct(_) => Some(BuiltinInstance::Record),
+            _ => match ds_check::import::primitive_word(&decl.name)? {
+                ds_check::import::PrimitiveWord::Scalar(ds_check::import::ScalarWord::Str) => {
+                    Some(BuiltinInstance::Str)
+                },
+                ds_check::import::PrimitiveWord::Bytes => Some(BuiltinInstance::Bytes),
+                ds_check::import::PrimitiveWord::Scalar(ds_check::import::ScalarWord::Int) => {
+                    Some(BuiltinInstance::Int)
+                },
+                ds_check::import::PrimitiveWord::Scalar(ds_check::import::ScalarWord::Float) => {
+                    Some(BuiltinInstance::Float)
+                },
                 _ => None,
             },
         }

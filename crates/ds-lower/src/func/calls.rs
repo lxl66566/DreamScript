@@ -134,12 +134,16 @@ impl<'a> FnLower<'a, '_, '_> {
     /// its parameter span: the widening family re-spans a member or
     /// sub-union argument into the parameter's whole region before the
     /// staging moves, so a remaining width disagreement is a lowerer
-    /// seam the VM's slide validation would trap on.
+    /// seam the VM's slide validation would trap on. A linked member
+    /// dispatch carries the same contract over the checker's per-site
+    /// solved record (the receiver word of a default-body dispatch
+    /// included, since its one-word receiver guard ran ahead of here).
     fn guard_staged_width(
         &mut self,
         target: Callee,
         staged: &[SlotType],
         span: Span,
+        member_params: Option<&[Ty]>,
     ) -> Result<(), LowerError> {
         if let Callee::Builtin(native) = target
             && native.name == "map_set"
@@ -163,6 +167,26 @@ impl<'a> FnLower<'a, '_, '_> {
                  parameter re-spans its member argument into the whole region at the call, so a \
                  disagreement here is a lowerer seam",
             ));
+        }
+        if let Callee::Foreign { def: None, .. } = target
+            && let Some(params) = member_params
+        {
+            let mut expected = 0;
+            for ty in params {
+                let Some(words) = self.shapes.words(*ty).ok() else {
+                    return Ok(());
+                };
+                expected += words.len();
+            }
+            if staged.len() != expected {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a call argument",
+                    "the staged words disagree with the linked member's parameter span; a \
+                     union-typed parameter re-spans its member argument into the whole region at \
+                     the call, so a disagreement here is a lowerer seam",
+                ));
+            }
         }
         Ok(())
     }
@@ -1245,6 +1269,20 @@ impl<'a> FnLower<'a, '_, '_> {
         // position is dynamic and the callable-defaulted slot is the
         // trailing named word alone
         let interior_span = matches!(target, Callee::Generic(g) if g.staging == Staging::Interior);
+        // a linked member dispatch's solved parameter types, from the
+        // checker's per-site record: the registered member signature
+        // rides the decls table keyed by its method id, never a def
+        // whose fn type the free-fn seam reads, so the staging below
+        // reads the call's own solved record instead
+        let member_params: Option<&[Ty]> = match target {
+            Callee::Foreign { def: None, .. } => self
+                .analyzed
+                .checked
+                .member_call_params
+                .get(&call_span)
+                .map(Vec::as_slice),
+            _ => None,
+        };
         // a local callee's per-parameter checked types, when its
         // signature is static: a union-typed parameter re-spans a bare
         // member or a strict sub-union argument into its whole region
@@ -1259,6 +1297,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 .copied()
                 .and_then(|fn_ty| fn_sig_of(&self.analyzed.decls.universe, fn_ty))
                 .map(|(params, _)| params.to_vec()),
+            Callee::Foreign { def: None, .. } => member_params.map(<[Ty]>::to_vec),
             _ => None,
         };
         // whether each written argument position feeds a consuming
@@ -1298,15 +1337,22 @@ impl<'a> FnLower<'a, '_, '_> {
             };
             // A literal scalar argument stages its constant directly on
             // its overlay word. A tail transfer defers the staging past
-            // the exit claims, so it keeps the evaluated temp.
+            // the exit claims, so it keeps the evaluated temp. A word
+            // whose callee-side formal declares Raw (a default body's
+            // `Self` receiver) records the wildcard kind, mirroring the
+            // moved-word path below — the ABI slide admits the pairing
+            // whatever the literal's own static kind.
             if !tail
                 && let Some((slot, constant)) = self.direct_literal(arg, element_ty.or(param_ty))?
             {
                 if index == 0 {
                     receiver_ty = Some(self.val(arg.span())?.ty);
                 }
+                let expected_raw = expected_words
+                    .as_deref()
+                    .is_some_and(|words| words.get(staged.len()) == Some(&SlotType::Raw));
                 let at = staged.len();
-                staged.push(slot);
+                staged.push(if expected_raw { SlotType::Raw } else { slot });
                 counted.push(false);
                 word_arg.push(index);
                 consts.push((at, constant));
@@ -1488,11 +1534,16 @@ impl<'a> FnLower<'a, '_, '_> {
                 // the argument's outermost data op wrote its overlay
                 // word: the staging records the word's kind and the
                 // argument's ownership; no Mov and no window read ride
-                // it (a scalar word carries no count)
+                // it (a scalar word carries no count). A Raw-declaring
+                // callee formal takes the wildcard kind, exactly like
+                // the literal path above and the moved-word path below
                 let PlaceShape::Word(slot) = arg_val.place.shape else {
                     return Err(mismatch("a directly staged scalar argument"));
                 };
-                staged.push(slot);
+                let expected_raw = expected_words
+                    .as_deref()
+                    .is_some_and(|words| words.get(staged.len()) == Some(&SlotType::Raw));
+                staged.push(if expected_raw { SlotType::Raw } else { slot });
                 counted.push(false);
                 word_arg.push(index);
             } else {
@@ -1650,7 +1701,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 self.rc.staged_move(&mut self.code, slot);
             }
         }
-        self.guard_staged_width(target, &staged, callee_span)?;
+        self.guard_staged_width(target, &staged, callee_span, member_params)?;
         if let Callee::Builtin(native) = target
             && matches!(
                 native.shape,

@@ -456,7 +456,7 @@ pub enum TypeWord {
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
 /// the const and type facts spell in — each scalar fact maps into it
-/// (`[ConstFact::scalar_word]`, [`by_name`](Self::by_name)), and the ambient
+/// (`[ConstFact::scalar_word]`, the primitive word table), and the ambient
 /// atom names resolve in the consuming compile's own universe, the same
 /// trust the const fact's scalar atom enjoys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -473,25 +473,11 @@ pub enum ScalarWord {
     Char,
     /// `byte`.
     Byte,
+    /// `u32`.
+    U32,
 }
 
 impl ScalarWord {
-    /// The word one ambient atom name spells, when the surface trusts
-    /// it; every other name answers `None` and keeps its selection
-    /// refused.
-    #[must_use]
-    pub fn by_name(name: &str) -> Option<Self> {
-        match name {
-            "int" => Some(Self::Int),
-            "float" => Some(Self::Float),
-            "bool" => Some(Self::Bool),
-            "string" => Some(Self::Str),
-            "char" => Some(Self::Char),
-            "byte" => Some(Self::Byte),
-            _ => None,
-        }
-    }
-
     /// The ambient atom name the word resolves by in the consuming
     /// compile.
     #[must_use]
@@ -503,8 +489,100 @@ impl ScalarWord {
             Self::Str => "string",
             Self::Char => "char",
             Self::Byte => "byte",
+            Self::U32 => "u32",
         }
     }
+}
+
+/// The word one primitive atom's row of the shared table spells: a
+/// scalar word the linked surface carries, the byte-sequence word it
+/// carries as its own [`TypeWord::Bytes`] variant, or the builtin
+/// comptime type-value atom, which never rides a field fact (its `Tag`
+/// word lives only inside comptime evaluation) while the lowerer's
+/// shape layer still maps its name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrimitiveWord {
+    /// A scalar word of the linked surface's vocabulary.
+    Scalar(ScalarWord),
+    /// The byte-sequence word: one Ref word locally, its own
+    /// linked-surface variant.
+    Bytes,
+    /// The builtin comptime type-value atom.
+    ComptimeType,
+}
+
+/// The primitive word vocabulary: the one table the checker's linked
+/// surface and the lowerer's shape layer both read, so widening a
+/// primitive (a width riding an existing frame slot, as `u32` rides
+/// the integer word) updates the linked surface and the shape mapping
+/// in the same edit. The shape layer derives each row's frame slot
+/// from its word, never from a second name table: a new scalar word
+/// fails the lowerer's slot match until mapped, the same
+/// compile-time discipline the table itself keeps.
+const PRIMITIVE_WORDS: &[(&str, PrimitiveWord)] = &[
+    ("int", PrimitiveWord::Scalar(ScalarWord::Int)),
+    ("byte", PrimitiveWord::Scalar(ScalarWord::Byte)),
+    ("u32", PrimitiveWord::Scalar(ScalarWord::U32)),
+    ("float", PrimitiveWord::Scalar(ScalarWord::Float)),
+    ("bool", PrimitiveWord::Scalar(ScalarWord::Bool)),
+    ("string", PrimitiveWord::Scalar(ScalarWord::Str)),
+    ("char", PrimitiveWord::Scalar(ScalarWord::Char)),
+    ("bytes", PrimitiveWord::Bytes),
+    ("type", PrimitiveWord::ComptimeType),
+];
+
+/// The word one ambient atom name spells, when the primitive
+/// vocabulary trusts it; every other name answers `None`.
+#[must_use]
+pub fn primitive_word(name: &str) -> Option<PrimitiveWord> {
+    PRIMITIVE_WORDS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, word)| *word)
+}
+
+/// One heap-reference container's row of the shared table: the
+/// constructor's ambient atom name, its application's argument count,
+/// and whether the container's word crosses the linked surface — the
+/// one place the linked walk's container names and the lowerer's heap
+/// constructors agree, so a new container updates both sides in the
+/// same edit. `chan` stays local-only: the value crosses through the
+/// platform's natives while the link fact vocabulary spells no word
+/// for its cross-boundary surface yet.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HeapRefWord {
+    /// The constructor's ambient atom name.
+    pub name: &'static str,
+    /// The application's argument count.
+    pub args: usize,
+    /// Whether the container's word crosses the linked surface.
+    pub linked: bool,
+}
+
+/// The heap-reference container vocabulary, one row per constructor.
+const HEAP_REFS: &[HeapRefWord] = &[
+    HeapRefWord {
+        name: "list",
+        args: 1,
+        linked: true,
+    },
+    HeapRefWord {
+        name: "map",
+        args: 2,
+        linked: true,
+    },
+    HeapRefWord {
+        name: "chan",
+        args: 1,
+        linked: false,
+    },
+];
+
+/// The heap-reference container one ambient atom name constructs,
+/// when the vocabulary names it; every other name answers `None`.
+#[must_use]
+pub fn heap_ref(name: &str) -> Option<HeapRefWord> {
+    HEAP_REFS.iter().find(|row| row.name == name).copied()
 }
 
 /// One word's diagnostic spelling, the producer's own vocabulary
@@ -1132,33 +1210,28 @@ impl WordSolver<'_> {
     fn atom_word(&self, id: crate::atom::TypeId) -> Option<TypeWord> {
         let decl = self.decls.universe.atom_decl(id).ok()?;
         match &decl.kind {
-            // a bare scalar atom, or the bytes word
-            crate::AtomKind::Unit => {
-                if decl.name == "bytes" {
-                    Some(TypeWord::Bytes)
-                } else {
-                    ScalarWord::by_name(&decl.name).map(TypeWord::Scalar)
-                }
+            // a primitive word: the shared table's row the name spells
+            crate::AtomKind::Unit => match primitive_word(&decl.name) {
+                Some(PrimitiveWord::Scalar(word)) => Some(TypeWord::Scalar(word)),
+                Some(PrimitiveWord::Bytes) => Some(TypeWord::Bytes),
+                Some(PrimitiveWord::ComptimeType) | None => None,
             },
             // a heap-reference constructor applied to word members
             crate::AtomKind::Apply(ctor, args) => {
                 let ctor = self.decls.universe.atom_decl(*ctor).ok()?;
-                if ctor.name == "list" {
-                    let [arg] = &**args else {
-                        return None;
-                    };
-                    self.word_of_ty(*arg)
-                        .map(|word| TypeWord::List(Box::new(word)))
-                } else if ctor.name == "map" {
-                    let [key, value] = &**args else {
-                        return None;
-                    };
-                    Some(TypeWord::Map(
-                        Box::new(self.word_of_ty(*key)?),
-                        Box::new(self.word_of_ty(*value)?),
-                    ))
-                } else {
-                    None
+                let row = heap_ref(&ctor.name).filter(|row| row.linked)?;
+                if args.len() != row.args {
+                    return None;
+                }
+                match row.name {
+                    "list" => self
+                        .word_of_ty(args[0])
+                        .map(|word| TypeWord::List(Box::new(word))),
+                    "map" => Some(TypeWord::Map(
+                        Box::new(self.word_of_ty(args[0])?),
+                        Box::new(self.word_of_ty(args[1])?),
+                    )),
+                    _ => None,
                 }
             },
             // a solved tuple atom — a container member over a tuple
@@ -1371,18 +1444,30 @@ impl WordSolver<'_> {
                 let [only] = path.segments.as_slice() else {
                     return None;
                 };
-                match (only.name.as_str(), args.as_slice()) {
-                    ("bytes", []) => Some(TypeWord::Bytes),
-                    ("list", [arg]) => self
-                        .written_word(arg, false, stack)
+                if args.is_empty() {
+                    // the primitive words the shared table spells; a
+                    // name it does not trust falls to the producer's
+                    // own declarations
+                    return match primitive_word(&only.name) {
+                        Some(PrimitiveWord::Scalar(word)) => Some(TypeWord::Scalar(word)),
+                        Some(PrimitiveWord::Bytes) => Some(TypeWord::Bytes),
+                        Some(PrimitiveWord::ComptimeType) | None => {
+                            self.written_named(&only.name, in_union, stack)
+                        },
+                    };
+                }
+                let row = heap_ref(&only.name).filter(|row| row.linked)?;
+                if row.args != args.len() {
+                    return None;
+                }
+                match row.name {
+                    "list" => self
+                        .written_word(&args[0], false, stack)
                         .map(|word| TypeWord::List(Box::new(word))),
-                    ("map", [key, value]) => Some(TypeWord::Map(
-                        Box::new(self.written_word(key, false, stack)?),
-                        Box::new(self.written_word(value, false, stack)?),
+                    "map" => Some(TypeWord::Map(
+                        Box::new(self.written_word(&args[0], false, stack)?),
+                        Box::new(self.written_word(&args[1], false, stack)?),
                     )),
-                    (name, []) => ScalarWord::by_name(name)
-                        .map(TypeWord::Scalar)
-                        .or_else(|| self.written_named(name, in_union, stack)),
                     _ => None,
                 }
             },
@@ -1822,6 +1907,7 @@ mod tests {
             "pub tag int\n",
             "pub tag string\n",
             "pub tag byte\n",
+            "pub tag u32\n",
             "pub tag bytes\n",
             "pub struct list[t] {\n",
             "}\n",
@@ -1832,6 +1918,7 @@ mod tests {
             "  label: string,\n",
             "  tags: list[string],\n",
             "  code: byte,\n",
+            "  w: u32,\n",
             "  data: bytes,\n",
             "}\n",
             "pub struct keyed {\n",
@@ -1922,6 +2009,13 @@ mod tests {
                 super::TypeField {
                     name: "code".to_owned(),
                     word: super::TypeWord::Scalar(super::ScalarWord::Byte),
+                },
+                // the widened width rides the shared word table's row,
+                // crossing the walk the same edit the shape layer maps
+                // its slot in
+                super::TypeField {
+                    name: "w".to_owned(),
+                    word: super::TypeWord::Scalar(super::ScalarWord::U32),
                 },
                 super::TypeField {
                     name: "data".to_owned(),
