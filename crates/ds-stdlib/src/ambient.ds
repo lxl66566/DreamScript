@@ -255,10 +255,16 @@ impl[t] list[t] {
 // word is a shared handle, the mutation the object's own state, the
 // language's one shared-state exception). `send` answers unit, `recv` the payload;
 // both park the calling fiber when the buffer cannot serve it, the
-// wake delivering at the parked call site.
+// wake delivering at the parked call site. The deadline twins bound
+// the same wait: the winner answers the ok unit or the element's word,
+// the deadline-cut loser the io taxonomy's own `timed_out` member (the
+// timer race's loser shape at the parked call), the loser's waiter
+// entry deregistered from the channel's own queue either door.
 impl[t] chan[t] {
   fn send (self, x: t) -> ()
   fn recv (self) -> t
+  fn send_deadline (self, nanos: int, x: t) -> () | timed_out
+  fn recv_deadline (self, nanos: int) -> t | timed_out
 }
 
 // The arena face (the read-side aliasing container): every member
@@ -458,6 +464,13 @@ extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 extern fn chan_new[t] (cap: int) -> chan[t]
 extern fn chan_send[t] (ch: chan[t], x: t) -> ()
 extern fn chan_recv[t] (ch: chan[t]) -> t
+// The deadline twins behind the member spellings above: the winner
+// rides the ok discriminant, the deadline-cut loser the `timed_out`
+// class span, so the union re-spans at the call exactly the timer
+// race's. A wider element answer refuses at the seam's one-word
+// adoption (the timer race's own boundary).
+extern fn chan_send_deadline[t] (ch: chan[t], nanos: int, x: t) -> () | timed_out
+extern fn chan_recv_deadline[t] (ch: chan[t], nanos: int) -> t | timed_out
 // The arena's native face: the construction is the type application
 // `arena[t]()` (the element type never reaches the code, every arena
 // one Ref word), so `arena_new` stays a private seam like `list_new`'s,

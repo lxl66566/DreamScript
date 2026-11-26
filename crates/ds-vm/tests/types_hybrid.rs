@@ -35,7 +35,8 @@ use ds_vm::{
     native::{
         BUILTIN_ARENA_AT, BUILTIN_ARENA_NEW, BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE,
         BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF, BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ,
-        BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAR_AT,
+        BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV,
+        BUILTIN_CHAN_RECV_DEADLINE, BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT,
         BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH, BUILTIN_COLLECT, BUILTIN_CONS,
         BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD,
         BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_CLEAR,
@@ -1150,21 +1151,29 @@ fn both_native_modules_are_installed_and_resolvable() {
     // the timer race (107): the intercepted `timeout` seam, its step the
     // dispatcher's own like the channel triple
     assert!(reg.resolve_native("builtin", BUILTIN_TIMEOUT).is_some());
+    // the channel deadline twins (108-109): the intercepted send/recv
+    // deadline seams, their steps the dispatcher's own like the triple's
     assert!(
-        reg.resolve_native("builtin", 108).is_none(),
-        "108 table entries: the core's, the list block, the fiber pair, the push, the map block,
-     the generic container closes, the reentrant combinators, the nursery seams, the join,
-     the partition, the fork-join combinator, the fork-join fold, the float sort key, the
-     string, char, and byte sort keys, the string, float, and char content hashes, the
+        reg.resolve_native("builtin", BUILTIN_CHAN_SEND_DEADLINE).is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", BUILTIN_CHAN_RECV_DEADLINE).is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", 110).is_none(),
+        "110 table entries: the core's, the list block, the fiber pair, the push, the map
+     block, the generic container closes, the reentrant combinators, the nursery seams, the
+     join, the partition, the fork-join combinator, the fork-join fold, the float sort key,
+     the string, char, and byte sort keys, the string, float, and char content hashes, the
      REPL's spliced park, the float reader, the char face, the retired JSON reader's
-     reserved slot, the map key face, the bytes collection's face with its content
-     compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
-     bare trap primitive, the list and map collections' content compares, the
-     byte/u32 width bridges, the float math family and its completion, the string
-     search triple, the bounded channel's intercepted send/recv/construct triple, the
-     ord-routed list sort's reserved slot, the collection member round, the arena
-     face's construct/store/remove/read seams, the timer race's intercepted
-     timeout seam"
+     reserved slot, the map key face, the bytes collection's face with its content compare,
+     the bytes representation's sort key, content hash, and UTF-8 bridges, the bare trap
+     primitive, the list and map collections' content compares, the byte/u32 width bridges,
+     the float math family and its completion, the string search triple, the bounded
+     channel's intercepted send/recv/construct triple, the ord-routed list sort's reserved
+     slot, the collection member round, the arena face's construct/store/remove/read seams,
+     the timer race's intercepted timeout seam, the channel deadlines' intercepted
+     deadline twin seams"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

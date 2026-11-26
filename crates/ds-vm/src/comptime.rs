@@ -190,10 +190,11 @@ pub fn comptime_module() -> Vec<NativeFunction> {
 /// runtime table with the world-touching builtin rows dropped, so the
 /// slice's own load refuses a call to one exactly the platform
 /// natives' unserved ops — the fence's world refusal, as a compile
-/// error. The timer race's `timeout` is the fenced row: it parks the
-/// calling fiber against the clock, a world touch no fenced run may
-/// make. The dropped rows sit at the table's tail, so the remaining
-/// indices keep their pinned ids.
+/// error. The fenced rows run from the timer race's `timeout` through
+/// the channel deadlines' `chan_send_deadline`/`chan_recv_deadline`
+/// twins: each parks the calling fiber against the clock, a world
+/// touch no fenced run may make. The dropped rows sit at the table's
+/// tail, so the remaining indices keep their pinned ids.
 #[must_use]
 pub fn fenced_builtin_module() -> Vec<NativeFunction> {
     let mut table = crate::native::builtin_module();

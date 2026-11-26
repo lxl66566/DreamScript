@@ -1010,3 +1010,30 @@ fn the_timer_race_refuses_at_the_fence() {
         "the fence names the timer race's world touch: {rendered}"
     );
 }
+
+#[test]
+fn the_channel_deadline_twins_refuse_at_the_fence() {
+    // the deadline twins ride the same dropped tail: the fenced table
+    // ends at the timer race's predecessor row, so a channel deadline
+    // call refuses with the same world refusal naming its own row
+    let rendered = evaluate_refused(
+        "chan_deadline_fence",
+        &source(concat!(
+            "tag timed_out\n",
+            "struct chan[t]\n",
+            "extern fn chan_recv_deadline[t] (ch: chan[t], nanos: int) -> t | timed_out\n",
+            "fn bounded(comptime t: type) -> int {\n",
+            "  const ch = chan[int](0)\n",
+            "  chan_recv_deadline(ch, 1000).err((e) => 0)\n",
+            "}\n",
+            "fn main() -> () {\n",
+            "  println(\"${bounded(int)}\")\n",
+            "}\n",
+        )),
+    );
+    assert!(
+        rendered.contains("comptime fence refuses world-touching calls")
+            && rendered.contains("`chan_recv_deadline`"),
+        "the fence names the channel deadline's world touch: {rendered}"
+    );
+}

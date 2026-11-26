@@ -82,6 +82,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "list_insert" => self.shapes.list_element(ty),
             Callee::Builtin(native) if native.name == "map_set" => self.shapes.map_value(ty),
             Callee::Builtin(native) if native.name == "chan_send" => self.shapes.chan_payload(ty),
+            Callee::Builtin(native) if native.name == "chan_send_deadline" => {
+                self.shapes.chan_payload(ty)
+            },
             Callee::Builtin(native) if native.name == "arena_insert" => {
                 self.shapes.arena_element(ty)
             },
@@ -1348,6 +1351,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "chan_send" => {
                 Some((1usize, "a chan_send payload"))
             },
+            Callee::Builtin(native) if native.name == "chan_send_deadline" => {
+                Some((2usize, "a chan_send_deadline payload"))
+            },
             Callee::Builtin(native) if native.name == "arena_insert" => {
                 Some((1usize, "an arena_insert element"))
             },
@@ -1513,7 +1519,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 // its span queued fires no hook either way
                 if let Some((slot, _)) = element_slot
                     && slot == index
-                    && matches!(target, Callee::Builtin(native) if native.name == "chan_send")
+                    && matches!(target, Callee::Builtin(native) if native.name == "chan_send" || native.name == "chan_send_deadline")
                 {
                     return Err(LowerError::unsupported(
                         arg.span(),
@@ -3005,6 +3011,8 @@ impl<'a> FnLower<'a, '_, '_> {
             ("map", "entries") => ("map_entries", false),
             ("chan", "send") => ("chan_send", false),
             ("chan", "recv") => ("chan_recv", false),
+            ("chan", "send_deadline") => ("chan_send_deadline", false),
+            ("chan", "recv_deadline") => ("chan_recv_deadline", false),
             ("arena", "insert") => ("arena_insert", false),
             ("arena", "remove") => ("arena_remove", false),
             ("arena", "at") => ("arena_at", false),
@@ -3641,9 +3649,10 @@ impl<'a> FnLower<'a, '_, '_> {
         if wide {
             return Err(LowerError::unsupported(
                 no_span(), // re-pointed at the call site
-                "a timeout answer wider than one word",
-                "the timer race adopts exactly one word from its racer; a scalar, a reference, a \
-                 one-field record, or a tag-only union lowers, a wider answer type does not",
+                "a deadline answer wider than one word",
+                "the deadline seams adopt exactly one word — the timer race from its racer, the \
+                 channel deadline recv off its element; a scalar, a reference, a one-field \
+                 record, or a tag-only union lowers, a wider answer type does not",
             ));
         }
         Ok(())
@@ -4767,9 +4776,10 @@ impl<'a> FnLower<'a, '_, '_> {
         let Shape::Union(u) = &*shape else {
             return Err(LowerError::unsupported(
                 no_span(), // re-pointed at the call site
-                "a timeout call's result",
-                "the call answers `t | timed_out` and the deadline's member must be handled or \
-                 propagate; a total spelling has no member for the deadline",
+                "a deadline call's result",
+                "the call answers its success type unioned with `timed_out` and the deadline's \
+                 member must be handled or propagate; a total spelling has no member for the \
+                 deadline",
             ));
         };
         let class_members = self.class_members_of(u, fail_payload, classes)?;

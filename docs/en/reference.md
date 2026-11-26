@@ -1532,10 +1532,19 @@ The channel face: the net handle's plain receiver discipline (the
 word is a shared handle, the mutation the object's own state, the
 language's one shared-state exception). `send` answers unit, `recv` the payload;
 both park the calling fiber when the buffer cannot serve it, the
-wake delivering at the parked call site.
+wake delivering at the parked call site. The deadline twins bound
+the same wait: the winner answers the ok unit or the element's word,
+the deadline-cut loser the io taxonomy's own `timed_out` member (the
+timer race's loser shape at the parked call), the loser's waiter
+entry deregistered from the channel's own queue either door.
 
 ```ds
-impl[t] chan[t] { fn send(self, x: t) -> (), fn recv(self) -> t }
+impl[t] chan[t] {
+  fn send(self, x: t) -> ()
+  fn recv(self) -> t
+  fn send_deadline(self, nanos: int, x: t) -> () | timed_out
+  fn recv_deadline(self, nanos: int) -> t | timed_out
+}
 ```
 
 ```ds

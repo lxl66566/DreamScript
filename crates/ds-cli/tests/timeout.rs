@@ -377,7 +377,7 @@ fn main() -> () {
     );
     assert!(!status.success(), "the wider answer refuses: {stdout}");
     assert!(
-        stderr.contains("a timeout answer wider than one word"),
+        stderr.contains("a deadline answer wider than one word"),
         "the refusal names its reason: {stderr}"
     );
 }

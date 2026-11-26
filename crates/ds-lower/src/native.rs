@@ -718,6 +718,32 @@ pub(crate) const NATIVES: &[Native] = &[
         },
     },
     Native {
+        // the bounded channel's deadline twins (the timer race's loser
+        // shape over the channel's own waiter queues): the winner the
+        // ok unit (the send) or the element's word under the ok
+        // discriminant (the recv), the loser the io taxonomy's own
+        // `timed_out` tag over the inert unit word; the call site
+        // re-spans the two-word platform span into the call's own
+        // union so `?`, `.err`, and match handle the deadline through
+        // the ordinary error machinery
+        name: "chan_send_deadline",
+        module: NativeModule::Builtin,
+        index: 108,
+        shape: NativeShape::FallibleByResultType {
+            fail_payload: SlotType::I64,
+            classes: &[(IO_TIMED_OUT, "timed_out")],
+        },
+    },
+    Native {
+        name: "chan_recv_deadline",
+        module: NativeModule::Builtin,
+        index: 109,
+        shape: NativeShape::FallibleByResultType {
+            fail_payload: SlotType::I64,
+            classes: &[(IO_TIMED_OUT, "timed_out")],
+        },
+    },
+    Native {
         // the read-side aliasing container's seams: the constructor
         // answers the arena's Ref word, insert the packed
         // (index, generation) handle as one i64 word, remove the unit

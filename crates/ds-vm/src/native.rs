@@ -871,6 +871,12 @@ pub const BUILTIN_TAN: u32 = 106;
 /// Intercepted at `CALL` sites like the channel natives; the body is
 /// the never-run placeholder.
 pub const BUILTIN_TIMEOUT: u32 = 107;
+/// `chan_send_deadline(ch, nanos, x)`: the bounded channel's deadline
+/// send, the loser the io taxonomy's own `timed_out` member.
+pub const BUILTIN_CHAN_SEND_DEADLINE: u32 = 108;
+/// `chan_recv_deadline(ch, nanos)`: the bounded channel's deadline
+/// recv, the loser the same member.
+pub const BUILTIN_CHAN_RECV_DEADLINE: u32 = 109;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -1025,6 +1031,16 @@ pub enum ChannelNative {
     Send,
     /// `chan_recv(ch)`: take off the head or park on empty.
     Recv,
+    /// `chan_send_deadline(ch, nanos, x)`: deposit, or park on full
+    /// with the deadline armed on the wheel — the loser's entry
+    /// deregisters from the sender queue and the parked call answers
+    /// the io taxonomy's `timed_out` span.
+    SendDeadline,
+    /// `chan_recv_deadline(ch, nanos)`: take off the head, or park on
+    /// empty with the deadline armed on the wheel — the loser's entry
+    /// deregisters from the receiver queue and the parked call answers
+    /// the same span.
+    RecvDeadline,
 }
 
 /// The timer native: like the channel natives, the dispatcher intercepts
@@ -4481,10 +4497,35 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             timer: Some(TimerNative::Timeout),
             func: chan_refuse_fn,
         },
+        NativeFunction {
+            name: "chan_send_deadline",
+            // the channel word, the deadline's nanoseconds, then the
+            // staged payload span (`chan_send`'s variadic shape one
+            // word later); the answer spans two overlay words — the ok
+            // unit or the `timed_out` class tag with the inert unit
+            // word — exactly a fallible native's own shape
+            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
+            variadic: true,
+            result_words: 2,
+            control: None,
+            channel: Some(ChannelNative::SendDeadline),
+            timer: None,
+            func: chan_refuse_fn,
+        },
+        NativeFunction {
+            name: "chan_recv_deadline",
+            params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
+            result_words: 2,
+            control: None,
+            channel: Some(ChannelNative::RecvDeadline),
+            timer: None,
+            func: chan_refuse_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_TIMEOUT, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_TIMEOUT as usize + 1);
+    // the channel deadlines, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
     fns
 }
 
@@ -5393,7 +5434,15 @@ mod tests {
         assert_eq!(fns[BUILTIN_EXP as usize].name, "exp");
         assert_eq!(fns[BUILTIN_TAN as usize].name, "tan");
         assert_eq!(fns[BUILTIN_TIMEOUT as usize].name, "timeout");
-        assert_eq!(fns.len(), BUILTIN_TIMEOUT as usize + 1);
+        assert_eq!(
+            fns[BUILTIN_CHAN_SEND_DEADLINE as usize].name,
+            "chan_send_deadline"
+        );
+        assert_eq!(
+            fns[BUILTIN_CHAN_RECV_DEADLINE as usize].name,
+            "chan_recv_deadline"
+        );
+        assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [

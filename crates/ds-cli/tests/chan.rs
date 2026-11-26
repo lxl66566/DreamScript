@@ -20,6 +20,12 @@
 //!   buffer's element stride, the recv answering the tag-less total of the span's words; a parked
 //!   recv wakes to a multi-word claim, a parked multi-word send refills from the drain, and a union
 //!   payload's bare member stages its whole region span.
+//! - the deadline twins (the channel send/recv deadlines round): `send_deadline`/`recv_deadline`
+//!   bound the wait with the io taxonomy's own `timed_out` loser — a past deadline answering at
+//!   once, the win door waking before the deadline with the ok span, the timed-out recv leaving the
+//!   next waiter the wake, the timed-out send's staged payload never crossing, a cut loser (the
+//!   timer race over a parked deadline send) keeping its deinit and leaving the queue clean, and
+//!   the lowering refusals (a wider element answer, a deinit-carrying payload, a bare tail).
 //! - lowering refusals: a deinit-carrying payload refuses at the send's staging, before any run.
 
 use std::{env, fs, path::PathBuf, process::Command};
@@ -426,6 +432,237 @@ fn main() -> int {
   const ch = chan[held](1)
   const h = held { id: 1 }
   ch.send(h)
+  0
+}
+"#,
+    );
+    assert!(!status.success(), "a deinit-carrying payload refuses");
+    assert!(
+        stderr.contains("deinit-carrying"),
+        "the refusal names the claim seam: {stderr}"
+    );
+}
+
+#[test]
+fn a_past_deadline_answers_timed_out_at_once() {
+    // the deadline bounds only the wait: a servable channel answers the
+    // ok span under the same past deadline, a blocked one the failure
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const full = chan[int](1)
+  full.send(5)
+  const blocked = full.send_deadline(0, 6).err((e) => -1)
+  const drained = full.recv_deadline(0).err((e) => -3)
+  full.send_deadline(0, 7).err((e) => 0)
+  const stocked = full.recv_deadline(0).err((e) => -5)
+  const empty = chan[int](1)
+  const starved = empty.recv_deadline(0).err((e) => -4)
+  println("blocked=${blocked} drained=${drained} stocked=${stocked} starved=${starved}")
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the at-once answers exit clean: {stderr}");
+    assert!(
+        stdout.contains("blocked=-1 drained=5 stocked=7 starved=-4"),
+        "the past deadline answered each side: {stdout}"
+    );
+}
+
+#[test]
+fn a_deadline_recv_wakes_through_the_win_door_before_its_deadline() {
+    // the woken deadline call overlays the two-word ok span at the
+    // parked site: the element answers, no failure member
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](1)
+  const _ = nursery {
+    spawn { println("woke ${ch.recv_deadline(500000000).err((e) => -1)}") }
+    spawn { ch.send(7) }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the win door exits clean: {stderr}");
+    assert!(stdout.contains("woke 7"), "the element answered: {stdout}");
+}
+
+#[test]
+fn the_timed_out_recv_leaves_the_next_waiter_the_wake() {
+    // the loser deregisters from the receiver queue, so the later
+    // plain recv still takes the delayed send's wake in order
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](1)
+  const _ = nursery {
+    spawn { println("loser ${ch.recv_deadline(20000000).err((e) => -1)}") }
+    spawn {
+      sleep(150000000)
+      println("survivor ${ch.recv()}")
+    }
+    spawn {
+      sleep(250000000)
+      ch.send(42)
+    }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the loser's cut exits clean: {stderr}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["loser -1", "survivor 42"],
+        "the loser answered the failure span and the survivor took the wake: {stdout}"
+    );
+}
+
+#[test]
+fn the_timed_out_senders_staged_payload_never_crosses() {
+    // the loser parks on the full channel staging 11, times out, and a
+    // later plain sender's 22 refills the drain in its place
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> int {
+  const ch = chan[int](1)
+  ch.send(5)
+  const _ = nursery {
+    spawn { println("loser ${ch.send_deadline(20000000, 11).err((e) => -1)}") }
+    spawn {
+      sleep(150000000)
+      ch.send(22)
+    }
+    spawn {
+      sleep(250000000)
+      println("drain ${ch.recv()} ${ch.recv()}")
+    }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the drain exits clean: {stderr}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["loser -1", "drain 5 22"],
+        "the survivor's payload refilled, the loser's 11 never crossed: {stdout}"
+    );
+}
+
+#[test]
+fn a_cut_deadline_loser_keeps_its_deinit_and_leaves_the_queue_clean() {
+    // the timer race cuts a sender parked on a deadline send: the kept
+    // frame's hook fires at the teardown drain, and the staged entry is
+    // gone with the cut — a later rendezvous pair still crosses
+    let (status, stdout, stderr) = run_source(
+        r#"struct res: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn main() -> () {
+  const ch = chan[int](0)
+  const held = timeout(20000000, () => {
+    const r = res { id: 7 }
+    ch.send_deadline(5000000000, r.id).err((e) => 0)
+    0
+  }).err((e) => -1)
+  println("cut ${held}")
+  const _ = nursery {
+    spawn { ch.send(99) }
+    spawn { println("after ${ch.recv()}") }
+  }
+}
+"#,
+    );
+    assert!(status.success(), "the cut exits clean: {stderr}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["freed 7", "cut -1", "after 99"],
+        "the cut loser's deinit fired and the queue pairs the later peers: {stdout}"
+    );
+}
+
+#[test]
+fn the_helper_extraction_propagates_timed_out_through_the_call() {
+    // the deadline member composes with `?`, `.err`, and a match arm
+    // exactly the timer race's answer shapes
+    let (status, stdout, stderr) = run_source(
+        r#"fn helper(ch: chan[int], nanos: int) -> int | timed_out {
+  ch.recv_deadline(nanos)?
+}
+
+fn main() -> () {
+  const ch = chan[int](1)
+  ch.send(5)
+  println("helper ${helper(ch, 0).err((e) => -1)}")
+  println("member ${ch.recv_deadline(0).err((e) => -2)}")
+  match helper(ch, 0) {
+    n => println("match ${n.err((e) => -3)}")
+  }
+}
+"#,
+    );
+    assert!(
+        status.success(),
+        "the extraction shapes exit clean: {stderr}"
+    );
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["helper 5", "member -2", "match -3"] as [&str; 3],
+        "the ok word extracted and the deadline propagated: {stdout}"
+    );
+}
+
+#[test]
+fn a_wider_element_answer_refuses_at_the_recv_deadlines_lowering() {
+    // the deadline recv adopts exactly one word off its element, the
+    // timer race's own boundary
+    let (status, _stdout, stderr) = run_source(
+        r#"struct pair { a: int, b: int }
+
+fn main() -> int {
+  const ch = chan[pair](1)
+  const p = ch.recv_deadline(500000000).err((e) => pair { a: 0, b: 0 })
+  p.a
+}
+"#,
+    );
+    assert!(!status.success(), "the wider answer refuses: {stderr}");
+    assert!(
+        stderr.contains("a deadline answer wider than one word"),
+        "the refusal names its reason: {stderr}"
+    );
+}
+
+#[test]
+fn a_deinit_carrying_payload_refuses_at_the_send_deadlines_staging() {
+    let (status, _stdout, stderr) = run_source(
+        r#"struct held: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn main() -> int {
+  const ch = chan[held](1)
+  const h = held { id: 1 }
+  ch.send_deadline(500000000, h).err((e) => 0)
   0
 }
 "#,

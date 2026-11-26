@@ -322,7 +322,6 @@ fn the_deadline_cuts_a_parking_looper_at_its_park() {
 }
 
 #[test]
-#[test]
 fn the_deadline_cuts_a_spinning_racer_at_its_back_edge() {
     // a racer that never parks: the wheel fires only between drives,
     // so the deadline answers through the back-edge poll — the same
@@ -346,6 +345,7 @@ fn the_deadline_cuts_a_spinning_racer_at_its_back_edge() {
     assert_eq!(vm.fiber_state(FiberId(1)), Some(FiberState::Dead));
 }
 
+#[test]
 fn a_deadline_already_past_answers_the_failure_at_once() {
     // no reactor installed, and the failure answers in place: the drive
     // never parks, no racer ever spawns

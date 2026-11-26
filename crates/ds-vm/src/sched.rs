@@ -24,6 +24,7 @@ use crate::{
     fiber::FiberId,
     native::NativeResult,
     reactor::{Direction, IoHandle},
+    value::RefId,
     vm::Trap,
 };
 
@@ -140,6 +141,22 @@ pub enum WorldWait {
     /// state, and the wait carries no nanos because the failure answer
     /// is the bare `timed_out` class span.
     Timeout { deadline: Instant },
+    /// `chan_send_deadline`/`chan_recv_deadline`: the calling fiber
+    /// parks with its waiter entry already in the channel's own queue
+    /// (`sender` names which queue) and the deadline armed on the wheel.
+    /// The wheel's firing is the deadline door: the loser's entry
+    /// deregisters from that queue — the sender's staged span dropping
+    /// with it, its counts the parked frame's own — and the parked call
+    /// answers the io taxonomy's `timed_out` span, exactly the timer
+    /// race's loser shape. A waking peer's release performs the same
+    /// deregistration through the win door, dropping the row before the
+    /// wheel can ever fire it. No IO interest: the waking peer is the
+    /// resumer, the wheel the only other door.
+    ChanDeadline {
+        chan: RefId,
+        sender: bool,
+        deadline: Instant,
+    },
 }
 
 /// Which handle table one close seam closed: the close natives note
@@ -204,6 +221,19 @@ impl WorldWait {
     #[must_use]
     pub fn sleep(deadline: Instant) -> Self {
         Self::Sleep { deadline }
+    }
+
+    /// A channel deadline wait's constructor: the channel word the
+    /// deregistration names, `sender` whether the parked entry stands
+    /// in the sender queue (the recv loser parks in the receiver
+    /// queue), and the requested span folded into its deadline.
+    #[must_use]
+    pub fn chan_deadline(chan: RefId, sender: bool, deadline: Instant) -> Self {
+        Self::ChanDeadline {
+            chan,
+            sender,
+            deadline,
+        }
     }
 
     /// An accept wait's constructor (the listener's own handle rides
@@ -298,7 +328,8 @@ impl WorldWait {
             | Self::ProcRead { deadline, .. }
             | Self::ProcWait { deadline, .. }
             | Self::Sleep { deadline }
-            | Self::Timeout { deadline, .. } => Some(*deadline),
+            | Self::Timeout { deadline, .. }
+            | Self::ChanDeadline { deadline, .. } => Some(*deadline),
             Self::Accept { .. } => None,
         }
     }
@@ -321,7 +352,8 @@ impl WorldWait {
             | Self::TlsFetch { .. }
             | Self::TlsAccept { .. }
             | Self::Sleep { .. }
-            | Self::Timeout { .. } => None,
+            | Self::Timeout { .. }
+            | Self::ChanDeadline { .. } => None,
         }
     }
 
@@ -379,7 +411,7 @@ impl WorldWait {
             | Self::Connect { .. }
             | Self::Fetch { .. }
             | Self::TlsFetch { .. } => Some(Direction::Write),
-            Self::Sleep { .. } | Self::Timeout { .. } => None,
+            Self::Sleep { .. } | Self::Timeout { .. } | Self::ChanDeadline { .. } => None,
         }
     }
 
@@ -399,6 +431,13 @@ impl WorldWait {
             Self::ProcWait { .. } => "proc_wait",
             Self::Sleep { .. } => "time_sleep",
             Self::Timeout { .. } => "timeout",
+            Self::ChanDeadline { sender, .. } => {
+                if *sender {
+                    "chan_send_deadline"
+                } else {
+                    "chan_recv_deadline"
+                }
+            },
         }
     }
 

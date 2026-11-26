@@ -2845,6 +2845,40 @@ impl<'a> Heaps<'a> {
         }
     }
 
+    /// Removes one fiber's waiter entry from channel `chan`'s queue
+    /// (`sender` names which), routed — the deadline and cancel doors'
+    /// deregistration. The sender queue's staged span drops with the
+    /// entry (its counts the parked frame's own); the entries behind it
+    /// shift up, so a later peer still pairs in park order and no
+    /// stale head can swallow a wake. Answers whether an entry went.
+    pub(crate) fn chan_remove_waiter(
+        &mut self,
+        chan: RefId,
+        fiber: FiberId,
+        sender: bool,
+    ) -> Result<bool, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => {
+                let len = |data: &ChanData| {
+                    if sender {
+                        data.senders.len()
+                    } else {
+                        data.receivers.len()
+                    }
+                };
+                let before = len(data);
+                if sender {
+                    data.senders.retain(|waiter| waiter.fiber != fiber);
+                } else {
+                    data.receivers.retain(|&waiter| waiter != fiber);
+                }
+                Ok(len(data) != before)
+            },
+            None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
     /// Adopts one existing count into `claimant`'s ledger with no count
     /// mutation: the channel receive's transfer — the buffer's edge
     /// count becomes the receiving frame's backing, so the frame's

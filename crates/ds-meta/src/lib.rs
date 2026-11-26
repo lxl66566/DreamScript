@@ -615,6 +615,19 @@ fn slice_refusal(error: &ds_lower::LowerError, sites: &[ConstSite]) -> Diagnosti
     }
 }
 
+/// The world-touching builtin rows the fenced table drops: each parks
+/// the calling fiber against the clock — the timer race, the channel
+/// deadline twins. Answers the row's ambient name for the fence
+/// refusal, `None` for a row the fenced table serves.
+fn dropped_clock_row(index: u32) -> Option<&'static str> {
+    match index {
+        ds_vm::native::BUILTIN_TIMEOUT => Some("timeout"),
+        ds_vm::native::BUILTIN_CHAN_SEND_DEADLINE => Some("chan_send_deadline"),
+        ds_vm::native::BUILTIN_CHAN_RECV_DEADLINE => Some("chan_recv_deadline"),
+        _ => None,
+    }
+}
+
 /// The evaluation slice's install refusal: a world call names the
 /// capability, anything else the load error.
 fn fence_refusal(error: &LoadError, sites: &[ConstSite]) -> Diagnostic {
@@ -627,17 +640,19 @@ fn fence_refusal(error: &LoadError, sites: &[ConstSite]) -> Diagnostic {
             ),
         ),
         // the world-touching builtin rows the fenced table drops: the
-        // timer race parks the calling fiber against the clock, the
-        // same world refusal the unserved platform ops take
+        // call parks the calling fiber against the clock, the same
+        // world refusal the unserved platform ops take
         LoadError::UnresolvedCallee { module, index, .. }
             if *module == ds_vm::native::BUILTIN_MODULE
-                && *index == ds_vm::native::BUILTIN_TIMEOUT =>
+                && let Some(row) = dropped_clock_row(*index) =>
         {
             site_refusal(
                 &sites[0],
-                "the initializer calls the world surface (`timeout`: the timer race parks the \
-                 calling fiber against the clock); the evaluation fence refuses world-touching \
-                 calls as compile errors",
+                &format!(
+                    "the initializer calls the world surface (`{row}`: the call parks the calling \
+                     fiber against the clock); the evaluation fence refuses world-touching calls \
+                     as compile errors"
+                ),
             )
         },
         other => Diagnostic::error(
@@ -1834,20 +1849,22 @@ fn fence_diagnostic(error: &LoadError, fns: &[ComptimeFn], sites: &[CallSite]) -
             .with_secondary(sites[0].span, "evaluated at this comptime call")
         },
         // the world-touching builtin rows the fenced table drops: the
-        // timer race parks the calling fiber against the clock, the
-        // same world refusal the unserved platform ops take
+        // call parks the calling fiber against the clock, the same
+        // world refusal the unserved platform ops take
         LoadError::UnresolvedCallee {
             func,
             module,
             index,
         } if *module == ds_vm::native::BUILTIN_MODULE
-            && *index == ds_vm::native::BUILTIN_TIMEOUT =>
+            && let Some(row) = dropped_clock_row(*index) =>
         {
             Diagnostic::error(
                 ErrorCode::ComptimeFenceRefusal,
-                "this comptime function calls the world surface (`timeout`: the timer race parks \
-                 the calling fiber against the clock); the comptime fence refuses world-touching \
-                 calls as compile errors [G1]",
+                format!(
+                    "this comptime function calls the world surface (`{row}`: the call parks the \
+                     calling fiber against the clock); the comptime fence refuses world-touching \
+                     calls as compile errors [G1]"
+                ),
             )
             .with_primary(
                 fns.iter()

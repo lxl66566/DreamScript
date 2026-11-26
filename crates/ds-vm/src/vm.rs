@@ -1241,6 +1241,15 @@ fn timeout_failure_span() -> NativeResult {
     }
 }
 
+/// The deadline twins' winner answer: the unit word under the ok
+/// discriminant (the send's union success member).
+fn ok_tagged(payload: Value) -> NativeResult {
+    NativeResult::Tag {
+        tag: PLATFORM_IO_OK,
+        payload,
+    }
+}
+
 fn native_head_word(result: &NativeResult) -> Value {
     match result {
         NativeResult::Word(value) => *value,
@@ -1293,8 +1302,11 @@ enum ChanStep {
     /// The step answered: overlay like an ordinary native's result.
     Answer(NativeResult),
     /// The step parked the caller: the waiter already entered the
-    /// channel's own data; the arm performs the fiber park.
-    Park,
+    /// channel's own data; the arm performs the fiber park. `Some`
+    /// carries the deadline wait the park registers (the wheel the
+    /// arbiter, the loser's cut the timer race's own teardown path),
+    /// `None` the plain park no wheel entry arms.
+    Park(Option<WorldWait>),
 }
 
 /// The timer race's outcome for the `CALL` arm: a deadline already
@@ -6444,6 +6456,14 @@ impl Vm {
             .collect();
         for token in tokens {
             if let Some(entry) = self.sched.waits.remove(&token) {
+                // a channel deadline's interest is the channel's own
+                // waiter entry: the cut deregisters it here, the
+                // cancel-deregistration shape over the channel's queue,
+                // so no stale entry lingers and no later peer pairs with
+                // a cut fiber
+                if let WorldWait::ChanDeadline { chan, sender, .. } = &entry.wait {
+                    let _ = self.heaps().chan_remove_waiter(*chan, fiber, *sender);
+                }
                 self.release_wait_resources(&entry.wait);
                 if let Some(handle) = entry.handle
                     && let Some(installed) = self.reactor.as_mut()
@@ -6699,6 +6719,19 @@ impl Vm {
             self.expire_race(token, fiber);
             return;
         }
+        // the channel deadline's door: the wheel fires the loser's cut —
+        // the waiter entry deregisters from the channel's own queue (the
+        // sender's staged span dropping with it, its counts the parked
+        // frame's own), and the parked call answers the io taxonomy's
+        // `timed_out` span, the re-span the ambient's `t | timed_out`
+        // union carries. The entry is present whenever the row stands:
+        // the win doors wake through `wake_chan_waiter`, which drops the
+        // row before this arm could ever see a woken fiber.
+        if let WorldWait::ChanDeadline { chan, sender, .. } = &entry.wait {
+            let _ = self.heaps().chan_remove_waiter(*chan, fiber, *sender);
+            self.finish_wait_with(token, Wake::Answer(timeout_failure_span()));
+            return;
+        }
         let target = entry.wait.target();
         let op = entry.wait.op_name();
         if entry.wait.deadline().is_some_and(|at| at <= Instant::now()) {
@@ -6761,9 +6794,9 @@ impl Vm {
                 WorldWait::ProcRead { .. } | WorldWait::ProcWait { .. } => {
                     unreachable!("the proc parked twins are the linux driver's own")
                 },
-                // the timer-only wait completed at its own arm above; the
-                // arm keeps this match total
-                WorldWait::Sleep { .. } | WorldWait::Timeout { .. } => {
+                // the timer-only waits completed at their own arms above;
+                // the arm keeps this match total
+                WorldWait::Sleep { .. } | WorldWait::Timeout { .. } | WorldWait::ChanDeadline { .. } => {
                     unreachable!("the timer-only waits completed at their own arms")
                 },
                 WorldWait::Recv { conn: id, max, .. } => {
@@ -7064,7 +7097,9 @@ impl Vm {
                         // wait rides the same wheel)
                         if matches!(
                             entry.wait,
-                            WorldWait::Sleep { .. } | WorldWait::Timeout { .. }
+                            WorldWait::Sleep { .. }
+                                | WorldWait::Timeout { .. }
+                                | WorldWait::ChanDeadline { .. }
                         ) {
                             continue;
                         }
@@ -11093,12 +11128,13 @@ impl Vm {
                                         .map_err(|e| (e, pc))?
                                     {
                                         ChanStep::Answer(result) => result,
-                                        ChanStep::Park => {
+                                        ChanStep::Park(wait) => {
+                                            let kind = wait.map_or(ParkKind::Chan, ParkKind::World);
                                             return self.park_world_tail(
                                                 &active,
                                                 pc,
                                                 boundary,
-                                                ParkKind::Chan,
+                                                kind,
                                             )
                                         },
                                     }
@@ -12448,7 +12484,7 @@ impl Vm {
                 // door
                 if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
                     self.heaps().chan_park_sender(chan, here, payload)?;
-                    return Ok(ChanStep::Park);
+                    return Ok(ChanStep::Park(None));
                 }
                 self.heaps().chan_deposit(chan, &payload)?;
                 self.chan_release(chan)?;
@@ -12470,7 +12506,7 @@ impl Vm {
                     // staged sender has no slot to fill
                     let Some(sender) = self.chan_take_live_sender(chan)? else {
                         self.heaps().chan_park_receiver(chan, here)?;
-                        return Ok(ChanStep::Park);
+                        return Ok(ChanStep::Park(None));
                     };
                     self.heaps().chan_deposit(chan, &sender.payload)?;
                     let elem = self
@@ -12484,6 +12520,74 @@ impl Vm {
                 self.chan_refill(chan)?;
                 Ok(ChanStep::Answer(result))
             },
+            ChannelNative::SendDeadline => {
+                let Value::Ref(chan) = control_word(&self.stack, fp, caller, 0)? else {
+                    return Err(Trap::UnknownObject { obj: 0 });
+                };
+                let nanos = control_i64(&self.stack, fp, caller, 1)?;
+                let payload = (2..usize::from(nargs))
+                    .map(|index| control_word(&self.stack, fp, caller, index))
+                    .collect::<Result<Vec<_>, Trap>>()?;
+                let here = self.current;
+                if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
+                    // the deadline bounds only the wait: a full channel
+                    // beside a past deadline answers the failure span at
+                    // once, no park, the timer ruling's own letter
+                    if nanos <= 0 {
+                        return Ok(ChanStep::Answer(timeout_failure_span()));
+                    }
+                    self.heaps().chan_park_sender(chan, here, payload)?;
+                    return Ok(ChanStep::Park(Some(WorldWait::chan_deadline(
+                        chan,
+                        true,
+                        Instant::now() + Duration::from_nanos(nanos.cast_unsigned()),
+                    ))));
+                }
+                self.heaps().chan_deposit(chan, &payload)?;
+                self.chan_release(chan)?;
+                Ok(ChanStep::Answer(ok_tagged(Value::I64(0))))
+            },
+            ChannelNative::RecvDeadline => {
+                let Value::Ref(chan) = control_word(&self.stack, fp, caller, 0)? else {
+                    return Err(Trap::UnknownObject { obj: 0 });
+                };
+                let nanos = control_i64(&self.stack, fp, caller, 1)?;
+                let here = self.current;
+                let Some(elem) = self.heaps().chan_pop(chan)? else {
+                    let Some(sender) = self.chan_take_live_sender(chan)? else {
+                        if nanos <= 0 {
+                            return Ok(ChanStep::Answer(timeout_failure_span()));
+                        }
+                        self.heaps().chan_park_receiver(chan, here)?;
+                        return Ok(ChanStep::Park(Some(WorldWait::chan_deadline(
+                            chan,
+                            false,
+                            Instant::now() + Duration::from_nanos(nanos.cast_unsigned()),
+                        ))));
+                    };
+                    self.heaps().chan_deposit(chan, &sender.payload)?;
+                    let elem = self
+                        .heaps()
+                        .chan_pop(chan)?
+                        .expect("the rendezvous deposit precedes its pop");
+                    self.wake_chan_waiter(sender.fiber, NativeResult::Word(Value::I64(0)));
+                    return Ok(ChanStep::Answer(self.chan_deadline_answer(elem, here)));
+                };
+                let result = self.chan_deadline_answer(elem, here);
+                self.chan_refill(chan)?;
+                Ok(ChanStep::Answer(result))
+            },
+        }
+    }
+
+    /// The deadline recv's ok answer: the element's word under the ok
+    /// discriminant (the fallible union's success member; a wider
+    /// element's span the lowering refuses at the seam, so the total
+    /// shape never lands at a lowered site)
+    fn chan_deadline_answer(&mut self, elem: ChanPop, fiber: FiberId) -> NativeResult {
+        match self.chan_elem_answer(elem, fiber) {
+            NativeResult::Word(word) => ok_tagged(word),
+            other => other,
         }
     }
 
@@ -12505,12 +12609,15 @@ impl Vm {
                 overlay_native(result, &mut self.stack, caller, fp)?;
                 Ok(ChanOutcome::Answered)
             },
-            ChanStep::Park => match self
-                .park_world(active, CodePc(pc), ParkKind::Chan)
-                .map_err(|(trap, _)| trap)?
-            {
-                event @ DriveOutcome::WorldPark(_) => Ok(ChanOutcome::Parked(event)),
-                _ => unreachable!("a park answers the park event"),
+            ChanStep::Park(wait) => {
+                let kind = wait.map_or(ParkKind::Chan, ParkKind::World);
+                match self
+                    .park_world(active, CodePc(pc), kind)
+                    .map_err(|(trap, _)| trap)?
+                {
+                    event @ DriveOutcome::WorldPark(_) => Ok(ChanOutcome::Parked(event)),
+                    _ => unreachable!("a park answers the park event"),
+                }
             },
         }
     }
@@ -12638,16 +12745,42 @@ impl Vm {
         }
     }
 
+    /// Whether `fiber` stands parked on a channel deadline wait — the
+    /// win doors' answer shaping reads the row before the wake's own
+    /// deregistration drops it.
+    fn chan_deadline_parked(&self, fiber: FiberId) -> bool {
+        self.sched.waits.iter().any(|(_, entry)| {
+            entry.fiber == fiber && matches!(entry.wait, WorldWait::ChanDeadline { .. })
+        })
+    }
+
     /// Wakes one channel-parked fiber with `result`: the delivery and
     /// run-queue push the net wake performs, minus the wait table (a
     /// channel waiter registers in the channel's own data, never the
-    /// scheduler's — nothing to deregister, no deadline to cancel).
+    /// scheduler's — nothing to deregister, no deadline to cancel). A
+    /// deadline waiter is the one exception: its row (and its wheel
+    /// entry, stale on pop) drops here, the win door's own
+    /// deregistration, so the fired wheel never meets a delivered fiber
+    /// — and its win answer rides the two-word ok span its parked call
+    /// site overlays (the plain waiter's one-word answer would leave the
+    /// span's payload word stale at the site).
     fn wake_chan_waiter(&mut self, fiber: FiberId, result: NativeResult) {
         if self
             .pool
             .get(fiber.index())
             .is_some_and(|f| f.state == FiberState::WorldParked)
         {
+            let result = if self.chan_deadline_parked(fiber) {
+                match result {
+                    NativeResult::Word(word) => ok_tagged(word),
+                    // a wider element never parks a deadline recv: the
+                    // seam's one-word adoption refused it at lowering
+                    other => other,
+                }
+            } else {
+                result
+            };
+            self.cancel_wait(fiber);
             self.pool[fiber.index()].state = FiberState::Suspended;
             self.sched.deliveries.insert(fiber, Wake::Answer(result));
             self.sched.push_ready(fiber);
