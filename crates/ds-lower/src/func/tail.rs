@@ -81,11 +81,12 @@ impl FnLower<'_, '_, '_> {
                     Ok(TraitDispatch::Inherent { .. }
                         | TraitDispatch::Static { .. }
                         | TraitDispatch::Runtime { .. }
-                        | TraitDispatch::Foreign { .. })
+                        | TraitDispatch::Foreign { .. }
+                        | TraitDispatch::InherentForeign { .. })
                 ),
                 Some(Res::Dot(DotRes::Static { candidates })) => matches!(
                     self.resolve_method_dispatch(*call_span, name.span, None, candidates),
-                    Ok(TraitDispatch::Inherent { .. })
+                    Ok(TraitDispatch::Inherent { .. } | TraitDispatch::InherentForeign { .. })
                 ),
                 _ => false,
             },

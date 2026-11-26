@@ -1114,6 +1114,165 @@ fn impl_exercised(
     })
 }
 
+/// One linked inherent impl's member link fact (the type-keyed receiver
+/// seam): the impl's owner type name, each served member body's index in
+/// the linked module's table, and the written signature a consumer's
+/// call checks against — the inherent mirror of [`ImplFact`], keyed by
+/// the owner the consumer's method registry registers instead of an
+/// instance. A generic impl, a generic or defaulted member, and an
+/// unplanned body keep their refusals: the row simply does not cross,
+/// and the consumer's call site refuses at resolution. An inherent row
+/// carries no exercise fact: an inherent call site addresses the body
+/// directly (no instance word exists to bake), so a losing row's own
+/// package keeps its behavior whatever the consumer shadows.
+#[derive(Clone, Debug)]
+pub struct InherentFact {
+    /// The impl's target type's declared name: the owner identity the
+    /// consuming compile's registry keys (`MethodOwner::Inherent`), the
+    /// same head path name the local registration spells.
+    pub target: String,
+    /// The impl's served member rows, one per crossing member fn.
+    pub members: Vec<InherentMemberFact>,
+    /// The impl item's span, rebased into the consuming compile's file
+    /// space so shadowing diagnostics render.
+    pub span: Span,
+    /// The linked dep entry's position in the consuming module's
+    /// recorded list, assigned at the surface build: the module whose
+    /// table holds the member bodies.
+    pub link: u32,
+    /// The declaring package's identity (`name@version`), stamped at
+    /// the surface build: the link layering's package identity, the
+    /// loser's name a root shadowing warning spells. Empty when no
+    /// graph served the row.
+    pub pkg: String,
+}
+
+/// One member row of a linked inherent impl.
+#[derive(Clone, Debug)]
+pub struct InherentMemberFact {
+    /// The member's name as called after the dot or behind the type
+    /// name.
+    pub name: String,
+    /// The member's name occurrence, rebased into the consuming
+    /// compile's file space so method diagnostics render.
+    pub span: Span,
+    /// The written signature, as the declaring impl spells it.
+    pub sig: Arc<FnSig>,
+    /// The member body's index in the linked module's table.
+    pub func: u32,
+}
+
+// PartialEq ignores the span and the signature, exactly like
+// [`ImplFact`]'s own: equality is the linked impl's identity (the
+// owner, the member names, the body indexes, the owning module's link
+// position, and the stamped package identity), which one producer
+// source determines; two surface builds of one package rebase the
+// spans differently, so the link pass's dedup keys on this equality,
+// never the span. The signature rides to the consumer's call check
+// and is never compared.
+impl PartialEq for InherentMemberFact {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.func == other.func
+    }
+}
+
+impl Eq for InherentMemberFact {}
+
+impl PartialEq for InherentFact {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.members == other.members
+            && self.link == other.link
+            && self.pkg == other.pkg
+    }
+}
+
+impl Eq for InherentFact {}
+
+impl InherentFact {
+    /// The member link facts for every plain inherent impl one package
+    /// compile declares over an exported type: one row per impl item,
+    /// the owner the type's declared name, each bodied member's index
+    /// in the linked module's own table. The owner type's own `pub`
+    /// tier is the members' export gate (a member carries no vis of
+    /// its own), and the row crosses only when the type's structural
+    /// fact crossed — a consumer that cannot mint the owner cannot
+    /// spell its members. A generic impl, an applied or qualified
+    /// target, a generic or defaulted member, and a body the module
+    /// never planned keep their refusals.
+    #[must_use]
+    pub fn member_facts(
+        analyzed: &crate::type_of::Analyzed,
+        ambient_files: usize,
+        functions: &[String],
+        types: &FxHashMap<crate::DefId, Arc<TypeFact>>,
+    ) -> Vec<Self> {
+        let package = &analyzed.package;
+        let mut out = Vec::new();
+        for ast in analyzed.asts.iter().skip(ambient_files) {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ds_parse::ItemKind::Impl(imp) = &item.kind else {
+                        continue;
+                    };
+                    if imp.trait_ref.is_some() || !imp.generics.is_empty() {
+                        continue;
+                    }
+                    let ds_parse::Type::Path { path, args, .. } = &imp.target else {
+                        continue;
+                    };
+                    let [only] = path.segments.as_slice() else {
+                        continue;
+                    };
+                    if !args.is_empty() {
+                        continue;
+                    }
+                    // the owner resolves through the package namespace,
+                    // which never answers a linked name: the row crosses
+                    // only over the declaring package's own type, so
+                    // the origin package alone ever serves a type's
+                    // members — no third-party row exists to layer
+                    let Some(def) = package.lookup_type(&only.name) else {
+                        continue;
+                    };
+                    if package.def(def).vis != Vis::Pub || !types.contains_key(&def) {
+                        continue;
+                    }
+                    let mut members = Vec::new();
+                    for f in &imp.fns {
+                        if !f.generics.is_empty()
+                            || f.params.iter().any(|param| param.default.is_some())
+                        {
+                            continue;
+                        }
+                        let name = format!("{}#{}", only.name, f.name.name);
+                        let Some(func) = functions.iter().position(|row| *row == name) else {
+                            continue;
+                        };
+                        members.push(InherentMemberFact {
+                            name: f.name.name.clone(),
+                            span: f.name.span,
+                            sig: Arc::new(FnSig::of(f)),
+                            func: u32::try_from(func).expect("function index fits u32"),
+                        });
+                    }
+                    if members.is_empty() {
+                        continue;
+                    }
+                    out.push(Self {
+                        target: only.name.clone(),
+                        members,
+                        span: item.span,
+                        link: 0,
+                        pkg: String::new(),
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
 /// One exported trait member whose declared default body the
 /// producer's walk refuses to carry: the member's own span and the
 /// seam that named it.
@@ -1683,6 +1842,12 @@ pub struct MemberSurface {
     /// dispatches through, each member body's index addressing this
     /// member's own module table at the surface's link position.
     pub impls: Vec<ImplFact>,
+    /// The member's declared inherent impls, one row per impl item over
+    /// the package's own exported types: the type-keyed receiver
+    /// seam's member link facts a consuming static or value call site
+    /// dispatches through, each member body's index addressing this
+    /// member's own module table at the surface's link position.
+    pub inherent: Vec<InherentFact>,
     /// The linked module's tag-table rows, the declaring declaration's
     /// name beside the label and the id: the shared tag mapping's
     /// identity. A union-typed word crossing the module boundary
@@ -2461,6 +2626,7 @@ mod tests {
         let surface = crate::MemberSurface {
             tags: Vec::new(),
             impls: Vec::new(),
+            inherent: Vec::new(),
             entries: vec![entry("cell"), entry("seed")],
         };
         let mut imports = crate::ImportGraph::new();
@@ -3024,6 +3190,7 @@ mod tests {
         let surface = crate::MemberSurface {
             tags: Vec::new(),
             impls: Vec::new(),
+            inherent: Vec::new(),
             entries: vec![
                 ty_entry("cell", super::TypeFact::Struct {
                     fields: vec![super::TypeField {
@@ -3235,6 +3402,7 @@ mod tests {
         let surface = crate::MemberSurface {
             tags: Vec::new(),
             impls: Vec::new(),
+            inherent: Vec::new(),
             entries: vec![
                 ty_entry("twin", super::TypeFact::Struct {
                     fields: vec![super::TypeField {
@@ -3541,6 +3709,95 @@ mod tests {
             none.iter()
                 .all(|row| super::render_word(&row.head) != "pair"),
             "an unplanned member refuses the impl"
+        );
+    }
+
+    /// The inherent walk keys each plain impl's member rows by the
+    /// mangled table names the plan owns, the owner the type's own
+    /// declaration: a `pub` type's impl carries its planned members in
+    /// order, while a generic member, a defaulted member, a member the
+    /// plan never tabled, a private owner, and an impl over an applied
+    /// target keep their refusals — the row does not cross and the
+    /// consumer's call site refuses at resolution.
+    #[test]
+    fn the_inherent_rows_key_over_the_owner_and_the_plan() {
+        let source = concat!(
+            "pub struct pair {\n",
+            "  a: int,\n",
+            "  b: int,\n",
+            "}\n",
+            "struct hidden {\n",
+            "  v: int,\n",
+            "}\n",
+            "pub struct box[t] {\n",
+            "  v: t,\n",
+            "}\n",
+            "impl pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a + self.b\n",
+            "  }\n",
+            "  fn make(a: int, b: int) -> pair {\n",
+            "    pair { a: a, b: b }\n",
+            "  }\n",
+            "  fn defaulted(self, scale: int = 2) -> int {\n",
+            "    self.a * scale\n",
+            "  }\n",
+            "  fn generic[t](self) -> int {\n",
+            "    self.a\n",
+            "  }\n",
+            "}\n",
+            "impl hidden {\n",
+            "  fn size(self) -> int {\n",
+            "    self.v\n",
+            "  }\n",
+            "}\n",
+            "impl box[int] {\n",
+            "  fn get(self) -> int {\n",
+            "    self.v\n",
+            "  }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("inherent_fact.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
+        let functions = vec![
+            "pair#size".to_owned(),
+            "pair#make".to_owned(),
+        ];
+        let rows = super::InherentFact::member_facts(&analyzed, 0, &functions, &facts);
+        assert_eq!(rows.len(), 1, "one row crosses: the pub pair impl alone");
+        let row = &rows[0];
+        assert_eq!(row.target, "pair");
+        assert_eq!(
+            row.members
+                .iter()
+                .map(|member| (member.name.as_str(), member.func))
+                .collect::<Vec<_>>(),
+            vec![("size", 0), ("make", 1)],
+            "the planned members cross in order; the defaulted and generic members keep their refusals"
+        );
+        assert_eq!(
+            row.members[0].sig.params.len(),
+            1,
+            "the written signature rides the row"
+        );
+        // a member the plan never tabled keeps its own refusal: the
+        // member's row stays home while its sibling crosses alone
+        let short = ["pair#size".to_owned()];
+        let unplanned = super::InherentFact::member_facts(&analyzed, 0, &short, &facts);
+        let [only] = &unplanned[..] else {
+            panic!("the pair row crosses over its planned member alone");
+        };
+        assert_eq!(
+            only.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            vec!["size"],
+            "an unplanned member keeps its refusal without refusing the impl"
         );
     }
 }

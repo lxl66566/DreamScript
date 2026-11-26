@@ -1278,7 +1278,10 @@ impl<'a> FnLower<'a, '_, '_> {
             Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index, .. }) => {
                 Callee::Local(*index)
             },
-            Some(TraitDispatch::Foreign { position, func, .. }) => Callee::Foreign {
+            Some(
+                TraitDispatch::Foreign { position, func, .. }
+                | TraitDispatch::InherentForeign { position, func, .. },
+            ) => Callee::Foreign {
                 def: None,
                 position: *position,
                 func: *func,
@@ -3033,6 +3036,20 @@ impl<'a> FnLower<'a, '_, '_> {
         call: Span,
         what: Span,
     ) -> Result<TraitDispatch, LowerError> {
+        // A linked member body addresses the linked module directly
+        // (the type-keyed receiver seam): the method id's member link
+        // names the dep position and the table index, the same transfer
+        // a linked free fn's call takes
+        if let Some(link) = self.analyzed.decls.linked_inherent.get(&method) {
+            if matches!(self.comptime, ComptimeRun::Slice) {
+                return Err(Self::comptime_member_refusal(what));
+            }
+            return Ok(TraitDispatch::InherentForeign {
+                position: link.position,
+                func: link.func,
+                method,
+            });
+        }
         let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
             return Err(LowerError::unsupported(
                 what,
@@ -4108,16 +4125,25 @@ impl<'a> FnLower<'a, '_, '_> {
                 .get(&def)
                 .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
             Callee::Foreign { def: None, .. } | Callee::Evidence(_) => match dispatch {
-                Some(
-                    TraitDispatch::Runtime { method, .. }
-                    | TraitDispatch::Foreign {
-                        call: TraitCall { method, .. },
-                        ..
-                    },
-                ) => self
+                Some(TraitDispatch::Runtime { method, .. }) => self
                     .analyzed
                     .decls
                     .members
+                    .get(method)
+                    .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
+                Some(TraitDispatch::Foreign {
+                    call: TraitCall { method, .. },
+                    ..
+                }) => self
+                    .analyzed
+                    .decls
+                    .members
+                    .get(method)
+                    .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
+                Some(TraitDispatch::InherentForeign { method, .. }) => self
+                    .analyzed
+                    .decls
+                    .inherent
                     .get(method)
                     .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
                 _ => None,

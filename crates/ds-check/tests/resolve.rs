@@ -1114,6 +1114,7 @@ fn a_linked_const_binds_through_its_literal_fact() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             entry(
                 "limit",
@@ -1299,6 +1300,7 @@ fn a_linked_type_registers_before_selections_validate() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             fn_entry("make", "n", "int", "cell"),
             fn_entry("area", "c", "cell", "int"),
@@ -1380,6 +1382,7 @@ fn a_linked_zero_field_struct_binds_through_its_empty_layout() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![ds_check::ForeignEntry {
             name: "response".to_owned(),
             origin: None,
@@ -1506,6 +1509,7 @@ fn the_widened_link_shapes_bind_at_the_walk() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             entry(
                 "row",
@@ -1698,6 +1702,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             ty_entry(
                 "presence",
@@ -1798,6 +1803,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![struct_named_none],
     };
     let mut imports = ds_check::ImportGraph::new();
@@ -1831,6 +1837,7 @@ fn resolve_over_linked_cell(source: &str) -> Vec<Diagnostic> {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![ds_check::ForeignEntry {
             name: "cell".to_owned(),
             vis: ds_check::Vis::Pub,
@@ -2020,6 +2027,7 @@ fn a_linked_enum_registers_its_cases_beside_it() {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             fn_entry("make", "n", "int", "tone"),
             ty_entry(
@@ -2188,6 +2196,7 @@ fn resolve_pub_import(source: &str) -> (Package, Vec<Diagnostic>) {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             entry("helper", ds_check::ForeignKind::Fn, Some(3)),
             entry("limit", ds_check::ForeignKind::Fn, Some(4)),

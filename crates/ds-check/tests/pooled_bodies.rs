@@ -54,6 +54,7 @@ fn pooled_linked_of(
                 ds_check::ImportSurface::Linked(ds_check::MemberSurface {
                     tags: Vec::new(),
                     impls: Vec::new(),
+            inherent: Vec::new(),
                     entries: entries.clone(),
                 }),
             );

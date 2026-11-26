@@ -225,10 +225,22 @@ error_codes! {
     LinkLayerConflict => "DS2048", Type,
     /// A shadowed impl's declaring package statically exercises its own head (its linked artifact baked a statically-resolved instance word naming it), so the link cannot shadow it without one value answering two behaviors; the link refuses naming the loser.
     ShadowedImplExercised => "DS2049", Type,
+<<<<<<< HEAD
+    /// A root package's inherent impl member shadows a linked member of the same owner type (the root package's own impls over every dependency's, the link layering's root-over-deps rule), and the warning names the winner, the loser, and the action.
+    LinkShadowedInherentMember => "DS2052", Type,
+||||||| parent of 13b9257e (Merge branch 'linked-inherent-seam')
     /// A call site's `as` selection on a call that dispatches through no trait instance: a free function, an inherent member, a constructor, or an indirect callee has no instance vocabulary to select.
     InstanceSelectionWithoutDispatch => "DS2050", Type,
     /// A call site's `as` selection names no impl of the dispatched trait for the receiver: no impl of the trait carries the name, or the named impl's head does not serve the receiver. The message names the trait, the receiver, and the selection.
     UnknownInstanceSelection => "DS2051", Type,
+=======
+    /// A call site's `as` selection on a call that dispatches through no trait instance: a free function, an inherent member, a constructor, or an indirect callee has no instance vocabulary to select.
+    InstanceSelectionWithoutDispatch => "DS2050", Type,
+    /// A call site's `as` selection names no impl of the dispatched trait for the receiver: no impl of the trait carries the name, or the named impl's head does not serve the receiver. The message names the trait, the receiver, and the selection.
+    UnknownInstanceSelection => "DS2051", Type,
+    /// A root package's inherent impl member shadows a linked member of the same owner type (the root package's own impls over every dependency's, the link layering's root-over-deps rule), and the warning names the winner, the loser, and the action.
+    LinkShadowedInherentMember => "DS2052", Type,
+>>>>>>> 13b9257e (Merge branch 'linked-inherent-seam')
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -372,12 +384,24 @@ mod tests {
             ("LinkShadowedImpl", "DS2047", ErrorClass::Type),
             ("LinkLayerConflict", "DS2048", ErrorClass::Type),
             ("ShadowedImplExercised", "DS2049", ErrorClass::Type),
+<<<<<<< HEAD
+            ("LinkShadowedInherentMember", "DS2052", ErrorClass::Type),
+||||||| parent of 13b9257e (Merge branch 'linked-inherent-seam')
             (
                 "InstanceSelectionWithoutDispatch",
                 "DS2050",
                 ErrorClass::Type,
             ),
             ("UnknownInstanceSelection", "DS2051", ErrorClass::Type),
+=======
+            (
+                "InstanceSelectionWithoutDispatch",
+                "DS2050",
+                ErrorClass::Type,
+            ),
+            ("UnknownInstanceSelection", "DS2051", ErrorClass::Type),
+            ("LinkShadowedInherentMember", "DS2052", ErrorClass::Type),
+>>>>>>> 13b9257e (Merge branch 'linked-inherent-seam')
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

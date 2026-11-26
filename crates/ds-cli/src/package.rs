@@ -78,6 +78,7 @@ struct LinkedPackage {
     members: Rc<[Member]>,
     exports: Vec<Export>,
     impls: Vec<ds_check::import::ImplFact>,
+    inherent: Vec<ds_check::import::InherentFact>,
 }
 
 /// The graph one package run serves from: each resolved dependency's
@@ -927,6 +928,7 @@ impl Graph {
             members: Rc::clone(members),
             exports: compiled.exports,
             impls: compiled.impls,
+            inherent: compiled.inherent,
         });
         self.linked
             .borrow_mut()
@@ -1268,11 +1270,36 @@ impl Graph {
                 exercised: fact.exercised,
             })
             .collect();
+        // The inherent rows ride the surface beside the entries the
+        // same way: each member body's index addresses THIS package's
+        // module, so the row's link position is the imported package's
+        // own — the spans rebased like the entries'
+        let inherent = package
+            .inherent
+            .iter()
+            .map(|fact| ds_check::import::InherentFact {
+                target: fact.target.clone(),
+                members: fact
+                    .members
+                    .iter()
+                    .map(|member| ds_check::import::InherentMemberFact {
+                        name: member.name.clone(),
+                        span: rebase_span(member.span, &rebase),
+                        sig: rebase_sig(&member.sig, &rebase),
+                        func: member.func,
+                    })
+                    .collect(),
+                span: rebase_span(fact.span, &rebase),
+                link: position,
+                pkg: pkg.clone(),
+            })
+            .collect();
         let tags = package.module.tags().to_vec();
         Ok(ImportSurface::Linked(MemberSurface {
             entries,
             tags,
             impls,
+            inherent,
         }))
     }
 }

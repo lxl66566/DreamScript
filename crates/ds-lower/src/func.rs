@@ -633,6 +633,20 @@ pub(crate) enum TraitDispatch {
         bounds: InherentCallBounds,
         method: MethodId,
     },
+    /// A solved inherent-method call site whose body lives in a linked
+    /// package's module (the type-keyed receiver seam): the FuncRef
+    /// addresses the dep position and the linked module's own table,
+    /// the same transfer a linked free fn's call takes — no instance
+    /// word exists for an inherent impl, so the call stages exactly
+    /// the written arguments and dispatches through a plain CALL. A
+    /// linked member body is monomorphic by the producer's walk (the
+    /// generic and conditional shapes refuse the crossing), so no
+    /// evidence words stage either.
+    InherentForeign {
+        position: u32,
+        func: u32,
+        method: MethodId,
+    },
 }
 
 /// The module plan: lowered functions in function-table order.

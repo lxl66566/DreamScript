@@ -141,6 +141,7 @@ fn build_vm() -> (Vm, Lowered) {
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
         impls: Vec::new(),
+            inherent: Vec::new(),
         entries: vec![
             const_entry(
                 "pages",
@@ -492,6 +493,7 @@ fn build_trait_vm() -> (Vm, Lowered) {
             pkg: String::new(),
             exercised: false,
         }],
+        inherent: Vec::new(),
         entries: vec![
             ty_entry("pair", ds_check::TypeFact::Struct {
                 fields: vec![
@@ -734,6 +736,7 @@ fn build_default_vm() -> (Vm, Lowered) {
                 exercised: false,
             },
         ],
+        inherent: Vec::new(),
         entries: vec![ty_entry(
             "answering",
             ds_check::TypeFact::Trait(ds_check::import::TraitFact {
@@ -1003,6 +1006,7 @@ fn build_union_vm() -> (Vm, Lowered) {
             pkg: String::new(),
             exercised: false,
         }],
+        inherent: Vec::new(),
         entries: vec![
             ty_entry("pack", ds_check::TypeFact::Struct {
                 fields: vec![TypeField {
@@ -1251,6 +1255,7 @@ fn build_union_default_vm() -> (Vm, Lowered) {
             pkg: String::new(),
             exercised: false,
         }],
+        inherent: Vec::new(),
         entries: vec![ty_entry(
             "wording",
             ds_check::TypeFact::Trait(ds_check::import::TraitFact {

@@ -327,6 +327,12 @@ pub struct Decls {
     /// solved dispatch site addresses through its CALLG — the linked
     /// mirror of `instance_impls`, whose span tie no linked impl owns.
     pub linked_impls: IdTable<InstanceId, Arc<ForeignImplLink>>,
+    /// The member links of every linked inherent impl (G4), keyed by
+    /// the method id the link pass registered: the dep-list position
+    /// and the member body's module-table index a type-keyed dispatch
+    /// site addresses through its plain call — the linked mirror of
+    /// `inherent_impls`, whose span tie no linked impl owns.
+    pub linked_inherent: IdTable<MethodId, ForeignLink>,
     /// The default-body links of every linked trait (G4), keyed by the
     /// minted trait def: the dep-list position and each crossed default
     /// body's module-table index — the dispatch target a site whose
@@ -775,6 +781,29 @@ where
                     .with_primary(fact.span, "the refused impl"),
                 );
             },
+        }
+    }
+    // The linked inherent impls install after every foreign type minted
+    // and the trait rows above: each member row keys onto the method id
+    // the link pass registered, the written signature serving the
+    // consumer's call check exactly like a local inherent member's row
+    // and the member link serving the dispatch. A member a root
+    // registration owns installs nothing (`None` below) — the call
+    // sites select the root's row and the linked body never serves
+    // here.
+    for (fact, methods) in package.linked_inherent_facts() {
+        for (member, method) in fact.members.iter().zip(methods) {
+            let Some(method) = method else {
+                continue;
+            };
+            decls.inherent.insert(*method, member.sig.clone());
+            decls.linked_inherent.insert(
+                *method,
+                ForeignLink {
+                    position: fact.link,
+                    func: member.func,
+                },
+            );
         }
     }
     package_coherence(&mut decls, &mut diags);

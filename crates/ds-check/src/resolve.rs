@@ -614,6 +614,18 @@ pub struct Package {
     /// dispatches through, deduplicated per linked impl — two imports
     /// of one package share the row the first registered.
     linked_impls: Vec<crate::import::ImplFact>,
+    /// The linked members' inherent-impl facts the link pass collected
+    /// (G4), each member row beside the method id its own registration
+    /// minted (`None` for a member a root registration owns — the
+    /// root-over-deps layering's loser): the type-keyed member links a
+    /// consuming static or value call site dispatches through,
+    /// deduplicated per linked impl — two imports of one package share
+    /// the row the first registered. The ids let the declaration pass
+    /// install the sig and the member link over exactly the rows the
+    /// link pass registered, never a root registration a member lost
+    /// to.
+    linked_inherent:
+        Vec<(crate::import::InherentFact, Vec<Option<MethodId>>)>,
     /// The tag declarations a file re-declares beside an earlier file's
     /// same-label tag or case (F9.5): label to the shadowing def. The
     /// first declaration per label owns the type namespace's entry; a
@@ -780,6 +792,17 @@ impl Package {
     #[must_use]
     pub fn linked_impl_facts(&self) -> &[crate::import::ImplFact] {
         &self.linked_impls
+    }
+
+    /// The linked members' inherent-impl facts with the method ids the
+    /// link pass registered, deduplicated per linked impl: the
+    /// declaration pass installs each member's sig and member link
+    /// over its recorded id, skipping a member a root registration owns.
+    #[must_use]
+    pub fn linked_inherent_facts(
+        &self,
+    ) -> &[(crate::import::InherentFact, Vec<Option<MethodId>>)] {
+        &self.linked_inherent
     }
 
     /// One linked type name's def: the link table's row, which the
@@ -1049,6 +1072,80 @@ impl Package {
                                 if !self.linked_impls.contains(fact) {
                                     self.linked_impls.push(fact.clone());
                                 }
+                            }
+                            // the inherent-impl facts register and
+                            // collect the same way: the consumer's own
+                            // root registration beat every member row
+                            // here (the add-file walk registers root
+                            // methods before the link pass), and the
+                            // method ids name the rows the declaration
+                            // pass installs
+                            for fact in &member_surface.inherent {
+                                if self.linked_inherent.iter().any(|(row, _)| row == fact) {
+                                    continue;
+                                }
+                                let Some(&def) = self.foreign_type_defs.get(&fact.target)
+                                else {
+                                    continue;
+                                };
+                                // the owner must be this package's own
+                                // registration: another package's
+                                // same-named type never owns the row
+                                let Some(entry) = self.foreign().get(&def) else {
+                                    continue;
+                                };
+                                if entry.link != fact.link {
+                                    continue;
+                                }
+                                let owner = MethodOwner::Inherent(fact.target.clone());
+                                let mut methods = Vec::with_capacity(fact.members.len());
+                                for member in &fact.members {
+                                    let claimed = self
+                                        .method_candidates(&member.name)
+                                        .find(|&id| self.method(id).owner == owner);
+                                    methods.push(match claimed {
+                                            Some(first) => {
+                                                // the root's own impl
+                                                // member owns the name:
+                                                // the linked member loses
+                                                // the root-over-deps
+                                                // layering, and the call
+                                                // sites keep the root's
+                                                // body
+                                                diags.push(
+                                                    Diagnostic::warning(
+                                                        ErrorCode::LinkShadowedInherentMember,
+                                                        format!(
+                                                            "the root package's impl member `{}` \
+                                                             of `{}` shadows {}'s linked member; \
+                                                             drop the local impl to adopt it, or \
+                                                             keep the current selection",
+                                                            member.name, fact.target, fact.pkg,
+                                                        ),
+                                                    )
+                                                    .with_secondary(
+                                                        self.method(first).span,
+                                                        "the winning local member",
+                                                    )
+                                                    .with_primary(
+                                                        member.span,
+                                                        "the shadowed linked member",
+                                                    ),
+                                                );
+                                                None
+                                            },
+                                            None => Some(self.register_method(
+                                                &Ident {
+                                                    span: member.span,
+                                                    name: member.name.clone(),
+                                                },
+                                                owner.clone(),
+                                                &mut diags,
+                                            )),
+                                        },
+                                    );
+                                }
+                                self.linked_inherent.push((fact.clone(), methods));
                             }
                         },
                     }
@@ -1980,7 +2077,7 @@ impl Package {
     /// of [`Self::declare`]. Different owners may share a method name —
     /// two traits, or two inherent impls on different target types; call
     /// sites disambiguate by receiver (F3).
-    fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) {
+    fn register_method(&mut self, name: &Ident, owner: MethodOwner, diags: &mut Vec<Diagnostic>) -> MethodId {
         if let Some(id) = self
             .method_candidates(&name.name)
             .find(|&id| self.method(id).owner == owner)
@@ -1994,7 +2091,7 @@ impl Package {
                 .with_secondary(first_span, "first defined here")
                 .with_primary(name.span, "redefined here"),
             );
-            return;
+            return id;
         }
         // A growth id continues the method space past the base tier's run,
         // and a growth entry for a name the base carries seeds with the
@@ -2022,6 +2119,7 @@ impl Package {
             owner,
             span: name.span,
         });
+        id
     }
 
     /// Top-level binding patterns declare one def per bound name, through

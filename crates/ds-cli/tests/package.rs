@@ -2338,6 +2338,174 @@ fn a_wide_receiver_into_a_linked_default_body_refuses() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A producer's inherent impls cross the link seam (the type-keyed
+/// receiver seam): the impl's member rows bind as foreign method-registry
+/// rows keyed by the owner type's name, and the consumer's calls — the
+/// value-receiver dot-call and the receiverless static spelling —
+/// dispatch into the linked member bodies, a plain site, a tail site,
+/// and the producer's own function riding through beside them.
+#[test]
+fn the_inherent_impls_cross_and_run() {
+    let (work, pkg_id) = bespoke_pkg(
+        "inherent-traits",
+        concat!(
+            "pub struct pair {\n",
+            "  a: int,\n",
+            "  b: int,\n",
+            "}\n",
+            "impl pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a + self.b\n",
+            "  }\n",
+            "  fn make(a: int, b: int) -> pair {\n",
+            "    pair { a: a, b: b }\n",
+            "  }\n",
+            "}\n",
+            "pub fn base(p: pair) -> int {\n",
+            "  p.size()\n",
+            "}\n",
+        ),
+    );
+    let (ok, out, err) = bespoke_run(
+        &work,
+        &pkg_id,
+        concat!(
+            "import @std/io\n",
+            "import @lib (pair, base)\n",
+            "\n",
+            "fn weigh(p: pair) -> int {\n",
+            "  p.size()\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = pair.make(30, 12)\n",
+            "  println(\"${made.size()} ${weigh(made)} ${base(made)}\")\n",
+            "  made.size() + weigh(made) + base(made)\n",
+            "}\n",
+        ),
+    );
+    assert!(ok, "the inherent-impl run exits 0 (stderr: {err})");
+    // the static spelling's made pair, the value receiver's plain and
+    // tail sites, and the producer's own function — 42 each, the run
+    // echoing the total
+    assert_eq!(out, "42 42 42\n126\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The root package's own impl over a linked type owns the members it
+/// spells (the link layering's root-over-deps rule): a linked member of
+/// the same name loses at the link pass with the shadowing warning
+/// naming both sides, and the consumer's calls keep the root's bodies —
+/// the linked row's own package keeping its behavior through its baked
+/// direct calls, exactly like every inherent site.
+#[test]
+fn the_root_impl_shadows_the_linked_members() {
+    let (work, pkg_id) = bespoke_pkg(
+        "inherent-shadow",
+        concat!(
+            "pub struct pair {\n",
+            "  a: int,\n",
+            "  b: int,\n",
+            "}\n",
+            "impl pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a + self.b\n",
+            "  }\n",
+            "  fn make(a: int, b: int) -> pair {\n",
+            "    pair { a: a, b: b }\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    let (ok, out, err) = bespoke_run(
+        &work,
+        &pkg_id,
+        concat!(
+            "import @std/io\n",
+            "import @lib (pair)\n",
+            "\n",
+            "impl pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a * 100\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = pair.make(30, 12)\n",
+            "  println(\"${made.size()}\")\n",
+            "  made.size()\n",
+            "}\n",
+        ),
+    );
+    assert!(ok, "the shadowing run exits 0 (stderr: {err})");
+    // the root's body answers both sites: 30 * 100
+    assert_eq!(out, "3000\n3000\n");
+    assert!(
+        err.contains("DS2052"),
+        "the shadowing warning names the class: {err}"
+    );
+    assert!(
+        err.contains("the root package's impl member `size` of `pair` shadows"),
+        "the warning names the winner and the loser: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A member the producer's walk refuses to carry keeps the consumer's
+/// own call refusal (the type-keyed seam's own DS2044 story): a
+/// defaulted member stages its literal at the linked module's own call
+/// sites and a generic member's bodies are per-instantiation facts, so
+/// neither row crosses — the value-receiver spelling and the static
+/// spelling both refuse naming the missing member.
+#[test]
+fn the_unplanned_inherent_members_keep_their_call_refusals() {
+    let (work, pkg_id) = bespoke_pkg(
+        "inherent-refusals",
+        concat!(
+            "pub struct pair {\n",
+            "  a: int,\n",
+            "  b: int,\n",
+            "}\n",
+            "impl pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a + self.b\n",
+            "  }\n",
+            "  fn defaulted(self, scale: int = 2) -> int {\n",
+            "    (self.a + self.b) * scale\n",
+            "  }\n",
+            "  fn generic[t](self) -> int {\n",
+            "    self.a + 1\n",
+            "  }\n",
+            "  fn make(a: int, b: int = 5) -> pair {\n",
+            "    pair { a: a, b: b }\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    for (member, spelling) in [
+        ("defaulted", "  made.defaulted()\n"),
+        ("generic", "  made.generic()\n"),
+        ("make", "  pair.make(3, 4)\n"),
+    ] {
+        let body = format!(
+            "import @lib (pair)\n\nfn main() -> int {{\n  const made = pair {{ a: 1, b: 2 }}\n{spelling}}}\n"
+        );
+        let (ok, out, err) = bespoke_run(&work, &pkg_id, &body);
+        assert!(!ok, "the `{member}` call refuses cross-link");
+        assert_eq!(out, "");
+        let expected = if member == "make" {
+            format!("type `pair` carries no member `{member}`")
+        } else {
+            format!("no name `{member}` behind the dot")
+        };
+        assert!(
+            err.contains(&expected),
+            "the `{member}` refusal names the missing member: {err}"
+        );
+    }
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A linked fn's signature binds over its own type without the type's
 /// selection (G4): the fact registers from the member's surface alone,
 /// so values of the type flow between linked calls — the consumer never

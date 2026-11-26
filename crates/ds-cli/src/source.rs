@@ -259,6 +259,25 @@ fn impl_facts_of(
     )
 }
 
+/// The member files' inherent-impl link rows (the type-keyed receiver
+/// seam): one per plain inherent impl over an exported type of this
+/// package, the owner's name and each member body's index addressed
+/// over the same module table the export rows serve. Everything the
+/// walk refuses (a generic impl, a generic or defaulted member, an
+/// unplanned body, an owner whose structural fact stayed home) simply
+/// rides no row, exactly like a type shape the vocabulary cannot
+/// spell.
+#[must_use]
+fn inherent_facts_of(
+    analyzed: &Analyzed,
+    ambient_files: usize,
+    functions: &[String],
+    carried: &HashMap<String, u32>,
+) -> Vec<ds_check::import::InherentFact> {
+    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files, carried);
+    ds_check::import::InherentFact::member_facts(analyzed, ambient_files, functions, &facts)
+}
+
 /// The producer's default-body gate (G4): an exported trait member
 /// whose declared default body cannot cross — the body never planned,
 /// stages runtime evidence, or carries an effect row — refuses this
@@ -410,6 +429,12 @@ pub struct CompiledSource {
     /// through, each member body's index addressing this module's own
     /// table. Empty for a script compile's own view of itself.
     pub impls: Vec<ds_check::import::ImplFact>,
+    /// The member files' declared inherent impls (the type-keyed
+    /// receiver seam): the member link rows a dependent's static and
+    /// value call sites dispatch through, each member body's index
+    /// addressing this module's own table. Empty for a script compile's
+    /// own view of itself.
+    pub inherent: Vec<ds_check::import::InherentFact>,
 }
 
 /// One member file's exported definition: the import surface's facts
@@ -995,6 +1020,12 @@ fn compile_text(
         lowered.carried_default_bodies(),
         lowered.exercised(),
     );
+    let inherent = inherent_facts_of(
+        &analyzed,
+        ambient_files,
+        lowered.functions(),
+        lowered.carried_default_bodies(),
+    );
     match after {
         BundleAfter::Keep => {
             // The bundle's teardown is pure overhead on the one-shot
@@ -1010,6 +1041,7 @@ fn compile_text(
         name,
         exports,
         impls,
+        inherent,
     })
 }
 

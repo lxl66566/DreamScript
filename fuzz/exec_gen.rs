@@ -2236,6 +2236,7 @@ fn linked_surface(
         entries,
         tags,
         impls: Vec::new(),
+        inherent: Vec::new(),
     }
 }
 
@@ -2313,6 +2314,7 @@ fn origin_surface(
         entries,
         tags,
         impls: Vec::new(),
+        inherent: Vec::new(),
     }
 }
 
@@ -2386,6 +2388,7 @@ fn middle_surface(
         entries,
         tags,
         impls: Vec::new(),
+        inherent: Vec::new(),
     }
 }
 
@@ -2462,6 +2465,7 @@ fn std_surface(pkg: &ds_check::Analyzed, map: &HashMap<FileId, FileId>) -> Membe
         entries,
         tags: Vec::new(),
         impls: Vec::new(),
+        inherent: Vec::new(),
     }
 }
 

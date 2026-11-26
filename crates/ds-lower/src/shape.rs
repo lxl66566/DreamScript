@@ -2169,6 +2169,7 @@ mod tests {
         let surface = ds_check::MemberSurface {
             tags: Vec::new(),
             impls: Vec::new(),
+            inherent: Vec::new(),
             entries: vec![
                 entry(
                     "tone",
