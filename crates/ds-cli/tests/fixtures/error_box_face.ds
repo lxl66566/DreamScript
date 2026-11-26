@@ -1,0 +1,59 @@
+// purpose: the @std open error box through the real ambient — the
+// explicit conversion entering from a concrete taxonomy member
+// (read_file's io_err, parse_json's parse_err, utf8_decode's
+// utf8_err), `?`'s containment routing the box member out to the
+// boundary fn's return union, and the payload and message extracting
+// (the field reads over the narrowed box and the member arms reading
+// the payload per class). A boxed failure neither halts nor prints:
+// the boundary renders its own report line. The script runs with the
+// fixture's directory as the working directory.
+
+fn load_cfg(path: string) -> string | box_err {
+  read_file(path).map_err((e: io_err) => box_err.of(e, "config unread"))?
+}
+
+fn parse_cfg(text: string) -> string | box_err {
+  const j = parse_json(text).map_err((e: parse_err) => box_err.of(e, "config malformed"))?
+  to_json(j)
+}
+
+fn decode_name(b: bytes) -> string | box_err {
+  utf8_decode(b).map_err((e: utf8_err) => box_err.of(e, "name not utf-8"))?
+}
+
+// The boundary: the is-narrowing reading the box member, the payload
+// field match reading the class, and the message riding beside it.
+fn report(r: string | box_err) -> string {
+  if r is box_err {
+    match r.payload {
+      not_found => "missing (${r.msg})"
+      parse_err { pos } => "malformed at ${str(pos)} (${r.msg})"
+      utf8_err => "bad bytes (${r.msg})"
+      io_other { msg } => "floor: ${msg} (${r.msg})"
+      _ => "failed (${r.msg})"
+    }
+  } else {
+    r
+  }
+}
+
+fn main() -> () {
+  write_file("error_box_probe.cfg", "key=value")
+  println(report(load_cfg("error_box_probe.cfg")))
+  println(report(load_cfg("error_box_absent.cfg")))
+  println(report(parse_cfg("{ \"a\": 1 }")))
+  println(report(parse_cfg("{ broken")))
+  const raw = utf8_encode("ÿ")
+  const bad = bytes_of([byte_at(raw, 0).unwrap_or(b'\0')])
+  println(report(decode_name(utf8_encode("ok"))))
+  println(report(decode_name(bad)))
+  const boxed = load_cfg("error_box_absent.cfg")
+  if boxed is box_err {
+    println("field ${boxed.msg}")
+    if boxed.payload is not_found {
+      println("payload not_found")
+    } else {
+      println("payload other")
+    }
+  }
+}

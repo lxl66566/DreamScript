@@ -1652,7 +1652,32 @@ pub struct string_view {
 }
 ```
 
+### Tags
+
+#### `box_err`
+
+The open error box: one tag carrying the original error as the
+boxed payload and the boundary's message beside it. The payload
+extracts whole — the `b.payload` field read or the match arms
+destructuring it per member — and `b.msg` is the boundary's own
+line.
+
+```ds
+pub tag box_err { payload: any_err, msg: string }
+```
+
 ### Type aliases
+
+#### `any_err`
+
+The box's payload set: the whole failure taxonomy's union. The set
+grows as the taxonomy grows and every box site follows — the open
+half of the box — and a handler or binding can annotate at it where
+the whole set is wanted.
+
+```ds
+pub type any_err = io_err | net_err | parse_err | utf8_err
+```
 
 #### `row`
 
@@ -2170,6 +2195,17 @@ pub const urls = ["https://ds.dev", "https://example.org"]
 ```
 
 ### Impls
+
+The explicit conversion, riding the box type's own static tier (the
+`u32.of` spelling): `box_err.of(e, msg)` boxes the error with the
+boundary's message. The error side arrives contained in the
+payload set — an `io_err` member, a `parse_err`, a whole alias —
+and the answer propagates through `?` against a return union
+naming `box_err` like any member.
+
+```ds
+impl box_err { fn of(e: any_err, msg: string) -> box_err }
+```
 
 ```ds
 impl decoder for json {

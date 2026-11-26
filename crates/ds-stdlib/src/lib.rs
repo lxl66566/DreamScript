@@ -260,6 +260,18 @@ pub const DATETIME_FILE: &str = "std/datetime.ds";
 /// the ambient-declared `utc_offset` extern.
 pub const DATETIME_SOURCE: &str = include_str!("datetime.ds");
 
+/// The @std error-box face's file name: the application boundary's
+/// open error box — one tag over the boxed payload and a message, the
+/// explicit conversion the boundary enters. Rides as the bundle's own
+/// member and composes last in both ambient readings (a tail append —
+/// the mint order of existing declarations stays untouched).
+pub const ERROR_FILE: &str = "std/error.ds";
+
+/// The @std error-box face's text: the `any_err` payload set over the
+/// failure taxonomy's aliases, the `box_err` tag, and the
+/// `box_err.of` conversion on the box type's own static tier.
+pub const ERROR_SOURCE: &str = include_str!("error.ds");
+
 /// The @std bundle's core member: the shrunk core with the json face
 /// and the string face composed after it, the bundle's own
 /// `std/ambient.ds` — the package's self-contained first member (its
@@ -295,7 +307,9 @@ pub const AMBIENT_SESSION_SOURCE: &str = concat!(
     "\n",
     include_str!("codec.ds"),
     "\n",
-    include_str!("datetime.ds")
+    include_str!("datetime.ds"),
+    "\n",
+    include_str!("error.ds")
 );
 
 /// The ambient package member's text: the declarations of the M3
@@ -317,7 +331,9 @@ pub const AMBIENT_SOURCE: &str = concat!(
     "\n",
     include_str!("codec.ds"),
     "\n",
-    include_str!("datetime.ds")
+    include_str!("datetime.ds"),
+    "\n",
+    include_str!("error.ds")
 );
 
 /// The reserved `@std` package's name in the package namespace: the
@@ -357,6 +373,7 @@ pub fn std_package() -> ds_pkg::Package {
             DATETIME_FILE.to_owned(),
             DATETIME_SOURCE.as_bytes().to_vec(),
         ),
+        (ERROR_FILE.to_owned(), ERROR_SOURCE.as_bytes().to_vec()),
         (BODIED_FILE.to_owned(), BODIED_SOURCE.as_bytes().to_vec()),
         (
             STD_MEMBERS_FILE.to_owned(),
@@ -746,9 +763,9 @@ mod tests {
             .filter(|(path, _)| path.as_str() != ds_pkg::MANIFEST_MEMBER)
             .count();
         assert_eq!(
-            source_members, 5,
+            source_members, 6,
             "the bundle carries the composed core, the codec face, the datetime face, the \
-             members,and the bodied file"
+             error-box face, the members, and the bodied file"
         );
         assert!(
             package.members().iter().any(
@@ -777,6 +794,13 @@ mod tests {
                 .iter()
                 .any(|(path, bytes)| path == BODIED_FILE && bytes == BODIED_SOURCE.as_bytes()),
             "the bodied members ride under their own file name"
+        );
+        assert!(
+            package
+                .members()
+                .iter()
+                .any(|(path, bytes)| path == ERROR_FILE && bytes == ERROR_SOURCE.as_bytes()),
+            "the error-box face rides under its own file name"
         );
         assert_eq!(
             std_package().to_bytes(),
@@ -853,8 +877,15 @@ mod tests {
         );
         // the @std package's own compile shape: the composed core member
         // and the driver face ahead of the migrated files, one namespace
-        let (pkg_package, _, pkg_diags) =
-            ds_check::resolve_package(&[bundle_core_ast, codec_ast, members_ast, bodied_ast]);
+        let error_file = files.add_source(ERROR_FILE, ERROR_SOURCE);
+        let error_ast = ds_parse::parse(&files, error_file).expect("the error-box face parses");
+        let (pkg_package, _, pkg_diags) = ds_check::resolve_package(&[
+            bundle_core_ast,
+            codec_ast,
+            members_ast,
+            bodied_ast,
+            error_ast,
+        ]);
         assert!(
             pkg_diags.is_empty(),
             "the package shape resolves: {pkg_diags:?}"
@@ -865,6 +896,14 @@ mod tests {
                 "`{name}` lives in the @std driver face beside the core"
             );
         }
+        assert!(
+            pkg_package.lookup_type("any_err").is_some(),
+            "`any_err` lives in the @std error-box face beside the core"
+        );
+        assert!(
+            pkg_package.lookup_type("box_err").is_some(),
+            "`box_err` lives in the @std error-box face beside the core"
+        );
         for name in ["row", "config", "response"] {
             assert!(
                 pkg_package.lookup_type(name).is_some(),
@@ -997,6 +1036,14 @@ mod tests {
             );
         }
         assert!(
+            core_package.lookup_type("any_err").is_none(),
+            "`any_err` left the shrunk core (the @std error-box face's own source)"
+        );
+        assert!(
+            core_package.lookup_type("box_err").is_none(),
+            "`box_err` left the shrunk core (the @std error-box face's own source)"
+        );
+        assert!(
             core_package.lookup_value("concat").is_some(),
             "`concat` stays pinned in the core (the core string face's own seam — the bytes show \
              body and the `+`/`+=` spellings call it)"
@@ -1119,6 +1166,14 @@ mod tests {
             );
         }
         assert!(
+            merged_package.lookup_type("any_err").is_some(),
+            "the merged reading keeps `any_err` (namespace-identical)"
+        );
+        assert!(
+            merged_package.lookup_type("box_err").is_some(),
+            "the merged reading keeps `box_err` (namespace-identical)"
+        );
+        assert!(
             merged_package.lookup_value("parse_json").is_some(),
             "the merged reading keeps `parse_json` (namespace-identical)"
         );
@@ -1157,7 +1212,18 @@ mod tests {
                                                 rest.strip_prefix(CODEC_SOURCE).is_some_and(
                                                     |rest| {
                                                         rest.strip_prefix('\n').is_some_and(
-                                                            |rest| rest == DATETIME_SOURCE,
+                                                            |rest| {
+                                                                rest.strip_prefix(DATETIME_SOURCE)
+                                                                    .is_some_and(|rest| {
+                                                                        rest.strip_prefix('\n')
+                                                                            .is_some_and(
+                                                                                |rest| {
+                                                                                    rest
+                                                                                        == ERROR_SOURCE
+                                                                                },
+                                                                            )
+                                                                    })
+                                                            },
                                                         )
                                                     },
                                                 )
@@ -1170,7 +1236,7 @@ mod tests {
                     })
                 }),
             "the session source is the core, the json file, the string face, the bodied file, \
-             then the codec face, one newline between neighbors"
+             then the codec face, then the error-box face, one newline between neighbors"
         );
         assert!(
             AMBIENT_SOURCE
@@ -1191,8 +1257,23 @@ mod tests {
                                                                     .is_some_and(|rest| {
                                                                         rest.strip_prefix('\n')
                                                                             .is_some_and(|rest| {
-                                                                                rest
-                                                                                    == DATETIME_SOURCE
+                                                                                rest.strip_prefix(
+                                                                                    DATETIME_SOURCE,
+                                                                                )
+                                                                                .is_some_and(
+                                                                                    |rest| {
+                                                                                        rest
+                                                                                            .strip_prefix(
+                                                                                                '\n',
+                                                                                            )
+                                                                                            .is_some_and(
+                                                                                                |rest| {
+                                                                                                    rest
+                                                                                                        == ERROR_SOURCE
+                                                                                                },
+                                                                                            )
+                                                                                    },
+                                                                                )
                                                                             })
                                                                     })
                                                             },
@@ -1208,7 +1289,8 @@ mod tests {
                     })
                 }),
             "the merged source is the core, the json file, the string face, the members' file, \
-             the bodied file, then the codec face, one newline between neighbors"
+             the bodied file, then the codec face, then the error-box face, one newline between \
+             neighbors"
         );
     }
 }

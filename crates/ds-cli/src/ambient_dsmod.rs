@@ -189,11 +189,11 @@ mod tests {
         );
         assert_eq!(
             served.functions.last().map(ds_mod::Function::name),
-            Some("datetime_str"),
+            Some("box_err#of"),
             "each struct's deinit plans right after its own item, so a growing module's\ntable \
              ends on its last item's entries and stays append-stable under live-frame swaps (the \
-             merged composition's tail is the @std datetime face, its last record the \
-             datetime_str body)",
+             merged composition's tail is the @std error-box face, its last record the box_err of \
+             member)",
         );
         assert!(
             served
