@@ -1,0 +1,5 @@
+error[DS1019]: comparison operators do not chain (`a < b < c`); parenthesize the grouping or join the separate tests with `&&`
+ --> tests/fixtures/negative/ds1019_comparison_chain.ds:6:3
+  |
+6 |   a < b < c
+  |   ^^^^^^^^^ here

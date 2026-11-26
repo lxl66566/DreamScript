@@ -279,6 +279,23 @@ impl Ctx {
     fn cmp(&mut self, p: Pair<'_, Rule>) -> Expr {
         let span = self.span(&p);
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
+        // Two comparison operators over one operand list refuse here,
+        // before any node is built: the left fold would pit the first
+        // test's bool answer against the third operand (`a < b < c`).
+        if children
+            .iter()
+            .filter(|c| c.as_rule() == Rule::cmp_op)
+            .count()
+            > 1
+        {
+            self.err(
+                span,
+                ErrorCode::ComparisonChain,
+                "comparison operators do not chain (`a < b < c`); parenthesize the grouping or \
+                 join the separate tests with `&&`",
+            );
+            return Expr::Invalid(span);
+        }
         let operands = children
             .iter()
             .filter(|c| !matches!(c.as_rule(), Rule::cmp_op | Rule::kw_in))

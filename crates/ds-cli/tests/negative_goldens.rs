@@ -30,6 +30,8 @@
 //! reports the crossed frame boundary at check time. DS1015, the
 //! script-mode collision with a written `main`, fires only through
 //! `parse_script` and is pinned in ds-parse's unit suite instead.
+//! DS1019 (two comparison operators over one operand list) joins the
+//! parse-side pins.
 
 use std::{
     env, fs,
@@ -64,6 +66,11 @@ const CASES: &[Case] = &[
         stem: "ds1014_top_level_statement",
         human: include_str!("goldens/ds1014_top_level_statement.human"),
         json: include_str!("goldens/ds1014_top_level_statement.json"),
+    },
+    Case {
+        stem: "ds1019_comparison_chain",
+        human: include_str!("goldens/ds1019_comparison_chain.human"),
+        json: include_str!("goldens/ds1019_comparison_chain.json"),
     },
     Case {
         stem: "ds2002_loop_exit_in_lambda",

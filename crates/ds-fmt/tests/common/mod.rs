@@ -106,7 +106,7 @@ pub const POSITIVE: &[&str] = &[
     // the frozen operator set
     "fn f() { a + b +% c - d -% e * f *% g / h % i\n}\n",
     "fn f() { a << 2 >> 3\n}\n",
-    "fn f() { a == b != c < d <= e > f >= g\n}\n",
+    "fn f() { a == b\n a != c\n a < d\n a <= e\n a > f\n a >= g\n}\n",
     "fn f() { a && b || !c\n}\n",
     "fn f() { a & b | c ^ d\n}\n",
     "fn f() { -%a + -b + -% -%c\n}\n",

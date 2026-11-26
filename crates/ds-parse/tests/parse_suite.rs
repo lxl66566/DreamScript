@@ -542,7 +542,7 @@ fn kw_blocks_keep_their_statements() {
 parses! {
     arithmetic_ops => "fn f() { a + b +% c - d -% e * f *% g / h % i\n}\n",
     shift_ops => "fn f() { a << 2 >> 3\n}\n",
-    comparison_ops => "fn f() { a == b != c < d <= e > f >= g\n}\n",
+    comparison_ops => "fn f() { a == b\n a != c\n a < d\n a <= e\n a > f\n a >= g\n}\n",
     logical_ops => "fn f() { a && b || !c\n}\n",
     bitwise_ops => "fn f() { a & b | c ^ d\n}\n",
     wrapping_negate => "fn f() { -%a + -b + -% -%c\n}\n",
@@ -596,6 +596,35 @@ fn in_binds_at_comparison_level() {
         panic!("in at top");
     };
     assert!(matches!(**right, Expr::Range { .. }));
+}
+
+#[test]
+fn comparison_chain_refuses_at_conversion() {
+    // Two comparison operators over one operand list answer the chain
+    // diagnostic at conversion; the label spans the whole level, so the
+    // fold never pits the first test's bool answer against the third
+    // operand.
+    let (code, starts, labels) = err("fn f(a: int, b: int, c: int) {\n a < b < c\n}\n");
+    assert_eq!(code, ErrorCode::ComparisonChain);
+    assert_eq!(labels, 1);
+    assert_eq!(starts[0], Location { line: 2, col: 2 });
+
+    let (code, ..) = err("fn f(a: int, b: int) {\n a == b == a\n}\n");
+    assert_eq!(code, ErrorCode::ComparisonChain);
+    // A chain mixing both spellings refuses too.
+    let (code, ..) = err("fn f(a: int, b: int, c: int) {\n a < b >= c\n}\n");
+    assert_eq!(code, ErrorCode::ComparisonChain);
+}
+
+#[test]
+fn parenthesized_regrouping_and_one_comparison_parse() {
+    // The refusal names the unparenthesized chain only: one comparison
+    // per level keeps parsing, and a parenthesized group stands as one
+    // operand of the outer comparison.
+    let _ = ok("fn f(a: bool, b: bool, c: bool) {\n (a == b) == c\n}\n");
+    let _ = ok("fn f(a: int, b: int) {\n a < b\n}\n");
+    // One `in` tail beside one comparison stays the legal level shape.
+    let _ = ok("fn f(x: int, xs: list<int>, r: list<int>) {\n x in xs == r\n}\n");
 }
 
 #[test]

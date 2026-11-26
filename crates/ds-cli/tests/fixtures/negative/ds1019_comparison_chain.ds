@@ -1,0 +1,7 @@
+// Two comparison operators fold over one operand list, so the parser
+// conversion refuses the chain with its own diagnostic before any node
+// is built.
+
+fn between(a: int, b: int, c: int) -> bool {
+  a < b < c
+}

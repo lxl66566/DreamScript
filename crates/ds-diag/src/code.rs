@@ -126,6 +126,8 @@ error_codes! {
     ArrowChainTooDeep => "DS1017", Parse,
     /// An `else if` chain deeper than the parser's unbracketed recursion budget.
     ElseChainTooDeep => "DS1018", Parse,
+    /// Two comparison operators over one operand list (`a < b < c`); each comparison binds one pair, so parenthesize the grouping or join the separate tests with `&&`.
+    ComparisonChain => "DS1019", Parse,
 
     /// Value's type is not contained in the expected type.
     TypeMismatch => "DS2001", Type,
@@ -325,6 +327,7 @@ mod tests {
             ("GuardTailLambda", "DS1016", ErrorClass::Parse),
             ("ArrowChainTooDeep", "DS1017", ErrorClass::Parse),
             ("ElseChainTooDeep", "DS1018", ErrorClass::Parse),
+            ("ComparisonChain", "DS1019", ErrorClass::Parse),
             ("TypeMismatch", "DS2001", ErrorClass::Type),
             ("InferenceFailed", "DS2002", ErrorClass::Type),
             ("NonExhaustiveMatch", "DS2003", ErrorClass::Type),
