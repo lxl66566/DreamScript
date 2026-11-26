@@ -85,11 +85,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let mut staged: Vec<SlotType> = Vec::new();
         let mut moves: Vec<u8> = Vec::new();
         for &(bind, ty) in captures {
-            let place = self
-                .binders
-                .get(&bind)
-                .cloned()
-                .ok_or_else(|| self.missing_binder(span))?;
+            let place = match self.binders.get(&bind).cloned() {
+                Some(place) => place,
+                // a block-local `fn`'s own name captured by a nested
+                // callable: the staged word is the fn's own, built in
+                // this frame exactly as a use inside the body builds it
+                None if self.analyzed.checked.self_fns.contains(&bind) => self.self_fn_word()?,
+                None => return Err(self.missing_binder(span)),
+            };
             if self.is_closure_word(&place, ty)? {
                 return Err(LowerError::unsupported(
                     span,

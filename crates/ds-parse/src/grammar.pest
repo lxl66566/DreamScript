@@ -295,7 +295,10 @@ pt_trail = { h ~ "," }
 
 block_expr = { "{" ~ sp ~ stmt_list? ~ sp ~ "}" }
 stmt_list = { stmt ~ (nlreq ~ stmt)* ~ nlreq? }
-stmt = { local | expr }
+// A block-local `fn` declaration: the body block is required (a statement
+// names no bodiless signature), everything else the item spelling takes.
+fn_stmt = { kw_fn ~ h ~ ident ~ generics? ~ h ~ params ~ ret_ann? ~ sp ~ block_expr }
+stmt = { fn_stmt | local | expr }
 
 local = { local_kw ~ sp ~ local_pat ~ h ~ "=" ~ sp ~ expr }
 local_kw = { kw_const | kw_var }

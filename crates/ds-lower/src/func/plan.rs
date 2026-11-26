@@ -855,6 +855,8 @@ pub(super) fn collect_captures(
 pub(super) fn stray_exit(block: &BlockExpr) -> Option<Span> {
     block.stmts.iter().find_map(|stmt| match &stmt.kind {
         StmtKind::Local(local) => stray_exit_expr(&local.init),
+        // a block-local `fn` body exits its own frame, never this block
+        StmtKind::Fn(_) => None,
         StmtKind::Expr(expr) => stray_exit_expr(expr),
     })
 }
@@ -878,6 +880,8 @@ pub(super) fn cancel_operands_walk(block: &BlockExpr, out: &mut Vec<Span>, throu
             StmtKind::Local(local) => {
                 cancel_operands_expr(&local.init, out, through_spawns);
             },
+            // a block-local `fn` body's cancels answer the fn's own frame
+            StmtKind::Fn(_) => {},
             StmtKind::Expr(expr) => cancel_operands_expr(expr, out, through_spawns),
         }
     }
@@ -1103,6 +1107,9 @@ pub(super) fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
         for stmt in &block.stmts {
             match &stmt.kind {
                 StmtKind::Local(local) => visit_uses(&local.init, visit),
+                // a block-local `fn` body's uses are its own mint's
+                // captures; the enclosing walk collects none of them
+                StmtKind::Fn(_) => {},
                 StmtKind::Expr(expr) => visit_uses(expr, visit),
             }
         }
@@ -1644,6 +1651,43 @@ pub(super) fn discover_stmt(
 ) -> Result<(), LowerError> {
     match &stmt.kind {
         StmtKind::Local(local) => discover_expr(plan, found, ctx, &local.init),
+        // A block-local `fn` mints at its declaration's span inside the
+        // entry holding the statement, the lambda-value site's own
+        // discipline; its captures skip the declaration's own name (that
+        // one is the fn's frame identity, never a capture of itself).
+        StmtKind::Fn(f) => {
+            if !f.generics.is_empty() {
+                return Ok(()); // the statement's walk refuses the generic fn value; nothing inside it lowers
+            }
+            let Some(synth) = Expr::fn_decl_lambda(f) else {
+                return Ok(()); // the grammar keeps a statement's body present
+            };
+            let evidence = mint_evidence(plan, found.analyzed, ctx, &synth);
+            let mut captures = captures_under(found, ctx.subst.as_ref(), &synth, ctx.res)?;
+            captures.retain(|(bind, _)| !found.analyzed.checked.self_fns.contains(bind));
+            let index = plan.push_lambda(
+                ctx.enclosing,
+                &synth,
+                Rc::new(captures),
+                evidence,
+                ctx.bounds.clone(),
+                ctx.subst.clone(),
+            );
+            let nested = MintCtx {
+                enclosing: index,
+                enclosing_name: format!("{}${index}", ctx.enclosing_name),
+                bounds: ctx.bounds.clone(),
+                subst: ctx.subst.clone(),
+                res: ctx.res,
+            };
+            // the descent enters the synthesized body directly: routing
+            // it through the lambda arm would mint the record twice
+            let Expr::Lambda { body, .. } = &synth else {
+                unreachable!("the fn statement's synth is a lambda shape");
+            };
+            discover_expr(plan, found, &nested, body)?;
+            Ok(())
+        },
         StmtKind::Expr(expr) => discover_expr(plan, found, ctx, expr),
     }
 }
@@ -1963,15 +2007,24 @@ impl PairWalk<'_> {
         }
     }
 
-    fn expr(&mut self, e: &Expr) {
-        let block = |walk: &mut Self, block: &BlockExpr| {
-            for stmt in &block.stmts {
-                match &stmt.kind {
-                    StmtKind::Local(local) => walk.expr(&local.init),
-                    StmtKind::Expr(expr) => walk.expr(expr),
-                }
+    /// One block's statements: a block-local `fn` body's demands stage
+    /// into the closure block from this frame's slots at the
+    /// construction, so this frame carries their slots transitively.
+    fn block(&mut self, block: &BlockExpr) {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                StmtKind::Local(local) => self.expr(&local.init),
+                StmtKind::Fn(f) => {
+                    if let Some(body) = &f.body {
+                        self.block(body);
+                    }
+                },
+                StmtKind::Expr(expr) => self.expr(expr),
             }
-        };
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Literal { .. }
             | Expr::RawStr { .. }
@@ -1985,7 +2038,7 @@ impl PairWalk<'_> {
             // staged from this frame's evidence slots at the spawn site,
             // so this frame must carry a slot for every demand lexically
             // inside it, transitively
-            Expr::Spawn { body, .. } => block(self, body),
+            Expr::Spawn { body, .. } => self.block(body),
             // a value-site lambda's body sites demand evidence too: the
             // construction stages the words from this frame's slots into
             // the capture block, so this frame must carry a slot for
@@ -2006,7 +2059,7 @@ impl PairWalk<'_> {
             Expr::Paren { inner, .. }
             | Expr::Try { expr: inner, .. }
             | Expr::Unary { expr: inner, .. } => self.expr(inner),
-            Expr::Block(inner) => block(self, inner),
+            Expr::Block(inner) => self.block(inner),
             Expr::Struct { fields, .. } => {
                 for (_, value) in fields {
                     if let Some(value) = value {
@@ -2067,7 +2120,7 @@ impl PairWalk<'_> {
                 cond, then, else_, ..
             } => {
                 self.expr(cond);
-                block(self, then);
+                self.block(then);
                 if let Some(else_expr) = else_ {
                     self.expr(else_expr);
                 }
@@ -2085,7 +2138,7 @@ impl PairWalk<'_> {
             },
             Expr::While { cond, body, .. } => {
                 self.expr(cond);
-                block(self, body);
+                self.block(body);
             },
             Expr::For { iter, body, .. } => {
                 self.expr(iter);
@@ -2097,7 +2150,7 @@ impl PairWalk<'_> {
                 }
             },
             Expr::Nursery { body, .. } | Expr::Defer { body, .. } => {
-                block(self, body);
+                self.block(body);
             },
         }
     }

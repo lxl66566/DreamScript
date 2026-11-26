@@ -202,6 +202,17 @@ impl FnLower<'_, '_, '_> {
                 let unit = self.unit_value(block.span)?;
                 self.emit_return(&unit.place, unit.ty, block.span)
             },
+            Some(Stmt {
+                kind: StmtKind::Fn(f),
+                span,
+                ..
+            }) => {
+                // A block-local `fn` tail is a statement the same way: it
+                // lowers, and the frame returns unit.
+                self.fn_stmt(f, *span)?;
+                let unit = self.unit_value(block.span)?;
+                self.emit_return(&unit.place, unit.ty, block.span)
+            },
             None => {
                 let unit = self.unit_value(block.span)?;
                 self.emit_return(&unit.place, unit.ty, block.span)

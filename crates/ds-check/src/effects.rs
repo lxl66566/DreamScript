@@ -1379,6 +1379,13 @@ impl Walker<'_, '_> {
         for stmt in &block.stmts {
             match &stmt.kind {
                 StmtKind::Local(local) => self.expr(&local.init, mask),
+                // A block-local `fn` body contributes in place, the
+                // lambda body's own rule.
+                StmtKind::Fn(f) => {
+                    if let Some(body) = &f.body {
+                        self.block(body, mask);
+                    }
+                },
                 StmtKind::Expr(e) => self.expr(e, mask),
             }
         }

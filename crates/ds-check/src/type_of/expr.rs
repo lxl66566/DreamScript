@@ -64,7 +64,7 @@ impl Bodies<'_> {
                         poisoned: true,
                     };
                 }
-                self.lambda(e, expected)
+                self.lambda(e, expected, None)
             },
             Expr::Path { path, .. } => self.path_expr(path, expected),
             Expr::Struct { .. } => self.struct_expr(e, expected),

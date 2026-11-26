@@ -180,7 +180,7 @@ fn write_import(ctx: &Ctx, out: &mut String, base: usize, d: &ImportDecl) {
     }
 }
 
-fn write_fn(ctx: &Ctx, out: &mut String, base: usize, f: &FnDecl) {
+pub(crate) fn write_fn(ctx: &Ctx, out: &mut String, base: usize, f: &FnDecl) {
     out.push_str("fn ");
     out.push_str(&f.name.name);
     write_generics(ctx, out, &f.generics);

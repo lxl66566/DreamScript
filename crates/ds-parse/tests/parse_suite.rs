@@ -1790,7 +1790,7 @@ fn first_stmt_expr(ast: &Ast) -> &Expr {
     let body = fn_body(ast);
     match &body.stmts[0].kind {
         StmtKind::Expr(e) => e,
-        StmtKind::Local(_) => panic!("first statement is not an expression"),
+        StmtKind::Local(_) | StmtKind::Fn(_) => panic!("first statement is not an expression"),
     }
 }
 
@@ -1918,7 +1918,7 @@ fn tuple_corners_split_grouping_one_element_and_unit() {
     let body = fn_body(&ast);
     let init = |i: usize| match &body.stmts[i].kind {
         StmtKind::Local(l) => &l.init,
-        StmtKind::Expr(_) => panic!("statement {i} is not a binding"),
+        StmtKind::Expr(_) | StmtKind::Fn(_) => panic!("statement {i} is not a binding"),
     };
     assert!(
         matches!(init(0), Expr::Paren { .. }),

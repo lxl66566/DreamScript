@@ -323,6 +323,30 @@ impl Walker<'_> {
                     });
                 }
             },
+            // A block-local `fn`: the body's frames hold the
+            // declaration's own name under the parameters, and the name
+            // then binds in the enclosing block, visible from the
+            // declaration's end like any binding.
+            StmtKind::Fn(f) => {
+                self.push(f.span, vec![ScopeBinding {
+                    name: f.name.name.clone(),
+                    kind: ScopeKind::Let,
+                    span: f.name.span,
+                    visible_from: f.name.span.end,
+                }]);
+                self.push(f.span, param_bindings(&f.params));
+                if let Some(body) = &f.body {
+                    self.block(body);
+                }
+                self.pop();
+                self.pop();
+                self.bind(ScopeBinding {
+                    name: f.name.name.clone(),
+                    kind: ScopeKind::Let,
+                    span: f.name.span,
+                    visible_from: f.span.end,
+                });
+            },
             StmtKind::Expr(expr) => self.expr(expr),
         }
     }

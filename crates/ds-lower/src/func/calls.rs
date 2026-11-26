@@ -1589,11 +1589,13 @@ impl<'a> FnLower<'a, '_, '_> {
         // the callee use is a read of the binder: a closure word's death
         // test compares against this span
         self.rc.use_of(bind, callee_span);
-        let place = self
-            .binders
-            .get(&bind)
-            .cloned()
-            .ok_or_else(|| self.missing_binder(callee_span))?;
+        let place = match self.binders.get(&bind).cloned() {
+            Some(place) => place,
+            // a block-local `fn`'s own name calling itself: no slot binds
+            // it, the call stages the fn's own word
+            None if self.analyzed.checked.self_fns.contains(&bind) => self.self_fn_word()?,
+            None => return Err(self.missing_binder(callee_span)),
+        };
         // the callee word: a Fn-classified slot directly (a scalar word or
         // a callable-defaulted parameter), a Ref-classified value-site
         // word (CALLS reads the FuncRef behind the closure object's

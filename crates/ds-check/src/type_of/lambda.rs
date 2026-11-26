@@ -4,7 +4,14 @@
 use super::{item::collect_type_names, *};
 
 impl Bodies<'_> {
-    pub(super) fn lambda(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
+    /// `self_name` binds the block-local `fn` form: the declaration's
+    /// own name inside its body alone, typed by the written signature.
+    pub(super) fn lambda(
+        &mut self,
+        e: &Expr,
+        expected: Option<Ty>,
+        self_name: Option<Span>,
+    ) -> Val {
         let Expr::Lambda {
             span,
             generics,
@@ -225,6 +232,31 @@ impl Bodies<'_> {
                 );
             }
         }
+        // The block-local `fn`'s own name: typed by the written
+        // signature before the body walks, so the body's uses of it read
+        // the fn itself (the recursion door). A written return type is
+        // the rule the binding needs — the name has no type without one.
+        if let Some(bind) = self_name {
+            match declared_ret {
+                Some(ret) => {
+                    let params_boxed: Box<[Ty]> = param_tys.clone().into();
+                    if let Ok(atom) = self.decls.universe.fn_atom(&params_boxed, ret)
+                        && let Ok(ty) = self.decls.universe.atom_ty(atom)
+                    {
+                        self.bind_local(bind, Binding { ty, mutable: false });
+                        self.self_fns.insert(bind);
+                    }
+                },
+                None => self.error(
+                    ErrorCode::InferenceFailed,
+                    "a block fn declares its return type, so its own name types inside its body"
+                        .to_owned(),
+                    *span,
+                    "block fn without a return type",
+                ),
+            }
+        }
+
         let fn_ret_expected = declared_ret.or_else(|| expected_sig.as_ref().map(|(_, r)| *r));
         // A still-unbound variable as the expected return is the
         // instantiation's inference hole (a generic callee's `r`): the

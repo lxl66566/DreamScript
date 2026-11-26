@@ -56,7 +56,7 @@ use ds_parse::{
     LocalDecl, MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam,
     UnaryOp,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     TypeExpr,
@@ -338,6 +338,11 @@ pub struct Checked {
     /// pass consumes this; top-level bindings derive theirs from
     /// `def_types` directly.
     pub binders: HashMap<Span, crate::linearity::BinderFact>,
+    /// The binder spans of every block-local `fn` declaration's own
+    /// name: the name is in scope inside the declaration's body alone,
+    /// so the lowering answers a use of one with the fn's own callable
+    /// word and never collects it as a capture of the fn's own frame.
+    pub self_fns: FxHashSet<Span>,
     /// The checked `Val` of every expression, keyed by its span: the solved
     /// type AT THAT USE SITE (flow-refined inside `is` tests and match arms)
     /// plus the early-exit flag. The lowering pass consumes this
@@ -595,6 +600,7 @@ pub fn analyze_resolved(
         diags,
         def_types: checked.def_types,
         binders: checked.binders,
+        self_fns: checked.self_fns,
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
@@ -768,6 +774,7 @@ fn analyze_served_over(
         diags,
         def_types: checked.def_types,
         binders: checked.binders,
+        self_fns: checked.self_fns,
         expr_types: checked.expr_types,
         generic_calls: checked.generic_calls,
         trait_calls: checked.trait_calls,
@@ -827,6 +834,7 @@ where
     let res_by_file = FilePositions::new(&trees);
     let mut def_types = FxHashMap::default();
     let mut binders = HashMap::default();
+    let mut self_fns = FxHashSet::default();
     let mut expr_types = FxHashMap::default();
     let mut generic_calls = FxHashMap::default();
     let mut trait_calls = FxHashMap::default();
@@ -859,6 +867,7 @@ where
             decls: &mut decls,
             def_types: &mut def_types,
             binders: &mut binders,
+            self_fns: &mut self_fns,
             expr_types: &mut expr_types,
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
@@ -927,6 +936,7 @@ where
             decls: &mut decls,
             def_types: &mut def_types,
             binders: &mut binders,
+            self_fns: &mut self_fns,
             expr_types: &mut expr_types,
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
@@ -1012,12 +1022,14 @@ where
         &mut comptime_sites,
         &mut instance_records,
         &mut instance_loops,
+        &mut self_fns,
     );
     diags.extend(instance_diags);
     Ok((decls, Checked {
         diags,
         def_types,
         binders,
+        self_fns,
         expr_types,
         generic_calls,
         trait_calls,
@@ -1128,6 +1140,7 @@ fn expand_comptime_instances(
     sites: &mut FxHashMap<Span, (DefId, Vec<Ty>)>,
     instance_records: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
     instance_loops: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
+    self_fns: &mut FxHashSet<Span>,
 ) -> Vec<Diagnostic> {
     let per_instance: Vec<Span> = comptime_loops
         .iter()
@@ -1227,6 +1240,7 @@ fn expand_comptime_instances(
             decls,
             def_types: &mut scratch_def_types,
             binders: &mut scratch_binders,
+            self_fns,
             expr_types: &mut scratch_expr_types,
             generic_calls: &mut scratch_generic_calls,
             trait_calls: &mut scratch_trait_calls,
@@ -1438,6 +1452,7 @@ struct Bodies<'a> {
     decls: &'a mut Decls,
     def_types: &'a mut FxHashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
+    self_fns: &'a mut FxHashSet<Span>,
     expr_types: &'a mut FxHashMap<Span, Val>,
     generic_calls: &'a mut FxHashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut FxHashMap<Span, TraitCall>,

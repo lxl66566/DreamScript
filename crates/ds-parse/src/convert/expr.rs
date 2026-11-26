@@ -918,6 +918,9 @@ impl Ctx {
                                         Rule::local => {
                                             StmtKind::Local(self.conv_local(inner_s.clone()))
                                         },
+                                        Rule::fn_stmt => {
+                                            StmtKind::Fn(self.conv_fn(inner_s.clone(), false))
+                                        },
                                         _ => StmtKind::Expr(self.expr(inner_s.clone())),
                                     };
                                     let mut trailing_t = Vec::new();

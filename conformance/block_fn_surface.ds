@@ -1,0 +1,45 @@
+// source: the 2026-11-27 local-functions ruling (todo item 155), the lambda-path capture seam
+// purpose: block-local fn declarations: the name a block-scoped binding from the declaration on, recursion through the body's own name, the captures following the lambda rules, sibling and nested calls running, uses before the declaration or past the block refusing unknown-name
+// items:
+// fib-probe: stage: run
+// counter-probe: stage: run
+// nested-probe: stage: run
+// main: stage: run
+
+fn fib_probe() -> int {
+  fn fib(n: int) -> int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+  }
+  println("fib(10) = ${fib(10)}")
+  0
+}
+
+fn counter_probe() -> int {
+  var counter: int = 0
+  fn bump() -> int {
+    counter = counter + 1
+    counter
+  }
+  bump()
+  bump()
+  println("counter = ${bump()}")
+  0
+}
+
+fn nested_probe() -> int {
+  fn outer_fn(k: int) -> int {
+    fn inner_fn(j: int) -> int {
+      if j <= 0 { 0 } else { outer_fn(j - 1) + 1 }
+    }
+    inner_fn(k)
+  }
+  println("nested = ${outer_fn(3)}")
+  0
+}
+
+fn main() -> int {
+  fib_probe()
+  counter_probe()
+  nested_probe()
+  0
+}

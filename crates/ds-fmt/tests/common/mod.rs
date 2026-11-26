@@ -553,6 +553,7 @@ fn norm_stmt(s: &mut Stmt) {
     s.trailing_trivia.clear();
     match &mut s.kind {
         StmtKind::Local(l) => norm_local(l),
+        StmtKind::Fn(f) => norm_fn(f),
         StmtKind::Expr(e) => norm_expr(e),
     }
 }

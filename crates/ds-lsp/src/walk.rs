@@ -340,6 +340,22 @@ impl<'v, V: Visit> Walk<'v, V> {
                     self.ty(ty);
                 }
             },
+            StmtKind::Fn(f) => {
+                self.visitor.at_fn(f, false);
+                let mark = self.generics(&f.generics);
+                for param in &f.params {
+                    self.param(param);
+                }
+                if let Some(ret) = &f.ret {
+                    let after = f.params.last().map_or(f.name.span.end, |p| p.span.end);
+                    self.visitor.at_ret_arrow(after, ret);
+                    self.ty(ret);
+                }
+                if let Some(body) = &f.body {
+                    self.block(body);
+                }
+                self.pop(mark);
+            },
             StmtKind::Expr(expr) => self.expr(expr),
         }
     }

@@ -184,6 +184,8 @@ fn impl_call_spans(ast: &Ast) -> Vec<Span> {
                         match &stmt.kind {
                             ds_parse::StmtKind::Expr(e) => expr(e, &mut out),
                             ds_parse::StmtKind::Local(local) => expr(&local.init, &mut out),
+                            // the fixture's impl members hold no fn statement
+                            ds_parse::StmtKind::Fn(_) => {},
                         }
                     }
                 }

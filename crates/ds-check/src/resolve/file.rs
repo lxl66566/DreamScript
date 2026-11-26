@@ -248,8 +248,36 @@ impl FileResolver<'_> {
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Local(local) => self.local(local),
+            StmtKind::Fn(f) => self.block_fn(f),
             StmtKind::Expr(expr) => self.expr(expr),
         }
+    }
+
+    /// One block-local `fn` declaration. The body resolves under a frame
+    /// holding the declaration's own name beside the parameters — the
+    /// recursion door, with the parameters shadowing it like a top-level
+    /// fn's do — and then the name binds in the enclosing block like any
+    /// local binding: a sibling statement from the declaration on
+    /// resolves it, a use before the declaration, in a sibling block, or
+    /// in an enclosing scope resolves nothing.
+    fn block_fn(&mut self, f: &FnDecl) {
+        self.type_params(&f.generics);
+        self.scopes.push(FxHashMap::default());
+        self.bind(&f.name, false);
+        self.scopes.push(FxHashMap::default());
+        for param in &f.params {
+            self.param(param, false);
+        }
+        if let Some(ret) = &f.ret {
+            self.type_(ret);
+        }
+        if let Some(body) = &f.body {
+            self.block(body);
+        }
+        self.scopes.pop();
+        self.scopes.pop();
+        self.bind(&f.name, false);
+        self.type_scopes.pop();
     }
 
     // ---- value positions ---------------------------------------------------

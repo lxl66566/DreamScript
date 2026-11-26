@@ -65,6 +65,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 kind: StmtKind::Local(local),
                 ..
             }) => self.local_stmt(local),
+            // a block-local `fn` in tail position answers like a
+            // binding tail: it lowers, the block's value stays unit
+            Some(Stmt {
+                kind: StmtKind::Fn(f),
+                span,
+                ..
+            }) => {
+                self.fn_stmt(f, *span)?;
+                self.unit_value(block.span)
+            },
             None => self.unit_value(block.span),
         }
     }
@@ -133,6 +143,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.note_value_end();
                 Ok(())
             },
+            StmtKind::Fn(f) => {
+                self.fn_stmt(f, stmt.span)?;
+                self.note_value_end();
+                Ok(())
+            },
             StmtKind::Expr(expr) => {
                 let tp = self.value(expr)?;
                 self.note_value_end();
@@ -154,6 +169,77 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.value_ends
                 .push(u32::try_from(self.code.len()).expect("code length fits u32"));
         }
+    }
+
+    /// One block-local `fn` statement: the plan's mint for the
+    /// declaration's own span stages the callable word — a capturing fn
+    /// constructs its closure object here, the capture migration's
+    /// counts the statement's own — and the name binds like a const
+    /// aliasing its initializer: the sibling statements read the word,
+    /// and the block's scope end releases the closure object's count.
+    pub(super) fn fn_stmt(&mut self, f: &ds_parse::FnDecl, span: Span) -> Result<(), LowerError> {
+        if !f.generics.is_empty() {
+            return Err(LowerError::unsupported(
+                span,
+                "a generic function value",
+                "the word carries no instantiation, and a call through it has no site to stage \
+                 the body's evidence words; generic calls name their callee directly",
+            ));
+        }
+        let Some(mint) = self.plan.minted(self.index, span) else {
+            return Err(LowerError::unsupported(
+                span,
+                "a block fn",
+                "the plan minted no record for this site: the discovery pass and the walk \
+                 disagree on the mint",
+            ));
+        };
+        let declared = match self.binder_fact(f.name.span)? {
+            Some(fact) => fact.ty,
+            None => self.val(span)?.ty,
+        };
+        let (word, slot) = self.child_callable(span, mint.index, &mint.captures, &mint.evidence)?;
+        let place = Place {
+            base: word,
+            shape: PlaceShape::Word(slot),
+        };
+        self.binders.insert(f.name.span, place.clone());
+        // the place's own word classification leads: a const aliasing a
+        // closure word binds the Ref word the declared fn type does not
+        // name, and the binder's death drops it
+        self.rc_bind(f.name.span, &place, declared)?;
+        self.scope_insert(&f.name.name, f.name.span);
+        Ok(())
+    }
+
+    /// The callable word of the block-local `fn` one use of its own name
+    /// reads: the closure object CALLS wrote into this frame when the fn
+    /// captures, the fn's own table entry as a scalar FuncRef word when
+    /// nothing captures. `bind` names the declaration's own name span,
+    /// `span` the use site.
+    pub(super) fn self_fn_word(&mut self) -> Result<Place, LowerError> {
+        if let Some(word) = self.capture_word {
+            self.fn_words.insert(word, self.index);
+            return Ok(Place {
+                base: word,
+                shape: PlaceShape::Word(SlotType::Ref),
+            });
+        }
+        let kidx = self.pool(Constant::FuncRef {
+            key: FuncRefKey::Dep(0), // the enclosing module
+            func: self.index,
+        });
+        let dst = self.temp_word(SlotType::Fn)?;
+        self.emit(Op::Kconst {
+            dst: Slot::body(dst),
+            kidx,
+        });
+        self.scalar_fn_words.insert(dst);
+        self.fn_words.insert(dst, self.index);
+        Ok(Place {
+            base: dst,
+            shape: PlaceShape::Word(SlotType::Fn),
+        })
     }
 
     /// One `const`/`var` binding statement.

@@ -1822,6 +1822,11 @@ fn walk_block(block: &BlockExpr, go: &mut dyn FnMut(&Expr)) {
 fn walk_stmt(stmt: &Stmt, go: &mut dyn FnMut(&Expr)) {
     match &stmt.kind {
         StmtKind::Local(local) => walk_expr(&local.init, go),
+        StmtKind::Fn(f) => {
+            if let Some(body) = &f.body {
+                walk_block(body, go);
+            }
+        },
         StmtKind::Expr(expr) => walk_expr(expr, go),
     }
 }

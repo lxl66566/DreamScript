@@ -578,11 +578,40 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
+            ds_parse::StmtKind::Fn(f) => {
+                self.block_fn(f);
+                Val {
+                    ty: self.unit(),
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
             ds_parse::StmtKind::Expr(expr) => {
                 self.value_pos = false;
                 self.expr(expr, None)
             },
         }
+    }
+
+    /// One block-local `fn` declaration: the body types as a lambda's
+    /// body under its own name (the recursion door), then the name binds
+    /// in the enclosing block like any local binding — the sibling uses
+    /// read the same solved fn type. The declaration's own span keys
+    /// every record the body walk makes, the same key the lowering's
+    /// mint and the statement's construction read.
+    pub(super) fn block_fn(&mut self, f: &FnDecl) {
+        let Some(synth) = Expr::fn_decl_lambda(f) else {
+            return;
+        };
+        let val = self.lambda(&synth, None, Some(f.name.span));
+        // The declaration's own span carries the fn type, the record the
+        // lowering's entry return derivation reads (a synthesized node's
+        // type the expression walk never recorded).
+        self.expr_types.insert(synth.span(), val);
+        self.bind_local(f.name.span, Binding {
+            ty: val.ty,
+            mutable: false,
+        });
     }
 
     /// A statement-level binding: locals infer.

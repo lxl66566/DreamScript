@@ -468,6 +468,19 @@ fn the_package_fixtures_compose_both_sides_and_pin_their_goldens() {
 }
 
 #[test]
+fn the_block_fn_surface_calls_siblings_and_persists_captures() {
+    // the sibling call runs the recursion to the answer, the
+    // capture-counter state persisting across three sibling calls
+    // through the closure object's re-stores, and a nested declaration
+    // composing with its enclosing fn's own body (the unit tail prints
+    // the run's own 0)
+    run_golden(
+        "block_fn_surface.ds",
+        "fib(10) = 55\ncounter = 3\nnested = 3\n0\n",
+    );
+}
+
+#[test]
 fn the_float_surface_answers_the_family_and_the_ordering_pair() {
     // the math family's five completions over their IEEE rows, the
     // limiting rows staying total, and the float max/min members

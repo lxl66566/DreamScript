@@ -1278,11 +1278,15 @@ fn main_answer(ast: &Ast) -> Option<Answer<'_>> {
                 match &stmts.get(stmts.len().checked_sub(2)?)?.kind {
                     StmtKind::Local(local) => Some(Answer::Expr(&local.init)),
                     StmtKind::Expr(expr) => Some(Answer::Expr(expr)),
+                    StmtKind::Fn(_) => None,
                 }
             } else {
                 Some(Answer::Expr(expr))
             }
         },
+        // a block-local `fn` reports no answer: its name lives inside
+        // its own body alone, nothing outside binds
+        StmtKind::Fn(_) => None,
         StmtKind::Local(local) => Some(Answer::Bindings(local)),
     }
 }

@@ -739,6 +739,12 @@ fn walk_block<'t>(block: &'t BlockExpr, on: &mut impl FnMut(Visit<'t>)) {
         on(Visit::Stmt(stmt));
         match &stmt.kind {
             StmtKind::Local(local) => walk_expr(&local.init, on),
+            // A block-local `fn` body counts in the segment it sits in.
+            StmtKind::Fn(f) => {
+                if let Some(body) = &f.body {
+                    walk_block(body, on);
+                }
+            },
             StmtKind::Expr(expr) => walk_expr(expr, on),
         }
     }

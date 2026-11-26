@@ -793,12 +793,18 @@ pub struct Stmt {
     pub trailing_trivia: Vec<Trivia>,
 }
 
-/// A statement is a binding or an expression.
+/// A statement is a binding, a block-local `fn` declaration, or an
+/// expression.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StmtKind {
     /// `const`/`var` binding.
     Local(LocalDecl),
+    /// A block-local `fn` declaration. The declared name is a
+    /// block-scoped binding from the declaration to the enclosing
+    /// block's end, in scope inside the body for recursion; the captures
+    /// follow the lambda rules.
+    Fn(FnDecl),
     /// Any expression, including assignments and control forms.
     Expr(Expr),
 }
@@ -1105,6 +1111,23 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// The lambda-shaped reading of one bodied `fn` declaration: the node
+    /// the checker's body walk and the lowering's plan synthesize around,
+    /// every span the written one. `None` on a bodiless declaration (a
+    /// signature).
+    #[must_use]
+    pub fn fn_decl_lambda(f: &FnDecl) -> Option<Self> {
+        let body = f.body.as_ref()?;
+        Some(Self::Lambda {
+            span: f.span,
+            generics: f.generics.clone(),
+            params: f.params.clone(),
+            ret: f.ret.clone(),
+            arrow: false,
+            body: Box::new(Self::Block(body.clone())),
+        })
+    }
+
     /// Span of the expression.
     #[must_use]
     pub fn span(&self) -> Span {

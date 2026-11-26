@@ -215,6 +215,7 @@ fn write_block_multi(ctx: &Ctx, out: &mut String, base: usize, b: &BlockExpr) {
 pub(crate) fn write_stmt(ctx: &Ctx, out: &mut String, base: usize, stmt: &Stmt) {
     match &stmt.kind {
         ds_parse::StmtKind::Local(l) => write_local(ctx, out, base, l),
+        ds_parse::StmtKind::Fn(f) => super::decl::write_fn(ctx, out, base, f),
         ds_parse::StmtKind::Expr(e) => write_expr(ctx, out, base, e),
     }
 }

@@ -129,6 +129,7 @@ fn the_fold_collects_statements_in_source_order() {
         .iter()
         .map(|stmt| match stmt.kind {
             StmtKind::Local(_) => "let",
+            StmtKind::Fn(_) => "fn",
             StmtKind::Expr(_) => "expr",
         })
         .collect();

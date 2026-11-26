@@ -592,8 +592,61 @@ impl<'a> Lin<'a> {
                 self.local(local);
                 false
             },
+            ds_parse::StmtKind::Fn(f) => {
+                self.block_fn(f, stmt.span);
+                false
+            },
             ds_parse::StmtKind::Expr(expr) => self.expr(expr, true),
         }
+    }
+
+    /// One block-local `fn` declaration: the body walks as its own frame
+    /// and its captures kill at the declaration's span, the lambda walk's
+    /// own discipline. The declaration's own name binds inside the pushed
+    /// scope for the body's reads, then again in the enclosing frame
+    /// after the walk — a block-scoped binding the sibling statements
+    /// borrow, never one a capture moves (the binder is immutable).
+    fn block_fn(&mut self, f: &'a FnDecl, at: Span) {
+        let Some(body) = &f.body else {
+            return;
+        };
+        self.scopes.push(Vec::new());
+        self.epoch += 1;
+        for param in &f.params {
+            self.bind_param(param);
+        }
+        self.bind_binder(f.name.span, &f.name.name, true, false);
+        // The capture kill runs after the body walk: the sink collects
+        // the mutable bindings the body captured, the construction's
+        // kill the enclosing scope reads.
+        let outer_sink = self.capture_sink.replace(Vec::new());
+        let outer = self.escaping;
+        self.escaping = true;
+        self.block(body);
+        self.escaping = outer;
+        let captured_vars = self
+            .capture_sink
+            .take()
+            .expect("the fn walk installs its sink");
+        self.capture_sink = outer_sink;
+        self.epoch -= 1;
+        if !self.audit {
+            for place in captured_vars {
+                if matches!(self.state.get(&place), Some(State::Live)) {
+                    self.out.moves.push(Move {
+                        binder: place.binder_span(self.package),
+                        at,
+                    });
+                    self.set_state(place, State::Dead { at });
+                }
+            }
+        }
+        self.drop_scope(at);
+        let copyable = self
+            .facts
+            .get(&f.name.span)
+            .is_none_or(|fact| fact.copyable);
+        self.bind_binder(f.name.span, &f.name.name, copyable, true);
     }
 
     fn local(&mut self, local: &'a LocalDecl) {

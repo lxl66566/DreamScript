@@ -47,10 +47,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // the checker's use site: the RC death test compares
                 // against the binder's last-use facts at exactly this span
                 self.rc.use_of(*bind, only.span);
-                self.binders
-                    .get(bind)
-                    .cloned()
-                    .ok_or_else(|| self.missing_binder(span))
+                match self.binders.get(bind).cloned() {
+                    Some(place) => Ok(place),
+                    // a block-local `fn`'s own name inside its own frame:
+                    // no slot binds it, the use reads the fn's own word
+                    None if self.analyzed.checked.self_fns.contains(bind) => self.self_fn_word(),
+                    None => Err(self.missing_binder(span)),
+                }
             },
             Some(Res::Def(def)) => {
                 let kind = self.analyzed.package.def(*def).kind;
