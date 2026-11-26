@@ -41,6 +41,7 @@ kw_else     = @{ "else" ~ !ident_cont }
 kw_match    = @{ "match" ~ !ident_cont }
 kw_while    = @{ "while" ~ !ident_cont }
 kw_for      = @{ "for" ~ !ident_cont }
+kw_comptime = @{ "comptime" ~ !ident_cont }
 kw_in       = @{ "in" ~ !ident_cont }
 kw_break    = @{ "break" ~ !ident_cont }
 kw_continue = @{ "continue" ~ !ident_cont }
@@ -245,7 +246,12 @@ postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
                   | block_expr
                   | postfix_index
                   | "?"
+                  | keyed_field
                   | sp ~ "." ~ h ~ field_name ) }
+// The comptime-keyed field read `x.[name]` (the comptime field seam):
+// a dot immediately followed by the bracketed constant name expression,
+// disjoint from the plain `xs[i]` index by its dot.
+keyed_field = { sp ~ "." ~ h ~ postfix_index }
 postfix_index = { "[" ~ sp ~ ctor_arg ~ sp ~ "]" }
 // A keyword is a legal field name after `.` (the record uses `f.type`).
 
@@ -314,7 +320,10 @@ guard = { h ~ kw_if ~ sp ~ expr }
 arm_body = { block_expr | expr }
 
 while_expr = { kw_while ~ sp ~ expr_nos ~ sp ~ block_expr }
-for_expr = { kw_for ~ sp ~ (for_paren | for_plain) }
+// `for comptime` is the expansion loop over a written struct's fields
+// (the comptime field seam); the plain loop keeps its shape. The flag
+// precedes the pattern, so a binding may no longer spell `comptime`.
+for_expr = { kw_for ~ sp ~ kw_comptime? ~ sp ~ (for_paren | for_plain) }
 for_plain = { pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ block_expr }
 for_paren = { "(" ~ sp ~ pattern ~ sp ~ kw_in ~ sp ~ expr_nos ~ sp ~ ")" ~ sp ~ for_body }
 for_body = { block_expr | expr_nos }
@@ -364,6 +373,7 @@ nos_postfix = { primary_nos ~ nos_postfix_op* }
 nos_postfix_op = { h ~ ( "(" ~ sp ~ args ~ sp ~ ")"
                       | postfix_index
                       | "?"
+                      | keyed_field
                       | sp ~ "." ~ h ~ field_name ) }
 primary_nos = { lambda | list_lit | paren_tuple | control | literal | block_expr | path_atom }
 

@@ -662,6 +662,11 @@ fn norm_expr(e: &mut Expr) {
             norm_expr(recv);
             norm_ident(name);
         },
+        Expr::FieldKey { span, recv, name } => {
+            z(span);
+            norm_expr(recv);
+            norm_expr(name);
+        },
         Expr::List { span, items } => {
             z(span);
             for i in items {
@@ -748,6 +753,7 @@ fn norm_expr(e: &mut Expr) {
             pat,
             iter,
             body,
+            ..
         } => {
             z(span);
             norm_pat(pat);

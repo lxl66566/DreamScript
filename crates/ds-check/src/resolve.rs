@@ -2353,6 +2353,14 @@ impl FileResolver<'_> {
                     self.expr(recv);
                 }
             },
+            Expr::FieldKey { recv, name, .. } => {
+                // The keyed access resolves like a field read: the
+                // receiver as a value, the bracketed constant as an
+                // ordinary expression (the comptime record's member
+                // projection).
+                self.expr(recv);
+                self.expr(name);
+            },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv);
                 self.expr(index);

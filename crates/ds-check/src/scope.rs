@@ -382,6 +382,10 @@ impl Walker<'_> {
                 }
             },
             Expr::Field { recv, .. } => self.expr(recv),
+            Expr::FieldKey { recv, name, .. } => {
+                self.expr(recv);
+                self.expr(name);
+            },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv);
                 self.expr(index);

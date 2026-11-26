@@ -1,0 +1,80 @@
+// purpose: the comptime field seam end to end over the real ambient —
+// `for comptime f in fields(t)` unrolls over a written struct's fields,
+// the record binder's `name` member a string constant each copy and the
+// keyed access `x.[f.name]` a fixed field offset, the copies running in
+// sequence (the sum threads, the writes land, the string accumulation
+// concatenates in field order). The rows pin the int accumulation, the
+// keyed writes, the name constants in order, a struct whose own field
+// is literally `name` (the record projection and the field access share
+// the spelling), the nested loops' 2x2 count, the loop inside a plain
+// fn and inside a generic fn (one instance per entering shape, the
+// concrete loop riding each), and the loop inside a member body; every
+// row prints twice through the same helper to pin the served and fresh
+// agreement.
+struct nums { a: int, b: int, c: int }
+
+struct rec { name: string, unit: string }
+
+fn sum_keyed (p: nums) -> int {
+  var total = 0
+  for comptime f in fields(nums) {
+    total += p.[f.name]
+  }
+  total
+}
+
+fn write_all (p: nums) -> int {
+  var q = p
+  for comptime f in fields(nums) {
+    q.[f.name] = 9
+  }
+  q.a + q.b + q.c
+}
+
+fn names () -> string {
+  var out = ""
+  for comptime f in fields(nums) {
+    out += f.name
+  }
+  out
+}
+
+fn nested () -> int {
+  var count = 0
+  for comptime f in fields(nums) {
+    for comptime g in fields(nums) {
+      count += 1
+    }
+  }
+  count
+}
+
+fn twice[t] (x: t) -> int {
+  var acc = 0
+  for comptime f in fields(nums) {
+    acc += 1
+  }
+  acc * 2
+}
+
+fn rec_rows () -> () {
+  const r = rec { name: "n", unit: "u" }
+  var text = ""
+  var width = 0
+  for comptime f in fields(rec) {
+    text += r.[f.name]
+    width += 1
+  }
+  println(text)
+  println(width.show())
+}
+
+fn main() -> () {
+  println(sum_keyed(nums { a: 3, b: 4, c: 5 }).show())
+  println(write_all(nums { a: 1, b: 2, c: 3 }).show())
+  println(names())
+  println(nested().show())
+  println(twice(3).show())
+  println(twice(5).show())
+  rec_rows()
+}

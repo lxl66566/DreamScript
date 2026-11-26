@@ -555,6 +555,10 @@ impl<'v, V: Visit> Walk<'v, V> {
                 }
             },
             Expr::Field { recv, .. } => self.expr(recv),
+            Expr::FieldKey { recv, name, .. } => {
+                self.expr(recv);
+                self.expr(name);
+            },
             Expr::Binary { left, right, .. }
             | Expr::Range {
                 start: left,

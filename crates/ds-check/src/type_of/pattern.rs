@@ -566,7 +566,7 @@ impl Bodies<'_> {
                         .lookup_type_in(enum_file, case_name)
                         .or_else(|| self.decls.foreign_type(case_name))?;
                     let atom = self.decls.atoms.get(&case_def).copied()?;
-                    self.directed_tags.insert(tail.span, atom);
+                    self.record_directed_tag(tail.span, atom);
                     return Some(atom);
                 }
                 if matches!(
@@ -592,7 +592,7 @@ impl Bodies<'_> {
         let labeled = self.members_labeled(head_ty, &tail.name);
         match labeled.as_slice() {
             [one] => {
-                self.directed_tags.insert(tail.span, *one);
+                self.record_directed_tag(tail.span, *one);
                 Some(*one)
             },
             [] => {
@@ -695,7 +695,7 @@ impl Bodies<'_> {
             .collect();
         match labeled.as_slice() {
             [one] => {
-                self.directed_tags.insert(span, *one);
+                self.record_directed_tag(span, *one);
                 self.case_cover(span, *one, members, scrut, covered);
                 Some(())
             },

@@ -658,8 +658,10 @@ impl Visit for Walker<'_> {
                 }
             },
             // Bare field access records no resolution (the checker's
-            // type-directed work), so the member name stays plain.
+            // type-directed work), so the member name stays plain. The
+            // keyed spelling walks its bracketed constant like an index.
             Expr::Field { name, .. } => self.value_use(name),
+            Expr::FieldKey { .. } | Expr::Index { .. } => {},
             Expr::Try { span, expr } => self.between(expr.span().end, span.end, "?", Tok::Operator),
             Expr::Unary { span, op, expr } => self.between(
                 span.start,
@@ -717,7 +719,6 @@ impl Visit for Walker<'_> {
             Expr::Spawn { span, .. } => self.keyword(span.start, "spawn"),
             Expr::Defer { span, .. } => self.keyword(span.start, "defer"),
             Expr::Lambda { .. }
-            | Expr::Index { .. }
             | Expr::MapApply { .. }
             | Expr::List { .. }
             | Expr::Tuple { .. }

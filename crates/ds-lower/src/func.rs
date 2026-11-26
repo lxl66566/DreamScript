@@ -1293,7 +1293,7 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>, through_spawns: bool) {
                 cancel_operands_expr(&arg.value, out, through_spawns);
             }
         },
-        Expr::Field { recv, .. } | Expr::Index { recv, .. } => {
+        Expr::Field { recv, .. } | Expr::FieldKey { recv, .. } | Expr::Index { recv, .. } => {
             cancel_operands_expr(recv, out, through_spawns);
         },
         Expr::MapApply { key, value, .. } => {
@@ -1389,7 +1389,9 @@ fn stray_exit_expr(e: &Expr) -> Option<Span> {
         }),
         Expr::Call { callee, args, .. } => stray_exit_expr(callee)
             .or_else(|| args.iter().find_map(|arg| stray_exit_expr(&arg.value))),
-        Expr::Field { recv, .. } | Expr::Index { recv, .. } => stray_exit_expr(recv),
+        Expr::Field { recv, .. } | Expr::FieldKey { recv, .. } | Expr::Index { recv, .. } => {
+            stray_exit_expr(recv)
+        },
         Expr::MapApply { key, value, .. } => {
             stray_exit_expr(key).or_else(|| stray_exit_expr(value))
         },
@@ -1527,6 +1529,10 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
         Expr::Field { recv, name, .. } => {
             visit_uses(recv, visit);
             visit(name.span);
+        },
+        Expr::FieldKey { recv, name, .. } => {
+            visit_uses(recv, visit);
+            visit_uses(name, visit);
         },
         Expr::Index { recv, index, .. } => {
             visit_uses(recv, visit);
@@ -1911,6 +1917,10 @@ fn discover_expr(
             }
         },
         Expr::Field { recv, .. } => discover_expr(plan, found, ctx, recv)?,
+        Expr::FieldKey { recv, name, .. } => {
+            discover_expr(plan, found, ctx, recv)?;
+            discover_expr(plan, found, ctx, name)?;
+        },
         Expr::Index { recv, index, .. } => {
             discover_expr(plan, found, ctx, recv)?;
             discover_expr(plan, found, ctx, index)?;
@@ -2384,6 +2394,10 @@ impl PairWalk<'_> {
                 }
             },
             Expr::Field { recv, .. } => self.expr(recv),
+            Expr::FieldKey { recv, name, .. } => {
+                self.expr(recv);
+                self.expr(name);
+            },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv);
                 self.expr(index);
@@ -2615,6 +2629,15 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// so the cancel-containment proof belongs to the parent's spawn
     /// site instead of this frame.
     spawn_child: bool,
+    /// The active `for comptime` copy path while a copy's body lowers,
+    /// outer-to-inner copy indices; empty outside one. Every checked
+    /// record read routes through it: inside a copy the checker's facts
+    /// for the body live in the per-copy table.
+    comptime_path: Vec<u32>,
+    /// The enclosing `for comptime` loops' (loop span, record binder
+    /// span) pairs, innermost last; the copy's field name reads from the
+    /// loop's projected fields through the path depth.
+    comptime_stack: Vec<(Span, Span)>,
     /// Whether this frame is a `spawn` expression's child [E2]: the
     /// parent's spawn site owns the `cancel`-payload containment checks
     /// against the nursery-owning function's return union, so the child's
@@ -2806,6 +2829,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             capture_word: None,
             capture_index: HashMap::new(),
             spawn_child: planned.spawn_child,
+            comptime_path: Vec::new(),
+            comptime_stack: Vec::new(),
             unit_slot: None,
             value_ends: Vec::new(),
             cur_span: body.span(),
@@ -2869,16 +2894,152 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// walk lowers an instance exactly like a monomorphic body. A type
     /// naming a variable the discovery never resolved refuses here,
     /// re-spanned at the node, instead of lowering a variable's word.
-    fn val(&self, span: Span) -> Result<Val, LowerError> {
-        let val = self
-            .analyzed
+    /// The copy record at one span: inside a `for comptime` copy the
+    /// checker's facts for the body live in the per-copy table keyed by
+    /// the copy path; outside one, none exists.
+    fn copy_val(&self, span: Span) -> Option<Val> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
             .checked
-            .expr_types
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.val)
+    }
+
+    fn copy_binder(&self, span: Span) -> Option<BinderFact> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.binder)
+    }
+
+    fn copy_trait_call(&self, span: Span) -> Option<TraitCall> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.trait_call.clone())
+    }
+
+    fn copy_is_test(&self, span: Span) -> Option<Ty> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.is_test)
+    }
+
+    fn copy_generic_call(&self, span: Span) -> Option<Vec<Ty>> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.generic_call.clone())
+    }
+
+    fn copy_member_params(&self, span: Span) -> Option<Vec<Ty>> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.member_params.clone())
+    }
+
+    fn copy_handler_handled(&self, span: Span) -> Option<Ty> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.handler_handled)
+    }
+
+    fn copy_place_store(&self, span: Span) -> Option<PlaceStore> {
+        if self.comptime_path.is_empty() {
+            return None;
+        }
+        self.analyzed
+            .checked
+            .comptime_records
+            .get(&(self.comptime_path.clone(), span))
+            .and_then(|rec| rec.place_store.clone())
+    }
+
+    /// The directed label's atom at one span, the copy-active read.
+    fn directed_tag(&self, span: Span) -> Option<TypeId> {
+        if !self.comptime_path.is_empty() {
+            if let Some(atom) = self
+                .analyzed
+                .checked
+                .comptime_records
+                .get(&(self.comptime_path.clone(), span))
+                .and_then(|rec| rec.directed_tag)
+            {
+                return Some(atom);
+            }
+        }
+        self.analyzed.checked.directed_tags.get(&span).copied()
+    }
+
+    /// The hole's solved show dispatch at one span, the copy-active read.
+    fn hole_show_method(&self, span: Span) -> Option<MethodId> {
+        if !self.comptime_path.is_empty() {
+            if let Some(method) = self
+                .analyzed
+                .checked
+                .comptime_records
+                .get(&(self.comptime_path.clone(), span))
+                .and_then(|rec| rec.hole_show)
+            {
+                return Some(method);
+            }
+        }
+        self.analyzed
+            .checked
+            .hole_show_dispatches
             .get(&span)
             .copied()
-            .ok_or_else(|| {
-                LowerError::unsupported(span, "an expression", "it has no checked type")
-            })?;
+    }
+
+    fn val(&self, span: Span) -> Result<Val, LowerError> {
+        let val = if !self.comptime_path.is_empty() {
+            self.copy_val(span).ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    "an expression",
+                    "it has no checked type in the active copy",
+                )
+            })?
+        } else {
+            self.analyzed
+                .checked
+                .expr_types
+                .get(&span)
+                .copied()
+                .ok_or_else(|| {
+                    LowerError::unsupported(span, "an expression", "it has no checked type")
+                })?
+        };
         let ty = self
             .shapes
             .subst(val.ty)
@@ -2893,6 +3054,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// solved, so the decision reads the written type and the lens
     /// stays out of it.
     fn written_val(&self, span: Span) -> Result<Val, LowerError> {
+        if !self.comptime_path.is_empty() {
+            return self.copy_val(span).ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    "an expression",
+                    "it has no checked type in the active copy",
+                )
+            });
+        }
         self.analyzed
             .checked
             .expr_types
@@ -2906,7 +3076,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// refusal (`Err`) re-spans at the binder and never lowers a
     /// variable's word for an instance.
     fn binder_fact(&self, span: Span) -> Result<Option<BinderFact>, LowerError> {
-        let Some(fact) = self.analyzed.checked.binders.get(&span).copied() else {
+        let Some(fact) = self
+            .copy_binder(span)
+            .or_else(|| self.analyzed.checked.binders.get(&span).copied())
+        else {
             return Ok(None);
         };
         let ty = self
@@ -2931,7 +3104,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// The checked trait-call record at one span, its receiver type read
     /// through the lens.
     fn trait_call(&self, span: Span) -> Result<Option<TraitCall>, LowerError> {
-        let Some(call) = self.analyzed.checked.trait_calls.get(&span).cloned() else {
+        let Some(call) = self
+            .copy_trait_call(span)
+            .or_else(|| self.analyzed.checked.trait_calls.get(&span).cloned())
+        else {
             return Ok(None);
         };
         let recv = self
@@ -2945,12 +3121,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// runtime-evidence slot path's read, which peels the entering
     /// frame's own written variable.
     fn written_trait_call(&self, span: Span) -> Option<TraitCall> {
-        self.analyzed.checked.trait_calls.get(&span).cloned()
+        self.copy_trait_call(span)
+            .or_else(|| self.analyzed.checked.trait_calls.get(&span).cloned())
     }
 
     /// The checked `is`-test type at one span, read through the lens.
     fn is_test(&self, span: Span) -> Result<Option<Ty>, LowerError> {
-        let Some(ty) = self.analyzed.checked.is_tests.get(&span).copied() else {
+        let Some(ty) = self
+            .copy_is_test(span)
+            .or_else(|| self.analyzed.checked.is_tests.get(&span).copied())
+        else {
             return Ok(None);
         };
         Ok(Some(
@@ -2963,7 +3143,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// record names this body's variables, and the substitution is what
     /// the plan's discovery keyed the instance by.
     fn generic_call(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
-        let Some(solved) = self.analyzed.checked.generic_calls.get(&span).cloned() else {
+        let Some(solved) = self
+            .copy_generic_call(span)
+            .or_else(|| self.analyzed.checked.generic_calls.get(&span).cloned())
+        else {
             return Ok(None);
         };
         let solved = solved
@@ -2980,6 +3163,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// while a solved answer's type reaches the chain start through the
     /// lens at the staging itself.
     fn written_generic_call_bounds(&self, span: Span) -> Option<GenericCallBounds> {
+        if !self.comptime_path.is_empty() {
+            if let Some(bounds) = self
+                .analyzed
+                .checked
+                .comptime_records
+                .get(&(self.comptime_path.clone(), span))
+                .and_then(|rec| rec.generic_bounds.clone())
+            {
+                return Some(bounds);
+            }
+        }
         self.analyzed
             .checked
             .generic_call_bounds
@@ -2989,7 +3183,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The member call's solved parameter types, read through the lens.
     fn member_call_params(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
-        let Some(params) = self.analyzed.checked.member_call_params.get(&span).cloned() else {
+        let Some(params) = self
+            .copy_member_params(span)
+            .or_else(|| self.analyzed.checked.member_call_params.get(&span).cloned())
+        else {
             return Ok(None);
         };
         let params = params
@@ -3004,7 +3201,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// dispatch emits, the site's result type being unable to re-derive
     /// it once the handler's answer re-adds a handled member.
     fn handler_handled(&self, span: Span) -> Result<Option<Ty>, LowerError> {
-        let Some(set) = self.analyzed.checked.handler_handled.get(&span).copied() else {
+        let Some(set) = self
+            .copy_handler_handled(span)
+            .or_else(|| self.analyzed.checked.handler_handled.get(&span).copied())
+        else {
             return Ok(None);
         };
         Ok(Some(
@@ -3014,7 +3214,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// The checked assignment place chain, read through the lens.
     fn place_store(&self, span: Span) -> Result<Option<PlaceStore>, LowerError> {
-        let Some(store) = self.analyzed.checked.place_stores.get(&span).cloned() else {
+        let Some(store) = self
+            .copy_place_store(span)
+            .or_else(|| self.analyzed.checked.place_stores.get(&span).cloned())
+        else {
             return Ok(None);
         };
         let root_ty = self
@@ -4540,12 +4743,122 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     /// One `for x in it { body }`: the iterable is an int range or one
     /// list [F7]; every other iterable refuses.
+    /// The `for comptime` expansion loop: one straight-line copy per
+    /// projected field, the record binder recognized by span and every
+    /// checked record read keyed by the copy path. No loop machinery
+    /// exists at runtime — the copies run in sequence, each in its own
+    /// scope so its locals die at the copy's end.
+    fn for_comptime_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
+        let Expr::For {
+            pat, body, span, ..
+        } = e
+        else {
+            return Err(mismatch("the comptime loop"));
+        };
+        let Some(loop_info) = self.analyzed.checked.comptime_loops.get(span).cloned() else {
+            return Err(LowerError::unsupported(
+                *span,
+                "a `for comptime` loop",
+                "the checker projected no fields for it",
+            ));
+        };
+        let Pattern::Binding {
+            span: binder_span,
+            name: _,
+        } = pat
+        else {
+            return Err(LowerError::unsupported(
+                *span,
+                "a destructuring comptime pattern",
+                "the record binds one name",
+            ));
+        };
+        for index in 0..loop_info.fields.len() {
+            self.comptime_path
+                .push(u32::try_from(index).expect("copy index fits u32"));
+            self.comptime_stack.push((*span, *binder_span));
+            self.scope_push();
+            match &**body {
+                Expr::Block(block) => {
+                    for stmt in &block.stmts {
+                        self.stmt(stmt)?;
+                    }
+                },
+                other => {
+                    let tp = self.value(other)?;
+                    let words = self.discard_words(&tp.place, tp.ty, other.span())?;
+                    self.rc.discard(&mut self.code, &words);
+                },
+            }
+            self.scope_pop();
+            self.comptime_stack.pop();
+            self.comptime_path.pop();
+        }
+        Ok(self.unit_value(*span)?.place)
+    }
+
+    /// The comptime constant a keyed access's name expression spells:
+    /// exactly `<record binder>.name`, answering the field name of the
+    /// active copy at the binder's depth.
+    fn comptime_key_name(&self, name: &Expr) -> Option<String> {
+        let Expr::Field {
+            recv, name: member, ..
+        } = peel_parens(name)
+        else {
+            return None;
+        };
+        if member.name != "name" {
+            return None;
+        }
+        let Expr::Path { path, .. } = peel_parens(recv) else {
+            return None;
+        };
+        let [only] = path.segments.as_slice() else {
+            return None;
+        };
+        let Res::Local { bind } = self.res.get(only.span)? else {
+            return None;
+        };
+        let depth = self
+            .comptime_stack
+            .iter()
+            .rposition(|(_, binder)| binder == bind)?;
+        let (loop_span, _) = self.comptime_stack.get(depth).copied()?;
+        let fields = &self.analyzed.checked.comptime_loops.get(&loop_span)?.fields;
+        let index = *self.comptime_path.get(depth)?;
+        fields.get(index as usize).cloned()
+    }
+
+    /// The copy's field name when a receiver expression names an active
+    /// comptime record binder (`f` inside `for comptime f in ...`): the
+    /// binder's stack depth indexes the copy path.
+    fn comptime_record_name(&self, recv: &Expr) -> Option<String> {
+        let Expr::Path { path, .. } = peel_parens(recv) else {
+            return None;
+        };
+        let [only] = path.segments.as_slice() else {
+            return None;
+        };
+        let Res::Local { bind } = self.res.get(only.span)? else {
+            return None;
+        };
+        let depth = self
+            .comptime_stack
+            .iter()
+            .rposition(|(_, binder)| binder == bind)?;
+        let (loop_span, _) = self.comptime_stack.get(depth).copied()?;
+        let fields = &self.analyzed.checked.comptime_loops.get(&loop_span)?.fields;
+        let index = *self.comptime_path.get(depth)?;
+        fields.get(index as usize).cloned()
+    }
+
     fn for_value(&mut self, e: &Expr) -> Result<Place, LowerError> {
         let Expr::For {
             pat,
             iter,
             body,
             span,
+            ..
         } = e
         else {
             return Err(mismatch("a for loop"));
@@ -5138,7 +5451,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Expr::Match { .. } => self.match_value(e, val.ty)?,
             Expr::Struct { .. } => self.struct_literal(e, val.ty)?,
             Expr::Call { .. } => self.call_value(e, val.ty)?,
-            Expr::Field { .. } => self.field_access(e, val.ty)?,
+            Expr::Field { .. } | Expr::FieldKey { .. } => self.field_access(e, val.ty)?,
             Expr::Try { .. } => self.try_value(e, val.ty)?,
             Expr::Unary { op, expr, span } => self.unary(*op, expr, *span, val.ty)?,
             Expr::Binary { .. } => self.binary_value(e, val.ty)?,
@@ -5146,6 +5459,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Expr::Assign { .. } => self.assign_value(e)?,
             Expr::While { .. } => self.while_value(e)?,
             Expr::Return { .. } => return self.return_value(e),
+            Expr::For { comptime: true, .. } => self.for_comptime_value(e)?,
             Expr::For { .. } => self.for_value(e)?,
             Expr::Break(span) => self.break_value(*span)?,
             Expr::Continue(span) => self.continue_value(*span)?,
@@ -6420,13 +6734,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// an assumption-answered hole) the synthetic member call below
     /// resolves through.
     fn hole_show_dispatch(&self, span: Span) -> bool {
-        self.analyzed.checked.trait_calls.contains_key(&span)
+        self.hole_show_method(span).is_some()
+            || self.analyzed.checked.trait_calls.contains_key(&span)
             || self.analyzed.checked.inherent_calls.contains_key(&span)
-            || self
-                .analyzed
-                .checked
-                .hole_show_dispatches
-                .contains_key(&span)
     }
 
     /// One hole's `show` dispatch [F6]: the receiver wrapped as the
@@ -6511,7 +6821,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
 
     fn path_value(&mut self, path: &Path, span: Span, ty: Ty) -> Result<Place, LowerError> {
         if let [_head, tail] = path.segments.as_slice()
-            && let Some(&atom) = self.analyzed.checked.directed_tags.get(&tail.span)
+            && let Some(atom) = self.directed_tag(tail.span)
             && matches!(
                 self.res.get(tail.span),
                 Some(Res::Def(def))
@@ -6853,17 +7163,46 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// `x.f`: the member payload word, addressed through the receiver's
     /// checked (possibly refined) type.
     fn field_access(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {
-        let Expr::Field { recv, name, .. } = e else {
-            return Err(mismatch("a field access"));
+        // A written field and the comptime-keyed spelling share one
+        // resolution: the keyed form resolves the copy's field name from
+        // the active `for comptime` loop first, then lowers as that
+        // written access (the fixed offset the seam guarantees).
+        let (recv, field_name) = match e {
+            Expr::Field { recv, name, .. } => {
+                // A module alias's qualified const (G4): the checker bound the
+                // linked binding's def at the member's span, so the value embeds
+                // through the same literal fact the selection spelling lowers
+                // — no receiver word exists.
+                if let Some(&Res::Def(def)) = self.res.get(name.span)
+                    && let Some(fact) = self.analyzed.decls.foreign_consts.get(&def).cloned()
+                {
+                    return self.embed_const_fact(fact, static_ty, name.span);
+                }
+                (&**recv, name.name.as_str().to_owned())
+            },
+            Expr::FieldKey { recv, name, .. } => {
+                let Some(field_name) = self.comptime_key_name(name) else {
+                    return Err(LowerError::unsupported(
+                        name.span(),
+                        "a keyed field access",
+                        "the key names no active `for comptime` record's `name` member",
+                    ));
+                };
+                (&**recv, field_name)
+            },
+            _ => return Err(mismatch("a field access")),
         };
-        // A module alias's qualified const (G4): the checker bound the
-        // linked binding's def at the member's span, so the value embeds
-        // through the same literal fact the selection spelling lowers
-        // — no receiver word exists.
-        if let Some(&Res::Def(def)) = self.res.get(name.span)
-            && let Some(fact) = self.analyzed.decls.foreign_consts.get(&def).cloned()
-        {
-            return self.embed_const_fact(fact, static_ty, name.span);
+        // The comptime record binder's `name` member (`f.name`) is a
+        // string constant: the copy's own field name embeds from the
+        // pool, no receiver word exists.
+        if let Some(record_name) = self.comptime_record_name(recv) {
+            let dst = self.temp_word(SlotType::Ref)?;
+            let kidx = self.pool_str(&record_name);
+            self.kstr(dst, kidx);
+            return Ok(Place {
+                base: dst,
+                shape: PlaceShape::Word(SlotType::Ref),
+            });
         }
         let recv_val = self.value(recv)?;
         // the receiver's recorded type carries the refinement: a member
@@ -6881,13 +7220,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     .ok_or_else(|| mismatch("a union member field"))?;
                 fields
                     .iter()
-                    .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                    .find(|f| f.name.as_deref() == Some(field_name.as_str()))
                     .ok_or_else(|| mismatch("a union member field"))?
             },
             Shape::Struct(s) => s
                 .fields
                 .iter()
-                .find(|f| f.name.as_deref() == Some(name.name.as_str()))
+                .find(|f| f.name.as_deref() == Some(field_name.as_str()))
                 .ok_or_else(|| mismatch("a struct field"))?,
             Shape::Word(_) | Shape::Tuple(_) => return Err(mismatch("a field access")),
         };

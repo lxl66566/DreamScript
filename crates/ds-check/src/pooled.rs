@@ -799,6 +799,10 @@ fn walk_expr<'t>(expr: &'t Expr, on: &mut impl FnMut(Visit<'t>)) {
             }
         },
         Expr::Field { recv, .. } => walk_expr(recv, on),
+        Expr::FieldKey { recv, name, .. } => {
+            walk_expr(recv, on);
+            walk_expr(name, on);
+        },
         Expr::Index { recv, index, .. } => {
             walk_expr(recv, on);
             walk_expr(index, on);

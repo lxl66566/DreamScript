@@ -208,6 +208,7 @@ where
         decls,
         facts: &checked.binders,
         def_types: &checked.def_types,
+        loops: &checked.comptime_loops,
         res: resolutions.first(),
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
@@ -310,6 +311,7 @@ where
         decls,
         facts: &checked.binders,
         def_types: &checked.def_types,
+        loops: &checked.comptime_loops,
         res: resolutions.first(),
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
@@ -567,6 +569,15 @@ struct StateUndo {
     prev: Option<State>,
 }
 
+/// The test-side walk's loop table: its fixtures declare no `for
+/// comptime` loops.
+#[cfg(test)]
+fn empty_loops() -> &'static FxHashMap<Span, crate::type_of::ComptimeLoop> {
+    static EMPTY: std::sync::OnceLock<FxHashMap<Span, crate::type_of::ComptimeLoop>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(FxHashMap::default)
+}
+
 /// The forward walker. One instance covers one package; top-level
 /// bindings' states persist across items so a value consumed in one item
 /// and used in another is still a move (G3, C1).
@@ -575,6 +586,9 @@ struct Lin<'a> {
     decls: &'a Decls,
     facts: &'a HashMap<Span, BinderFact>,
     def_types: &'a FxHashMap<DefId, Ty>,
+    /// The `for comptime` loops' projected fields, keyed by the loop's
+    /// own span: a copy walks once per field, straight-line.
+    loops: &'a FxHashMap<Span, crate::type_of::ComptimeLoop>,
     res: Option<&'a Resolutions>,
     /// The interpolation holes whose `show` the checker solved at their
     /// own span (F6): the solved dispatch, read for the receiver's
@@ -1185,6 +1199,17 @@ impl<'a> Lin<'a> {
                 let transfers = self.projection_transfers(recv, name, consuming);
                 self.expr(recv, transfers)
             },
+            // The keyed access reads the receiver by the same rule; the
+            // bracketed constant projects the comptime record, whose
+            // member is a string constant (no binding use). The field is
+            // a per-copy fact, so a consuming read conservatively
+            // transfers when any field of the receiver's shape could.
+            Expr::FieldKey { recv, name, .. } => {
+                let transfers = consuming && self.keyed_transfers(recv);
+                self.expr(recv, transfers);
+                self.expr(name, false);
+                false
+            },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv, consuming);
                 self.expr(index, true);
@@ -1226,8 +1251,12 @@ impl<'a> Lin<'a> {
             } => self.match_expr(scrutinee, arms),
             Expr::While { cond, body, .. } => self.while_expr(cond, body),
             Expr::For {
-                pat, iter, body, ..
-            } => self.for_expr(pat, iter, body),
+                pat,
+                iter,
+                body,
+                span,
+                ..
+            } => self.for_expr(pat, iter, body, *span),
             Expr::Return { expr, .. } => {
                 if let Some(expr) = expr {
                     let outer = self.escaping;
@@ -1495,6 +1524,46 @@ impl<'a> Lin<'a> {
         !all_copy
     }
 
+    /// The keyed access's consuming-transfer rule: true when any field
+    /// of the receiver's shape is linear (the read may transfer one),
+    /// false only when every field copies, undecidable shapes true.
+    fn keyed_transfers(&self, recv: &Expr) -> bool {
+        if self.epoch
+            > self
+                .place_of(recv)
+                .and_then(|place| self.info.get(&place).map(|info| info.epoch))
+                .unwrap_or(0)
+        {
+            return true;
+        }
+        let Some(ty) = self.place_of(recv).and_then(|place| self.place_ty(place)) else {
+            return true;
+        };
+        let mut any_linear = false;
+        for atom in self.decls.universe.members(ty) {
+            let Ok(decl) = self.decls.universe.atom_decl(*atom) else {
+                return true;
+            };
+            if decl.name.starts_with('$') {
+                return true;
+            }
+            match &decl.kind {
+                AtomKind::Struct(fields) => {
+                    for field in fields {
+                        any_linear |= !expr_copyable(
+                            self.decls,
+                            &field.ty,
+                            no_linear_vars(),
+                            &mut Vec::new(),
+                        );
+                    }
+                },
+                _ => return true,
+            }
+        }
+        any_linear
+    }
+
     fn place_ty(&self, place: Place) -> Option<Ty> {
         match place {
             Place::Local(span) => self.facts.get(&span).map(|fact| fact.ty),
@@ -1618,7 +1687,20 @@ impl<'a> Lin<'a> {
         false
     }
 
-    fn for_expr(&mut self, pat: &'a Pattern, iter: &'a Expr, body: &'a Expr) -> bool {
+    fn for_expr(&mut self, pat: &'a Pattern, iter: &'a Expr, body: &'a Expr, span: Span) -> bool {
+        // The comptime expansion loop runs its copies in sequence: each
+        // copy is one straight-line execution, the linear state threading
+        // across them (a copy's move stays moved), no back-edge audit.
+        if let Some(loop_info) = self.loops.get(&span) {
+            let _ = iter;
+            for _ in 0..loop_info.fields.len() {
+                self.scopes.push(Vec::new());
+                self.bind_pattern(pat);
+                self.expr(body, true);
+                self.drop_scope(body.span());
+            }
+            return false;
+        }
         // The iterable feeds a linear cursor: a consuming use (D3).
         self.expr(iter, true);
         let mark = self.undo.len();
@@ -1992,6 +2074,7 @@ mod tests {
             decls: &decls,
             facts: &checked.binders,
             def_types: &checked.def_types,
+            loops: empty_loops(),
             res: resolutions.first(),
             hole_dispatches: &checked.trait_calls,
             hole_inherents: &checked.inherent_calls,

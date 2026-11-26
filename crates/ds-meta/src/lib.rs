@@ -2032,6 +2032,10 @@ fn walk_expr(expr: &Expr, go: &mut dyn FnMut(&Expr)) {
             }
         },
         Expr::Field { recv, .. } => walk_expr(recv, go),
+        Expr::FieldKey { recv, name, .. } => {
+            walk_expr(recv, go);
+            walk_expr(name, go);
+        },
         Expr::Index { recv, index, .. } => {
             walk_expr(recv, go);
             walk_expr(index, go);

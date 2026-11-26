@@ -4068,6 +4068,7 @@ fn list_write(
             stmts: body,
             trailing_trivia: Vec::new(),
         })),
+        comptime: false,
     };
     let stmts = vec![local(mint, &out, empty, true), expr_stmt(walk)];
     let out_read = path_expr(&out, mint.span());

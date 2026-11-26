@@ -445,6 +445,22 @@ impl Ctx {
                 },
                 None => acc,
             },
+            Some(c) if c.as_rule() == Rule::keyed_field => {
+                match inner(&c).next() {
+                    // The bracketed constant name expression converts as
+                    // an ordinary expression; the checker admits only the
+                    // comptime loop record's name member.
+                    Some(index) => match inner(&index).next() {
+                        Some(arg) => Expr::FieldKey {
+                            span,
+                            recv: Box::new(acc),
+                            name: Box::new(self.bracket_arg(arg)),
+                        },
+                        None => acc,
+                    },
+                    None => acc,
+                }
+            },
             Some(c) if c.as_rule() == Rule::field_name => {
                 match inner(&c).next().map(|i| self.ident(i)) {
                     Some(name) => Expr::Field {
@@ -794,8 +810,10 @@ impl Ctx {
                 pat: Pattern::Wildcard(span),
                 iter: Box::new(Expr::Invalid(span)),
                 body: Box::new(Expr::Invalid(span)),
+                comptime: false,
             };
         };
+        let comptime = inner(&p).any(|c| c.as_rule() == Rule::kw_comptime);
         let mut pat = Pattern::Wildcard(span);
         let mut iter = None;
         let mut body = None;
@@ -813,6 +831,7 @@ impl Ctx {
             pat,
             iter: Box::new(iter.unwrap_or(Expr::Invalid(span))),
             body: Box::new(body.unwrap_or(Expr::Invalid(span))),
+            comptime,
         }
     }
 

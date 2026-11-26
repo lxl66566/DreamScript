@@ -1462,7 +1462,7 @@ impl FnLower<'_, '_, '_> {
                 // The directed probe (F9.5) may resolve an arm's bare label
                 // to another declaration's atom than the first namespace
                 // holder; the checker's record is the arm's truth.
-                if let Some(&atom) = self.analyzed.checked.directed_tags.get(&name.span) {
+                if let Some(atom) = self.directed_tag(name.span) {
                     return Ok(vec![atom]);
                 }
                 Ok(self.binding_atom(&name.name).into_iter().collect())
@@ -1537,7 +1537,7 @@ impl FnLower<'_, '_, '_> {
     fn pattern_head_atom(&self, path: &Path) -> Option<TypeId> {
         match path.segments.as_slice() {
             [only] => self.path_atom(&only.name),
-            [_head, tail] => self.analyzed.checked.directed_tags.get(&tail.span).copied(),
+            [_head, tail] => self.directed_tag(tail.span),
             _ => None,
         }
     }

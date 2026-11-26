@@ -220,6 +220,51 @@ fn body_types(analyzed: &Analyzed, generic: &GenericFn) -> Vec<Ty> {
             }
         }
     }
+    // The `for comptime` copies' per-span records: a copy's keyed reads
+    // type as its own field, so two shapes whose copies differ key
+    // different instances.
+    for ((_, at), rec) in &checked.comptime_records {
+        if !inside(*at) {
+            continue;
+        }
+        if let Some(val) = &rec.val {
+            out.push(val.ty);
+        }
+        if let Some(fact) = &rec.binder {
+            out.push(fact.ty);
+        }
+        if let Some(solved) = &rec.generic_call {
+            out.extend(solved.iter().copied());
+        }
+        if let Some(bounds) = &rec.generic_bounds {
+            out.extend(bounds.iter().map(|(_, _, _, ty)| *ty));
+        }
+        if let Some(call) = &rec.trait_call {
+            out.push(call.recv);
+        }
+        if let Some(params) = &rec.member_params {
+            out.extend(params.iter().copied());
+        }
+        if let Some(ty) = rec.is_test {
+            out.push(ty);
+        }
+        if let Some(store) = &rec.place_store {
+            out.push(store.root_ty);
+            for step in &store.steps {
+                match step {
+                    PlaceStep::Field { ty, .. } | PlaceStep::Index { elem: ty, .. } => {
+                        out.push(*ty);
+                    },
+                }
+            }
+        }
+        if let Some(ty) = rec.handler_handled {
+            out.push(ty);
+        }
+        // A copy's directed label atom is a TypeId, not a Ty — the
+        // label's tag use lowers through the same shapes the val records
+        // carry, so the key covers it transitively.
+    }
     out.sort_unstable_by_key(|ty: &Ty| ty.index());
     out.dedup();
     out

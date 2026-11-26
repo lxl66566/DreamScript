@@ -911,6 +911,18 @@ pub enum Expr {
         /// Index expression.
         index: Box<Expr>,
     },
+    /// Comptime-keyed field access `x.[name]` (the comptime field seam):
+    /// the bracketed name expression must be a `for comptime` record's
+    /// `name` member, each expansion resolving it to the field's fixed
+    /// offset. A written field keeps the plain `x.f` spelling.
+    FieldKey {
+        /// Span of `x.[name]`.
+        span: Span,
+        /// Receiver.
+        recv: Box<Expr>,
+        /// The comptime constant name expression.
+        name: Box<Expr>,
+    },
     /// The map constructor's type application `map[k, v]` (F9, B3): the
     /// one expression-position application with two type arguments, pinned
     /// to the head spelled `map` by the grammar — no other head takes a
@@ -1028,6 +1040,9 @@ pub enum Expr {
         body: BlockExpr,
     },
     /// `for pat in iter { body }` or `for (pat in iter) body` (F7).
+    /// The comptime flag spells `for comptime`: the loop expands once
+    /// per projected field at check time, the record's name a constant
+    /// each copy (the comptime field seam).
     For {
         /// Span of the whole expression.
         span: Span,
@@ -1037,6 +1052,9 @@ pub enum Expr {
         iter: Box<Expr>,
         /// Body.
         body: Box<Expr>,
+        /// `for comptime`: the expansion loop over a written struct's
+        /// fields; an ordinary loop leaves this false.
+        comptime: bool,
     },
     /// `return e?` — also the `or return e` tail (F2, E4).
     Return {
@@ -1096,6 +1114,7 @@ impl Expr {
             | Self::Call { span, .. }
             | Self::Field { span, .. }
             | Self::Index { span, .. }
+            | Self::FieldKey { span, .. }
             | Self::MapApply { span, .. }
             | Self::FnType { span, .. }
             | Self::Try { span, .. }

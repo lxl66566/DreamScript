@@ -1167,6 +1167,12 @@ impl Walker<'_, '_> {
                 ..
             } => self.call(callee, args, trailing.as_deref(), mask),
             Expr::Field { recv, name, .. } => self.field(recv, name, mask),
+            // The keyed access carries the receiver's read effects; the
+            // bracketed constant is an ordinary expression.
+            Expr::FieldKey { recv, name, .. } => {
+                self.expr(recv, mask);
+                self.expr(name, mask);
+            },
             Expr::Index { recv, index, .. } => {
                 self.expr(recv, mask);
                 self.expr(index, mask);

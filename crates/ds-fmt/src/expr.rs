@@ -256,7 +256,11 @@ fn prec(e: &Expr) -> u8 {
             BinaryOp::Mul | BinaryOp::WrapMul | BinaryOp::Div | BinaryOp::Rem => 13,
         },
         Expr::Unary { .. } => 14,
-        Expr::Call { .. } | Expr::Field { .. } | Expr::Index { .. } | Expr::Try { .. } => 15,
+        Expr::Call { .. }
+        | Expr::Field { .. }
+        | Expr::FieldKey { .. }
+        | Expr::Index { .. }
+        | Expr::Try { .. } => 15,
         _ => 16,
     }
 }
@@ -448,6 +452,15 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
             }
             out.push('.');
             out.push_str(&name.name);
+        },
+        Expr::FieldKey { recv, name, .. } => {
+            // The keyed spelling never breaks after the dot: the bracket
+            // belongs to the same access as the receiver.
+            write_expr_min(ctx, out, base, recv, 15);
+            out.push('.');
+            out.push('[');
+            write_expr(ctx, out, base, name);
+            out.push(']');
         },
         Expr::Index { recv, index, .. } => {
             write_expr_min(ctx, out, base, recv, 15);
