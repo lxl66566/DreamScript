@@ -5,14 +5,19 @@
 //! module minting more tag ids than the space below the platform's
 //! reserved top leaves refuses instead of wrapping into the reserved
 //! range where TAG_TEST dispatch would alias a platform discriminant.
+//! The frame cap's own edges sit beside them: u8 slot operands address
+//! 256 slots (indices 0-255), so a frame needing the full 256 words
+//! lowers, round-trips, installs, and runs, while a need of 257 refuses
+//! with the frame-cap diagnostic naming the true count.
 
 use std::fmt::Write;
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
-use ds_mod::Hash128;
+use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
+use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
 
 /// parse -> check -> lower, asserting the package checks clean; the
 /// lowering outcome is the caller's to inspect.
@@ -119,6 +124,88 @@ fn a_callable_value_call_staging_past_255_words_refuses_with_the_frame_error() {
     assert!(
         matches!(err, LowerError::FrameTooWide { .. }),
         "the staged width is a frame fact, not a crash: {err}"
+    );
+}
+
+/// `fn wide() -> int` binding `n` int constants then answering the first:
+/// each binding costs exactly one frame slot, so `wide`'s frame is `n`
+/// slots wide — the calibration the frame-cap edge tests below pin.
+fn bound_frame_source(n: usize) -> String {
+    let mut src = String::from("tag int\nfn wide() -> int {\n");
+    for i in 0..n {
+        let _ = writeln!(src, "  const a{i} = {i}");
+    }
+    src.push_str("  a0\n}\nfn main() -> int { wide() }\n");
+    src
+}
+
+/// The frame cap's passing edge: a frame needing the full 256 words
+/// u8 slot operands address lowers with the 256th slot hosting a word,
+/// then round-trips, installs, and runs — the cap is the frame width,
+/// never a need of 256 refused under a 256-slot name.
+#[test]
+fn a_frame_needing_the_full_256_slots_lowers_and_runs() {
+    let source = bound_frame_source(256);
+    let mut files = Files::new();
+    let id = files.add_source("frame_edge.ds", &source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "frame_edge",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("a 256-word frame lowers");
+    assert_eq!(
+        lowered
+            .module()
+            .functions()
+            .iter()
+            .map(|f| f.layout().slots().len())
+            .max(),
+        Some(256),
+        "the probe's widest frame is the cap itself"
+    );
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    assert_eq!(
+        vm.run("frame_edge", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
+}
+
+/// The frame cap's refusing edge: one word past the cap keeps the typed
+/// refusal, and the diagnostic reports the true need instead of the
+/// count where the check first fired.
+#[test]
+fn a_frame_needing_257_words_refuses_with_the_true_need() {
+    let Err(err) = lower_clean("frame_over", &bound_frame_source(257)) else {
+        panic!("a 257-word frame must refuse")
+    };
+    let LowerError::FrameTooWide { ref name, need } = err else {
+        panic!("the frame cap owns the refusal: {err}")
+    };
+    assert_eq!(name, "wide", "the refusing frame is the wide probe");
+    assert_eq!(need, 257, "the diagnostic names the true need");
+    assert_eq!(
+        err.to_string(),
+        "the frame of `wide` needs 257 slots, past the 256-slot cap"
     );
 }
 

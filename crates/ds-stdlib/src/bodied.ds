@@ -67,6 +67,17 @@
 // fold's init parameter to one-word element types through this
 // spelling (the multi-word fold keeps its seam-level coverage until the
 // generic-body staging seam widens, todo item 81's residuals).
+//
+// The seeded PRNG (splitmix64): the stream state is one int the caller
+// holds — `rand_next` the pure state step (one wrapping add), `rand`
+// the draw following a seed (the mix over the advanced state, so a
+// stream reads `rand(s)` beside `s = rand_next(s)`), and `rand_seed`
+// stepping the wall clock into a fresh state. The mixer's shifts are
+// unsigned facts the core's `>>` cannot spell alone (the i64 shift is
+// sign-propagating, B7), so each xor operand masks the shifted word
+// back to its logical bits — the mask a no-op when the shifted word
+// carries no sign. The int spellings of the mixer's unsigned constants
+// ride as negative literals (the i64 range the literals carry).
 pub fn max (a: int, b: int) -> int {
   if a < b { b } else { a }
 }
@@ -181,4 +192,16 @@ pub fn par_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r] {
 }
 pub fn par_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t {
   fork_reduce(xs, init, f)
+}
+pub fn rand_next (seed: int) -> int {
+  seed +% -7046029254386353131
+}
+pub fn rand (seed: int) -> int {
+  var z = rand_next(seed)
+  z = (z ^ ((z >> 30) & 17179869183)) *% -4658895280553007687
+  z = (z ^ ((z >> 27) & 137438953471)) *% -7723592293110705685
+  z ^ ((z >> 31) & 8589934591)
+}
+pub fn rand_seed () -> int {
+  rand_next(time())
 }

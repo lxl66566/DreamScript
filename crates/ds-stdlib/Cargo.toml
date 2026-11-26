@@ -25,10 +25,16 @@ postcard = { workspace = true, optional = true }
 serde    = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The blob generator example and the drift gate build against this crate
+# the PRNG e2e pin runs the ambient's members through the real
+# pipeline (lower, round-trip, VM): the dev-only cycle through the
+# lowerer (whose own ambient seams this crate's sources feed) keeps
+# the execution pin beside the members it pins
+ds-lower  = { path = "../ds-lower" }
+# the blob generator example and the drift gate build against this crate
 # with its own feature on: the self-dependency unions the feature into
 # every test and example target.
 ds-stdlib = { path = ".", features = ["ast-serde"] }
+ds-vm     = { path = "../ds-vm" }
 
 [features]
 # The precompiled ambient AST blob's decode path: postcard over ds-parse's

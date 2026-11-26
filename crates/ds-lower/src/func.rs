@@ -14,7 +14,9 @@ use std::{
     rc::Rc,
 };
 
-use ds_abi::{BoundRet, BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop};
+use ds_abi::{
+    BoundRet, BuiltinInstance, ConstIdx, RcOp, SlotType, Staging, Uop, uop::MAX_FRAME_SLOTS,
+};
 use ds_check::{
     Analyzed, AtomKind, BinderFact, ConstFact, DefId, DotRes, Extraction, GenericCallBounds,
     InherentCallBounds, InstanceId, MethodId, MethodOwner, Res, Resolutions, TraitCall, TraitId,
@@ -2579,13 +2581,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn alloc(&mut self, words: &[SlotType]) -> Result<u8, LowerError> {
         let base = self.slots.len();
         self.slots.extend_from_slice(words);
-        if self.slots.len() > usize::from(u8::MAX) {
+        if self.slots.len() > usize::from(MAX_FRAME_SLOTS) {
             return Err(LowerError::FrameTooWide {
                 name: self.name.clone(),
                 need: self.slots.len(),
             });
         }
-        Ok(u8::try_from(base).expect("guarded by the FrameTooWide check"))
+        // A zero-word span has no addressable slot, and a full frame's
+        // base (256) is past u8; the nominal base clamps to slot 0, which
+        // no op of the empty span ever references.
+        Ok(u8::try_from(base).unwrap_or(0))
     }
 
     fn temp_word(&mut self, slot: SlotType) -> Result<u8, LowerError> {
@@ -8117,7 +8122,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .unwrap_or(SlotType::Raw);
             overlay_words.push(slot);
         }
-        if body_len + overlay_words.len() > usize::from(u8::MAX) {
+        if body_len + overlay_words.len() > usize::from(MAX_FRAME_SLOTS) {
             return Err(LowerError::FrameTooWide {
                 name: self.name.clone(),
                 need: body_len + overlay_words.len(),

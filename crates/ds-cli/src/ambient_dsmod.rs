@@ -189,11 +189,11 @@ mod tests {
         );
         assert_eq!(
             served.functions.last().map(ds_mod::Function::name),
-            Some("par_reduce"),
+            Some("rand_seed"),
             "each struct's deinit plans right after its own item, so a growing module's\ntable \
              ends on its last item's entries and stays append-stable under live-frame swaps (the \
-             merged composition's tail is the @std bodied file's pooled pair, its last record the \
-             par_reduce body)",
+             merged composition's tail is the @std bodied file's PRNG family, its last record the \
+             rand_seed body)",
         );
         assert!(
             served

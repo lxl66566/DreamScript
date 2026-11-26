@@ -709,11 +709,13 @@ dependencies = [
  "ds-check",
  "ds-diag",
  "ds-dsi",
+ "ds-lower",
  "ds-meta",
  "ds-mod",
  "ds-parse",
  "ds-pkg",
  "ds-stdlib",
+ "ds-vm",
  "postcard",
  "serde",
 ]

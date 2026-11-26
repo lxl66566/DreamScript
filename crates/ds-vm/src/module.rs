@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
-use ds_abi::{BoundRet, EntryDescriptor, Inst, InstDecodeError, Uop};
+use ds_abi::{BoundRet, EntryDescriptor, Inst, InstDecodeError, Uop, uop::MAX_FRAME_SLOTS};
 
 use crate::{
     bound::BoundModule,
@@ -19,10 +19,10 @@ pub enum ModuleBuildError {
     DuplicateFunction(String),
     /// A function's pool exceeds the u16 index space the encoding addresses.
     PoolTooLarge { func: String, len: usize },
-    /// A function's frame exceeds the u8 slot space the ISA addresses —
-    /// the same width limit the lowerer enforces, caught here so a
-    /// producer bypassing ds-lower fails at load instead of panicking at
-    /// a slot operand.
+    /// A function's frame exceeds the 256-slot cap the ISA's u8 slot
+    /// operands address — the same width limit the lowerer enforces,
+    /// caught here so a producer bypassing ds-lower fails at load instead
+    /// of panicking at a slot operand.
     FrameTooWide {
         /// The function whose layout is too wide.
         func: String,
@@ -372,8 +372,9 @@ fn validate_body(def: &FunctionDef) -> Result<(), ModuleBuildError> {
             len: def.pool.len(),
         });
     }
-    // slot operands are u8-encoded: a wider frame could never be addressed
-    if def.layout.slots().len() > usize::from(u8::MAX) {
+    // slot operands are u8: the cap is 256 slots (indices 0-255), and a
+    // wider frame could never be fully addressed
+    if def.layout.slots().len() > usize::from(MAX_FRAME_SLOTS) {
         return Err(ModuleBuildError::FrameTooWide {
             func: def.name.clone(),
             slots: def.layout.slots().len(),
@@ -1160,23 +1161,24 @@ mod tests {
     }
 
     #[test]
-    fn frames_past_the_u8_slot_space_are_rejected_at_load() {
-        // slot operands are u8-encoded: a producer bypassing ds-lower's
-        // width check fails here, never at a runtime slot conversion
+    fn frames_past_the_slot_space_are_rejected_at_load() {
+        // slot operands are u8: a producer bypassing ds-lower's width
+        // check fails here, never at a runtime slot conversion
         let mut def = empty_def("wide");
         def.layout =
-            ds_abi::FrameLayout::new(vec![SlotType::I64; 256], 0, 0).expect("valid layout");
+            ds_abi::FrameLayout::new(vec![SlotType::I64; 257], 0, 0).expect("valid layout");
         assert_eq!(
             ModuleVersion::new("m", vec![def]).unwrap_err(),
             ModuleBuildError::FrameTooWide {
                 func: "wide".into(),
-                slots: 256,
+                slots: 257,
             }
         );
-        // u8::MAX slots is the widest addressable frame and loads
+        // the cap itself (256 slots, u8-indexed 0-255) is the widest
+        // addressable frame and loads
         let mut def = empty_def("edge");
         def.layout =
-            ds_abi::FrameLayout::new(vec![SlotType::I64; 255], 0, 0).expect("valid layout");
+            ds_abi::FrameLayout::new(vec![SlotType::I64; 256], 0, 0).expect("valid layout");
         assert!(ModuleVersion::new("m", vec![def]).is_ok());
     }
 

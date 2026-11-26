@@ -540,3 +540,140 @@ fn a_std_declared_root_refuses_the_combinator_link() {
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
+
+/// The PRNG family's program text: the fixed-seed splitmix64 stream
+/// over the bare spellings, three draws from state 0.
+const PRNG_MAIN: &str = concat!(
+    "fn main() -> int {\n",
+    "  var s = 0\n",
+    "  var i = 0\n",
+    "  while i < 3 {\n",
+    "    println(\"${rand(s)}\")\n",
+    "    s = rand_next(s)\n",
+    "    i += 1\n",
+    "  }\n",
+    "  0\n",
+    "}\n",
+);
+const PRNG_OUT: &str = concat!(
+    "-2152535657050944081\n",
+    "7960286522194355700\n",
+    "487617019471545679\n",
+    "0\n",
+);
+
+/// The seeded PRNG runs through a bare script's session (the family
+/// composed back beside the shrunk core), cold and warm under the same
+/// deterministic answer.
+#[test]
+fn the_prng_runs_through_the_bare_script() {
+    let file = script("prng", PRNG_MAIN);
+    let entry = file.to_str().expect("temp path is UTF-8");
+    let cold = run(&["run", entry]);
+    assert_eq!(
+        cold.status.code(),
+        Some(0),
+        "the cold run exits 0: {}",
+        text(&cold.stderr)
+    );
+    assert_eq!(text(&cold.stdout), PRNG_OUT, "the cold run answers");
+    let warm = run(&["run", entry]);
+    assert_eq!(warm.status.code(), Some(0), "the warm run exits 0");
+    assert_eq!(
+        text(&warm.stdout),
+        PRNG_OUT,
+        "the warm run answers identically"
+    );
+    fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
+}
+
+/// The std-declared root keeps the boundary over the PRNG family too:
+/// a bare use over the shrunk core refuses as an unknown name, while
+/// the linked import binds the int-returning family (the scalar word
+/// shape a linked call binds) and answers the same deterministic
+/// stream.
+#[test]
+fn a_std_declared_root_refuses_bare_prng_and_binds_the_link() {
+    // the bare spelling refuses over the core
+    let bare = write_root("prng-core", &std_manifest(), &[(
+        "app.ds",
+        "fn main() -> int {\n  rand(0)\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&bare)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the bare use over the core refuses"
+    );
+    assert!(
+        text(&out.stderr).contains("unknown name `rand`"),
+        "the refusal names the missing member: {}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(&bare).expect("the temp tree removes");
+
+    // the linked import binds the family: the pure pair answering the
+    // deterministic stream over the link
+    let linked = write_root("prng-link", &std_manifest(), &[(
+        "app.ds",
+        concat!(
+            "import @std (rand, rand_next)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  var s = 0\n",
+            "  var i = 0\n",
+            "  while i < 3 {\n",
+            "    println(\"${rand(s)}\")\n",
+            "    s = rand_next(s)\n",
+            "    i += 1\n",
+            "  }\n",
+            "  0\n",
+            "}\n",
+        ),
+    )]);
+    let out = run(&["run", &entry_of(&linked)]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the linked run exits 0: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        text(&out.stdout),
+        PRNG_OUT,
+        "the PRNG family answers over the link"
+    );
+    fs::remove_dir_all(&linked).expect("the temp tree removes");
+
+    // the time-stepped seed binds too: the world-carrying member runs
+    // over the link (the wall-clock native routing by name), its value
+    // the clock's — the run and its int rendering are the pin, never
+    // the value
+    let seeded = write_root("prng-seed-link", &std_manifest(), &[(
+        "app.ds",
+        concat!(
+            "import @std (rand, rand_seed)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  println(\"${rand(rand_seed())}\")\n",
+            "  0\n",
+            "}\n",
+        ),
+    )]);
+    let out = run(&["run", &entry_of(&seeded)]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the time-stepped linked run exits 0: {}",
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stdout)
+            .lines()
+            .next()
+            .is_some_and(|line| line.parse::<i64>().is_ok()),
+        "the time-stepped draw renders an int over the link: {}",
+        text(&out.stdout)
+    );
+    fs::remove_dir_all(&seeded).expect("the temp tree removes");
+}
