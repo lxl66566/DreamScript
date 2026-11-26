@@ -1550,6 +1550,7 @@ impl[t] chan[t] {
 ```ds
 impl[t] list[t] {
   fn get(self, i: int) -> t | none
+  fn contains(self, x: t) -> bool
   fn set(mut self, i: int, x: t) -> list[t]
   fn push(mut self, x: t) -> list[t]
   fn insert(mut self, i: int, x: t) -> list[t]

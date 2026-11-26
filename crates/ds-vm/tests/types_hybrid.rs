@@ -40,16 +40,16 @@ use ds_vm::{
         BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH, BUILTIN_COLLECT, BUILTIN_CONS,
         BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD,
         BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_CLEAR,
-        BUILTIN_LIST_CONCAT, BUILTIN_LIST_EQ, BUILTIN_LIST_GET, BUILTIN_LIST_INSERT,
-        BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH, BUILTIN_LIST_REMOVE,
-        BUILTIN_LIST_SET, BUILTIN_MAP, BUILTIN_MAP_CONTAINS, BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ,
-        BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET,
-        BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
-        BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
-        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND, BUILTIN_SORT, BUILTIN_STR_BOOL,
-        BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL,
-        BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF,
-        BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
+        BUILTIN_LIST_CONCAT, BUILTIN_LIST_CONTAINS, BUILTIN_LIST_EQ, BUILTIN_LIST_GET,
+        BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+        BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_MAP, BUILTIN_MAP_CONTAINS,
+        BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
+        BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY,
+        BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
+        BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND,
+        BUILTIN_SORT, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH,
+        BUILTIN_STR_INT, BUILTIN_TAIL, BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TOTAL_COMPARE,
+        BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
     },
     platform::{
         OP_CLOSE_RAW, OP_COUNT, OP_HTTP_GET, OP_NET_CONNECT, OP_NET_RECV, OP_OPEN_FILE, OP_PRINT,
@@ -1160,9 +1160,14 @@ fn both_native_modules_are_installed_and_resolvable() {
         reg.resolve_native("builtin", BUILTIN_CHAN_RECV_DEADLINE)
             .is_some()
     );
+    // the list membership read (110): the `xs.contains(x)` member's seam
     assert!(
-        reg.resolve_native("builtin", 110).is_none(),
-        "110 table entries: the core's, the list block, the fiber pair, the push, the map
+        reg.resolve_native("builtin", BUILTIN_LIST_CONTAINS)
+            .is_some()
+    );
+    assert!(
+        reg.resolve_native("builtin", 111).is_none(),
+        "111 table entries: the core's, the list block, the fiber pair, the push, the map
      block, the generic container closes, the reentrant combinators, the nursery seams, the
      join, the partition, the fork-join combinator, the fork-join fold, the float sort key,
      the string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1174,7 +1179,7 @@ fn both_native_modules_are_installed_and_resolvable() {
      channel's intercepted send/recv/construct triple, the ord-routed list sort's reserved
      slot, the collection member round, the arena face's construct/store/remove/read seams,
      the timer race's intercepted timeout seam, the channel deadlines' intercepted
-     deadline twin seams"
+     deadline twin seams, the list membership read"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

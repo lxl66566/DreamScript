@@ -28,6 +28,8 @@ const PRELUDE: &str = concat!(
     "\n",
     "extern fn println (msg: string) -> ()\n",
     "extern fn len[t] (xs: t) -> int\n",
+    "extern fn list_contains[t] (xs: list[t], x: t) -> bool\n",
+    "impl[t] list[t] { fn contains (self, x: t) -> bool }\n",
     "\n",
 );
 
@@ -182,7 +184,7 @@ fn a_deinit_claim_in_a_cond_fires_once_past_the_loop() {
 }
 
 /// The composed shapes: a while inside a for-in body (the cond operand
-/// is a per-outer-iteration const), a membership scan inside the cond,
+/// is a per-outer-iteration const), a membership read inside the cond,
 /// and a for-in inside a while body — the two rounds' placements nest
 /// without double-dropping or leaking.
 const COMPOSED: &str = concat!(
@@ -199,7 +201,7 @@ const COMPOSED: &str = concat!(
     "  }\n",
     "  var hits: int = 0\n",
     "  var j: int = 0\n",
-    "  while \"beta\" in words && j < 2 {\n",
+    "  while words.contains(\"beta\") && j < 2 {\n",
     "    hits += 1\n",
     "    j += 1\n",
     "  }\n",
@@ -219,7 +221,7 @@ const COMPOSED: &str = concat!(
 );
 
 #[test]
-fn while_conds_compose_with_for_in_bodies_and_membership_scans() {
+fn while_conds_compose_with_for_in_bodies_and_membership_reads() {
     acceptance(
         "while_cond_composed",
         &format!("{PRELUDE}{COMPOSED}"),

@@ -522,6 +522,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "list_push" => {
                 Some((1usize, "a list_push element"))
             },
+            Callee::Builtin(native) if native.name == "list_contains" => {
+                Some((1usize, "a list_contains element"))
+            },
             Callee::Builtin(native) if native.name == "list_set" => {
                 Some((2usize, "a list_set element"))
             },

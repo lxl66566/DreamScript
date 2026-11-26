@@ -161,7 +161,7 @@ error_codes! {
     LowercaseSelfType => "DS2015", Type,
     /// The receiver parameter carries an annotation; spell it `self` or `mut self`.
     AnnotatedReceiver => "DS2016", Type,
-    /// `in` right-hand side is neither a range nor a list; membership over other collections refuses.
+    /// `in` right-hand side is not a range; membership is range-only, the list spelling the member call `xs.contains(x)`.
     NonRangeIn => "DS2017", Type,
     /// An impl member's signature disagrees with its trait member's arity, parameter modes, parameter types, or return.
     ImplMemberSignatureMismatch => "DS2018", Type,

@@ -412,6 +412,10 @@ pub const BUILTIN_TIMEOUT: u32 = 107;
 pub const BUILTIN_CHAN_SEND_DEADLINE: u32 = 108;
 /// `chan_recv_deadline(ch, nanos)`: the bounded channel's deadline recv, the loser the same member.
 pub const BUILTIN_CHAN_RECV_DEADLINE: u32 = 109;
+/// `list_contains (xs: list, x: element words) -> bool` — the list membership read, no element
+/// handed out, variadic at the element span. The member tier's `list[t].contains` routes here; the
+/// probe compares against every element through the structural content walk (`list_eq`'s judge).
+pub const BUILTIN_LIST_CONTAINS: u32 = 110;
 
 // The comptime reflection module's rows.
 
@@ -1448,6 +1452,17 @@ pub const NATIVES: &[Native] = &[
             fail_payload: SlotType::I64,
             family: FailureClasses::TimedOut,
         },
+    },
+    // the list membership read: the probe's whole element span against every element, the
+    // structural content walk the `==` chain's list compare serves
+    Native {
+        name: "list_contains",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_LIST_CONTAINS,
+        params: &[SlotType::Ref, SlotType::Raw],
+        variadic: true,
+        shape: NativeShape::Total(SlotType::Bool),
     },
     Native {
         name: "fields",

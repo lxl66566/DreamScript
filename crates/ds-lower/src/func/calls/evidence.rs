@@ -277,6 +277,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let member = self.analyzed.package.method(method).name.as_str();
         let (native, window) = match (target.as_str(), member) {
             ("list", "get") => ("list_get", false),
+            ("list", "contains") => ("list_contains", false),
             ("list", "set") => ("list_set", true),
             ("list", "push") => ("list_push", true),
             ("list", "insert") => ("list_insert", true),

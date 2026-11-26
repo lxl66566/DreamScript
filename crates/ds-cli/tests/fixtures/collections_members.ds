@@ -2,8 +2,9 @@
 // indexed element store, splice, and removal over the mut windows (an
 // out-of-range store or removal trapping loud — the place must resolve,
 // no miss answer exists to extract), the stride-resetting emptying, the
-// map's row removal (a missing key a no-op), the membership read, and
-// the entry-order pair list with the removed rows' counts released.
+// map's row removal (a missing key a no-op), the membership reads (the
+// list probe and the map row), and the entry-order pair list with the
+// removed rows' counts released.
 
 fn main() -> () {
   var xs = [1, 2, 3]
@@ -15,6 +16,8 @@ fn main() -> () {
   zs.clear()
   zs.push(7)
   println("cleared ${zs.get(0).unwrap_or(-1)}")
+  var ys = ["a", "b"]
+  println("probed ${ys.contains("a")} ${ys.contains("z")}")
   var m = map[string, int]()
   m.set("one", 1)
   m.set("two", 2)

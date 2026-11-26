@@ -16,6 +16,7 @@ struct map[k, v]
 
 extern fn println (s: string) -> ()
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_contains[t] (xs: list[t], x: t) -> bool
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
 extern fn list_remove[t] (xs: mut list[t], i: int) -> ()
@@ -31,6 +32,7 @@ extern fn len[t] (xs: t) -> int
 
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
+  fn contains (self, x: t) -> bool
   fn set (mut self, i: int, x: t) -> list[t]
   fn push (mut self, x: t) -> list[t]
   fn insert (mut self, i: int, x: t) -> list[t]
@@ -54,9 +56,9 @@ fn grown() -> list[int] {
 
 // the mutation and membership members over the same windows: the
 // indexed replacement, the splice, the removal, the emptying, the
-// map's removal and membership reads, and the entry-order pair list
-// (a missing key's removal a no-op, the pair tuples read one word per
-// positional member)
+// map's removal and membership reads, the list's probe reads, and the
+// entry-order pair list (a missing key's removal a no-op, the pair
+// tuples read one word per positional member)
 fn members_round() -> bool {
   var xs = [1, 2, 3]
   xs.set(1, 20)
@@ -76,6 +78,8 @@ fn members_round() -> bool {
   m.remove("nope")
   const kept = m.contains("two")
   const gone = m.contains("one")
+  const hit = xs.contains(20)
+  const miss = xs.contains(99)
   var total = 0
   for e in m.entries() {
     const (k, v) = e
@@ -83,14 +87,16 @@ fn members_round() -> bool {
   }
   const rows = m.len()
   a == 9 && b == 1 && c == 20 && len(xs) == 3 && fresh == 7 &&
-    len(ys) == 1 && kept && !gone && total == 2 && rows == 1
+    len(ys) == 1 && kept && !gone && total == 2 && rows == 1 &&
+    hit && !miss
 }
 
 // the same members over reference-carrying elements: the replaced
 // and removed words release their counts, the inserted and stored
-// words acquire theirs, and the entry list's edge counts keep the map
-// rows alive for the loop's own reads — the frame draining to zero at
-// its end
+// words acquire theirs, the list's string probes stay borrowed beside
+// the list's own edge counts, and the entry list's edge counts keep
+// the map rows alive for the loop's own reads — the frame draining to
+// zero at its end
 fn members_ref_round() -> bool {
   var xs = ["a", "b", "c"]
   const hold = "b"
@@ -108,7 +114,13 @@ fn members_ref_round() -> bool {
     joined += v
   }
   const read = xs.get(0).ok((s: string) => s).err((_: none) => "?")
-  read == "z" && joined == "twodeux" && hold == "b" && len(xs) == 3
+  const probe = xs.contains("q")
+  const absent = xs.contains("nope")
+  // the held word compares by content: `b` left the list at the removal,
+  // the held binding still reading it
+  const gone = xs.contains(hold)
+  read == "z" && joined == "twodeux" && hold == "b" && len(xs) == 3 &&
+    probe && !absent && !gone
 }
 
 fn main() -> bool {

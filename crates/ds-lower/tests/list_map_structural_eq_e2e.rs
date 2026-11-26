@@ -9,9 +9,10 @@
 //! native window's borrowed counts balance on every spelling. The
 //! per-word chains compare fields by their type, never their slot kind
 //! alone: a struct, tuple, or union field of list or map type — the
-//! linked-type facts mint exactly these `list[scalar]` fields — and `in`
-//! membership over list elements (a list of lists, a one-word struct
-//! element whose field is a collection) all dispatch the content compare
+//! linked-type facts mint exactly these `list[scalar]` fields — and
+//! `contains` membership over list elements (a list of lists, a one-word
+//! struct element whose field is a collection) all dispatch the content
+//! compare
 //! — the EqStr uop reads string objects alone, so the slot-kind chain
 //! trapped at runtime over a collection word. An element kind without
 //! content equality (a callable, a union element) refuses at lowering
@@ -41,6 +42,8 @@ const PRELUDE: &str = concat!(
     "extern fn map_new[k, v] () -> map[k, v]\n",
     "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
     "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "extern fn list_contains[t] (xs: list[t], x: t) -> bool\n",
+    "impl[t] list[t] { fn contains (self, x: t) -> bool }\n",
 );
 
 /// Parses, checks, lowers, and installs one inline source, then runs
@@ -298,23 +301,24 @@ fn nested_collections_compose() {
     assert_eq!(stdout, "true false\ntrue false\ntrue false\n");
 }
 
-/// `in` membership compares the element by its type: a list element
-/// (over a list of lists) dispatches the content compare per iteration,
-/// a wide struct element rides the structural chain per element, and a
-/// one-word struct element whose single field is a collection dispatches
-/// the content compare too — the EqStr slot-kind path having trapped at
-/// runtime over the collection word.
+/// `contains` membership compares the element by its type: a list
+/// element (over a list of lists) dispatches the content compare per
+/// element, a wide struct probe rides the structural walk per element,
+/// and a one-word struct element whose single field is a collection
+/// dispatches the content compare too — the EqStr slot-kind path having
+/// trapped at runtime over the collection word.
 #[test]
 fn membership_over_collection_lists_compares_by_content() {
     let stdout = run_stdout(concat!(
         "struct tagged { tags: list[string] }\n",
         "fn main() -> () {\n",
         "  const xs = [[\"a\"], [\"b\"]]\n",
-        "  println(\"${[\"a\"] in xs} ${[\"c\"] in xs}\")\n",
+        "  println(\"${xs.contains([\"a\"])} ${xs.contains([\"c\"])}\")\n",
         "  const rows = [tagged { tags: [\"x\"] }, tagged { tags: [] }]\n",
-        "  println(\"${tagged { tags: [\"x\"] } in rows} ${tagged { tags: [\"q\"] } in rows}\")\n",
+        "  println(\"${rows.contains(tagged { tags: [\"x\"] })} ${rows.contains(tagged { tags: \
+         [\"q\"] })}\")\n",
         "  const wide = [(1, [\"a\"]), (2, [\"b\"])]\n",
-        "  println(\"${(2, [\"b\"]) in wide} ${(1, [\"b\"]) in wide}\")\n",
+        "  println(\"${wide.contains((2, [\"b\"]))} ${wide.contains((1, [\"b\"]))}\")\n",
         "}\n",
     ));
     assert_eq!(stdout, "true false\ntrue false\ntrue false\n");
@@ -457,18 +461,18 @@ fn a_fail_fast_chain_before_a_map_field_releases_its_count() {
     assert_eq!(stdout, "ne\nfalse true\nend\n");
 }
 
-/// Membership fail-fasts inside the loop over collection elements: the
-/// staged operand and element counts release through the loop's exits
-/// beside the list's own edge counts.
+/// Membership over collection elements stages every probe as a borrow:
+/// the list's own edge counts carry the elements, so the heap drains
+/// over the hit and the miss alike.
 #[test]
 fn membership_over_collections_drains() {
     let stdout = run_drains(concat!(
         "struct tagged { tags: list[string] }\n",
         "fn main() -> () {\n",
         "  const xs = [[\"a\"], [\"b\"]]\n",
-        "  println(\"${[\"b\"] in xs} ${[\"c\"] in xs}\")\n",
+        "  println(\"${xs.contains([\"b\"])} ${xs.contains([\"c\"])}\")\n",
         "  const rows = [tagged { tags: [\"x\"] }, tagged { tags: [] }]\n",
-        "  println(\"${tagged { tags: [] } in rows}\")\n",
+        "  println(\"${rows.contains(tagged { tags: [] })}\")\n",
         "  println(\"end\")\n",
         "}\n",
     ));

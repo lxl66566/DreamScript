@@ -405,13 +405,13 @@ fn unnarrowed_uses_refuse_at_the_checker_seams() {
         ),
         "is not callable; expected one function type",
     );
-    // list membership over the wrong element type
+    // list membership over a union operand
     check_refuses(
         concat!(
             "struct list[t]\n",
             "fn pick() -> int | none { 1 }\n",
             "fn main() -> () { if pick() in [1, 2] { println(\"t\") } }\n",
         ),
-        "list membership needs the list's element type",
+        "`in` takes a bare range",
     );
 }

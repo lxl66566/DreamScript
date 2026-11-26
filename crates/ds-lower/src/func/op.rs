@@ -1,5 +1,5 @@
 //! Operators: binary and arithmetic words, the float refusals, compare,
-//! the bool chain, `in` over ranges and lists, structural equality (word
+//! the bool chain, `in` over ranges, structural equality (word
 //! plans per atom, collection content compares, union tags), and unary.
 
 use super::*;
@@ -32,15 +32,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return self.in_range_value(left, start, end, *inclusive, *span);
         }
         if *op == BinaryOp::In {
-            let rhs_ty = self.val(right.span())?.ty;
-            if self.shapes.list_element(rhs_ty).is_some() {
-                return self.in_list_value(left, right, *span);
-            }
+            // The checker refuses every non-range right side, the list
+            // membership spelling the member call `xs.contains(x)`; the
+            // belt keeps a shape the check never admits off the runtime
+            // path.
             return Err(LowerError::unsupported(
                 *span,
-                "a membership over a non-list collection",
-                "`in` lowers over int ranges and one list; membership over other collections is \
-                 not ruled yet",
+                "a membership over a non-range right side",
+                "`in` lowers over int ranges; list membership lowers through the `xs.contains(x)` \
+                 member call",
             ));
         }
         // string `+` is the concat native's call shape: its borrow
@@ -600,187 +600,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             kidx: lie,
         });
         self.bind_label(join);
-        Ok(Place {
-            base: dst,
-            shape: PlaceShape::Word(SlotType::Bool),
-        })
-    }
-
-    /// `x in xs` over one list: a scan over once-evaluated
-    /// operands — one hidden induction word, `list_get` per iteration
-    /// over its ok/none span (the none span answers false), one
-    /// comparison per element (a wider element compares through the
-    /// structural `==` chain, field words pairwise), the first match
-    /// answers true. The gathered element's handed-out counts die right
-    /// at the gather — the values stay readable through the list's own
-    /// edge counts, so the comparison's reads never own and every exit
-    /// path balances — while the operands' counts are loop-carried and
-    /// die past the loop.
-    pub(super) fn in_list_value(
-        &mut self,
-        left: &Expr,
-        right: &Expr,
-        span: Span,
-    ) -> Result<Place, LowerError> {
-        let x_tp = self.value(left)?;
-        let list_tp = self.value(right)?;
-        let Some(element) = self.shapes.list_element(list_tp.ty) else {
-            return Err(mismatch("a list membership's list"));
-        };
-        let elem_words = self.element_words(element, span)?;
-        let wide = elem_words.len() > 1;
-        if !wide
-            && !matches!(
-                elem_words[0],
-                SlotType::I64 | SlotType::F64 | SlotType::Bool | SlotType::Ref
-            )
-        {
-            return Err(LowerError::unsupported(
-                span,
-                "a membership over tag or callable elements",
-                "membership compares int, float, bool, string, bytes, and collection elements",
-            ));
-        }
-        // the one-word element compares by its type, never its slot kind
-        // alone: the element's own word plan names the compare — a
-        // collection element (bytes, list, map, or a one-word struct
-        // whose field is one) dispatches its content-compare native, the
-        // EqStr uop reading string objects alone
-        let kind = (!wide)
-            .then(|| {
-                let plan = self.eq_word_plan(element)?;
-                let [word] = plan.as_slice() else {
-                    return Err(mismatch("a membership comparison"));
-                };
-                Ok(*word)
-            })
-            .transpose()
-            .map_err(|err: LowerError| err.respanned(span))?;
-        let mut operand_words: Vec<u8> = self
-            .word_addrs(&x_tp.place, x_tp.ty)
-            .map_err(|err| err.respanned(span))?
-            .iter()
-            .map(|addr| addr.slot)
-            .collect();
-        let x_w = if wide { None } else { Some(operand_words[0]) };
-        let list_w = single(&self.word_addrs(&list_tp.place, list_tp.ty)?, right.span())?;
-        operand_words.push(list_w.slot);
-        let ind = self.temp_word(SlotType::I64)?;
-        let zero = self.pool(Constant::I64(0));
-        self.emit(Op::Kimm {
-            dst: Slot::body(ind),
-            kidx: zero,
-        });
-        let step = self.temp_word(SlotType::I64)?;
-        let one = self.pool(Constant::I64(1));
-        self.emit(Op::Kimm {
-            dst: Slot::body(step),
-            kidx: one,
-        });
-        let dst = self.temp_word(SlotType::Bool)?;
-        let entry = self.rc.save();
-        self.rc.loop_enter();
-        self.loop_spans.push(LoopSpan {
-            head: self.code.len(),
-            back: usize::MAX,
-        });
-        let head = self.label();
-        let next = self.label();
-        let exhausted = self.label();
-        let found = self.label();
-        self.bind_label(head);
-        self.fetch_element(list_w.slot, ind, &elem_words)?;
-        let cond = self.temp_word(SlotType::Bool)?;
-        self.emit(Op::TagTest {
-            dst: Slot::body(cond),
-            src: Slot::overlay(0),
-            tag: PLATFORM_IO_OK,
-        });
-        self.emit(Op::JmpifNot {
-            cond: Slot::body(cond),
-            target: exhausted,
-        });
-        let elem_place = self.gather_element(&elem_words, element)?;
-        let cmp_place = if wide {
-            // the handed-out counts die here, straight-line on every
-            // path: the values stay readable through the list's own edge
-            // counts, so the equality chain's reads never own and a
-            // fail-fast field mismatch cannot strand a later field's
-            // count
-            let dying = self.tracked_words(&elem_place, element)?;
-            self.rc.discard(&mut self.code, &dying);
-            self.eq_chain(
-                &x_tp,
-                &TypedPlace {
-                    place: elem_place,
-                    ty: element,
-                },
-                span,
-            )
-            .map_err(|err| err.respanned(span))?
-        } else {
-            let (Some(word), Some(kind)) = (x_w, kind) else {
-                return Err(mismatch("a membership comparison"));
-            };
-            let cmp = match kind {
-                // the one-word shape keeps its emission exactly (the
-                // word's count dies at the comparison read)
-                WordEq::Scalar(op) => {
-                    let cmp = self.temp_word(SlotType::Bool)?;
-                    self.emit(Op::Data {
-                        op,
-                        dst: Slot::body(cmp),
-                        lhs: Slot::body(word),
-                        rhs: Slot::body(elem_place.base),
-                    });
-                    if op == DataOp::EqStr {
-                        self.rc.read(&mut self.code, &[word, elem_place.base]);
-                    }
-                    cmp
-                },
-                // a collection element compares through its content
-                // compare, the operands staged as borrows
-                WordEq::Bytes | WordEq::List | WordEq::Map => {
-                    self.content_eq_slots(kind, word, elem_place.base, true)?
-                },
-            };
-            Place {
-                base: cmp,
-                shape: PlaceShape::Word(SlotType::Bool),
-            }
-        };
-        self.emit(Op::JmpifNot {
-            cond: Slot::body(cmp_place.base),
-            target: next,
-        });
-        let truth = self.pool(Constant::Bool(true));
-        self.emit(Op::Kconst {
-            dst: Slot::body(dst),
-            kidx: truth,
-        });
-        self.emit(Op::Jmp { target: found });
-        self.bind_label(next);
-        self.emit(Op::Data {
-            op: DataOp::AddI64,
-            dst: Slot::body(ind),
-            lhs: Slot::body(ind),
-            rhs: Slot::body(step),
-        });
-        self.loop_back_edge();
-        self.emit(Op::Jmp { target: head });
-        self.rc.loop_exit();
-        let back = self.rc.take();
-        self.rc.join(&[entry, back]);
-        self.bind_label(exhausted);
-        let lie = self.pool(Constant::Bool(false));
-        self.emit(Op::Kconst {
-            dst: Slot::body(dst),
-            kidx: lie,
-        });
-        self.bind_label(found);
-        // an anonymous operand (a literal, a call result) has no scope of
-        // its own: its consumed count dies here, once per evaluation
-        self.rc.drop_unnamed(&mut self.code, &operand_words);
         Ok(Place {
             base: dst,
             shape: PlaceShape::Word(SlotType::Bool),

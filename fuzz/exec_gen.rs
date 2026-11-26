@@ -66,7 +66,8 @@
 //! union-equality episode's carrier shapes: a bytes field inside a
 //! struct compared beside an int field and a nested struct's own bytes
 //! field (the per-word chain dispatching on the field's type, never its
-//! slot kind), `in` membership over a `list[bytes]` element, and the
+//! slot kind), `xs.contains(x)` membership over a `list[bytes]`
+//! element, and the
 //! plain operand pair — each counted in the census.
 //!
 //! The `pub import` chain episode rides the chain as a three-module
@@ -202,7 +203,8 @@ pub struct Drawn {
     /// Whole-span equality conditions over union operands.
     pub union_equality: u32,
     /// Bytes-typed equality chains: struct fields (flat and nested),
-    /// list membership, and plain operand pairs over `bytes` words —
+    /// `xs.contains(x)` membership, and plain operand pairs over `bytes`
+    /// words —
     /// beside the list and map collection words riding the same
     /// per-word chains (fields, nesting, membership, the map's rows).
     pub bytes_equality: u32,
@@ -1196,7 +1198,8 @@ impl Gen<'_> {
     /// The bytes-equality episode: the per-word equality chains over
     /// bytes-typed parts dispatch on the field's type, never its slot
     /// kind — a flat bytes field beside an int field, a nested struct's
-    /// own bytes field, `in` membership over `list[bytes]`, and the
+    /// own bytes field, `xs.contains(x)` membership over
+    /// `list[bytes]`, and the
     /// plain operand pair, all over fresh `bytes_of` constructions so
     /// equal content rides distinct objects. The fail-fast shapes ride
     /// both spellings too: a chain that answers at an earlier field must
@@ -1309,7 +1312,7 @@ impl Gen<'_> {
         self.line(&format!("const {hit} = {}", spell(&base)));
         self.line(&format!("const {miss} = {}", spell(&first_flip)));
         self.line(&format!(
-            "println(\"${{{hit} in {xs}}} ${{{miss} in {xs}}}\")"
+            "println(\"${{{xs}.contains({hit})}} ${{{xs}.contains({miss})}}\")"
         ));
         self.line(&format!("const {plain_a} = {}", spell(&base)));
         self.line(&format!("const {plain_b} = {}", spell(&last_flip)));
@@ -1333,7 +1336,7 @@ impl Gen<'_> {
     /// ride the same per-word chains the bytes word does — the Ref word
     /// dispatches the list content compare over drawn content (a
     /// list[string] field beside a nested list[bytes] field, a list of
-    /// lists, membership over one), the fail-fast shape releasing the
+    /// lists, `contains` over one), the fail-fast shape releasing the
     /// skipped collection fields' staged counts at the merged exits, and
     /// the map's rows comparing through the lookup face over an int
     /// value and a nested list value. The mirror asserts the drain over
@@ -1383,7 +1386,7 @@ impl Gen<'_> {
         // matches whatever the drawn values are
         self.line(&format!("const {row_miss} = [{r0}, {r1}, {r1}]"));
         self.line(&format!(
-            "println(\"${{{row_hit} in {nest_one}}} ${{{row_miss} in {nest_one}}}\")"
+            "println(\"${{{nest_one}.contains({row_hit})}} ${{{nest_one}.contains({row_miss})}}\")"
         ));
         let (m_one, m_two, m_diff) = (self.name("m1"), self.name("m2"), self.name("md"));
         for (name, value) in [(&m_one, 1), (&m_two, 1), (&m_diff, 2)] {
@@ -1518,11 +1521,12 @@ impl Gen<'_> {
         );
         self.decl("extern fn unwrap_or[t] (x: t?, y: t) -> t");
         self.decl("extern fn list_len[t] (xs: list[t]) -> int");
+        self.decl("extern fn list_contains[t] (xs: list[t], x: t) -> bool");
         self.decl("extern fn list_push[t] (xs: mut list[t], x: t) -> ()");
         self.decl("extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none");
         self.decl(
-            "impl[t] list[t] {\n  fn get (self, i: int) -> t | none\n  fn push (mut self, x: t) \
-             -> list[t]\n}",
+            "impl[t] list[t] {\n  fn get (self, i: int) -> t | none\n  fn contains (self, x: t) \
+             -> bool\n  fn push (mut self, x: t) -> list[t]\n}",
         );
         self.decl(
             "impl[k, v] map[k, v] {\n  fn get (self, key: k) -> v | none\n  fn set (mut self, \

@@ -102,7 +102,9 @@ const LIST_AMBIENT: &str = concat!(
     "extern fn println (msg: string) -> ()\n",
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "extern fn list_get[t] (xs: list[t], i: int) -> t | none\n",
+    "extern fn list_contains[t] (xs: list[t], x: t) -> bool\n",
     "extern fn list_push[t] (xs: mut list[t], x: t) -> ()\n",
+    "impl[t] list[t] { fn contains (self, x: t) -> bool }\n",
 );
 
 /// The whole read-back story: a literal and direct pushes store whole
@@ -300,7 +302,7 @@ fn copy_closes_balance_ref_words() {
 
 /// for-in and membership bind whole element spans per step: the fetch
 /// answers the stride's words, the binder names the gathered span, and
-/// the membership compare walks the structural equality chain (a
+/// the `contains` probe walks the structural content compare (a
 /// fail-fast field mismatch strands no count — the heap drains).
 #[test]
 fn for_in_and_membership_bind_wider_elements() {
@@ -314,8 +316,10 @@ fn for_in_and_membership_bind_wider_elements() {
             "  for p in [point { x: 1, y: 2 }, point { x: 3, y: 4 }] {\n",
             "    total += p.x * p.y\n",
             "  }\n",
-            "  const hit = point { x: 3, y: 4 } in [point { x: 1, y: 2 }, point { x: 3, y: 4 }]\n",
-            "  const miss = pair { a: \"ab\", b: \"zz\" } in [pair { a: \"ab\", b: \"cd\" }]\n",
+            "  const rows = [point { x: 1, y: 2 }, point { x: 3, y: 4 }]\n",
+            "  const hit = rows.contains(point { x: 3, y: 4 })\n",
+            "  const miss = [pair { a: \"ab\", b: \"cd\" }].contains(pair { a: \"ab\", b: \"zz\" \
+             })\n",
             "  if hit { total += 10 }\n",
             "  if miss { total += 100 }\n",
             "  total\n",
@@ -528,8 +532,8 @@ fn tuple_elements_balance_ref_words() {
 
 /// for-in and membership over tuple elements: the loop binder receives
 /// the whole element span and destructures positionally, and the wide
-/// membership walks the structural comparison one element word at a
-/// time.
+/// `contains` probe walks the structural comparison one element word at
+/// a time.
 #[test]
 fn for_in_and_membership_bind_tuple_elements() {
     let out = runs(
@@ -541,8 +545,9 @@ fn for_in_and_membership_bind_tuple_elements() {
             "    const (n, s) = p\n",
             "    total += n\n",
             "  }\n",
-            "  const hit = (2, \"b\") in [(1, \"a\"), (2, \"b\")]\n",
-            "  const miss = (2, \"x\") in [(1, \"a\"), (2, \"b\")]\n",
+            "  const rows = [(1, \"a\"), (2, \"b\")]\n",
+            "  const hit = rows.contains((2, \"b\"))\n",
+            "  const miss = rows.contains((2, \"x\"))\n",
             "  if hit { total += 10 }\n",
             "  if miss { total += 100 }\n",
             "  total\n",

@@ -229,6 +229,7 @@ const LISTS_AMBIENT: &str = concat!(
     "pub extern fn println (msg: string) -> ()\n",
     "impl[t] list[t] {\n",
     "  fn get (self, i: int) -> t | none\n",
+    "  fn contains (self, x: t) -> bool\n",
     "  fn push (mut self, x: t) -> list[t]\n",
     "  fn concat (self, other: list[t]) -> list[t]\n",
     "}\n",
@@ -757,12 +758,13 @@ fn linearity_negative_rejects_render_recorded_shapes() {
 
 /// lists_surface.ds: the list-literal and `list[t]()` constructor
 /// surface — every typecheck and run item checks clean under the list
-/// ambient stubs, and the reject item reports exactly its mixed-element
-/// error.
+/// ambient stubs, and the reject items report exactly their mixed-element
+/// and range-only `in` errors.
 #[test]
 fn lists_surface_items_check_with_the_mixed_rejection() {
     let rejects = gate("../../conformance/lists_surface.ds", LISTS_AMBIENT);
-    let [(id, what, diag)] = rejects.try_into().expect("exactly the one reject item");
+    let [(id, what, diag), (in_id, in_what, in_diag)] =
+        rejects.try_into().expect("exactly the two reject items");
     assert_eq!(id, "reject-mixed");
     assert!(what.contains("DS2001"), "the reject text names the code");
     assert_eq!(diag.code.as_str(), "DS2001");
@@ -770,6 +772,16 @@ fn lists_surface_items_check_with_the_mixed_rejection() {
         diag.message.contains("list literal mixes element types"),
         "the mixed-element rejection: {}",
         diag.message
+    );
+    assert_eq!(in_id, "reject-in-membership");
+    assert!(in_what.contains("DS2017"), "the reject text names the code");
+    assert_eq!(in_diag.code.as_str(), "DS2017");
+    assert!(
+        in_diag
+            .message
+            .contains("`in` takes a bare range (`x in a..b`); list membership is `xs.contains(x)`"),
+        "the range-only `in` rejection: {}",
+        in_diag.message
     );
 
     // every other item checks clean under the same stubs

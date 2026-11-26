@@ -141,8 +141,8 @@ impl Bodies<'_> {
     }
 
     pub(crate) fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Val {
-        // `x in a..b` / `x in a..=b`: the range fixes the element type
-        // instead of a collection's.
+        // `x in a..b` / `x in a..=b`: the range fixes the element type;
+        // every other right side refuses.
         if op == BinaryOp::In
             && let Expr::Range { start, end, .. } = peel_paren(right)
         {
@@ -394,36 +394,17 @@ impl Bodies<'_> {
                 }
             },
             In => {
-                // Only non-range right sides reach here (`binary` routes
-                // `x in a..b` first). Membership over one list
-                // application carries the operand's element type and the
-                // result is bool; every other right side refuses.
-                if let Some(element) = self.list_element(right) {
-                    if !self.decls.universe.contains(element, left) {
-                        self.error(
-                            ErrorCode::TypeMismatch,
-                            format!(
-                                "list membership needs the list's element type `{}`, `{}` given",
-                                self.decls.universe.render(element),
-                                self.decls.universe.render(left)
-                            ),
-                            span,
-                            "operand mismatch",
-                        );
-                    }
-                    return Val {
-                        ty: bool_ty,
-                        diverges: false,
-                        poisoned: false,
-                    };
-                }
+                // `binary` routes the range spellings first, so every
+                // right side here refuses: `in` is range-only, list
+                // membership spelling the member call `xs.contains(x)`.
+                // The answer types bool so the site's context keeps its
+                // expected shape and no cascade grows past the refusal.
                 self.error(
                     ErrorCode::NonRangeIn,
-                    "`in` runs over ranges (`x in a..b`) and lists (`x in xs`); membership over \
-                     other collections is not ruled yet"
+                    "`in` takes a bare range (`x in a..b`); list membership is `xs.contains(x)`"
                         .to_owned(),
                     span,
-                    "not a range or list",
+                    "not a range",
                 );
                 Val {
                     ty: bool_ty,
@@ -529,18 +510,6 @@ impl Bodies<'_> {
             );
         }
         None
-    }
-
-    /// The element type of one whole-list application: membership
-    /// reads it. `None` for any other type — a union of lists, a
-    /// non-list application, a non-application.
-    fn list_element(&mut self, ty: Ty) -> Option<Ty> {
-        let (ctor, args) = self.single_apply(ty)?;
-        let [element] = args.as_slice() else {
-            return None
-        };
-        let def = self.package.lookup_type("list")?;
-        (self.decls.defs_of_atoms.get(&ctor) == Some(&def)).then_some(*element)
     }
 
     /// Range membership: the operand must carry the range's integer

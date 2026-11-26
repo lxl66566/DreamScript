@@ -11,8 +11,9 @@
 // member_scan: stage: run
 // csv_line: stage: run
 // cons_records: stage: run (the stride-aware copy closes, heap-list slice 2026-11-12)
-// record_iteration: stage: run (for-in and membership over wider elements, heap-list slice 2026-11-12)
+// record_iteration: stage: run (for-in and contains membership over wider elements, heap-list slice 2026-11-12)
 // reject-mixed: stage: reject the mixed-element literal names the offending item's type (DS2001) [B3]
+// reject-in-membership: stage: reject the `x in xs` spelling refuses range-only (DS2017), `xs.contains(x)` the member spelling
 
 struct page { url: string }
 
@@ -61,7 +62,7 @@ fn for_sum() -> int {
 
 fn member_scan() -> bool {
   const words = ["alpha", "beta"]
-  2 in [1, 2, 3] && "beta" in words && !("delta" in words)
+  [1, 2, 3].contains(2) && words.contains("beta") && !words.contains("delta")
 }
 
 // join renders the parts list back to one string, the separator between
@@ -92,8 +93,8 @@ fn record_iteration() -> int {
   for p in pages {
     if p.url == "b" { total += 1 }
   }
-  const hit = page { url: "a" } in pages
-  const miss = page { url: "z" } in pages
+  const hit = pages.contains(page { url: "a" })
+  const miss = pages.contains(page { url: "z" })
   if hit { total += 10 }
   if miss { total += 100 }
   total
@@ -102,4 +103,8 @@ fn record_iteration() -> int {
 fn reject_mixed() -> int {
   const bad = [1, "a"]
   0
+}
+
+fn reject_in_membership() -> bool {
+  2 in [1, 2, 3]
 }

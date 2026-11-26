@@ -1,13 +1,12 @@
 //! The collection members end to end: the bodiless inherent members
-//! (`get`/`push`/`concat` on the list, `get`/`set` on the map) route to
-//! their
-//! native seams at lowering — the receiver feeds the native's first
-//! argument exactly like the retired free spelling's own call, the
-//! checked read re-spans its ok/none span into the call's union, and
-//! the in-place mutations answer a duplicate of the receiver's word
-//! after the native's unit word (a statement-position call discarding
-//! it, a bound answer keeping it, a tail-position call answering its
-//! caller through the in-place shape).
+//! (`get`/`push`/`concat`/`contains` on the list, `get`/`set`/`contains`
+//! on the map) route to their native seams at lowering — the receiver
+//! feeds the native's first argument exactly like the retired free
+//! spelling's own call, the checked read re-spans its ok/none span into
+//! the call's union, and the in-place mutations answer a duplicate of
+//! the receiver's word after the native's unit word (a statement-position
+//! call discarding it, a bound answer keeping it, a tail-position call
+//! answering its caller through the in-place shape).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -74,9 +73,10 @@ fn the_mutation_and_membership_members_run_over_the_windows() {
     // `members_round` legs: the indexed replacement and splice, the
     // removal and the stride-resetting clear (a cleared list adopting a
     // later element again), the map's removal (the missing key a
-    // no-op), the membership reads, and the entry-order pair list
-    // iterated as one tuple per row. `members_ref_round` runs the same
-    // members over reference-carrying elements and the frame drains to
+    // no-op), the membership reads (the list probe and the map row),
+    // and the entry-order pair list iterated as one tuple per row.
+    // `members_ref_round` runs the same members over reference-carrying
+    // elements and the frame drains to
     // zero — the replaced and removed words released, the stored and
     // entry words balanced
     let (mut vm, _) = build_vm();

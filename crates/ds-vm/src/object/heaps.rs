@@ -856,7 +856,55 @@ impl<'a> Heaps<'a> {
     /// greatest fixed point), any real mismatch surfacing through some
     /// first-visit pair.
     pub(crate) fn content_eq(&mut self, x: RefId, y: RefId) -> Result<bool, Trap> {
-        let mut pending = vec![(Value::Ref(x), Value::Ref(y))];
+        self.pairs_eq(vec![(Value::Ref(x), Value::Ref(y))])
+    }
+
+    /// Whether any element span of list object `list` equals the probe
+    /// span, routed as a shared read: every pair compared through the
+    /// same walk [`Heaps::content_eq`] serves, the probe staged variadic
+    /// at the element's whole stride. Both operands stay borrowed, so
+    /// the read owns no count and queues nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live object,
+    /// [`Trap::ElementStride`] when the probe width misses the stride.
+    pub(crate) fn list_contains(&mut self, list: RefId, probe: &[Value]) -> Result<bool, Trap> {
+        let (elems, stride) = self.list_at(list)?;
+        // the empty list carries no stride (stride 0 iff empty), so it
+        // answers false whatever the probe's width
+        if elems.is_empty() {
+            return Ok(false);
+        }
+        if probe.len() != stride {
+            return Err(Trap::ElementStride {
+                obj: list.id(),
+                stride,
+                given: probe.len(),
+            });
+        }
+        // the element words copy out of the owning store before the walk
+        // routes: a borrowed slice dies at the next routed call
+        let elems: Vec<Value> = elems.to_vec();
+        let step = stride.max(1);
+        for at in (0..elems.len()).step_by(step) {
+            let pairs: Vec<(Value, Value)> = probe
+                .iter()
+                .copied()
+                .zip(elems[at..at + stride].iter().copied())
+                .collect();
+            if self.pairs_eq(pairs)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The pairwise walk one content compare runs: the pending pair
+    /// stack the entry site seeds (two reference words for
+    /// [`Heaps::content_eq`], one probe-element pair per element for
+    /// [`Heaps::list_contains`]).
+    fn pairs_eq(&mut self, mut pending: Vec<(Value, Value)>) -> Result<bool, Trap> {
         let mut assumed: Vec<(RefId, RefId)> = Vec::new();
         // the two row buffers, reused across the walk so a many-row
         // compare allocates no per-row vector (the death scratch's spill

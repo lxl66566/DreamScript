@@ -37,6 +37,9 @@ impl<'a> FnLower<'a, '_, '_> {
         let ty = receiver?;
         match target {
             Callee::Builtin(native) if native.name == "list_push" => self.shapes.list_element(ty),
+            Callee::Builtin(native) if native.name == "list_contains" => {
+                self.shapes.list_element(ty)
+            },
             Callee::Builtin(native) if native.name == "list_set" => self.shapes.list_element(ty),
             Callee::Builtin(native) if native.name == "list_insert" => self.shapes.list_element(ty),
             Callee::Builtin(native) if native.name == "map_set" => self.shapes.map_value(ty),

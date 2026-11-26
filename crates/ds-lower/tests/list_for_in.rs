@@ -3,16 +3,16 @@
 //! induction word, `list_get` per iteration over its ok/none span, the
 //! none span exits) bounded by the frozen entry count (one `list_len`
 //! read), so a body appending to the iterable visits exactly the entry
-//! count and terminates, and `x in xs` lowers as a scan of the same fetch
-//! shape with one comparison per element — both operands evaluate once,
-//! the element binding's handed-out count dies at each rollover, and
-//! the iterable's count survives the loop as a carried borrow. The run
-//! proves int and string elements, empty lists, wildcard and unused
-//! binders, early return, nested membership inside the loop, the
-//! append-during-iteration termination, and both membership answers at
-//! the edges; the heap drains at the end, so every per-iteration count
-//! balanced. Map iteration and map membership stay named honest
-//! boundaries.
+//! count and terminates, and membership spells the `xs.contains(x)`
+//! member call — one `list_contains` native call over the whole list,
+//! both operands evaluate once, and the iterable's count survives the
+//! call as a borrow. The run proves int and string elements, empty
+//! lists, wildcard and unused binders, early return, membership inside
+//! the loop, the append-during-iteration termination, and both
+//! membership answers at the edges; the heap drains at the end, so
+//! every per-iteration count balanced. Map iteration stays a named
+//! honest boundary, and `in` over any non-range right side keeps the
+//! checker's DS2017 refusal.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -31,6 +31,11 @@ const SOURCE: &str = concat!(
     "extern fn println (msg: string) -> ()\n",
     "extern fn len[t] (xs: t) -> int\n",
     "extern fn list_new[t] () -> list[t]\n",
+    "extern fn list_contains[t] (xs: list[t], x: t) -> bool\n",
+    "\n",
+    "impl[t] list[t] {\n",
+    "  fn contains (self, x: t) -> bool\n",
+    "}\n",
     "\n",
     "fn main() -> int {\n",
     "  const xs = [1, 2, 3, 4]\n",
@@ -64,14 +69,14 @@ const SOURCE: &str = concat!(
     "  }\n",
     "  println(\"spins ${spins}\")\n",
     "  println(\"early ${early([1, 2, 42, 7])} none ${early([1, 2, 3])}\")\n",
-    "  println(\"has4 ${4 in xs} has9 ${9 in xs}\")\n",
-    "  println(\"has beta ${\"beta\" in words} no delta ${\"delta\" in words}\")\n",
-    "  println(\"empty ${9 in fresh}\")\n",
+    "  println(\"has4 ${xs.contains(4)} has9 ${xs.contains(9)}\")\n",
+    "  println(\"has beta ${words.contains(\"beta\")} no delta ${words.contains(\"delta\")}\")\n",
+    "  println(\"empty ${fresh.contains(9)}\")\n",
     "  var i: int = 0\n",
     "  var hits: int = 0\n",
     "  while i < 10 {\n",
     "    for w in words {\n",
-    "      if \"beta\" in words {\n",
+    "      if words.contains(\"beta\") {\n",
     "        hits += 1\n",
     "      }\n",
     "    }\n",
@@ -141,7 +146,8 @@ fn for_in_and_membership_run_over_lists_and_the_heap_drains() {
         )
     );
     // the run answers 40: 10 outer rounds each drove 4 fetch iterations
-    // plus one membership scan of 4 fetches, so every handed-out element
+    // plus one membership call over the 4-element list, so every
+    // handed-out element
     // count died at its rollover or comparison read, the anonymous
     // operands died once per evaluation, and the named iterables'
     // carried counts died past their loops
@@ -194,8 +200,9 @@ fn map_iteration_stays_a_named_lowering_boundary() {
     assert!(err.to_string().contains("map iteration"));
 }
 
-/// Membership over a non-list collection stays the checker's DS2017
-/// refusal; the list right side checks clean against the element type.
+/// Membership over a non-list collection keeps the checker's DS2017
+/// refusal (`in` is range-only; the list spelling is the `contains`
+/// member call).
 #[test]
 fn non_list_membership_keeps_the_checker_refusal() {
     let source = concat!(

@@ -239,6 +239,7 @@ impl[k, v] map[k, v] {
 
 impl[t] list[t] {
   fn get (self, i: int) -> t | none
+  fn contains (self, x: t) -> bool
   fn set (mut self, i: int, x: t) -> list[t]
   fn push (mut self, x: t) -> list[t]
   // The indexed splice and removal: `insert` before `i` appends at
@@ -434,6 +435,7 @@ pub extern fn tail[t] (xs: list[t]) -> list[t]
 extern fn list_new[t] () -> list[t]
 extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn list_contains[t] (xs: list[t], x: t) -> bool
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()

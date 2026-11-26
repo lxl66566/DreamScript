@@ -38,6 +38,21 @@ pub(super) fn list_new_fn(
     Ok(NativeResult::Word(heaps.new_list(Vec::new())))
 }
 
+/// `list_contains(xs, x: element words) -> bool` — the list membership
+/// read: the probe's whole element span against every element span, each
+/// pair through the structural content walk the `==` chain's list
+/// compare serves (the first match answering true). Both operands stay
+/// borrowed (the native call convention's staging owns no count).
+pub(super) fn list_contains_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let list = ref_arg(args, 0)?;
+    let hit = heaps.list_contains(list, &args[1..])?;
+    Ok(NativeResult::Word(Value::Bool(hit)))
+}
+
 pub(super) fn list_len_fn(
     heaps: &mut Heaps,
     _out: &mut OutputSink,

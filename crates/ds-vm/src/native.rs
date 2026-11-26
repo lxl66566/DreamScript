@@ -109,8 +109,8 @@ pub use ds_abi::native::{
     BUILTIN_CONTAINS, BUILTIN_COS, BUILTIN_EXP, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD,
     BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_FLOOR, BUILTIN_HEAD,
     BUILTIN_INDEX_OF, BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN,
-    BUILTIN_LIST_CLEAR, BUILTIN_LIST_CONCAT, BUILTIN_LIST_EQ, BUILTIN_LIST_GET,
-    BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+    BUILTIN_LIST_CLEAR, BUILTIN_LIST_CONCAT, BUILTIN_LIST_CONTAINS, BUILTIN_LIST_EQ,
+    BUILTIN_LIST_GET, BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
     BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_LN, BUILTIN_MAP, BUILTIN_MAP_CONTAINS,
     BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_KEYS, BUILTIN_MAP_LEN,
     BUILTIN_MAP_NEW, BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY,
@@ -135,8 +135,8 @@ use generic::GENERIC_BODIES;
 #[cfg(test)]
 use io::io_class;
 use list::{
-    arena_at_fn, arena_insert_fn, arena_new_fn, arena_remove_fn, list_clear_fn, list_insert_fn,
-    list_new_fn, list_push_fn, list_remove_fn, list_set_fn,
+    arena_at_fn, arena_insert_fn, arena_new_fn, arena_remove_fn, list_clear_fn, list_contains_fn,
+    list_insert_fn, list_new_fn, list_push_fn, list_remove_fn, list_set_fn,
 };
 #[cfg(test)]
 use list::{collect_fn, cons_fn, list_concat_fn, list_get_fn, list_len_fn, max_fn, tail_fn};
@@ -504,13 +504,13 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             Dispatch::Timer(timer) => slot.timer = Some(*timer),
         }
     }
-    debug_assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
+    debug_assert_eq!(fns.len(), BUILTIN_LIST_CONTAINS as usize + 1);
     fns
 }
 
 /// One body per builtin table index, in index order: a gap carries its refusal stub.
 #[rustfmt::skip]
-const BUILTIN_BODIES: [NativeFn; BUILTIN_CHAN_RECV_DEADLINE as usize + 1] = [
+const BUILTIN_BODIES: [NativeFn; BUILTIN_LIST_CONTAINS as usize + 1] = [
     builtin_reserved_0, builtin_reserved_1, str_int_fn, str_float_fn,
     str_bool_fn, builtin_reserved_5, builtin_reserved_6, builtin_reserved_7,
     builtin_reserved_8, builtin_reserved_9, builtin_reserved_10, substring_fn,
@@ -538,7 +538,7 @@ const BUILTIN_BODIES: [NativeFn; BUILTIN_CHAN_RECV_DEADLINE as usize + 1] = [
     map_contains_fn, map_entries_fn, arena_new_fn, arena_insert_fn,
     arena_remove_fn, arena_at_fn, round_fn, trunc_fn,
     log_fn, exp_fn, tan_fn, chan_refuse_fn,
-    chan_refuse_fn, chan_refuse_fn,
+    chan_refuse_fn, chan_refuse_fn, list_contains_fn,
 ];
 
 /// How the dispatcher intercepts a slot ahead of its body.
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn the_builtin_table_is_row_driven() {
         let fns = builtin_module();
-        assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
+        assert_eq!(fns.len(), BUILTIN_LIST_CONTAINS as usize + 1);
         for row in ds_abi::native::rows(NativeModule::Builtin) {
             let slot = &fns[row.index as usize];
             assert_eq!(slot.name, row.name, "{}'s slot", row.name);

@@ -173,7 +173,7 @@ fn report(total: int, failed: int) -> string {
 }
 ```
 
-Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right and serves list membership (`x in xs`, checked against the element type; map membership refuses, so maps read through the checked `get`). A `for` over a list freezes the element count at loop entry.
+Loops are `for x in xs`, ranges `a..b` (exclusive) and `a..=b` (inclusive), and `while cond`, with `break` and `continue`. `in` takes a bare range on its right (`x in a..b`); list membership is the member call `xs.contains(x)`, and any other collection refuses (map membership reads through the checked `get` and `m.contains(k)`). A `for` over a list freezes the element count at loop entry.
 
 ```ts
 fn drill() {
@@ -262,7 +262,7 @@ const roster = collect(grown)                                   // the whole-lis
 for u in roster { println("user ${u.name}") }
 ```
 
-The mutation and membership members share the same exclusive window: `xs.insert(i, x)` splices, `xs.remove(i)` and `m.remove(k)` delete one element or row (a missing map key a no-op), `xs.clear()` empties, `m.contains(k)` reads membership, and `m.entries()` answers the entry-order `list[(k, v)]`; assignment sugar writes places in place over a `var` root — `p.x = v`, `xs[i] = v`, and nestings of both (`xs[i].x.y = v`) — with an out-of-range store trapping rather than answering a miss, a `const` receiver refusing (DS3006), and a compound operator over a place chain keeping the plain-binding refusal this round (DS2002).
+The mutation and membership members share the same exclusive window: `xs.insert(i, x)` splices, `xs.remove(i)` and `m.remove(k)` delete one element or row (a missing map key a no-op), `xs.clear()` empties, `xs.contains(x)` and `m.contains(k)` read membership, and `m.entries()` answers the entry-order `list[(k, v)]`; assignment sugar writes places in place over a `var` root — `p.x = v`, `xs[i] = v`, and nestings of both (`xs[i].x.y = v`) — with an out-of-range store trapping rather than answering a miss, a `const` receiver refusing (DS3006), and a compound operator over a place chain keeping the plain-binding refusal this round (DS2002).
 
 Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
 

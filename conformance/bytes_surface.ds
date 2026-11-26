@@ -1,5 +1,5 @@
 // source: the bytes representation round 2026-11-18 (the ambient's bytes collection: show/ord/hash over the payload, the utf8 bridges)
-// purpose: show renders the payload as a byte list (a high byte read through the checked byte_at beside literal low bytes, empty printing bytes[]), the derive families compose over a bytes part (show's rendering, ord's lexicographic shorter-prefix-first order, hash's content fold), the utf8_encode/utf8_decode bridges round-trip a multi-byte string (a lone lead byte answering utf8_err on the way back), and list[bytes] answers content equality and in membership
+// purpose: show renders the payload as a byte list (a high byte read through the checked byte_at beside literal low bytes, empty printing bytes[]), the derive families compose over a bytes part (show's rendering, ord's lexicographic shorter-prefix-first order, hash's content fold), the utf8_encode/utf8_decode bridges round-trip a multi-byte string (a lone lead byte answering utf8_err on the way back), and list[bytes] answers content equality and `xs.contains(x)` membership
 // items:
 // chunk: stage: run
 // render: stage: run
@@ -50,7 +50,7 @@ fn bridges() -> () {
 fn roster() -> () {
   const bs = [utf8_encode("ab"), utf8_encode("cd")]
   println("${bs == [utf8_encode("ab"), utf8_encode("cd")]} ${bs == [utf8_encode("ab"), utf8_encode("ce")]}")
-  println("${utf8_encode("ab") in bs} ${utf8_encode("xy") in bs}")
+  println("${bs.contains(utf8_encode("ab"))} ${bs.contains(utf8_encode("xy"))}")
 }
 
 fn main() -> () {

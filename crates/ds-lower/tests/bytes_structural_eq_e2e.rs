@@ -7,7 +7,7 @@
 //! bound names stage, so the native window's borrowed counts balance on
 //! every spelling. The per-word chains compare fields by their type,
 //! never their slot kind alone: a struct, tuple, or union field of
-//! bytes, a bytes field nested inside a struct field, and `in`
+//! bytes, a bytes field nested inside a struct field, and `contains`
 //! membership over `list[bytes]` all dispatch the content compare —
 //! the EqStr uop reads string objects alone, so the slot-kind chain
 //! trapped at runtime over a bytes word. A chain that answers at an
@@ -15,7 +15,7 @@
 //! counts at its merged exits, so the heap drains on the fail-fast
 //! spellings too (branch, statement, and interpolated; bytes or string
 //! behind the differing field; tuple and union payload chains; wide
-//! `in` membership).
+//! `contains` membership).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -35,6 +35,8 @@ const PRELUDE: &str = concat!(
     "extern fn println (s: string) -> ()\n",
     "extern fn bytes_of (xs: list[byte]) -> bytes\n",
     "extern fn byte_list (b: bytes) -> list[byte]\n",
+    "extern fn list_contains[t] (xs: list[t], x: t) -> bool\n",
+    "impl[t] list[t] { fn contains (self, x: t) -> bool }\n",
 );
 
 /// Parses, checks, lowers, and installs one inline source, then runs
@@ -193,9 +195,9 @@ fn a_union_payload_of_bytes_compares_by_content() {
     assert_eq!(stdout, "true false\nfalse false\n");
 }
 
-/// `in` membership over `list[bytes]` compares the element by its type:
-/// the one-word Ref element dispatches the content compare per
-/// iteration, the EqStr slot-kind path having trapped at runtime.
+/// `contains` membership over `list[bytes]` compares the element by its
+/// type: the one-word Ref probe dispatches the content compare per
+/// element, the EqStr slot-kind path having trapped at runtime.
 #[test]
 fn membership_over_a_bytes_list_compares_by_content() {
     let stdout = run_stdout(concat!(
@@ -204,8 +206,8 @@ fn membership_over_a_bytes_list_compares_by_content() {
         "  const hit = bytes_of([b'a', b'b'])\n",
         "  const fresh_hit = bytes_of([b'c'])\n",
         "  const miss = bytes_of([b'a', b'd'])\n",
-        "  println(\"${hit in xs} ${fresh_hit in xs} ${miss in xs}\")\n",
-        "  println(\"${!(hit in xs)} ${!(miss in xs)}\")\n",
+        "  println(\"${xs.contains(hit)} ${xs.contains(fresh_hit)} ${xs.contains(miss)}\")\n",
+        "  println(\"${!xs.contains(hit)} ${!xs.contains(miss)}\")\n",
         "}\n",
     ));
     assert_eq!(stdout, "true true false\nfalse true\n");
@@ -334,18 +336,18 @@ fn a_fail_fast_union_payload_chain_releases_the_skipped_field() {
     assert_eq!(stdout, "ne\nfalse true\nend\n");
 }
 
-/// Wide `in` membership fail-fasts inside the per-element chain: the
-/// skipped Ref-carrying field's handed-out count releases through the
-/// chain's merged exits beside the list's own edge counts.
+/// Wide `contains` membership walks the per-element content compare:
+/// the probe's Ref-carrying field stages a borrow beside the list's own
+/// edge counts, so the heap drains over the hit and the miss alike.
 #[test]
-fn wide_membership_fail_fast_releases_the_elements_counts() {
+fn wide_membership_releases_the_elements_counts() {
     let stdout = run_drains(concat!(
         "struct flat { b: bytes, n: int }\n",
         "fn main() -> () {\n",
         "  const xs = [flat { b: bytes_of([b'a']), n: 1 }, flat { b: bytes_of([b'b']), n: 2 }]\n",
         "  const hit = flat { b: bytes_of([b'b']), n: 2 }\n",
         "  const miss = flat { b: bytes_of([b'z']), n: 9 }\n",
-        "  println(\"${hit in xs} ${miss in xs}\")\n",
+        "  println(\"${xs.contains(hit)} ${xs.contains(miss)}\")\n",
         "  println(\"end\")\n",
         "}\n",
     ));

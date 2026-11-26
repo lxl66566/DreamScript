@@ -71,9 +71,10 @@ fn the_member_spellings_run_over_the_ambient() {
 /// The mutation and membership members answer through the ambient in
 /// source mode: the indexed replacement, splice, and removal over the
 /// same mut windows, the stride-resetting emptying, the map's row
-/// removal (a missing key a no-op), the membership read, and the
-/// entry-order pair list — with the trap an out-of-range indexed store
-/// answers carrying its own report line.
+/// removal (a missing key a no-op), the membership reads (the list
+/// probe and the map row), and the entry-order pair list — with the
+/// trap an out-of-range indexed store answers carrying its own report
+/// line.
 #[test]
 fn the_mutation_and_membership_members_run_over_the_ambient() {
     let out = run(ds().arg("run").arg(fixture("collections_members.ds")));
@@ -83,6 +84,7 @@ fn the_mutation_and_membership_members_run_over_the_ambient() {
         concat!(
             "spliced 9 1 20\n",
             "cleared 7\n",
+            "probed true false\n",
             "removed true false 1\n",
             "pairs two=2\n",
             "0\n",

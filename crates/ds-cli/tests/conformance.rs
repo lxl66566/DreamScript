@@ -216,8 +216,8 @@ fn the_bytes_surface_renders_orders_and_crosses_the_bridges() {
     // families composing over a bytes part (the lexicographic
     // shorter-prefix-first order, the content hash), the utf8 bridges
     // round-tripping a multi-byte string with a lone lead byte answering
-    // utf8_err, and list[bytes] answering content equality and in
-    // membership
+    // utf8_err, and list[bytes] answering content equality and
+    // `contains` membership
     run_golden(
         "bytes_surface.ds",
         concat!(
@@ -240,11 +240,11 @@ fn the_bytes_surface_renders_orders_and_crosses_the_bridges() {
 fn collection_equality_compares_nested_content_and_membership() {
     // the content-compare natives over the collections' one Ref word:
     // nested collections compose (a list of lists, a map over list
-    // values, a struct field of list and map type), and in membership
-    // compares the element by its type (a list element over a list of
-    // lists, a struct element whose fields are collections); the float
-    // judge rides the one bit-structural word equality everywhere — a
-    // NaN reflexive, the two zeros distinct keys and unequal elements
+    // values, a struct field of list and map type), and `contains`
+    // membership compares the element by its type (a list element over a
+    // list of lists, a struct element whose fields are collections); the
+    // float judge rides the one bit-structural word equality everywhere —
+    // a NaN reflexive, the two zeros distinct keys and unequal elements
     run_golden(
         "collection_equality.ds",
         "nested true\nmatrix true\nfields true\nmember true\nfloat true\n0\n",

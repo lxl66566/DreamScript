@@ -83,8 +83,9 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("effects_nursery.ds", 0);
     assert_corpus_clean("range_for.ds", 0);
     assert_corpus_clean("pattern_dispatch.ds", 0);
-    // the one error is the file's own reject item (the mixed-element literal)
-    assert_corpus_clean("lists_surface.ds", 1);
+    // the two errors are the file's own reject items (the mixed-element
+    // literal, the range-only `in` spelling)
+    assert_corpus_clean("lists_surface.ds", 2);
     // the one error is the file's own reject item (the union destructuring)
     assert_corpus_clean("tuples_surface.ds", 1);
     // the one error is the file's own reject item (the constructor
