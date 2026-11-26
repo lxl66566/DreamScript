@@ -724,6 +724,9 @@ impl Visit for Walker<'_> {
             | Expr::Paren { .. }
             | Expr::Str { .. }
             | Expr::FnType { .. }
+            // a conversion placeholder's span is rejected source, not a
+            // token
+            | Expr::Invalid(_)
             | Expr::Block(_) => {},
         }
     }

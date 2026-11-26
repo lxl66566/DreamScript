@@ -1080,8 +1080,11 @@ impl<'a> Lin<'a> {
     fn expr(&mut self, e: &'a Expr, consuming: bool) -> bool {
         match e {
             // A fn type in the constructor brackets is a pure type
-            // spelling; no binding use.
-            Expr::Literal { .. } | Expr::RawStr { .. } | Expr::FnType { .. } => false,
+            // spelling; no binding use. A conversion placeholder uses no
+            // binding and exits no path.
+            Expr::Literal { .. } | Expr::RawStr { .. } | Expr::FnType { .. } | Expr::Invalid(_) => {
+                false
+            },
             Expr::Str { parts, .. } => {
                 for part in parts {
                     match part {

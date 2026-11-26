@@ -1277,7 +1277,9 @@ fn cancel_operands_expr(e: &Expr, out: &mut Vec<Span>, through_spawns: bool) {
         | Expr::Break(_)
         | Expr::Continue(_)
         | Expr::Lambda { .. }
-        | Expr::Defer { .. } => {},
+        | Expr::Defer { .. }
+        // a conversion placeholder cancels no operand
+        | Expr::Invalid(_) => {},
     }
 }
 
@@ -1339,7 +1341,9 @@ fn stray_exit_expr(e: &Expr) -> Option<Span> {
         | Expr::Spawn { .. }
         | Expr::Defer { .. }
         | Expr::Break(_)
-        | Expr::Continue(_) => None,
+        | Expr::Continue(_)
+        // a conversion placeholder is no exit
+        | Expr::Invalid(_) => None,
     }
 }
 
@@ -1378,12 +1382,13 @@ fn visit_uses(e: &Expr, visit: &mut dyn FnMut(Span)) {
     };
     match e {
         // a fn type in the constructor brackets is a type spelling; it
-        // names no value
+        // names no value, and a conversion placeholder names none either
         Expr::Literal { .. }
         | Expr::RawStr { .. }
         | Expr::Break(_)
         | Expr::Continue(_)
-        | Expr::FnType { .. } => {},
+        | Expr::FnType { .. }
+        | Expr::Invalid(_) => {},
         Expr::Str { parts, .. } => {
             for part in parts {
                 match part {
@@ -1819,7 +1824,9 @@ fn discover_expr(plan: &mut Plan, analyzed: &Analyzed, ctx: &MintCtx, e: &Expr) 
         | Expr::Path { .. }
         | Expr::FnType { .. }
         | Expr::Break(_)
-        | Expr::Continue(_) => {},
+        | Expr::Continue(_)
+        // a conversion placeholder mints nothing
+        | Expr::Invalid(_) => {},
     }
 }
 
@@ -2164,7 +2171,9 @@ impl PairWalk<'_> {
             | Expr::Break(_)
             | Expr::Continue(_)
             | Expr::FnType { .. }
-            | Expr::Path { .. } => {},
+            | Expr::Path { .. }
+            // a conversion placeholder demands no slot
+            | Expr::Invalid(_) => {},
             // a spawned block's demands ride its entry argument area,
             // staged from this frame's evidence slots at the spawn site,
             // so this frame must carry a slot for every demand lexically
@@ -4683,6 +4692,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Expr::For { .. } => self.for_value(e)?,
             Expr::Break(span) => self.break_value(*span)?,
             Expr::Continue(span) => self.continue_value(*span)?,
+            // a conversion placeholder never reaches lowering through the
+            // pipeline (a tree holding one never leaves `parse`); refuse
+            // rather than emit code for a rejected shape
+            Expr::Invalid(span) => {
+                return Err(LowerError::unsupported(
+                    *span,
+                    "an expression",
+                    "it was rejected at conversion",
+                ))
+            },
             Expr::Nursery { .. } => self.nursery_value(e)?,
             Expr::Spawn { .. } => self.spawn_value(e)?,
             Expr::Defer { .. } => {

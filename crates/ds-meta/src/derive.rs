@@ -102,8 +102,8 @@
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
-    AssignOp, Ast, Attribute, BinaryOp, BlockExpr, CallArg, EnumCase, EnumDecl, EnumPayload, Expr,
-    FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, Literal, LocalDecl, MatchArm, Param,
+    AssignOp, Ast, Attribute, BinaryOp, BlockExpr, CallArg, Delim, EnumCase, EnumDecl, EnumPayload,
+    Expr, FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, Literal, LocalDecl, MatchArm, Param,
     ParamMode, Path, Pattern, Stmt, StmtKind, StrPart, StructMember, Type, TypeParam, TypeRef,
     UnaryOp,
 };
@@ -2427,7 +2427,9 @@ fn applied_default(ty: &Type, mint: &mut Mint) -> Expr {
 fn minted_type(ty: &Type, mint: &mut Mint) -> Type {
     let span = mint.span();
     match ty {
-        Type::Path { path, args, .. } => Type::Path {
+        Type::Path {
+            path, args, delim, ..
+        } => Type::Path {
             span,
             path: Path {
                 span,
@@ -2441,6 +2443,7 @@ fn minted_type(ty: &Type, mint: &mut Mint) -> Type {
                     .collect(),
             },
             args: args.iter().map(|arg| minted_type(arg, mint)).collect(),
+            delim: *delim,
         },
         Type::Optional { inner, .. } => Type::Optional {
             span,
@@ -4513,6 +4516,7 @@ fn name_type(mint: &mut Mint, name: &str) -> Type {
         span,
         path,
         args: Vec::new(),
+        delim: Delim::Bracket,
     }
 }
 
@@ -4588,8 +4592,10 @@ fn impl_item(
                     segments: vec![p.name.clone()],
                 },
                 args: Vec::new(),
+                delim: Delim::Bracket,
             })
             .collect(),
+        delim: Delim::Bracket,
     };
     // The trait reference is a name use, so it mints its own span; an
     // inherent member's impl carries none.
@@ -4664,6 +4670,7 @@ fn trait_type(mint: &mut Mint, name: &str) -> Type {
             }],
         },
         args: Vec::new(),
+        delim: Delim::Bracket,
     }
 }
 

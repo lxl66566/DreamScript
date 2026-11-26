@@ -237,7 +237,12 @@ fn modes_agree(a: ParamMode, b: ParamMode) -> bool {
 /// substituted parameter takes the argument's written type.
 fn substitute_type(ty: &Type, subst: &FxHashMap<String, Type>) -> Type {
     match ty {
-        Type::Path { span, path, args } => {
+        Type::Path {
+            span,
+            path,
+            args,
+            delim,
+        } => {
             if args.is_empty()
                 && let [only] = path.segments.as_slice()
                 && let Some(replacement) = subst.get(&only.name)
@@ -248,6 +253,7 @@ fn substitute_type(ty: &Type, subst: &FxHashMap<String, Type>) -> Type {
                 span: *span,
                 path: path.clone(),
                 args: args.iter().map(|a| substitute_type(a, subst)).collect(),
+                delim: *delim,
             }
         },
         Type::Optional { span, inner } => Type::Optional {

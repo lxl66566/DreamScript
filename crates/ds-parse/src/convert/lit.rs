@@ -134,7 +134,7 @@ impl Ctx {
                         .map(|e| self.expr(e));
                     parts.push(StrPart::Expr {
                         span: hspan,
-                        expr: Box::new(hole_expr.unwrap_or(Expr::Break(hspan))),
+                        expr: Box::new(hole_expr.unwrap_or(Expr::Invalid(hspan))),
                     });
                 },
                 Rule::interp_simple => {

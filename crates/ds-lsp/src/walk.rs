@@ -463,7 +463,9 @@ impl<'v, V: Visit> Walk<'v, V> {
             | Expr::RawStr { .. }
             | Expr::Path { .. }
             | Expr::Break(_)
-            | Expr::Continue(_) => {},
+            | Expr::Continue(_)
+            // a conversion placeholder holds nothing to visit
+            | Expr::Invalid(_) => {},
             Expr::Str { span, parts, .. } => self.str_parts(*span, parts),
             Expr::Lambda {
                 span,

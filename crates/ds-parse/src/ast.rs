@@ -490,6 +490,18 @@ pub struct ImplDecl {
     pub fns: Vec<FnDecl>,
 }
 
+/// The delimiter a path type's application was spelled with: case-type
+/// parentheses (`bad_number(string)`) or generic brackets (`list[int]`).
+/// Synthesized trees pick the bracket spelling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Delim {
+    /// Case-type parentheses.
+    Paren,
+    /// Generic-application brackets; the angle spelling folds here.
+    Bracket,
+}
+
 /// A type expression (B1, B4).
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "ast-serde", derive(serde::Serialize, serde::Deserialize))]
@@ -502,6 +514,8 @@ pub enum Type {
         path: Path,
         /// Generic arguments.
         args: Vec<Type>,
+        /// The application's delimiter; read only when `args` is non-empty.
+        delim: Delim,
     },
     /// `t?` — exactly `t | none` (B4).
     Optional {
@@ -1035,6 +1049,11 @@ pub enum Expr {
     Break(Span),
     /// `continue`.
     Continue(Span),
+    /// Placeholder for a shape the grammar produced but conversion refuses;
+    /// every insertion records a diagnostic, so a tree holding one never
+    /// leaves `parse`, and downstream passes must refuse it rather than
+    /// read it as a keyword.
+    Invalid(Span),
     /// `nursery { ... }` (E2).
     Nursery {
         /// Span of the whole expression.
@@ -1094,7 +1113,8 @@ impl Expr {
             | Self::Spawn { span, .. }
             | Self::Defer { span, .. }
             | Self::Break(span)
-            | Self::Continue(span) => *span,
+            | Self::Continue(span)
+            | Self::Invalid(span) => *span,
             Self::Block(b) => b.span,
         }
     }

@@ -1198,6 +1198,7 @@ fn a_linked_type_registers_before_selections_validate() {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     };
     let fn_entry = |name: &str, param: &str, param_ty: &str, ret: &str| ds_check::ForeignEntry {
         name: name.to_owned(),
@@ -1636,6 +1637,7 @@ fn a_linked_enum_case_named_none_registers_through_the_reserved_atom() {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     };
     let ty_entry = |name: &str, fact: Option<ds_check::TypeFact>| ds_check::ForeignEntry {
         name: name.to_owned(),
@@ -1913,6 +1915,7 @@ fn a_linked_enum_registers_its_cases_beside_it() {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     };
     let fn_entry = |name: &str, param: &str, param_ty: &str, ret: &str| ds_check::ForeignEntry {
         name: name.to_owned(),

@@ -818,7 +818,7 @@ impl Ctx {
         let mut mutable = false;
         let mut pat = Pattern::Wildcard(span);
         let mut ty = None;
-        let mut init = Expr::Break(span);
+        let mut init = Expr::Invalid(span);
         for c in inner(&p) {
             match c.as_rule() {
                 Rule::local_kw => mutable = c.as_str().starts_with("var"),
@@ -1528,10 +1528,10 @@ impl Ctx {
     }
 }
 
-fn inner_or_break(ctx: &mut Ctx, p: &Pair<'_, Rule>) -> Expr {
+fn inner_or_invalid(ctx: &mut Ctx, p: &Pair<'_, Rule>) -> Expr {
     match inner(p).next() {
         Some(c) => ctx.expr(c),
-        None => Expr::Break(ctx.span(p)),
+        None => Expr::Invalid(ctx.span(p)),
     }
 }
 

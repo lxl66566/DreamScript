@@ -1938,7 +1938,9 @@ fn walk_expr(expr: &Expr, go: &mut dyn FnMut(&Expr)) {
         | Expr::Path { .. }
         | Expr::FnType { .. }
         | Expr::Break(_)
-        | Expr::Continue(_) => {},
+        | Expr::Continue(_)
+        // a conversion placeholder holds nothing to visit
+        | Expr::Invalid(_) => {},
         Expr::Str { parts, .. } => {
             for part in parts {
                 match part {

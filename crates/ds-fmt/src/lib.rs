@@ -12,7 +12,7 @@
 //!   empty string).
 //! - Generic application renders with square brackets (`list[int]`); the angle form the parser
 //!   tolerates is never emitted. Case-type references (`bad_number(string)`) keep their parentheses
-//!   — the AST models both as `Path { args }`, so the delimiter is read from the source span.
+//!   — the AST's `Path` carries the delimiter.
 //! - Trailing commas are tolerated everywhere per F1 and never emitted; the one exception is the
 //!   one-element tuple/pattern `(x,)`, where the comma alone keeps it a tuple.
 //! - Trait/impl members always render as `fn name(params) -> ret { ... }`; the AST erases the

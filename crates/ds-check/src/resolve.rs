@@ -2181,7 +2181,12 @@ impl FileResolver<'_> {
 
     fn expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Literal { .. } | Expr::RawStr { .. } | Expr::Break(_) | Expr::Continue(_) => {},
+            Expr::Literal { .. }
+            | Expr::RawStr { .. }
+            | Expr::Break(_)
+            | Expr::Continue(_)
+            // A conversion placeholder uses no name.
+            | Expr::Invalid(_) => {},
             Expr::Str { parts, .. } => {
                 for part in parts {
                     match part {

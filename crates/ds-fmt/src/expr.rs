@@ -348,8 +348,12 @@ fn write_expr_inner(ctx: &Ctx, out: &mut String, base: usize, e: &Expr) {
     match e {
         Expr::Literal { lit, .. } => write_literal(out, lit),
         // String literals re-render verbatim from their source spans; the
-        // formatter never re-escapes or re-flows them.
-        Expr::Str { span, .. } | Expr::RawStr { span, .. } => ctx.push_verbatim(out, *span),
+        // formatter never re-escapes or re-flows them. A conversion
+        // placeholder only exists beside conversion errors and keeps its
+        // rejected bytes as written.
+        Expr::Str { span, .. } | Expr::RawStr { span, .. } | Expr::Invalid(span) => {
+            ctx.push_verbatim(out, *span);
+        },
         Expr::Lambda {
             generics,
             params,

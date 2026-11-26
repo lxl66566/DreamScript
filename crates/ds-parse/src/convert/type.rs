@@ -113,6 +113,8 @@ impl Ctx {
                     span,
                     path,
                     args: payload,
+                    // Case-type applications spell parens.
+                    delim: Delim::Paren,
                 }
             },
             Rule::path_type => {
@@ -133,6 +135,8 @@ impl Ctx {
                         segments: Vec::new(),
                     }),
                     args,
+                    // Bracket is canonical; the angle spelling folds here.
+                    delim: Delim::Bracket,
                 }
             },
             Rule::tuple_type => {

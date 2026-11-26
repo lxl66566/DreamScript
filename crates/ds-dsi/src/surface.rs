@@ -449,6 +449,7 @@ mod tests {
                 }],
             },
             args: Vec::new(),
+            delim: ds_parse::Delim::Bracket,
         }
     }
 

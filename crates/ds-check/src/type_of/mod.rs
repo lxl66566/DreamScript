@@ -48,8 +48,9 @@ use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use ds_diag::{Diagnostic, ErrorCode, Files, Span};
 use ds_parse::{
-    Ast, BinaryOp, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal, LocalDecl,
-    MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam, UnaryOp,
+    Ast, BinaryOp, BlockExpr, Delim, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal,
+    LocalDecl, MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam,
+    UnaryOp,
 };
 use rustc_hash::FxHashMap;
 
@@ -1475,6 +1476,22 @@ impl Bodies<'_> {
         val
     }
 
+    /// Refusal for a conversion placeholder: a tree holding one never
+    /// leaves `parse`, so this arm only fires on a synthesized tree.
+    fn invalid_expr(&mut self, span: Span) -> Val {
+        self.error(
+            ErrorCode::InferenceFailed,
+            "the expression was rejected at conversion".to_owned(),
+            span,
+            "rejected expression",
+        );
+        Val {
+            ty: self.empty(),
+            diverges: false,
+            poisoned: true,
+        }
+    }
+
     fn expr_inner(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
         // The position this expression occupies (statement or
         // value-consumed) was set by the parent walk; every sub-expression
@@ -1739,6 +1756,11 @@ impl Bodies<'_> {
                     poisoned: false,
                 }
             },
+            // A conversion placeholder only ever exists beside recorded
+            // conversion diagnostics, so `parse` never returns a tree
+            // holding one; refusing keeps a synthesized tree from reading
+            // as a loop exit.
+            Expr::Invalid(span) => self.invalid_expr(*span),
             Expr::Nursery { body, span } => self.nursery_block(body, *span),
             // A spawned body runs as its own fiber: its loop exits stay
             // inside its frame, and its answer rides the join's
@@ -3233,6 +3255,7 @@ impl Bodies<'_> {
                 span: *span,
                 path: path.clone(),
                 args: Vec::new(),
+                delim: Delim::Bracket,
             }),
             Expr::FnType { ty, .. } => Some((**ty).clone()),
             Expr::Paren { inner, .. } => Self::ctor_type_arg(inner),
@@ -3250,6 +3273,7 @@ impl Bodies<'_> {
                         segments: vec![head.clone()],
                     },
                     args: vec![arg],
+                    delim: Delim::Bracket,
                 })
             },
             Expr::MapApply {
@@ -3264,6 +3288,7 @@ impl Bodies<'_> {
                         segments: vec![head.clone()],
                     },
                     args: vec![key, value],
+                    delim: Delim::Bracket,
                 })
             },
             _ => None,
@@ -4465,6 +4490,7 @@ impl Bodies<'_> {
                         span: *span,
                         path: path.clone(),
                         args: vec![arg],
+                        delim: Delim::Bracket,
                     }),
                 )
             },
@@ -4488,6 +4514,7 @@ impl Bodies<'_> {
                             segments: vec![head.clone()],
                         },
                         args: vec![key, value],
+                        delim: Delim::Bracket,
                     }),
                 )
             },
@@ -4637,6 +4664,7 @@ impl Bodies<'_> {
                 }],
             },
             args: Vec::new(),
+            delim: Delim::Bracket,
         });
         let Some(owner_ty) = self.solve_here(&owner_written) else {
             if let Some(applied) = &written {
@@ -6349,7 +6377,9 @@ impl Bodies<'_> {
         generics: &[GenericParam],
     ) -> Option<Ty> {
         match ty {
-            Type::Path { span, path, args } => {
+            Type::Path {
+                span, path, args, ..
+            } => {
                 let [only] = path.segments.as_slice() else {
                     return None
                 };
@@ -7344,6 +7374,7 @@ fn name_type(name: &str) -> Type {
             }],
         },
         args: Vec::new(),
+        delim: Delim::Bracket,
     }
 }
 

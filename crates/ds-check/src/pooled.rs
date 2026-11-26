@@ -757,7 +757,9 @@ fn walk_expr<'t>(expr: &'t Expr, on: &mut impl FnMut(Visit<'t>)) {
         | Expr::Path { .. }
         | Expr::FnType { .. }
         | Expr::Break(_)
-        | Expr::Continue(_) => {},
+        | Expr::Continue(_)
+        // A conversion placeholder holds no nested values.
+        | Expr::Invalid(_) => {},
         Expr::Str { parts, .. } => {
             for part in parts {
                 if let StrPart::Expr { expr, .. } = part {

@@ -1142,6 +1142,8 @@ impl Walker<'_, '_> {
             | Expr::RawStr { .. }
             | Expr::Break(_)
             | Expr::Continue(_)
+            // A conversion placeholder carries no value effects.
+            | Expr::Invalid(_)
             | Expr::FnType { .. } => {},
             Expr::Str { parts, .. } => self.string(parts, mask),
             Expr::Lambda { body, .. } => self.expr(body, mask),

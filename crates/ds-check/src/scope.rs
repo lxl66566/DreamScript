@@ -334,6 +334,8 @@ impl Walker<'_> {
             | Expr::Path { .. }
             | Expr::Break(_)
             | Expr::Continue(_)
+            // A conversion placeholder names nothing.
+            | Expr::Invalid(_)
             // Types bind no value names.
             | Expr::FnType { .. } => {},
             Expr::Str { parts, .. } => {

@@ -73,11 +73,12 @@ mod pest_gen {
     pub(super) struct DsParser;
 }
 pub use ast::{
-    AssignOp, Ast, Attribute, BinaryOp, BindName, Block, BlockExpr, CallArg, EnumCase, EnumDecl,
-    EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath, ImportSel, Item,
-    ItemKind, Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern, PlatformDecl,
-    PlatformName, Stmt, StmtKind, StrPart, StructDecl, StructMember, TagDecl, TraitDecl,
-    TraitMember, Trivia, TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp, Vis,
+    AssignOp, Ast, Attribute, BinaryOp, BindName, Block, BlockExpr, CallArg, Delim, EnumCase,
+    EnumDecl, EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, ImportDecl, ImportPath,
+    ImportSel, Item, ItemKind, Literal, LocalDecl, MatchArm, Param, ParamMode, Path, Pattern,
+    PlatformDecl, PlatformName, Stmt, StmtKind, StrPart, StructDecl, StructMember, TagDecl,
+    TraitDecl, TraitMember, Trivia, TriviaKind, Type, TypeAliasDecl, TypeParam, TypeRef, UnaryOp,
+    Vis,
 };
 pub(crate) use pest_gen::{DsParser, Rule};
 

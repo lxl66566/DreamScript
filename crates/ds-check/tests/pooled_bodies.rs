@@ -132,6 +132,7 @@ fn int_type(span: ds_diag::Span) -> ds_parse::Type {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     }
 }
 

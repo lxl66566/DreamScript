@@ -435,7 +435,9 @@ fn norm_path(p: &mut Path) {
 
 fn norm_ty(t: &mut Type) {
     match t {
-        Type::Path { span, path, args } => {
+        Type::Path {
+            span, path, args, ..
+        } => {
             z(span);
             norm_path(path);
             for a in args {
@@ -758,7 +760,7 @@ fn norm_expr(e: &mut Expr) {
                 norm_expr(e);
             }
         },
-        Expr::Break(s) | Expr::Continue(s) => z(s),
+        Expr::Break(s) | Expr::Continue(s) | Expr::Invalid(s) => z(s),
         Expr::Nursery { span, body } | Expr::Spawn { span, body } | Expr::Defer { span, body } => {
             z(span);
             norm_block(body);

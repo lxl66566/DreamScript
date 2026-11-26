@@ -22,11 +22,54 @@ fn angle_generics_never_emitted() {
 #[test]
 fn case_type_refs_keep_parens() {
     // `bad_number(string)` is a case-type reference, not generic application;
-    // the parens must survive (the AST alone cannot tell them apart).
+    // the parens must survive (the AST's delimiter field carries them).
     assert_eq!(
         fmt_once("t.ds", "type e = badnumber(string) | missing\n"),
         "type e = badnumber(string) | missing\n"
     );
+}
+
+#[test]
+fn delim_field_alone_picks_the_spelling() {
+    // The delimiter is carried by the AST: flipping a parsed bracket
+    // application to the case-type spelling renders parens while the
+    // source bytes at the same span still close with `]`, so no source
+    // re-reading can be driving the choice.
+    use ds_diag::Files;
+    use ds_fmt::format_source;
+    use ds_parse::{Delim, ItemKind, Type, parse};
+
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", "type t = list[int]\n");
+    let mut ast = parse(&files, file).expect("parses");
+    let ItemKind::TypeAlias(alias) = &mut ast.blocks[0].items[0].kind else {
+        panic!("alias item");
+    };
+    let Type::Path { delim, args, .. } = &mut alias.ty else {
+        panic!("path type");
+    };
+    assert!(!args.is_empty(), "the fixture applies one argument");
+    *delim = Delim::Paren;
+    assert_eq!(format_source(&files, file, &ast), "type t = list(int)\n");
+}
+
+#[test]
+fn a_conversion_placeholder_renders_verbatim() {
+    // An `Expr::Invalid` node covers rejected source; the formatter keeps
+    // its bytes as written instead of spelling a keyword over it.
+    use ds_diag::Files;
+    use ds_fmt::format_source;
+    use ds_parse::{Expr, ItemKind, parse};
+
+    let mut files = Files::new();
+    let file = files.add_source("t.ds", "const x = 1 + 2\n");
+    let mut ast = parse(&files, file).expect("parses");
+    let ItemKind::Local(local) = &mut ast.blocks[0].items[0].kind else {
+        panic!("local item");
+    };
+    let span = local.init.span();
+    local.init = Expr::Invalid(span);
+    assert_eq!(format_source(&files, file, &ast), "const x = 1 + 2\n");
 }
 
 #[test]

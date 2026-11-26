@@ -3,7 +3,7 @@
 use ds_diag::{ErrorCode, Span};
 use pest::iterators::Pair;
 
-use super::{Ctx, empty_block, inner, inner_or_break, is_op_rule, is_operand_rule, join};
+use super::{Ctx, empty_block, inner, inner_or_invalid, is_op_rule, is_operand_rule, join};
 use crate::{Rule, ast::*};
 
 impl Ctx {
@@ -43,10 +43,10 @@ impl Ctx {
                     .filter(|c| c.as_rule() == Rule::neg_op)
                     .count();
                 if self.chain_guard(ops_count, span) {
-                    return Expr::Break(span);
+                    return Expr::Invalid(span);
                 }
                 let mut ops = Vec::new();
-                let mut operand = Expr::Break(span);
+                let mut operand = Expr::Invalid(span);
                 for c in children {
                     match c.as_rule() {
                         Rule::neg_op => ops.push((
@@ -76,7 +76,7 @@ impl Ctx {
             Rule::struct_lit => self.struct_lit(p),
             Rule::lambda => inner(&p)
                 .next()
-                .map_or(Expr::Break(self.span(&p)), |c| self.lambda_form(c)),
+                .map_or(Expr::Invalid(self.span(&p)), |c| self.lambda_form(c)),
             Rule::lambda_paren | Rule::lambda_bare => self.lambda_form(p),
             Rule::list_lit => {
                 let span = self.span(&p);
@@ -145,7 +145,7 @@ impl Ctx {
                         key: Box::new(self.bracket_arg(key)),
                         value: Box::new(self.bracket_arg(value)),
                     },
-                    _ => Expr::Break(span),
+                    _ => Expr::Invalid(span),
                 }
             },
             Rule::path_atom | Rule::path => {
@@ -153,7 +153,7 @@ impl Ctx {
                 let path = self.conv_path(p);
                 Expr::Path { span, path }
             },
-            _ => inner_or_break(self, &p),
+            _ => inner_or_invalid(self, &p),
         }
     }
 
@@ -162,7 +162,7 @@ impl Ctx {
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
         // Children alternate operand / op, so operands are half the run.
         if self.chain_guard(children.len().div_ceil(2), span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
         let mut operands = Vec::new();
         let mut ops = Vec::new();
@@ -185,7 +185,7 @@ impl Ctx {
             expect_operand = !expect_operand;
         }
         // Right fold: `a = b = c` is `a = (b = c)`.
-        let mut acc = operands.pop().unwrap_or(Expr::Break(span));
+        let mut acc = operands.pop().unwrap_or(Expr::Invalid(span));
         while let (Some(op), Some(lhs)) = (ops.pop(), operands.pop()) {
             let s = join(lhs.span(), acc.span());
             acc = Expr::Assign {
@@ -201,11 +201,15 @@ impl Ctx {
     fn range(&mut self, p: Pair<'_, Rule>) -> Expr {
         let span = self.span(&p);
         let mut children = inner(&p);
-        let start = children.next().map_or(Expr::Break(span), |c| self.expr(c));
+        let start = children
+            .next()
+            .map_or(Expr::Invalid(span), |c| self.expr(c));
         match children.next() {
             Some(op) if op.as_rule() == Rule::range_op => {
                 let inclusive = op.as_str() == "..=";
-                let end = children.next().map_or(Expr::Break(span), |c| self.expr(c));
+                let end = children
+                    .next()
+                    .map_or(Expr::Invalid(span), |c| self.expr(c));
                 Expr::Range {
                     span,
                     inclusive,
@@ -225,12 +229,12 @@ impl Ctx {
             .filter(|c| c.as_rule() == Rule::kw_is)
             .count();
         if self.chain_guard(tails + 1, span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
         let mut iter = children.into_iter();
         let first = match iter.next() {
             Some(c) if is_operand_rule(&c) => self.expr(c),
-            _ => return Expr::Break(span),
+            _ => return Expr::Invalid(span),
         };
         let mut acc = first;
         while let Some(c) = iter.next() {
@@ -253,10 +257,10 @@ impl Ctx {
         let span = self.span(&p);
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
         if self.chain_guard(children.len(), span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
         let mut iter = children.into_iter();
-        let mut acc = iter.next().map_or(Expr::Break(span), |c| self.expr(c));
+        let mut acc = iter.next().map_or(Expr::Invalid(span), |c| self.expr(c));
         for c in iter {
             let e = self.expr(c);
             let s = join(acc.span(), e.span());
@@ -280,10 +284,10 @@ impl Ctx {
             .filter(|c| !matches!(c.as_rule(), Rule::cmp_op | Rule::kw_in))
             .count();
         if self.chain_guard(operands, span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
         let mut iter = children.into_iter();
-        let mut acc = iter.next().map_or(Expr::Break(span), |c| self.expr(c));
+        let mut acc = iter.next().map_or(Expr::Invalid(span), |c| self.expr(c));
         while let Some(c) = iter.next() {
             match c.as_rule() {
                 Rule::cmp_op => {
@@ -333,9 +337,9 @@ impl Ctx {
         let children: Vec<Pair<'_, Rule>> = inner(&p).collect();
         let operands = children.iter().filter(|c| !is_op_rule(c)).count();
         if self.chain_guard(operands, span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
-        let mut acc = Expr::Break(span);
+        let mut acc = Expr::Invalid(span);
         let mut pending_op: Option<BinaryOp> = None;
         let mut first = true;
         for c in children {
@@ -372,12 +376,12 @@ impl Ctx {
         // Each postfix op nests one level (calls, indexes, `?`, fields), so
         // the op run is itself a chain.
         if self.chain_guard(children.len(), span) {
-            return Expr::Break(span);
+            return Expr::Invalid(span);
         }
         let mut iter = children.into_iter();
         let first = match iter.next() {
             Some(c) => self.expr(c),
-            None => return Expr::Break(span),
+            None => return Expr::Invalid(span),
         };
         let mut acc = first;
         for c in iter {
@@ -485,7 +489,7 @@ impl Ctx {
             let (name, value) = match inner(&a).next() {
                 Some(head) if head.as_rule() == Rule::arg_named => {
                     let mut n = None;
-                    let mut v = Expr::Break(aspan);
+                    let mut v = Expr::Invalid(aspan);
                     for c in inner(&head) {
                         match c.as_rule() {
                             Rule::ident => n = Some(self.ident(c)),
@@ -495,7 +499,7 @@ impl Ctx {
                     (n, v)
                 },
                 Some(e) => (None, self.expr(e)),
-                None => (None, Expr::Break(aspan)),
+                None => (None, Expr::Invalid(aspan)),
             };
             out.push(CallArg {
                 span: aspan,
@@ -579,7 +583,7 @@ impl Ctx {
             }
         }
         if items.len() == 1 && !trailing {
-            let inner_e = items.pop().unwrap_or(Expr::Break(span));
+            let inner_e = items.pop().unwrap_or(Expr::Invalid(span));
             return Expr::Paren {
                 span,
                 inner: Box::new(inner_e),
@@ -596,7 +600,7 @@ impl Ctx {
         let span = self.span(&p);
         if p.as_rule() == Rule::lambda_bare {
             let mut name = None;
-            let mut body = Expr::Break(span);
+            let mut body = Expr::Invalid(span);
             for c in inner(&p) {
                 match c.as_rule() {
                     Rule::ident => name = Some(self.ident(c)),
@@ -624,7 +628,7 @@ impl Ctx {
             let mut generics = Vec::new();
             let mut params = Vec::new();
             let mut ret = None;
-            let mut body = Expr::Break(span);
+            let mut body = Expr::Invalid(span);
             for c in inner(&p) {
                 match c.as_rule() {
                     Rule::generics => generics = self.generics(c),
@@ -650,7 +654,7 @@ impl Ctx {
     fn lambda_rhs(&mut self, p: Pair<'_, Rule>) -> Expr {
         match inner(&p).next() {
             Some(c) => self.expr(c),
-            None => Expr::Break(self.span(&p)),
+            None => Expr::Invalid(self.span(&p)),
         }
     }
 
@@ -691,7 +695,7 @@ impl Ctx {
         }
         Expr::If {
             span,
-            cond: Box::new(cond.unwrap_or(Expr::Break(span))),
+            cond: Box::new(cond.unwrap_or(Expr::Invalid(span))),
             then: then.unwrap_or_else(|| empty_block(span)),
             else_,
         }
@@ -716,7 +720,7 @@ impl Ctx {
         }
         Expr::Match {
             span,
-            scrutinee: Box::new(scrutinee.unwrap_or(Expr::Break(span))),
+            scrutinee: Box::new(scrutinee.unwrap_or(Expr::Invalid(span))),
             arms,
         }
     }
@@ -726,7 +730,7 @@ impl Ctx {
         let mut pat = Pattern::Wildcard(span);
         let mut ann = None;
         let mut guard = None;
-        let mut body = Expr::Break(span);
+        let mut body = Expr::Invalid(span);
         for c in inner(&p) {
             match c.as_rule() {
                 Rule::arm_pat => {
@@ -775,7 +779,7 @@ impl Ctx {
         }
         Expr::While {
             span,
-            cond: Box::new(cond.unwrap_or(Expr::Break(span))),
+            cond: Box::new(cond.unwrap_or(Expr::Invalid(span))),
             body,
         }
     }
@@ -788,8 +792,8 @@ impl Ctx {
             return Expr::For {
                 span,
                 pat: Pattern::Wildcard(span),
-                iter: Box::new(Expr::Break(span)),
-                body: Box::new(Expr::Break(span)),
+                iter: Box::new(Expr::Invalid(span)),
+                body: Box::new(Expr::Invalid(span)),
             };
         };
         let mut pat = Pattern::Wildcard(span);
@@ -807,8 +811,8 @@ impl Ctx {
         Expr::For {
             span,
             pat,
-            iter: Box::new(iter.unwrap_or(Expr::Break(span))),
-            body: Box::new(body.unwrap_or(Expr::Break(span))),
+            iter: Box::new(iter.unwrap_or(Expr::Invalid(span))),
+            body: Box::new(body.unwrap_or(Expr::Invalid(span))),
         }
     }
 

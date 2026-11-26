@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
-    Ast, EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, LocalDecl,
+    Ast, Delim, EnumPayload, Expr, FieldDecl, FnDecl, Ident, ImplDecl, Item, ItemKind, LocalDecl,
     ParamMode, Pattern, StructMember, TraitMember, Type, TypeParam,
 };
 use rustc_hash::FxHashMap;
@@ -1146,6 +1146,7 @@ fn foreign_field_type(
                 segments: vec![ident],
             },
             args,
+            delim: Delim::Bracket,
         }
     };
     match word {
@@ -1971,7 +1972,9 @@ fn conv_expr(
     diags: &mut Vec<Diagnostic>,
 ) -> Option<TypeExpr> {
     Some(match ty {
-        Type::Path { span, path, args } => {
+        Type::Path {
+            span, path, args, ..
+        } => {
             let [only] = path.segments.as_slice() else {
                 return None
             };

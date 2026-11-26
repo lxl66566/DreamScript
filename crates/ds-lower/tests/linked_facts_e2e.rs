@@ -442,6 +442,7 @@ fn build_trait_vm() -> (Vm, Lowered) {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     };
     let member = ds_check::import::TraitMemberFact {
         name: "size".to_owned(),
@@ -668,6 +669,7 @@ fn build_default_vm() -> (Vm, Lowered) {
             }],
         },
         args: Vec::new(),
+        delim: ds_parse::Delim::Bracket,
     };
     let member = ds_check::import::TraitMemberFact {
         name: "answer".to_owned(),

@@ -5,7 +5,7 @@
 //! grammar level of each slot's sub-rule, so grammar-conformant trees render
 //! flat exactly where they were parsed flat, and re-parse to the same tree.
 
-use ds_parse::{Param, Path, Type, TypeParam, TypeRef};
+use ds_parse::{Delim, Param, Path, Type, TypeParam, TypeRef};
 
 use crate::ctx::Ctx;
 
@@ -54,24 +54,26 @@ fn ty_level(ty: &Type) -> u8 {
 fn write_ty_inner(ctx: &Ctx, out: &mut String, ty: &Type) {
     match ty {
         Type::Path {
-            span, path, args, ..
+            path, args, delim, ..
         } => {
             write_path(out, path);
             if !args.is_empty() {
                 // Case-type refs (`bad_number(string)`) keep their parens;
                 // generic application renders square whatever the source
-                // spelled (bracket canonical, angle tolerated). The AST
-                // models both as `Path { args }`, so the delimiter is read
-                // from the source span's closing byte.
-                let paren = ctx.text(*span).ends_with(')');
-                out.push(if paren { '(' } else { '[' });
+                // spelled (bracket canonical, angle tolerated); the AST
+                // carries the delimiter, so no source bytes are read.
+                let (open, close) = match delim {
+                    Delim::Paren => ('(', ')'),
+                    Delim::Bracket => ('[', ']'),
+                };
+                out.push(open);
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
                     write_ty(ctx, out, a);
                 }
-                out.push(if paren { ')' } else { ']' });
+                out.push(close);
             }
         },
         Type::Optional { inner, .. } => {
