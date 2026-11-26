@@ -202,10 +202,8 @@ impl Segment {
 
     /// Grows to `new_len`, appending chunks of [`CHUNK_WORDS`] words
     /// pre-filled with the inert zero word. Never shrinks.
+    #[inline]
     pub(crate) fn grow_to(&mut self, new_len: usize) {
-        if new_len <= self.len {
-            return;
-        }
         let needed = new_len.div_ceil(CHUNK_WORDS);
         while self.chunks.len() < needed {
             self.chunks.push(Box::new(

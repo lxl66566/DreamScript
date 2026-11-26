@@ -26,12 +26,17 @@ name    = "strcat_temp"
 harness = false
 name    = "string_temp"
 
+[[bench]]
+harness = false
+name    = "arena_bypass"
+
 [dev-dependencies]
 # the examples/opcode_census tool lowers the benchmark kernels through the compiler chain
 ds-abi              = { path = "../ds-abi" }
 ds-check            = { path = "../ds-check" }
 ds-diag             = { path = "../ds-diag" }
 ds-lower            = { path = "../ds-lower" }
+ds-meta             = { path = "../ds-meta" }
 ds-mod.workspace    = true
 ds-parse            = { path = "../ds-parse" }
 ds-stdlib.workspace = true

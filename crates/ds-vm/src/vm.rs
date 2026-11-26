@@ -510,10 +510,12 @@ struct RawStagedWord {
 #[derive(Clone, Debug)]
 enum SiteFacts {
     /// The plan validated; `raw` is `None` when the caller's area stages
-    /// no `Raw` word (then no word is read at all).
+    /// no `Raw` word (then no word is read at all). `frame_size` is the
+    /// callee's, so the frame push reads no version table on a hit.
     Ready {
         plan: SlidePlan,
         raw: Option<Arc<[RawStagedWord]>>,
+        frame_size: u32,
     },
     /// The layout pair refuses the slide.
     Refused(SlideError),
@@ -529,6 +531,7 @@ impl SiteFacts {
             Ok(plan) => Self::Ready {
                 plan,
                 raw: raw_staged_words(caller, callee),
+                frame_size: callee.frame_size(),
             },
             Err(error) => Self::Refused(error),
         }
@@ -1292,6 +1295,7 @@ impl StackState<'_> {
     /// Grows the segment to `new_len` after the per-entry limit compare
     /// [H1]. Never shrinks; growth appends chunks, so live frames' words
     /// keep their addresses [H2].
+    #[inline]
     fn grow(&mut self, new_len: usize) -> Result<(), Trap> {
         if new_len <= self.stack.len() {
             return Ok(());
@@ -1459,18 +1463,45 @@ impl StackState<'_> {
         fp: usize,
         return_pc: u32,
     ) -> Result<Transfer, Trap> {
-        let target = &self.versions.pinned(version).functions()[func_id as usize];
-        let SiteFacts::Ready { raw, .. } = facts else {
+        let SiteFacts::Ready {
+            raw, frame_size, ..
+        } = facts
+        else {
             return Err(Trap::CallLayout(facts.refused()));
         };
         Self::check_raw_staged(self.stack, raw.as_deref().unwrap_or(&[]), caller, fp)?;
+        self.push_frame(
+            version,
+            func_id,
+            *frame_size,
+            caller.body_len(),
+            fp,
+            return_pc,
+        )
+    }
+
+    /// The frame push under a proven plan: the callee's metadata word
+    /// lands in the caller's call word and the chain gains the callee's
+    /// entry. The callee's frame size arrives from the site's cached
+    /// facts (derived at fill), so the push reads no version table row;
+    /// the entry-staging check and the plan belong to [`Self::call`].
+    #[inline]
+    fn push_frame(
+        &mut self,
+        version: VersionIdx,
+        func_id: u32,
+        frame_size: u32,
+        caller_body_len: usize,
+        fp: usize,
+        return_pc: u32,
+    ) -> Result<Transfer, Trap> {
         // the callee's metadata word lands in the caller's call word:
         // fp + 1 + body_len (the pinned physical mapping)
-        let callee_fp = fp + 1 + caller.body_len();
-        self.grow(callee_fp + target.layout.frame_size() as usize)?;
+        let callee_fp = fp + 1 + caller_body_len;
+        self.grow(callee_fp + frame_size as usize)?;
         self.stack[callee_fp] = Word::Meta(FrameMetadata {
             return_pc: CodePc(return_pc),
-            frame_size: target.layout.frame_size(),
+            frame_size,
             tail: TailChain::default(),
         });
         self.callinfo.push(CallInfo {
@@ -1503,7 +1534,7 @@ impl StackState<'_> {
         fp: usize,
     ) -> Result<Transfer, Trap> {
         let target = &self.versions.pinned(version).functions()[func_id as usize];
-        let SiteFacts::Ready { plan, raw } = facts else {
+        let SiteFacts::Ready { plan, raw, .. } = facts else {
             return Err(Trap::CallLayout(facts.refused()));
         };
         Self::check_raw_staged(self.stack, raw.as_deref().unwrap_or(&[]), caller, fp)?;
@@ -1621,6 +1652,184 @@ fn code_len_u32(len: usize) -> u32 {
 #[inline]
 fn word_of(fp: usize, slot: usize, body_len: usize) -> usize {
     fp + 1 + slot + usize::from(slot >= body_len)
+}
+
+/// The outcome of [`ret_hit`]: the frame stands popped and the caller
+/// resumes, or the return takes the general path.
+enum RetHit {
+    Resume {
+        version: VersionIdx,
+        func: u32,
+        pc: CodePc,
+    },
+    General,
+}
+
+/// The outcome of [`call_hit`]: the callee's frame stands pushed, the
+/// site's cached native hands its shared table across, or the site is no
+/// cache hit and the caller takes the general path.
+enum CallHit {
+    Pushed(Transfer),
+    Native {
+        table: Arc<Vec<NativeFunction>>,
+        index: u32,
+    },
+    Miss,
+}
+
+/// CALL's single cache probe: on a uop hit whose site stages no `Raw`
+/// word, the callee's metadata word lands in the caller's call word and
+/// the chain gains the callee's entry — exactly the general path's push
+/// ([`StackState::call`]) with the plan, the raw list, and the version
+/// table row all read straight off the cache entry instead of re-derived.
+/// A native hit answers the shared table and index the general path's
+/// native seam takes, so both cached kinds pay one probe per call. Every
+/// refusal the general path raises (a layout-static refusal riding the
+/// entry, a past-limit frame) and every other entry shape answer
+/// [`CallHit::Miss`] before any word moves, so the general path then runs
+/// untouched and raises the same trap. The three key words are the
+/// caller's identity, the pc, and the registry's install generation — a
+/// hit is a resolution no install has undone.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn call_hit(
+    site: Option<&CallSite>,
+    caller: usize,
+    pc: u32,
+    stamp: u64,
+    stack: &mut Segment,
+    callinfo: &mut Vec<CallInfo>,
+    limit: usize,
+    max_len: &mut usize,
+    fp: usize,
+    body_len: usize,
+) -> CallHit {
+    let Some(CallSite {
+        caller: at,
+        pc: at_pc,
+        stamp: at_stamp,
+        callee,
+    }) = site
+    else {
+        return CallHit::Miss;
+    };
+    if *at != caller || *at_pc != pc || *at_stamp != stamp {
+        return CallHit::Miss;
+    }
+    match callee {
+        CachedCallee::Uop {
+            version,
+            func,
+            facts:
+                SiteFacts::Ready {
+                    raw: None,
+                    frame_size,
+                    ..
+                },
+        } => {
+            // the callee's metadata word lands in the caller's call word:
+            // fp + 1 + body_len (the pinned physical mapping)
+            let callee_fp = fp + 1 + body_len;
+            let end = callee_fp + *frame_size as usize;
+            if end > limit {
+                return CallHit::Miss;
+            }
+            if end > stack.len() {
+                stack.grow_to(end);
+                *max_len = (*max_len).max(end);
+            }
+            stack[callee_fp] = Word::Meta(FrameMetadata {
+                return_pc: CodePc(pc + 1),
+                frame_size: *frame_size,
+                tail: TailChain::default(),
+            });
+            callinfo.push(CallInfo {
+                fp: callee_fp,
+                module: *version,
+                func: *func,
+            });
+            CallHit::Pushed(Transfer {
+                version: *version,
+                func: *func,
+            })
+        },
+        CachedCallee::Native { table, index } => CallHit::Native {
+            table: Arc::clone(table),
+            index: *index,
+        },
+        // a bound callee and a uop entry staging `Raw` words (or carrying
+        // a refusal) keep the general path's own handling
+        CachedCallee::Bound { .. } | CachedCallee::Uop { .. } => CallHit::Miss,
+    }
+}
+
+/// RET's common return: the result word overlays slot 0, the caller's
+/// frame span restores, and the caller resumes at the metadata word's
+/// return pc — [`StackState::ret`]'s `Resume` outcome with the frame's
+/// arena close folded in. A slot read that fails, a non-metadata word at
+/// the frame base, the root frame, a nested drive's reentry frame, a
+/// return pc past the caller's code, and a chain entry naming no row all
+/// answer [`RetHit::General`] before any word moves, so the general path
+/// then runs untouched and raises the same trap.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn ret_hit(
+    stack: &mut Segment,
+    callinfo: &mut Vec<CallInfo>,
+    versions: &ModuleRegistry,
+    arena: &mut ds_rt::Arena,
+    fp: usize,
+    boundary: usize,
+    slots: &[SlotType],
+    body_len: usize,
+    src: u8,
+) -> RetHit {
+    if usize::from(src) >= slots.len() {
+        return RetHit::General;
+    }
+    let Word::Slot(value) = stack[word_of(fp, usize::from(src), body_len)] else {
+        return RetHit::General;
+    };
+    let Word::Meta(meta) = stack[fp] else {
+        return RetHit::General;
+    };
+    if callinfo.len() < 2
+        || (boundary != usize::MAX && callinfo.len() == boundary && meta.return_pc.0 == u32::MAX)
+    {
+        return RetHit::General;
+    }
+    // the caller's entry answers the bounds checks (its version's code
+    // length, its layout's frame span); the row is Copy, so no borrow
+    // outlives the chain move
+    let caller = &callinfo[callinfo.len() - 2];
+    let (caller_fp, caller_module, caller_func) = (caller.fp, caller.module, caller.func);
+    let Some(caller_fn) = versions
+        .pinned(caller_module)
+        .functions()
+        .get(caller_func as usize)
+    else {
+        return RetHit::General;
+    };
+    let return_pc = meta.return_pc;
+    if return_pc.0 as usize >= caller_fn.code.len() {
+        return RetHit::General;
+    }
+    stack[fp + 1] = Word::Slot(value);
+    if meta.arena_active() {
+        arena.pop_frame_mark();
+        let Word::Meta(meta) = &mut stack[fp] else {
+            unreachable!("the frame base held a metadata word");
+        };
+        meta.clear_arena_active();
+    }
+    let restore = (caller_fp + caller_fn.layout.frame_size() as usize).max(fp + 2);
+    stack.truncate(restore);
+    callinfo.pop();
+    RetHit::Resume {
+        version: caller_module,
+        func: caller_func,
+        pc: return_pc,
+    }
 }
 
 fn read_value(
@@ -8234,6 +8443,7 @@ impl Vm {
     /// failure). A uop fill also derives the site's layout facts against
     /// `caller_layout`, so the plan is re-derived exactly when the callee
     /// is.
+    #[inline]
     fn resolve_site(
         &mut self,
         pool: &[Const],
@@ -9936,9 +10146,38 @@ impl Vm {
                             func: std::ptr::from_ref(f) as usize,
                             row: active.version,
                         };
-                        let resolved = self
-                            .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
-                            .map_err(|e| (e, pc))?;
+                        // the site's one probe: a uop hit pushes the frame
+                        // straight off the entry (no plan, no raw list, no
+                        // table row read), a native hit hands the shared
+                        // table across, and every other shape (an unfilled
+                        // slot, a bound callee, a site staging `Raw` words,
+                        // a refusal riding the entry) falls to the general
+                        // resolution below
+                        let resolved = match call_hit(
+                            self.call_cache[pc.0 as usize & (CALL_CACHE_SLOTS - 1)].as_ref(),
+                            caller.func,
+                            pc.0,
+                            self.registry.generation(),
+                            &mut self.stack,
+                            &mut self.callinfo,
+                            self.limit,
+                            &mut self.pool[self.current.index()].max_len,
+                            fp,
+                            body_len,
+                        ) {
+                            CallHit::Pushed(t) => {
+                                active = Active {
+                                    version: t.version,
+                                    func: t.func,
+                                };
+                                pc = CodePc(0);
+                                continue 'transfer;
+                            },
+                            CallHit::Native { table, index } => Resolved::Native { table, index },
+                            CallHit::Miss => self
+                                .resolve_site(pool, caller, &f.layout, pc.0, callee, nargs)
+                                .map_err(|e| (e, pc))?,
+                        };
                         match resolved {
                             Resolved::Uop {
                                 version,
@@ -11138,6 +11377,37 @@ impl Vm {
                             reserved!();
                         }
                         let src = fa;
+                        // the root frame and the nested drive's reentry
+                        // frame answer through the general path (the drive's
+                        // Root/Boundary outcomes), so the fast return
+                        // engages only past them; the chain position is a
+                        // pure pre-filter — the sentinel test and every
+                        // other gate stay with [`ret_hit`] and the general
+                        // path, which re-derive them from scratch
+                        let chain_len = self.callinfo.len();
+                        let at_drive_edge =
+                            chain_len < 2 || (boundary != usize::MAX && chain_len == boundary);
+                        if !at_drive_edge {
+                            if let RetHit::Resume {
+                                version,
+                                func,
+                                pc: at,
+                            } = ret_hit(
+                                &mut self.stack,
+                                &mut self.callinfo,
+                                &self.registry,
+                                &mut self.pool[self.current.index()].arena,
+                                fp,
+                                boundary,
+                                slots,
+                                body_len,
+                                src,
+                            ) {
+                                active = Active { version, func };
+                                pc = at;
+                                continue 'transfer;
+                            }
+                        }
                         let value = read_value(&self.stack, fp, src, slots, body_len)
                             .map_err(|e| (e, pc))?;
                         self.arena_frame_close(fp);

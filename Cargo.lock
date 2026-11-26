@@ -665,6 +665,7 @@ dependencies = [
  "ds-check",
  "ds-diag",
  "ds-lower",
+ "ds-meta",
  "ds-mod",
  "ds-parse",
  "ds-stdlib",
