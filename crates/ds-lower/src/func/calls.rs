@@ -1232,7 +1232,14 @@ impl<'a> FnLower<'a, '_, '_> {
         // reads the word and never owns its count, so the staging is a
         // borrow window, never a dup or a forward
         let mut defaulted: Vec<usize> = Vec::new();
-        let expected_words = self.expected_param_words(target);
+        let default_dispatch = matches!(
+            &trait_dispatch,
+            Some(TraitDispatch::Foreign {
+                default_body: true,
+                ..
+            })
+        );
+        let expected_words = self.expected_param_words(target, default_dispatch);
         // an interior-span generic stages one dynamic span between its
         // leading and trailing named words, so a staged closure word's
         // position is dynamic and the callable-defaulted slot is the
@@ -1699,10 +1706,23 @@ impl<'a> FnLower<'a, '_, '_> {
         let mut trait_evidence: Vec<EvidenceSrc> = Vec::new();
         let trait_evidence_at = staged.len();
         if let Some(TraitDispatch::Foreign { call, .. }) = &trait_dispatch {
-            // a linked impl body rides no evidence pairs (the walk
-            // refuses the generic and conditional impls that demand
-            // them), so the solved instance word rides alone — the same
-            // trailing word a local monomorphic body's site stages
+            // a linked body rides no evidence pairs (the walk refuses
+            // the generic and conditional impls that demand them, and a
+            // trait's default body crosses only when it stages none),
+            // so the solved instance word rides alone — the same
+            // trailing word a local monomorphic body's site stages.
+            // A default body is the exception on the receiver: its
+            // `Self` variable claims the receiver as its single Raw
+            // word, so a receiver spanning more than one word keeps
+            // the local one-word instantiation boundary's own refusal,
+            // mirrored at the linked site
+            if default_dispatch {
+                self.guard_one_word_instantiation(
+                    self.members(call.recv),
+                    "a linked default body's receiver",
+                    callee_span,
+                )?;
+            }
             self.guard_staged_count(staged.len() + 1)?;
             trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
             staged.push(SlotType::I64);
@@ -2657,53 +2677,77 @@ impl<'a> FnLower<'a, '_, '_> {
         let member = self.analyzed.package.method(tc.method).name.clone();
         // a linked impl owns no impl item in this compile: the solved
         // instance's member links address the linked module directly,
-        // the same transfer a linked free fn's call takes
+        // the same transfer a linked free fn's call takes. An impl
+        // spelling no member falls through — the trait's declared
+        // default serves it, exactly like a local omission's site
         if let Some(link) = self.analyzed.decls.linked_impls.get(&tc.instance)
             && let Some(func) = link.member(&member)
         {
-            // the comptime slice plans nothing outside its own module,
-            // so a member call from a comptime body keeps the local
-            // member call's own refusal
             if matches!(self.comptime, ComptimeRun::Slice) {
-                return Err(LowerError::unsupported(
-                    what,
-                    "a call from a comptime function",
-                    "a comptime function may call the pure builtins and other comptime functions \
-                     this round; a runtime helper is the slice seam",
-                ));
+                return Err(Self::comptime_member_refusal(what));
             }
             return Ok(TraitDispatch::Foreign {
                 position: link.position,
                 func,
                 call: tc,
+                default_body: false,
             });
         }
-        let Some(impl_site) = tc.impl_site else {
-            return Err(LowerError::unsupported(
-                what,
-                "a trait-method call",
-                "the solving impl item's span is missing from the declaration tables",
-            ));
-        };
-        if let Some(index) = self.plan.impl_body(impl_site, &member) {
-            return Ok(TraitDispatch::Static { index, call: tc });
+        if let Some(impl_site) = tc.impl_site {
+            if let Some(index) = self.plan.impl_body(impl_site, &member) {
+                return Ok(TraitDispatch::Static { index, call: tc });
+            }
+            // A defaulted member is omittable exactly because the
+            // trait's declaration carries the dispatch target: an impl
+            // spelling no member dispatches into the declared default
+            // body, the same staged shape (evidence demands trailing
+            // the true arguments, the solved instance word trailing
+            // them).
+            if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
+                && let Some(index) = self.plan.default_body(def, &member)
+            {
+                return Ok(TraitDispatch::Static { index, call: tc });
+            }
         }
-        // A defaulted member is omittable exactly because the trait's
-        // declaration carries the dispatch target: an impl spelling no
-        // member dispatches into the declared default body, the same
-        // staged shape (evidence demands trailing the true arguments,
-        // the solved instance word trailing them).
+        // The linked trait's declared default body: the linked mirror
+        // of the plan's own table above, serving a solving impl that
+        // spells no member — a linked impl owns no impl item here, and
+        // a local impl of the minted trait plans no default of its
+        // own, so this link is the only remaining dispatch target
         if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
-            && let Some(index) = self.plan.default_body(def, &member)
+            && let Some(link) = self.analyzed.decls.linked_trait_defaults.get(&def)
+            && let Some(func) = link.member(&member)
         {
-            return Ok(TraitDispatch::Static { index, call: tc });
+            if matches!(self.comptime, ComptimeRun::Slice) {
+                return Err(Self::comptime_member_refusal(what));
+            }
+            return Ok(TraitDispatch::Foreign {
+                position: link.position,
+                func,
+                call: tc,
+                default_body: true,
+            });
         }
         Err(LowerError::unsupported(
             what,
             "a trait-method call",
             "the solving impl's body did not plan (no body, no solved return, or a shape over its \
-             own type variables); report the construct",
+             own type variables), and the trait's declared default body is not linked here; \
+             report the construct",
         ))
+    }
+
+    /// The comptime slice's linked member-call refusal: the slice plans
+    /// nothing outside its own module, so a linked body — an impl
+    /// member's or a trait's declared default — keeps the local member
+    /// call's own door.
+    fn comptime_member_refusal(what: Span) -> LowerError {
+        LowerError::unsupported(
+            what,
+            "a call from a comptime function",
+            "a comptime function may call the pure builtins and other comptime functions this \
+             round; a runtime helper is the slice seam",
+        )
     }
 
     /// A solved inherent-method call site: the impl body the

@@ -207,6 +207,8 @@ error_codes! {
     NoneTypedField => "DS2042", Type,
     /// A linked package's exported `const` whose initializer the producer-side evaluation cannot answer: a reach the fence refuses, a trap or runaway the fenced run raised, or an answer outside the const fact's vocabulary.
     LinkedConstEvalRefusal => "DS2043", Type,
+    /// A linked package's exported trait member whose declared default body cannot cross the link seam: the body did not plan, demands runtime evidence, or carries an effect row the consumer cannot replay.
+    LinkedDefaultBodyRefusal => "DS2044", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -344,6 +346,7 @@ mod tests {
             ("TagPayloadTuple", "DS2041", ErrorClass::Type),
             ("NoneTypedField", "DS2042", ErrorClass::Type),
             ("LinkedConstEvalRefusal", "DS2043", ErrorClass::Type),
+            ("LinkedDefaultBodyRefusal", "DS2044", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

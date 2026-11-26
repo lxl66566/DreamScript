@@ -553,17 +553,22 @@ pub(crate) enum TraitDispatch {
     /// instance id rides as the final staged word, the per-bound evidence
     /// words the body's runtime pairs demand stage ahead of it).
     Static { index: u32, call: TraitCall },
-    /// The linked impl body the checker's solved instance names (G4):
-    /// the body lives in a linked package's module, so the FuncRef
+    /// The linked body the checker's solved instance names (G4): the
+    /// body lives in a linked package's module, so the FuncRef
     /// addresses the dep position and the linked module's own table —
     /// the same transfer a linked free fn's call takes, with the solved
     /// instance id riding as the final staged word exactly like the
-    /// local body's (a linked impl rides no evidence pairs: the walk
-    /// refuses the generic and conditional impls that carry them).
+    /// local body's (a linked body rides no evidence pairs: the walk
+    /// refuses the generic and conditional impls, and the trait's
+    /// default bodies cross only when they stage none). The body is
+    /// the trait's declared default when the solving impl spells no
+    /// member — the receiver then claims the `Self` variable's single
+    /// Raw word, so the staging records it.
     Foreign {
         position: u32,
         func: u32,
         call: TraitCall,
+        default_body: bool,
     },
     /// A bound-variable receiver inside a generic impl body: dispatch
     /// resolves at runtime from the frame's evidence slot the call site
@@ -600,6 +605,12 @@ pub(crate) struct Plan {
     default_index: HashMap<(DefId, String), u32>,
     /// The function-table indexes of every planned trait default body.
     default_bodies: HashSet<u32>,
+    /// The trait default bodies a link surface may carry, keyed by
+    /// mangled name: exactly the rows staging no runtime evidence, so
+    /// a consumer enters them staging the true arguments and the
+    /// solved instance word alone — the demanded bodies stay out (the
+    /// evidence-chain machinery names module-local bodies).
+    carried_defaults: HashMap<String, u32>,
     /// The function-table index of every planned struct deinit, keyed
     /// by the struct's definition.
     deinits: HashMap<DefId, u32>,
@@ -662,6 +673,7 @@ impl Plan {
             impl_index: HashMap::new(),
             default_index: HashMap::new(),
             default_bodies: HashSet::new(),
+            carried_defaults: HashMap::new(),
             deinits: HashMap::new(),
             declared_deinits: HashSet::new(),
             demands: Demands::default(),
@@ -952,6 +964,9 @@ impl Plan {
         let index = u32::try_from(self.functions.len()).expect("function index fits u32");
         self.default_index.insert((trait_def, member), index);
         self.default_bodies.insert(index);
+        if evidence.pairs.is_empty() {
+            self.carried_defaults.insert(name.clone(), index);
+        }
         self.functions.push(PlannedFn {
             name,
             lambda: (*body).clone(),
@@ -986,6 +1001,12 @@ impl Plan {
     /// body.
     pub(crate) fn is_default_body(&self, index: u32) -> bool {
         self.default_bodies.contains(&index)
+    }
+
+    /// The trait default bodies a link surface may carry, keyed by
+    /// mangled name: the rows staging no runtime evidence.
+    pub(crate) fn carried_defaults(&self) -> &HashMap<String, u32> {
+        &self.carried_defaults
     }
 
     /// Registers one struct's `deinit` member as a synthesized module
@@ -5515,11 +5536,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// entry. A closure word staged against a `Fn` entry lands in the
     /// callable-defaulted parameter as a borrow; a callee whose parameter
     /// words are unknown keeps the closure-argument refusal.
-    fn expected_param_words(&mut self, target: Callee) -> Option<Vec<SlotType>> {
+    fn expected_param_words(
+        &mut self,
+        target: Callee,
+        default_dispatch: bool,
+    ) -> Option<Vec<SlotType>> {
         match target {
             // a linked impl member's parameter words ride its declared
             // signature in the decls table, which this read does not
-            // reach; the closure-argument refusal keeps the site honest
+            // reach; the closure-argument refusal keeps the site honest.
+            // A linked trait default body's receiver is the exception:
+            // its `Self` variable's formal declares Raw, so the staging
+            // records the one word Raw and the ABI slide admits the
+            // pairing whatever the receiver's concrete kind
+            Callee::Foreign { def: None, .. } if default_dispatch => Some(vec![SlotType::Raw]),
             Callee::Builtin(_) | Callee::Evidence(_) | Callee::Foreign { def: None, .. } => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
             // a bound extern's staged words are its written signature's

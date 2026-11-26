@@ -1151,6 +1151,7 @@ impl Graph {
                                 name: member.name.clone(),
                                 span: rebase_span(member.span, &rebase),
                                 sig: rebase_sig(&member.sig, &rebase),
+                                default_func: member.default_func,
                             })
                             .collect();
                         std::sync::Arc::new(ds_check::TypeFact::Trait(

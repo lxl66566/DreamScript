@@ -101,6 +101,7 @@ pub struct Served {
 pub struct Lowered {
     module: Module,
     functions: Vec<String>,
+    carried_defaults: HashMap<String, u32>,
     tags: HashMap<String, u8>,
     placed: Vec<Vec<PlacedOp>>,
     facts: Vec<FnFacts>,
@@ -144,6 +145,15 @@ impl Lowered {
     #[must_use]
     pub fn functions(&self) -> &[String] {
         &self.functions
+    }
+
+    /// The trait default bodies a link surface may carry, keyed by
+    /// mangled name over this module's own table: exactly the rows
+    /// staging no runtime evidence. A consumer's dispatch whose solving
+    /// impl spells no member addresses the linked row.
+    #[must_use]
+    pub fn carried_default_bodies(&self) -> &HashMap<String, u32> {
+        &self.carried_defaults
     }
 
     /// The function-table index of a lowered function name.
@@ -429,6 +439,7 @@ where
     Ok(Lowered {
         module,
         functions: plan.names(),
+        carried_defaults: plan.carried_defaults().clone(),
         tags,
         placed,
         facts,

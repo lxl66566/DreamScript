@@ -250,10 +250,10 @@ pub enum TypeFact {
     /// carrying the written signature a call checks against — the rows
     /// the consuming compile's mint registers exactly like a local
     /// declaration's, so the trait's members join the method registry
-    /// and a linked impl's dispatch resolves through them. A generic
-    /// trait, a supertrait, an associated type, and a member carrying a
-    /// default body (a linked body the consumer cannot replay) keep
-    /// their selection refusals.
+    /// and a linked impl's dispatch resolves through them. A member's
+    /// declared default body crosses as its own link row when it plans
+    /// and stages no runtime evidence; a generic trait, a supertrait,
+    /// and an associated type keep their selection refusals.
     Trait(TraitFact),
 }
 
@@ -277,6 +277,12 @@ pub struct TraitMemberFact {
     pub span: Span,
     /// The written signature, as the declaring trait spells it.
     pub sig: Arc<FnSig>,
+    /// The member's declared default body, when it crossed: the body's
+    /// index in the linked module's table — the dispatch target a
+    /// consumer reaches when its solving impl spells no member, the
+    /// linked mirror of the plan's own default-body table. `None` for
+    /// a bodiless member or a body the producer's walk refused.
+    pub default_func: Option<u32>,
 }
 
 impl PartialEq for TraitFact {
@@ -289,7 +295,9 @@ impl Eq for TraitFact {}
 
 impl PartialEq for TraitMemberFact {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.span == other.span
+        self.name == other.name
+            && self.span == other.span
+            && self.default_func == other.default_func
     }
 }
 
@@ -547,7 +555,11 @@ impl TypeFact {
     pub fn member_facts(
         analyzed: &crate::type_of::Analyzed,
         ambient_files: usize,
+        carried: &std::collections::HashMap<String, u32, std::hash::RandomState>,
     ) -> FxHashMap<crate::DefId, Arc<Self>> {
+        let carried: FxHashMap<String, u32> =
+            carried.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let carried = &carried;
         let package = &analyzed.package;
         let decls = &analyzed.decls;
         let mut deinit = std::collections::HashSet::new();
@@ -619,6 +631,7 @@ impl TypeFact {
                     &deinit,
                     &eligible,
                     traits.get(&def).copied(),
+                    carried,
                     def,
                 ) {
                     next.insert(def);
@@ -641,6 +654,7 @@ impl TypeFact {
         deinit: &std::collections::HashSet<u32>,
         eligible: &FxHashSet<crate::DefId>,
         trait_decl: Option<&ds_parse::TraitDecl>,
+        carried: &FxHashMap<String, u32>,
         def: crate::DefId,
     ) -> Option<Self> {
         match package.def(def).kind {
@@ -663,18 +677,20 @@ impl TypeFact {
                 Self::alias_fact(package, decls, eligible, package.def(def).span.file, def)
             },
             crate::DefKind::Tag => Self::tag_fact(decls, def),
-            crate::DefKind::Trait => Self::trait_fact(trait_decl?),
+            crate::DefKind::Trait => Self::trait_fact(trait_decl?, carried),
             _ => None,
         }
     }
 
     /// The fact one declared trait carries, when it stays plain: no
-    /// generic parameters, no supertraits, no associated types, and no
-    /// member carrying a default body — a default is a linked body the
-    /// consuming compile cannot replay, so one such member refuses the
-    /// whole crossing. Every row carries the written signature the
-    /// member's registered method id already holds.
-    fn trait_fact(t: &ds_parse::TraitDecl) -> Option<Self> {
+    /// generic parameters, no supertraits, and no associated types.
+    /// Every row carries the written signature the member's registered
+    /// method id already holds; a member declaring a default body
+    /// carries the body's table index when the body crossed — the
+    /// carried table names exactly the bodies that plan and stage no
+    /// runtime evidence, so a body the walk refused keeps its member's
+    /// row bodiless and the consumer's impls must spell it.
+    fn trait_fact(t: &ds_parse::TraitDecl, carried: &FxHashMap<String, u32>) -> Option<Self> {
         if !t.generics.is_empty() || !t.supers.is_empty() {
             return None;
         }
@@ -683,13 +699,20 @@ impl TypeFact {
             let ds_parse::TraitMember::Fn(f) = member else {
                 return None; // an associated type is member machinery of its own
             };
-            if f.body.is_some() {
-                return None;
-            }
+            let default_func = f
+                .body
+                .is_some()
+                .then(|| {
+                    carried
+                        .get(&format!("{}#{}", t.name.name, f.name.name))
+                        .copied()
+                })
+                .flatten();
             members.push(TraitMemberFact {
                 name: f.name.name.clone(),
                 span: f.name.span,
                 sig: Arc::new(FnSig::of(f)),
+                default_func,
             });
         }
         Some(Self::Trait(TraitFact { members }))
@@ -943,6 +966,88 @@ impl ImplFact {
         }
         out
     }
+}
+
+/// One exported trait member whose declared default body the
+/// producer's walk refuses to carry: the member's own span and the
+/// seam that named it.
+#[derive(Clone, Debug)]
+pub struct RefusedDefault {
+    /// The member's name occurrence, the primary site the producer's
+    /// own diagnostic renders.
+    pub span: Span,
+    /// The declaring trait's name.
+    pub trait_name: String,
+    /// The member's name.
+    pub member: String,
+    /// The seam the body reached: why the crossing refused.
+    pub seam: &'static str,
+}
+
+/// Every `pub` trait member of the member files whose declared default
+/// body cannot cross the link seam: a body the module never planned,
+/// a body staging runtime evidence (its nested dispatches ride the
+/// evidence-chain machinery a consumer cannot build over the
+/// producer's bodies), or a body carrying an effect row the
+/// consumer's dispatch would never union. The producer's own compile
+/// refuses on these — a shape the surface cannot honestly serve fails
+/// before any consumer sees it, never as a trap at a dispatch site.
+#[must_use]
+pub fn refused_default_bodies(
+    analyzed: &crate::type_of::Analyzed,
+    ambient_files: usize,
+    effects: &crate::effects::Effects,
+    functions: &[String],
+    carried: &std::collections::HashMap<String, u32, std::hash::RandomState>,
+) -> Vec<RefusedDefault> {
+    let package = &analyzed.package;
+    let mut out = Vec::new();
+    for ast in analyzed.asts.iter().skip(ambient_files) {
+        for block in &ast.blocks {
+            for item in &block.items {
+                let ds_parse::ItemKind::Trait(t) = &item.kind else {
+                    continue;
+                };
+                let Some(def) = package
+                    .lookup_type(&t.name.name)
+                    .filter(|&def| package.def(def).span == t.name.span)
+                else {
+                    continue;
+                };
+                if package.def(def).vis != Vis::Pub {
+                    continue; // a private trait never serves a consumer
+                }
+                for member in &t.members {
+                    let ds_parse::TraitMember::Fn(f) = member else {
+                        continue;
+                    };
+                    let Some(body) = &f.body else {
+                        continue;
+                    };
+                    let mangle = format!("{}#{}", t.name.name, f.name.name);
+                    let seam = if !carried.contains_key(&mangle) {
+                        if functions.contains(&mangle) {
+                            "the body stages runtime evidence a consumer cannot build over the \
+                             producer's bodies"
+                        } else {
+                            "the body did not plan in this module"
+                        }
+                    } else if effects.rows_under(body.span).any(|row| !row.is_pure()) {
+                        "the body carries an effect row the consumer's dispatch would never union"
+                    } else {
+                        continue;
+                    };
+                    out.push(RefusedDefault {
+                        span: f.name.span,
+                        trait_name: t.name.name.clone(),
+                        member: f.name.name.clone(),
+                        seam,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One fact build's word resolver: the ambient vocabulary plus the
@@ -1782,7 +1887,8 @@ mod tests {
         let file = files.add_source("type_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let fact = |name: &str| {
             let def = analyzed
                 .package
@@ -2026,7 +2132,8 @@ mod tests {
         let file = files.add_source("named_gate.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let fact = |name: &str| {
             let def = analyzed
                 .package
@@ -2214,7 +2321,8 @@ mod tests {
             "the probe checks clean: {:?}",
             analyzed.checked.diags
         );
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let fact = |name: &str| {
             let def = analyzed
                 .package
@@ -2337,7 +2445,8 @@ mod tests {
                 word: super::TypeWord::Bytes,
             },
         ];
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let enum_fact = |name: &str| {
             let def = analyzed
                 .package
@@ -2473,7 +2582,8 @@ mod tests {
         let file = files.add_source("tag_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let tag_fact = |name: &str| {
             let def = analyzed
                 .package
@@ -2550,7 +2660,8 @@ mod tests {
         let file = files.add_source("alias_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let alias = |name: &str| {
             let def = analyzed
                 .package
@@ -3163,7 +3274,8 @@ mod tests {
         let file = files.add_source("trait_fact.ds", source);
         let ast = ds_parse::parse(&files, file).expect("the source parses");
         let analyzed = crate::type_of::analyze(&files, &[ast]);
-        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let facts =
+            super::TypeFact::member_facts(&analyzed, 0, &std::collections::HashMap::default());
         let fact = |name: &str| {
             analyzed
                 .package
@@ -3187,9 +3299,28 @@ mod tests {
             1,
             "the written signature rides the row"
         );
-        for refused in ["defaulted", "wide", "sub"] {
+        for refused in ["wide", "sub"] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
+        // a defaulted member's row crosses bodiless over an empty
+        // carried table, and its body's own link rides when the table
+        // names the mangled row the plan holds
+        let Some(super::TypeFact::Trait(defaulted)) = fact("defaulted") else {
+            panic!("defaulted carries its rows");
+        };
+        assert_eq!(defaulted.members[0].default_func, None);
+        let carried = [("defaulted#answer".to_owned(), 4u32)]
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        let with_defaults = super::TypeFact::member_facts(&analyzed, 0, &carried);
+        let Some(super::TypeFact::Trait(linked)) = analyzed
+            .package
+            .lookup_type("defaulted")
+            .and_then(|def| with_defaults.get(&def).map(|fact| (**fact).clone()))
+        else {
+            panic!("defaulted carries its rows over the carried table");
+        };
+        assert_eq!(linked.members[0].default_func, Some(4));
         // the impl rows key over the plan's mangled table names: both
         // heads cross (a Named word, a scalar word), members in order
         let eligible: std::collections::HashSet<crate::DefId> = facts.keys().copied().collect();
@@ -3219,10 +3350,12 @@ mod tests {
         );
         let int_row = row("sizing", "int").expect("the scalar-headed impl carries its row");
         assert_eq!(int_row.members[0].func, 2);
-        assert!(
-            row("defaulted", "pair").is_none(),
-            "an impl of a refused trait rides no row"
-        );
+        // the defaulted trait crosses now, so its spelled impl rides
+        // its row too — the omission door lives with the consumer's
+        // mint, not the walk
+        let defaulted_row =
+            row("defaulted", "pair").expect("the defaulted trait's impl carries its row");
+        assert_eq!(defaulted_row.members[0].func, 4);
         // a member the plan never tabled (the mangle misses) refuses
         // the whole impl
         let short = ["sizing#pair#size".to_owned()];

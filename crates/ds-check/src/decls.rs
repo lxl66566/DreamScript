@@ -309,6 +309,12 @@ pub struct Decls {
     /// solved dispatch site addresses through its CALLG — the linked
     /// mirror of `instance_impls`, whose span tie no linked impl owns.
     pub linked_impls: IdTable<InstanceId, Arc<ForeignImplLink>>,
+    /// The default-body links of every linked trait (G4), keyed by the
+    /// minted trait def: the dep-list position and each crossed default
+    /// body's module-table index — the dispatch target a site whose
+    /// solving impl spells no member addresses, the linked mirror of
+    /// the plan's own default-body table.
+    pub linked_trait_defaults: IdTable<DefId, Arc<ForeignImplLink>>,
 }
 
 impl Decls {
@@ -332,9 +338,11 @@ pub struct ForeignLink {
     pub func: u32,
 }
 
-/// Where one linked trait impl's dispatch sites point (G4): the linked
-/// dep entry's position and each member body's index inside the linked
-/// module's table, keyed by the instance the consumer declared.
+/// Where one linked trait body's dispatch sites point (G4): the linked
+/// dep entry's position and each body's index inside the linked
+/// module's table — keyed by the instance the consumer declared for an
+/// impl's member bodies, or by the minted trait def for the trait's
+/// crossed default bodies.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ForeignImplLink {
     /// The linked dep entry's position in the consuming module's
@@ -533,6 +541,7 @@ where
                 *def,
                 &entry.name,
                 entry.decl_span,
+                entry.link,
                 fact,
                 &mut decls,
             );
@@ -601,6 +610,7 @@ fn install_foreign_type(
     def: DefId,
     name: &str,
     span: Span,
+    link: u32,
     fact: &crate::import::TypeFact,
     decls: &mut Decls,
 ) {
@@ -624,24 +634,30 @@ fn install_foreign_type(
             install_foreign_tag(def, name, span, decls);
         },
         crate::import::TypeFact::Trait(fact) => {
-            install_foreign_trait(ctx, def, name, fact, decls);
+            install_foreign_trait(ctx, def, name, link, fact, decls);
         },
     }
 }
 
 /// The trait fact's mint: the trait id, the member rows keyed by their
 /// registered method ids, and the member-name table an impl checks
-/// against — exactly the products a local trait declaration carries,
-/// save that no member owns a default body (the walk refuses those
-/// traits whole). A mint whose member row names no registered method
-/// skips the row silently — its uses then fail at their own sites.
+/// against — exactly the products a local trait declaration carries.
+/// A member whose default body crossed is omittable by an impl and
+/// dispatches into the linked body, so the crossed defaults ride the
+/// omission gate's table and the linked default-body links. A mint
+/// whose member row names no registered method skips the row silently
+/// — its uses then fail at their own sites.
 fn install_foreign_trait(
     ctx: &mut MintCtx,
     def: DefId,
     name: &str,
+    link: u32,
     fact: &crate::import::TraitFact,
     decls: &mut Decls,
 ) {
+    if decls.traits.get(&def).is_some() {
+        return; // a forced mint already ran this install
+    }
     let Ok(trait_id) = decls.universe.declare_trait(name) else {
         return;
     };
@@ -655,6 +671,31 @@ fn install_foreign_trait(
     decls
         .trait_members
         .insert(def, fact.members.iter().map(|m| m.name.clone()).collect());
+    let defaults: Vec<crate::import::ImplMemberFact> = fact
+        .members
+        .iter()
+        .filter_map(|member| {
+            member
+                .default_func
+                .map(|func| crate::import::ImplMemberFact {
+                    name: member.name.clone(),
+                    func,
+                })
+        })
+        .collect();
+    decls.trait_member_defaults.insert(
+        def,
+        defaults.iter().map(|member| member.name.clone()).collect(),
+    );
+    if !defaults.is_empty() {
+        decls.linked_trait_defaults.insert(
+            def,
+            Arc::new(ForeignImplLink {
+                position: link,
+                members: defaults,
+            }),
+        );
+    }
     decls.trait_generics.insert(def, Vec::new());
 }
 
@@ -723,19 +764,21 @@ fn force_minted(ctx: &mut MintCtx, def: DefId, decls: &mut Decls) -> Option<()> 
     let fact = Arc::clone(entry.ty.as_ref()?);
     let name = entry.name.clone();
     let span = entry.decl_span;
+    let link = entry.link;
     ctx.forcing.push(def);
-    install_foreign_type(ctx, def, &name, span, &fact, decls);
+    install_foreign_type(ctx, def, &name, span, link, &fact, decls);
     ctx.forcing.pop();
     (decls.atoms.get(&def).is_some() || decls.enums.get(&def).is_some()).then_some(())
 }
 
 /// Whether one import-bound def's install already ran: an atom (a
-/// struct, a case, a tag), an enum's case rows, or an alias's written
-/// body.
+/// struct, a case, a tag), an enum's case rows, an alias's written
+/// body, or a trait's id.
 fn linked_minted(decls: &Decls, def: DefId) -> bool {
     decls.atoms.contains_key(&def)
         || decls.enums.contains_key(&def)
         || decls.aliases.contains_key(&def)
+        || decls.traits.contains_key(&def)
 }
 
 /// Ensures one linked def's install ran for a written type spelling —
@@ -756,8 +799,9 @@ fn force_linked(package: &Package, decls: &mut Decls, def: DefId) -> Option<()> 
         let fact = Arc::clone(entry.ty.as_ref()?);
         let name = entry.name.clone();
         let span = entry.decl_span;
+        let link = entry.link;
         ctx.forcing.push(def);
-        install_foreign_type(&mut ctx, def, &name, span, &fact, decls);
+        install_foreign_type(&mut ctx, def, &name, span, link, &fact, decls);
         ctx.forcing.pop();
     }
     if decls.enums.contains_key(&def) {
@@ -2298,11 +2342,29 @@ fn declare_instance(
     let [trait_only] = trait_ref.path.segments.as_slice() else {
         return
     };
-    let Some(owner) = package.lookup_type(&trait_only.name) else {
+    // The trait reference resolves through the local type namespace
+    // first, then the link table — a linked def rides no type_names
+    // row. A local impl of a linked trait may shape ahead of the
+    // trait's late mint loop, so the missing id forces the mint
+    // forward here — the same pull a written field naming a linked
+    // type takes
+    let Some(owner) = package
+        .lookup_type(&trait_only.name)
+        .or_else(|| package.foreign_type_def(&trait_only.name))
+    else {
         return;
     };
-    let Some(&trait_id) = decls.traits.get(&owner) else {
-        return
+    let trait_id = match decls.traits.get(&owner) {
+        Some(&trait_id) => trait_id,
+        None if package.foreign().get(&owner).is_some() => {
+            let Some(&trait_id) =
+                force_linked(package, decls, owner).and_then(|()| decls.traits.get(&owner))
+            else {
+                return;
+            };
+            trait_id
+        },
+        None => return,
     };
 
     let mut vars = FxHashMap::default();

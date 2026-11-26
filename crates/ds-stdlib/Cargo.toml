@@ -17,7 +17,8 @@ ds-diag  = { path = "../ds-diag" }
 ds-dsi   = { workspace = true, optional = true }
 # the derive expansion behind the baked artifacts
 ds-meta  = { path = "../ds-meta" }
-ds-mod   = { workspace = true, optional = true }
+# Hash128: the member identity the shared test pin over the bundle answers
+ds-mod   = { workspace = true }
 ds-parse = { path = "../ds-parse" }
 # the default @std package's bundle framing
 ds-pkg   = { path = "../ds-pkg" }
@@ -40,7 +41,7 @@ ds-vm     = { path = "../ds-vm" }
 # The precompiled ambient AST blob's decode path: postcard over ds-parse's
 # serde surface, the source hash through ds-mod. Off by default so
 # consumers that never load the blob carry no serializer.
-ast-serde = ["dep:ds-dsi", "dep:ds-mod", "dep:postcard", "dep:serde", "ds-parse/ast-serde"]
+ast-serde = ["dep:ds-dsi", "dep:postcard", "dep:serde", "ds-parse/ast-serde"]
 
 [lints]
 workspace = true

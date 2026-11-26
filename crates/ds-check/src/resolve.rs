@@ -769,6 +769,14 @@ impl Package {
     pub fn linked_impl_facts(&self) -> &[crate::import::ImplFact] {
         &self.linked_impls
     }
+
+    /// One linked type name's def: the link table's row, which the
+    /// local `type_names` walk never holds — a name resolves through
+    /// both before a local declaration's own row wins.
+    #[must_use]
+    pub fn foreign_type_def(&self, name: &str) -> Option<DefId> {
+        self.foreign_type_defs.get(name).copied()
+    }
 }
 
 /// One file's import bindings (G4): the names its import declarations

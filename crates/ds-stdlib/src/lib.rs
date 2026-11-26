@@ -82,6 +82,7 @@
 use std::sync::LazyLock;
 
 use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps};
+use ds_mod::Hash128;
 
 #[cfg(feature = "ast-serde")]
 pub mod ambient_blob;
@@ -358,6 +359,19 @@ pub fn std_package() -> ds_pkg::Package {
         ),
     ])
     .expect("the default @std bundle frames")
+}
+
+/// The default @std bundle's member identity — the dep hash a dep list
+/// records for the reserved package, answered through the one fold the
+/// load walk itself uses, over [`std_package`]'s own members so a new
+/// bundle member re-keys this pin in the same edit that adds it. A test
+/// seam, not library API.
+#[doc(hidden)]
+#[must_use]
+pub fn std_member_identity() -> Hash128 {
+    std_package()
+        .member_identity()
+        .expect("the default bundle's members fold")
 }
 
 /// The checked-in ambient dsmod artifact: a 16-byte build-identity

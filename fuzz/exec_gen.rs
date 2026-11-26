@@ -2206,7 +2206,7 @@ fn linked_surface(
         .package
         .lookup_type("tone")
         .expect("the library exports the enum");
-    let facts = TypeFact::member_facts(lib, 0);
+    let facts = TypeFact::member_facts(lib, 0, &HashMap::default());
     let enum_fact = Arc::clone(facts.get(&tone).expect("the enum's fact carries"));
     let mut entries = vec![entry(
         "tone",
@@ -2255,7 +2255,7 @@ fn origin_surface(
     module: &Module,
     map: &HashMap<FileId, FileId>,
 ) -> MemberSurface {
-    let facts = TypeFact::member_facts(lib, 0);
+    let facts = TypeFact::member_facts(lib, 0, &HashMap::default());
     let entry = |name: &str, def: ds_check::DefId, kind: ForeignKind| ForeignEntry {
         name: name.to_owned(),
         vis: lib.package.def(def).vis,
@@ -2416,7 +2416,7 @@ fn middle_surface(
 fn std_surface(pkg: &ds_check::Analyzed, map: &HashMap<FileId, FileId>) -> MemberSurface {
     // the first tree is the shrunk core itself, the ambient member the
     // declaring compile registers ahead of the members' file
-    let facts = TypeFact::member_facts(pkg, 1);
+    let facts = TypeFact::member_facts(pkg, 1, &HashMap::default());
     let mut entries = Vec::new();
     let mut entry = |name: &str,
                      def: ds_check::DefId,

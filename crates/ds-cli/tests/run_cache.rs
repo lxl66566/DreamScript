@@ -446,31 +446,6 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
     let _ = fs::remove_dir_all(&cache);
 }
 
-/// The default @std bundle's member identity — the ascending-path fold
-/// over path-and-text pairs the implicit resolution records for the
-/// manifest-free run's `@std` dep entry, computed over the tree's own
-/// member texts (the ambient core member beside the bodied and migrated
-/// members' sources).
-fn std_member_identity() -> Hash128 {
-    let members = [
-        (ds_stdlib::AMBIENT_FILE, ds_stdlib::BUNDLE_CORE_SOURCE),
-        (ds_stdlib::CODEC_FILE, ds_stdlib::CODEC_SOURCE),
-        (ds_stdlib::DATETIME_FILE, ds_stdlib::DATETIME_SOURCE),
-        (ds_stdlib::BODIED_FILE, ds_stdlib::BODIED_SOURCE),
-        (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
-    ];
-    let mut ordered: Vec<&(&str, &str)> = members.iter().collect();
-    ordered.sort_by(|left, right| left.0.cmp(right.0));
-    let mut buffer = Vec::new();
-    for (path, text) in ordered {
-        buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
-        buffer.extend_from_slice(path.as_bytes());
-        buffer.extend_from_slice(&(text.len() as u64).to_le_bytes());
-        buffer.extend_from_slice(text.as_bytes());
-    }
-    Hash128::compute(&buffer)
-}
-
 /// Both artifact writers record the dep list the bare-specifier switch
 /// pins: a manifest-free script importing `@std` through two rows records
 /// one entry — the package stem at the bundle's member identity, the
@@ -510,7 +485,7 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
         recorded,
         vec![ds_mod::Dep {
             name: "@std".to_owned(),
-            content_hash: std_member_identity(),
+            content_hash: ds_stdlib::std_member_identity(),
         }],
         "both rows link the package stem once at the bundle identity"
     );
@@ -565,7 +540,7 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
         ds_vm::LoadError::HashMismatch {
             dep: "@std".to_owned(),
             dependent: "deps".to_owned(),
-            linked: std_member_identity(),
+            linked: ds_stdlib::std_member_identity(),
             found: Some(Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())),
         },
         "the merged artifact refuses the bundle identity naming both hashes"

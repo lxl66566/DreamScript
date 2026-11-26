@@ -122,6 +122,7 @@ fn exports_of(
     ambient_files: usize,
     effects: &ds_check::Effects,
     functions: &[String],
+    carried: &HashMap<String, u32>,
     deps: &[ds_mod::Dep],
     const_values: &HashMap<ds_check::DefId, ds_check::ConstFact>,
 ) -> Vec<Export> {
@@ -147,7 +148,7 @@ fn exports_of(
     // a field may name another declared type of the same member, so the
     // whole member's facts derive together before any export row
     // carries one.
-    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files);
+    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files, carried);
     for (index, def) in analyzed.package.defs().enumerate() {
         if (def.span.file.as_u32() as usize) < ambient_files {
             continue; // the ambient's own definitions never export
@@ -260,10 +261,47 @@ fn impl_facts_of(
     analyzed: &Analyzed,
     ambient_files: usize,
     functions: &[String],
+    carried: &HashMap<String, u32>,
 ) -> Vec<ds_check::import::ImplFact> {
-    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files);
+    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files, carried);
     let eligible: std::collections::HashSet<ds_check::DefId> = facts.keys().copied().collect();
     ds_check::import::ImplFact::member_facts(analyzed, ambient_files, functions, &eligible, &facts)
+}
+
+/// The producer's default-body gate (G4): an exported trait member
+/// whose declared default body cannot cross — the body never planned,
+/// stages runtime evidence, or carries an effect row — refuses this
+/// compile here, naming the member at its own declaration, exactly
+/// like the dep-side const fence refuses a reach it cannot answer. A
+/// shape the surface cannot honestly serve fails before any consumer
+/// sees it; `Ok` when every exported default body carries.
+fn default_body_gate(
+    analyzed: &Analyzed,
+    ambient_files: usize,
+    effects: &ds_check::Effects,
+    functions: &[String],
+    carried: &HashMap<String, u32>,
+) -> Result<(), Vec<Diagnostic>> {
+    let diags = ds_check::import::refused_default_bodies(
+        analyzed,
+        ambient_files,
+        effects,
+        functions,
+        carried,
+    )
+    .into_iter()
+    .map(|refusal| {
+        Diagnostic::error(
+            ErrorCode::LinkedDefaultBodyRefusal,
+            format!(
+                "trait `{}`'s default body for `{}` cannot cross packages this round: {}",
+                refusal.trait_name, refusal.member, refusal.seam
+            ),
+        )
+        .with_primary(refusal.span, "the default body refuses the link walk")
+    })
+    .collect::<Vec<_>>();
+    if diags.is_empty() { Ok(()) } else { Err(diags) }
 }
 
 /// Rebases one signature's span set across file registries (G4): every
@@ -917,15 +955,36 @@ fn compile_text(
     if let (Some(cache), false) = (dep_dsi, inputs.main_required) {
         cache.store_dep_dsi(&name, source_hash, &analyzed, &effects, rows, caps);
     }
+    if !inputs.main_required
+        && let Err(diags) = default_body_gate(
+            &analyzed,
+            ambient_files,
+            &effects,
+            lowered.functions(),
+            lowered.carried_default_bodies(),
+        )
+    {
+        return Err(reject(
+            &files,
+            &diags,
+            "the exported trait default bodies refuse the link walk",
+        ));
+    }
     let exports = exports_of(
         &analyzed,
         ambient_files,
         &effects,
         lowered.functions(),
+        lowered.carried_default_bodies(),
         &deps,
         &const_values,
     );
-    let impls = impl_facts_of(&analyzed, ambient_files, lowered.functions());
+    let impls = impl_facts_of(
+        &analyzed,
+        ambient_files,
+        lowered.functions(),
+        lowered.carried_default_bodies(),
+    );
     match after {
         BundleAfter::Keep => {
             // The bundle's teardown is pure overhead on the one-shot

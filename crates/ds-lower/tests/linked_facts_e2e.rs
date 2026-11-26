@@ -446,6 +446,7 @@ fn build_trait_vm() -> (Vm, Lowered) {
     let member = ds_check::import::TraitMemberFact {
         name: "size".to_owned(),
         span: at,
+        default_func: None,
         sig: Arc::new(ds_check::FnSig {
             generics: Vec::new(),
             params: vec![ds_check::ParamSig {
@@ -557,5 +558,225 @@ fn linked_trait_dispatch_crosses_and_runs() {
         vm.run("linked_trait", "main", &[]),
         Ok(FrameAnswer::one(Value::I64(84))),
         "the plain site and the tail site both answer the linked body"
+    );
+}
+
+/// The default-body producer: a plain trait whose one member declares
+/// its body, an impl omitting the member, and an impl spelling its own
+/// — the omitted site's dispatch target is the trait's declared body.
+const DEFAULT_PRODUCER: &str = concat!(
+    "tag int\n",
+    "tag bool\n",
+    "trait answering {\n",
+    "  fn answer(self) -> int {\n",
+    "    7\n",
+    "  }\n",
+    "}\n",
+    "impl answering for int {\n",
+    "}\n",
+    "impl answering for bool {\n",
+    "  fn answer(self) -> int {\n",
+    "    5\n",
+    "  }\n",
+    "}\n",
+    "fn main() -> int {\n",
+    "  0\n",
+    "}\n",
+);
+
+/// The default-body consumer: the linked trait selected, one plain
+/// site and one tail site over the omitting impl dispatching into the
+/// linked default body, one site over the spelled impl's own body.
+const DEFAULT_SOURCE: &str = concat!(
+    "tag int\n",
+    "tag bool\n",
+    "import @lib (answering)\n",
+    "\n",
+    "fn go(n: int) -> int {\n",
+    "  n.answer()\n",
+    "}\n",
+    "\n",
+    "fn main() -> int {\n",
+    "  const once = 3.answer()\n",
+    "  const over = true.answer()\n",
+    "  once + over + go(4)\n",
+    "}\n",
+);
+
+/// Lowers the default-body producer and installs it under `lib`, then
+/// builds the consumer over a surface carrying the trait's member row
+/// with its default-body link and the two impl rows — the omitting
+/// one's member list empty, exactly what the producer's walk serves.
+fn build_default_vm() -> (Vm, Lowered) {
+    let mut pfiles = Files::new();
+    let pid = pfiles.add_source("lib.ds", DEFAULT_PRODUCER);
+    let past = Arc::new(parse(&pfiles, pid).expect("the producer parses"));
+    let panalyzed = ds_check::type_of::analyze(&pfiles, &[Arc::clone(&past)]);
+    assert!(
+        panalyzed.checked.diags.is_empty(),
+        "the producer checks clean"
+    );
+    let plowered = lower(
+        "lib",
+        Hash128::compute(DEFAULT_PRODUCER.as_bytes()),
+        std::slice::from_ref(&past),
+        &panalyzed,
+    )
+    .expect("the producer lowers");
+    let table = |name: &str| {
+        plowered
+            .module()
+            .functions()
+            .iter()
+            .position(|f| f.name() == name)
+            .and_then(|func| u32::try_from(func).ok())
+            .unwrap_or_else(|| panic!("the {name} row plans under its mangle"))
+    };
+    let default_func = table("answering#answer");
+    let spelled_func = table("answering#bool#answer");
+    let pbytes = write(plowered.module());
+    let pmodule = read(&pbytes).expect("the producer module round-trips");
+
+    let mut files = Files::new();
+    let id = files.add_source("linked_default_probe.ds", DEFAULT_SOURCE);
+    let ast = Arc::new(parse(&files, id).expect("the source parses"));
+    let at = ds_diag::Span::new(id, 1, 1);
+    let ty_entry = |name: &str, ty: ds_check::TypeFact| ds_check::ForeignEntry {
+        name: name.to_owned(),
+        origin: None,
+        vis: ds_check::Vis::Pub,
+        kind: ds_check::ForeignKind::Type,
+        generic: false,
+        defaulted: false,
+        decl_span: at,
+        sig: None,
+        row: ds_check::EffectRow::default(),
+        caps: 0,
+        value: None,
+        ty: Some(Arc::new(ty)),
+        link: 0,
+        func: None,
+        std: false,
+    };
+    let ret_int = ds_parse::Type::Path {
+        span: at,
+        path: ds_parse::Path {
+            span: at,
+            segments: vec![ds_parse::Ident {
+                span: at,
+                name: "int".to_owned(),
+            }],
+        },
+        args: Vec::new(),
+    };
+    let member = ds_check::import::TraitMemberFact {
+        name: "answer".to_owned(),
+        span: at,
+        default_func: Some(default_func),
+        sig: Arc::new(ds_check::FnSig {
+            generics: Vec::new(),
+            params: vec![ds_check::ParamSig {
+                name: "self".to_owned(),
+                span: at,
+                mode: ds_parse::ParamMode::Borrow,
+                ty: None,
+                default: None,
+            }],
+            ret: Some(ret_int),
+            bind: None,
+        }),
+    };
+    let surface = ds_check::MemberSurface {
+        tags: Vec::new(),
+        impls: vec![
+            ds_check::import::ImplFact {
+                trait_name: "answering".to_owned(),
+                head: TypeWord::Scalar(ScalarWord::Int),
+                members: Vec::new(),
+                span: at,
+                link: 0,
+            },
+            ds_check::import::ImplFact {
+                trait_name: "answering".to_owned(),
+                head: TypeWord::Scalar(ScalarWord::Bool),
+                members: vec![ds_check::import::ImplMemberFact {
+                    name: "answer".to_owned(),
+                    func: spelled_func,
+                }],
+                span: at,
+                link: 0,
+            },
+        ],
+        entries: vec![ty_entry(
+            "answering",
+            ds_check::TypeFact::Trait(ds_check::import::TraitFact {
+                members: vec![member],
+            }),
+        )],
+    };
+    let mut imports = ds_check::ImportGraph::new();
+    for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+        if let ds_parse::ItemKind::Import(import) = &item.kind {
+            imports.add(
+                import.span,
+                ds_check::ImportSurface::Linked(surface.clone()),
+            );
+        }
+    }
+    imports.set_link_order(vec!["lib".to_owned()]);
+    let (package, resolutions, _diags) =
+        ds_check::resolve_package_linked(&[Arc::clone(&ast)], &imports);
+    let analyzed = ds_check::type_of::analyze_resolved(
+        &files,
+        std::slice::from_ref(&ast).into(),
+        Arc::new(package),
+        resolutions.into(),
+        Vec::<Diagnostic>::new(),
+        Arc::default(),
+    );
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the default probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let lowered = lower(
+        "linked_default",
+        Hash128::compute(DEFAULT_SOURCE.as_bytes()),
+        std::slice::from_ref(&ast),
+        &analyzed,
+    )
+    .expect("the default probe lowers");
+    let lowered = lowered.with_deps(vec![ds_mod::Dep {
+        name: "lib".to_owned(),
+        content_hash: Hash128::compute(DEFAULT_PRODUCER.as_bytes()),
+    }]);
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the default module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, pmodule).expect("the producer installs");
+    loader::install(&mut registry, module).expect("the consumer installs");
+    (Vm::new(registry), lowered)
+}
+
+/// A consumer's dispatch whose solving impl spells no member reaches
+/// the producer's trait default body through the linked path: the
+/// trait's member row carries the body's table index, the mint marks
+/// the member omittable, and the CALLG stages the solved instance word
+/// alone — a plain site and a tail site over the omitting head, and a
+/// spelled head dispatching its own impl body.
+#[test]
+fn linked_default_body_dispatch_crosses_and_runs() {
+    let (mut vm, _lowered) = build_default_vm();
+    assert_eq!(
+        vm.run("linked_default", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(19))),
+        "the default site, the spelled site, and the tail site all answer"
     );
 }

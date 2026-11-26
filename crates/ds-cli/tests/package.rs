@@ -1622,6 +1622,13 @@ version = \"1.0.0\"
         "    7\n",
         "  }\n",
         "}\n",
+        "impl defaulted for int {\n",
+        "}\n",
+        "impl defaulted for string {\n",
+        "  fn answer(self) -> int {\n",
+        "    5\n",
+        "  }\n",
+        "}\n",
     );
     let members = [("shapes.ds", member)];
     write_pkg(&pkg, &manifest, &members);
@@ -2045,6 +2052,170 @@ fn the_trait_impls_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// One bespoke fixture package answering a single root: writes the
+/// member source as `lib.ds`, installs it, and returns the work dir
+/// with the root manifest pinning the installed identity.
+fn bespoke_pkg(tag: &str, member: &str) -> (PathBuf, String) {
+    let work = temp_dir(tag);
+    let pkg = work.join("lib");
+    let manifest = "name = \"@lib\"\nversion = \"1.0.0\"\n".to_owned();
+    write_pkg(&pkg, &manifest, &[("lib.ds", member)]);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the {tag} fixture installs (stderr: {err})");
+    let pkg_id = bundle_identity(&manifest, &[("lib.ds", member)]).to_string();
+    (work, pkg_id)
+}
+
+/// One bespoke root over the installed fixture: the run's flattened
+/// outcome.
+fn bespoke_run(work: &Path, pkg_id: &str, source: &str) -> (bool, String, String) {
+    let manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@lib = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{pkg_id}\" }}\n"
+    );
+    let root = write_root(work, &manifest, source);
+    let entry = root.join("app.ds");
+    ds(&["run", entry.to_str().expect("temp path is UTF-8")])
+}
+
+/// A producer's trait default bodies cross the link seam (G4): the
+/// member's row carries the declared body's table index, the mint
+/// marks the member omittable, and a consumer's dispatch whose solving
+/// impl spells no member — the producer's own omitting impl or the
+/// consumer's local one — CALLGs into the linked default body, the
+/// spelled impl answering its own body over the same trait.
+#[test]
+fn the_trait_default_bodies_cross_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-defaults");
+    let manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &manifest,
+        concat!(
+            "import @shapes (defaulted)\n",
+            "\n",
+            "impl defaulted for float {\n",
+            "}\n",
+            "\n",
+            "fn weigh(s: string) -> int {\n",
+            "  s.answer()\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const once = 3.answer()\n",
+            "  const own = 2.5.answer()\n",
+            "  once + own + weigh(\"x\")\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the default-body run exits 0 (stderr: {err})");
+    // the linked omitting impl's site 7, the consumer's own omitting
+    // impl 7, and the spelled string head's tail site 5
+    assert_eq!(out, "19\n", "the run echoes the dispatched total");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A default body the round cannot carry refuses at the producer's own
+/// walk (G4), naming the member at its declaration: a body dispatching
+/// on `self` stages runtime evidence a consumer cannot build, and a
+/// body carrying an effect row unions nothing at the consumer's
+/// dispatch — both fail the producer's compile before any consumer
+/// sees them, exactly like a dep member's own checker refusals.
+#[test]
+fn the_uncarriable_default_bodies_refuse_at_the_producer() {
+    for (tag, member, refused) in [
+        (
+            "demanded-body",
+            concat!(
+                "pub trait chained {\n",
+                "  fn a(self) -> int\n",
+                "  fn b(self) -> int {\n",
+                "    self.a()\n",
+                "  }\n",
+                "}\n",
+                "impl chained for int {\n",
+                "  fn a(self) -> int {\n",
+                "    3\n",
+                "  }\n",
+                "}\n",
+            ),
+            "default body for `b` cannot cross packages this round: the body stages runtime \
+             evidence",
+        ),
+        (
+            "effectful-body",
+            concat!(
+                "import @std/io\n",
+                "\n",
+                "pub trait noisy {\n",
+                "  fn speak(self) -> int {\n",
+                "    7\n",
+                "  }\n",
+                "  fn quiet(self) -> int {\n",
+                "    println(\"x\")\n",
+                "    7\n",
+                "  }\n",
+                "}\n",
+            ),
+            "default body for `quiet` cannot cross packages this round: the body carries an \
+             effect row",
+        ),
+    ] {
+        let (work, pkg_id) = bespoke_pkg(tag, member);
+        let root_source = match tag {
+            "demanded-body" => "import @lib (chained)\n\nfn main() -> int {\n  7\n}\n",
+            _ => "import @lib (noisy)\n\nfn main() -> int {\n  7\n}\n",
+        };
+        let (ok, out, err) = bespoke_run(&work, &pkg_id, root_source);
+        assert!(!ok, "the {tag} producer refuses");
+        assert_eq!(out, "");
+        assert!(
+            err.contains(refused),
+            "the {tag} refusal names the member (stderr: {err})"
+        );
+        fs::remove_dir_all(&work).expect("the temp tree removes");
+    }
+}
+
+/// A linked default body's receiver claims its `Self` variable's single
+/// Raw word, so a consumer dispatch over a multi-word head keeps the
+/// local one-word instantiation boundary's own refusal (G4): the
+/// consumer's omitting impl over a two-word linked struct refuses at
+/// the lowering, naming the linked default body's receiver.
+#[test]
+fn a_wide_receiver_into_a_linked_default_body_refuses() {
+    let (work, pkg_id) = shapes_fixtures("shapes-wide-default");
+    let manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &manifest,
+        concat!(
+            "import @shapes (pair, defaulted)\n",
+            "\n",
+            "impl defaulted for pair {\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = pair { a: 30, b: 12 }\n",
+            "  made.answer()\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the wide receiver refuses");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("a linked default body's receiver"),
+        "the refusal names the seam (stderr: {err})"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A linked fn's signature binds over its own type without the type's
 /// selection (G4): the fact registers from the member's surface alone,
 /// so values of the type flow between linked calls — the consumer never
@@ -2298,7 +2469,7 @@ fn an_empty_linked_enum_binds_its_name() {
 /// The type shapes the vocabulary cannot spell and the names a local
 /// declaration or the consumer itself owns keep their refusals at the
 /// same walk (G4): a deinit-carrying struct, a generic enum, a generic
-/// struct, a defaulted-member trait, and a struct with a field outside the word
+/// struct, and a struct with a field outside the word
 /// vocabulary each carry no fact; a generic alias — a declaration
 /// resolving through use-site arguments — carries none the same way;
 /// a locally declared spelling of a linked type name refuses both at
@@ -2347,17 +2518,6 @@ fn the_uncarried_type_shapes_refuse() {
             "generic-alias",
             concat!(
                 "import @shapes (wide)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
-            "defaulted-trait",
-            concat!(
-                "import @shapes (defaulted)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -3512,30 +3672,6 @@ fn std_package_facts() -> (Package, Hash128, String) {
     (package, identity, version)
 }
 
-/// The default @std bundle's member identity — the same ascending-path
-/// fold over path-and-text pairs the load walk records for one package's
-/// members, computed over the tree's own member texts: the ambient core
-/// member beside the bodied and migrated members' sources.
-fn std_member_identity() -> Hash128 {
-    let members = [
-        (ds_stdlib::AMBIENT_FILE, ds_stdlib::BUNDLE_CORE_SOURCE),
-        (ds_stdlib::CODEC_FILE, ds_stdlib::CODEC_SOURCE),
-        (ds_stdlib::DATETIME_FILE, ds_stdlib::DATETIME_SOURCE),
-        (ds_stdlib::BODIED_FILE, ds_stdlib::BODIED_SOURCE),
-        (ds_stdlib::STD_MEMBERS_FILE, ds_stdlib::STD_MEMBERS_SOURCE),
-    ];
-    let mut ordered: Vec<&(&str, &str)> = members.iter().collect();
-    ordered.sort_by(|left, right| left.0.cmp(right.0));
-    let mut buffer = Vec::new();
-    for (path, text) in ordered {
-        buffer.extend_from_slice(&(path.len() as u64).to_le_bytes());
-        buffer.extend_from_slice(path.as_bytes());
-        buffer.extend_from_slice(&(text.len() as u64).to_le_bytes());
-        buffer.extend_from_slice(text.as_bytes());
-    }
-    Hash128::compute(&buffer)
-}
-
 /// A root manifest declaring the @std dep at the given version and pin.
 fn std_root_manifest(ver: &str, hash: &str) -> String {
     format!(
@@ -3601,7 +3737,7 @@ fn a_declared_std_dep_serves_the_default_install() {
         module.deps(),
         &[Dep {
             name: "@std".to_owned(),
-            content_hash: std_member_identity(),
+            content_hash: ds_stdlib::std_member_identity(),
         }],
         "the writer records @std at the bundle's member identity"
     );
@@ -3942,7 +4078,7 @@ fn a_plain_script_resolves_std_through_the_implicit_graph() {
         module.deps(),
         &[Dep {
             name: "@std".to_owned(),
-            content_hash: std_member_identity(),
+            content_hash: ds_stdlib::std_member_identity(),
         }],
         "the script writer records @std at the bundle's member identity"
     );

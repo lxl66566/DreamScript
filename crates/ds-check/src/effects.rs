@@ -335,6 +335,16 @@ impl Effects {
         self.expr_rows.get(&span).copied()
     }
 
+    /// Every recorded row inside `span` (same file, the recorded
+    /// span contained in it): the walk a producer's link gate reads to
+    /// refuse an effect-carrying exported body.
+    pub fn rows_under(&self, span: Span) -> impl Iterator<Item = EffectRow> + '_ {
+        self.expr_rows
+            .iter()
+            .filter(move |(s, _)| s.file == span.file && span.start <= s.start && s.end <= span.end)
+            .map(|(_, row)| *row)
+    }
+
     /// The tightest recorded expression row covering `span` — an
     /// expression's own row when it is recorded, else the tightest
     /// enclosing expression's. `None` when no recorded span covers it
