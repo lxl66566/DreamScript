@@ -23,7 +23,7 @@ use crate::Ast;
 /// pass that follows the parse has the largest frames: measured on a
 /// debug build (rustc 1.102-nightly, x86_64 Linux), one paren or arrow
 /// layer of conversion recursion costs ~114 KiB, and one `else if`
-/// level ~3 KiB, so the worst admitted source (39 parens + 39 arrows +
+/// level ~3 KiB, so the worst admitted source (40 parens + 39 arrows +
 /// 499 elses, roughly 11 MiB) fits with close to 3x headroom. Release
 /// frames are several times smaller, so the segment is sized by the
 /// debug profile, which is the profile every test run uses.

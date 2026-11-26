@@ -46,7 +46,7 @@ pub fn item(out: &mut String, src: &str, item: &Item) {
 /// [`item`]'s rendering body over a shared [`Ctx`].
 fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
     match &item.kind {
-        ItemKind::Fn(f) => fn_signature(out, f, "pub fn"),
+        ItemKind::Fn(f) => fn_signature(out, ctx, f, "pub fn"),
         // the bind target rides between `extern` and `fn` (H5), the
         // declaration's own re-quote discipline
         ItemKind::ExternFn(f) => {
@@ -54,7 +54,7 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
                 Some(bind) => format!("pub extern \"{}\" fn", bind.name),
                 None => "pub extern fn".to_owned(),
             };
-            fn_signature(out, f, &prefix);
+            fn_signature(out, ctx, f, &prefix);
         },
         ItemKind::Local(local) => {
             // A bodied top-level fn is the converted const-arrow binding
@@ -71,7 +71,7 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
             ) = (&local.pat, &local.init)
             {
                 let mut line = format!("pub fn {}", head(name, generics));
-                write_params(&mut line, params);
+                write_params(ctx, &mut line, params);
                 if let Some(ret) = ret {
                     let _ = write!(line, " -> {}", render_type(ret));
                 }
@@ -151,7 +151,7 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
                 .members
                 .iter()
                 .map(|member| match member {
-                    TraitMember::Fn(f) => fn_line(f),
+                    TraitMember::Fn(f) => fn_line(ctx, f),
                     TraitMember::AssocType { name, .. } => format!("  type {}", name.name),
                 })
                 .collect::<Vec<_>>();
@@ -163,9 +163,9 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
 
 /// One function's signature: `prefix name[g](params) -> ret`, a defaulted
 /// parameter's literal spelled after its type.
-fn fn_signature(out: &mut String, f: &FnDecl, prefix: &str) {
+fn fn_signature(out: &mut String, ctx: &Ctx, f: &FnDecl, prefix: &str) {
     let mut line = format!("{prefix} {}", head(&f.name, &f.generics));
-    write_params(&mut line, &f.params);
+    write_params(ctx, &mut line, &f.params);
     if let Some(ret) = &f.ret {
         let _ = write!(line, " -> {}", render_type(ret));
     }
@@ -173,21 +173,21 @@ fn fn_signature(out: &mut String, f: &FnDecl, prefix: &str) {
 }
 
 /// A parameter list in its parens: `(mut xs: list[int], ...)`.
-fn write_params(line: &mut String, params: &[Param]) {
+fn write_params(ctx: &Ctx, line: &mut String, params: &[Param]) {
     line.push('(');
     for (index, param) in params.iter().enumerate() {
         if index > 0 {
             line.push_str(", ");
         }
-        let _ = write!(line, "{}", param_line(param));
+        let _ = write!(line, "{}", param_line(ctx, param));
     }
     line.push(')');
 }
 
 /// One trait member's signature, indented and unprefixed.
-fn fn_line(f: &FnDecl) -> String {
+fn fn_line(ctx: &Ctx, f: &FnDecl) -> String {
     let mut line = format!("fn {}", head(&f.name, &f.generics));
-    write_params(&mut line, &f.params);
+    write_params(ctx, &mut line, &f.params);
     if let Some(ret) = &f.ret {
         let _ = write!(line, " -> {}", render_type(ret));
     }
@@ -211,8 +211,11 @@ fn head(name: &Ident, generics: &[TypeParam]) -> String {
 }
 
 /// One parameter's signature: the mode keyword, the name, the annotation,
-/// and a defaulted parameter's literal (F7: defaults are literal-only).
-fn param_line(param: &Param) -> String {
+/// and a defaulted parameter's literal (F7: defaults are literal-only)
+/// rendered through the expression renderer — escaped chars and bytes,
+/// suffixed numbers, string and raw text verbatim from their spans, so
+/// the spelling re-parses to the value the parameter defaults from.
+fn param_line(ctx: &Ctx, param: &Param) -> String {
     let mode = match param.mode {
         ParamMode::Borrow => "",
         ParamMode::Mut(_) => "mut ",
@@ -224,37 +227,10 @@ fn param_line(param: &Param) -> String {
         let _ = write!(line, ": {}", render_type(ty));
     }
     if let Some(default) = &param.default {
-        let _ = write!(line, " = {}", literal(default));
+        line.push_str(" = ");
+        expr::write_expr(ctx, &mut line, 0, default);
     }
     line
-}
-
-/// The literal spelling of a defaulted parameter: the literal's own token
-/// text where one exists, a placeholder for the forms a bare token
-/// cannot spell.
-fn literal(expr: &ds_parse::Expr) -> String {
-    use ds_parse::{Expr, Literal};
-    match expr {
-        Expr::Literal {
-            lit: Literal::Int { text, .. } | Literal::Float { text, .. },
-            ..
-        } => text.clone(),
-        Expr::Literal {
-            lit: Literal::Char(c),
-            ..
-        } => format!("'{c}'"),
-        Expr::Literal {
-            lit: Literal::Byte(b),
-            ..
-        } => format!("b'{b}'"),
-        Expr::Literal {
-            lit: Literal::Bool(b),
-            ..
-        } => format!("{b}"),
-        Expr::Str { .. } => "\"...\"".to_owned(),
-        Expr::RawStr { .. } => "`...`".to_owned(),
-        _ => "<literal>".to_owned(),
-    }
 }
 
 /// One struct field's line: `name: type`.
@@ -440,6 +416,38 @@ mod tests {
                 "pub extern fn cons2[t](x: t, xs: list[t]) -> list[t]\n",
             ),
             "the bodied pair keeps the extern's own bracket spelling"
+        );
+        let mut files = Files::new();
+        let file = files.add_source("surface.dsi", &out);
+        let ast = parse(&files, file)
+            .unwrap_or_else(|diags| panic!("the surface re-parses: {}", diags[0].message));
+        let mut again = String::new();
+        member(&mut again, &out, &ast);
+        assert_eq!(again, out, "the surface is a fixed point");
+    }
+
+    /// A defaulted parameter's literal renders through the expression
+    /// renderer, so the awkward spellings survive the surface: a char
+    /// default escapes its quote and its newline, a byte default keeps
+    /// one escaped char (never a decimal run), and string/raw defaults
+    /// re-render verbatim from their own source text — never a
+    /// placeholder the grammar refuses.
+    #[test]
+    fn defaulted_literals_reparse_in_their_rendered_spellings() {
+        let src = "pub fn tricky(q: char = '\\'', n: char = '\\n', x: byte = b'x', d: byte = \
+                   b'\\u{7f}', s: string = \"a\\\"b\\\\c\\nd\", r: string = r#\"he said \
+                   \"hi\"\"#) -> int\n";
+        let mut files = Files::new();
+        let file = files.add_source("m.ds", src);
+        let ast = parse(&files, file).expect("the source parses");
+        let mut out = String::new();
+        member(&mut out, src, &ast);
+        assert_eq!(
+            out,
+            "pub fn tricky(q: char = '\\'', n: char = '\\n', x: byte = b'x', d: byte = \
+             b'\\u{7f}', s: string = \"a\\\"b\\\\c\\nd\", r: string = r#\"he said \"hi\"\"#) -> \
+             int\n",
+            "the defaults render in their re-parsable spellings"
         );
         let mut files = Files::new();
         let file = files.add_source("surface.dsi", &out);

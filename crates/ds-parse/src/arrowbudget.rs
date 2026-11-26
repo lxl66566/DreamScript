@@ -27,7 +27,7 @@
 use ds_diag::{Diagnostic, ErrorCode, FileId, Span};
 
 /// Live-arrow refusal point, kept independent of the other limits. Worst
-/// admitted source: 39 open brackets (`MAX_NEST` in [`crate::lexscan`])
+/// admitted source: 40 open brackets (`MAX_NEST` in [`crate::lexscan`])
 /// plus a 39-arrow run. The binding cost is the conversion pass that
 /// follows the parse: measured on a debug build (rustc 1.102-nightly,
 /// x86_64 Linux), one arrow layer of conversion recursion costs ~114 KiB
@@ -35,7 +35,7 @@ use ds_diag::{Diagnostic, ErrorCode, FileId, Span};
 /// ~12-30 KiB a bracket costs inside pest itself), and a paren layer
 /// costs about the same — an 8 MiB stack aborts at 39 parens + 36 arrows.
 /// The 32 MiB worker segment (`worker.rs`) therefore carries the worst
-/// admitted combination (39 + 39 arrow/paren layers, plus `else if`
+/// admitted combination (40 + 39 arrow/paren layers, plus `else if`
 /// levels, ~10-11 MiB) with close to 3x headroom, and the same
 /// arithmetic bounds the near-legal prefixes pest backtracks through, so
 /// an illegal tail cannot smuggle depth past the budget either.
@@ -45,7 +45,7 @@ pub(crate) const MAX_ARROWS: u32 = 40;
 /// own stack guard refuses an `else if` chain at ~3648 branches, so one
 /// level costs ~2 KiB; 499 live elses then cost ~1-2 MiB even counting
 /// the conversion pass's ~3 KiB per level. Combined with the other worst
-/// case (39 brackets + 39 arrows, ~9 MiB) the whole admitted worst case
+/// case (40 brackets + 39 arrows, ~9 MiB) the whole admitted worst case
 /// stays well inside the 32 MiB worker segment. Real generated decoders
 /// carry 100+ branches, so 500 sits far above legal use and ~7x under the
 /// measured guard point.
