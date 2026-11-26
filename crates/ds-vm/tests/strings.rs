@@ -11,9 +11,9 @@
 //! `parse_int` answers the fallible two-word span and the checked
 //! reads `substring`/`char_at` their ok/none span on argument slots 0 and
 //! 1 — word 0 the discriminant (`PLATFORM_IO_OK` / `PLATFORM_PARSE_ERR` /
-//! `PLATFORM_NONE`), word 1 the payload — so a caller of one sizes its
-//! overlay area to two; the overlay slots declare `Raw` because the same
-//! words stage arguments first.
+//! `PLATFORM_NONE`), word 1 the payload (a char read's payload the code
+//! point integer) — so a caller of one sizes its overlay area to two; the
+//! overlay slots declare `Raw` because the same words stage arguments first.
 
 use ds_vm::{
     Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
@@ -25,8 +25,9 @@ use ds_vm::{
     assemble,
     native::{
         BUILTIN_CHAR_AT, BUILTIN_CONCAT, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_NEW,
-        BUILTIN_LIST_PUSH, BUILTIN_PARSE_INT, BUILTIN_SPLIT, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
-        BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_NONE, PLATFORM_PARSE_ERR,
+        BUILTIN_LIST_PUSH, BUILTIN_PARSE_INT, BUILTIN_SPLIT, BUILTIN_STR_CHAR, BUILTIN_STR_INT,
+        BUILTIN_SUBSTRING, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TRIM, PLATFORM_NONE,
+        PLATFORM_PARSE_ERR,
     },
     platform::{OP_PRINTLN, Platform, STD_NAME},
 };
@@ -66,6 +67,8 @@ fn pool() -> Vec<Const> {
         builtin(BUILTIN_TO_LOWER),  // k10
         builtin(BUILTIN_SPLIT),     // k11
         builtin(BUILTIN_PARSE_INT), // k12
+        builtin(BUILTIN_STR_CHAR),  // k13
+        Const::I64(1),              // k14: the char member's tag constant
     ]
 }
 
@@ -246,25 +249,32 @@ fn ask_parse() -> FunctionDef {
     ])
 }
 
-/// `(s, sep: string) -> list[string]`: the payload `Ref` names the list
-/// object.
+/// `(s, sep: string) -> list[string]`: the separator stages its whole
+/// union span (the tag word, the text Ref, the char member's dead
+/// region word) beside the char tag constant the body reads the span
+/// through, and the payload `Ref` names the list object.
 fn parts() -> FunctionDef {
-    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref], 2, 3, &[
-        Uop::Funcf { frame_slots: 6 },
+    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref, I64, I64], 2, 5, &[
+        Uop::Funcf { frame_slots: 8 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
         Uop::Mov { dst: 5, src: 1 },
+        Uop::Kimm { dst: 6, kidx: k(0) }, // the char member's dead region word
+        Uop::Kimm {
+            dst: 7,
+            kidx: k(14),
+        }, // the char tag constant
         Uop::Call {
             callee: k(11),
-            nargs: 3,
+            nargs: 5,
         },
         Uop::Ret { src: 3 },
     ])
 }
 
-/// `(s: string, i: int) -> string | none`: `char_at`'s checked span — the
-/// hit returns the one-char payload `Ref`, the miss halts on the `none`
-/// tag word.
+/// `(s: string, i: int) -> char | none`: `char_at`'s checked span — the
+/// hit returns the code point payload integer, the miss halts on the
+/// `none` tag word.
 fn pick() -> FunctionDef {
     def("pick", &[Ref, I64, Bool, Raw, Raw, Raw], 2, 2, &[
         Uop::Funcf { frame_slots: 6 },
@@ -329,7 +339,13 @@ fn report() -> FunctionDef {
             callee: k(4),
             nargs: 2,
         },
+        // the char read answers the code point integer, so the render
+        // encodes it through str_char before the print
         Uop::Mov { dst: 4, src: 5 },
+        Uop::Call {
+            callee: k(13),
+            nargs: 1,
+        },
         Uop::Call {
             callee: k(8),
             nargs: 1,
@@ -354,6 +370,16 @@ fn report() -> FunctionDef {
 
 fn string(vm: &mut Vm, text: &str) -> Value {
     vm.intern_str(text)
+}
+
+/// Runs a fixture and reads the char its code point result spells.
+fn run_char(vm: &mut Vm, func: &str, args: &[Value]) -> char {
+    let result = vm.run("st", func, args).expect("the fixture runs");
+    let [Value::I64(code)] = result.as_slice() else {
+        panic!("a code point, got {result:?}");
+    };
+    char::from_u32(u32::try_from(*code).expect("the code point fits u32"))
+        .expect("the word spells a scalar")
 }
 
 /// Runs a fixture and reads the string content of its `Ref` result.
@@ -431,17 +457,21 @@ fn len_dispatches_the_one_body_on_the_evidence_word() {
         Const::Str(";".into()), // k1: the split separator
         builtin(BUILTIN_SPLIT), // k2
         builtin(BUILTIN_LEN),   // k3
+        Const::I64(2),          // k4: the char tag constant
     ];
-    // the shared overlay word is a Raw wildcard: the split stages the
-    // separator's union tag there, the CALLG stages the evidence word
+    // the shared overlay words are Raw wildcards: the split stages the
+    // separator's whole union span there, the CALLG restages one as the
+    // evidence word
     let body = [
-        Uop::Funcf { frame_slots: 4 },
+        Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 1, src: 0 },
         Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
         Uop::Kstr { dst: 3, kidx: k(1) },
+        Uop::Kimm { dst: 4, kidx: k(0) }, // the char member's dead region word
+        Uop::Kimm { dst: 5, kidx: k(4) }, // the char tag constant
         Uop::Call {
             callee: k(2),
-            nargs: 3,
+            nargs: 5,
         },
         // the split result sits on overlay 0; the evidence word restages
         // the wildcard as the list instance
@@ -454,7 +484,8 @@ fn len_dispatches_the_one_body_on_the_evidence_word() {
     ];
     let def = FunctionDef {
         name: "count_list".into(),
-        layout: FrameLayout::new(vec![Ref, Ref, Raw, Ref], 1, 3).expect("valid fixture layout"),
+        layout: FrameLayout::new(vec![Ref, Ref, Raw, Ref, Raw, Raw], 1, 5)
+            .expect("valid fixture layout"),
         pool,
         code: assemble(&body).expect("fixture body encodes"),
     };
@@ -663,9 +694,9 @@ fn split_answers_parts_as_a_list_object() {
 fn char_at_answers_the_checked_char_read() {
     let mut vm = Vm::new(st_registry());
     let args = [string(&mut vm, "héllo"), Value::I64(1)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "é");
+    assert_eq!(run_char(&mut vm, "pick", &args), 'é');
     let args = [string(&mut vm, "héllo"), Value::I64(0)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "h");
+    assert_eq!(run_char(&mut vm, "pick", &args), 'h');
     // past either end: the none member, never a trap
     let args = [string(&mut vm, "héllo"), Value::I64(5)];
     run_none(&mut vm, "pick", &args);
@@ -720,11 +751,11 @@ fn substring_and_char_at_pin_multi_byte_boundaries_and_huge_indexes() {
     run_none(&mut vm, "clip", &args);
     // char_at over the same strings: every scalar, none past both ends
     let args = [string(&mut vm, "a👍b🚀"), Value::I64(1)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "👍");
+    assert_eq!(run_char(&mut vm, "pick", &args), '👍');
     let args = [string(&mut vm, "a👍b🚀"), Value::I64(3)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "🚀");
+    assert_eq!(run_char(&mut vm, "pick", &args), '🚀');
     let args = [string(&mut vm, "漢字"), Value::I64(1)];
-    assert_eq!(run_str(&mut vm, "pick", &args), "字");
+    assert_eq!(run_char(&mut vm, "pick", &args), '字');
     let args = [string(&mut vm, "漢字"), Value::I64(2)];
     run_none(&mut vm, "pick", &args);
     let args = [string(&mut vm, "漢字"), Value::I64(i64::MAX)];
@@ -750,7 +781,7 @@ fn repeated_char_indexed_access_serves_one_boundary_map() {
     for (i, want) in expect.iter().enumerate() {
         let index = i64::try_from(i).expect("loop index fits i64");
         let args = [text, Value::I64(index)];
-        assert_eq!(run_str(&mut vm, "pick", &args), want.to_string());
+        assert_eq!(run_char(&mut vm, "pick", &args), *want);
     }
     // and len agrees over the same map after it exists
     assert_eq!(
@@ -818,6 +849,8 @@ fn jn_pool() -> Vec<Const> {
         Const::Str(",".into()),     // k3
         Const::I64(7),              // k4: the non-string element
         builtin(BUILTIN_LIST_PUSH), // k5
+        Const::I64(0),              // k6: the dead region word's zero
+        Const::I64(1),              // k7: the char member's tag constant
     ]
 }
 
@@ -846,23 +879,27 @@ fn jn_registry() -> ModuleRegistry {
 fn render() -> FunctionDef {
     jn_def(
         "render",
-        &[Ref, Ref, Ref, Raw, Raw, Ref, Tag, Ref],
+        &[Ref, Ref, Ref, Raw, Raw, Ref, Tag, Ref, I64, I64],
         3,
-        3,
+        5,
         &[
-            Uop::Funcf { frame_slots: 8 },
+            Uop::Funcf { frame_slots: 10 },
             Uop::Mov { dst: 5, src: 0 },
             Uop::TagNew { dst: 6, tag: 0 }, // the split separator's union tag
             Uop::Mov { dst: 7, src: 1 },
+            Uop::Kimm { dst: 8, kidx: k(6) }, // the char member's dead region word
+            Uop::Kimm { dst: 9, kidx: k(7) }, // the char tag constant
             Uop::Call {
                 callee: k(0),
-                nargs: 3,
+                nargs: 5,
             },
             Uop::TagNew { dst: 6, tag: 0 }, // the join separator's union tag
             Uop::Mov { dst: 7, src: 2 },
+            Uop::Kimm { dst: 8, kidx: k(6) }, // the char member's dead region word
+            Uop::Kimm { dst: 9, kidx: k(7) }, // the char tag constant
             Uop::Call {
                 callee: k(1),
-                nargs: 3,
+                nargs: 5,
             },
             Uop::Ret { src: 5 },
         ],
@@ -871,19 +908,21 @@ fn render() -> FunctionDef {
 
 /// `() -> string`: the empty list joins to the empty string.
 fn blanks() -> FunctionDef {
-    jn_def("blanks", &[Raw, Tag, Ref], 0, 3, &[
-        Uop::Funcf { frame_slots: 3 },
-        // the fresh list's word is overlay 0; the tag and separator
-        // stage beside it
+    jn_def("blanks", &[Raw, Tag, Ref, I64, I64], 0, 5, &[
+        Uop::Funcf { frame_slots: 5 },
+        // the fresh list's word is overlay 0; the tag, the separator,
+        // the dead region word, and the char tag constant stage beside it
         Uop::Call {
             callee: k(2),
             nargs: 0,
         },
         Uop::TagNew { dst: 1, tag: 0 }, // the separator's union tag word
         Uop::Kstr { dst: 2, kidx: k(3) },
+        Uop::Kimm { dst: 3, kidx: k(6) }, // the char member's dead region word
+        Uop::Kimm { dst: 4, kidx: k(7) }, // the char tag constant
         Uop::Call {
             callee: k(1),
-            nargs: 3,
+            nargs: 5,
         },
         Uop::Ret { src: 0 },
     ])
@@ -894,28 +933,36 @@ fn blanks() -> FunctionDef {
 /// hand-assembled caller reaches the trap.
 fn tainted() -> FunctionDef {
     // slot 0 is the body word holding the list across both calls; the
-    // two overlay words are slots 1 and 2
-    jn_def("tainted", &[Raw, Raw, Raw, Raw, Raw, Ref], 0, 3, &[
-        Uop::Funcf { frame_slots: 6 },
-        Uop::Call {
-            callee: k(2),
-            nargs: 0,
-        },
-        Uop::Mov { dst: 0, src: 3 },
-        Uop::Kimm { dst: 4, kidx: k(4) },
-        Uop::Call {
-            callee: k(5),
-            nargs: 2,
-        },
-        Uop::Mov { dst: 3, src: 0 },
-        Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
-        Uop::Kstr { dst: 5, kidx: k(3) },
-        Uop::Call {
-            callee: k(1),
-            nargs: 3,
-        },
-        Uop::Ret { src: 3 },
-    ])
+    // overlay words are slots 1 through 3
+    jn_def(
+        "tainted",
+        &[Raw, Raw, Raw, Raw, Raw, Ref, I64, I64],
+        0,
+        5,
+        &[
+            Uop::Funcf { frame_slots: 8 },
+            Uop::Call {
+                callee: k(2),
+                nargs: 0,
+            },
+            Uop::Mov { dst: 0, src: 3 },
+            Uop::Kimm { dst: 4, kidx: k(4) },
+            Uop::Call {
+                callee: k(5),
+                nargs: 2,
+            },
+            Uop::Mov { dst: 3, src: 0 },
+            Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
+            Uop::Kstr { dst: 5, kidx: k(3) },
+            Uop::Kimm { dst: 6, kidx: k(6) }, // the char member's dead region word
+            Uop::Kimm { dst: 7, kidx: k(7) }, // the char tag constant
+            Uop::Call {
+                callee: k(1),
+                nargs: 5,
+            },
+            Uop::Ret { src: 3 },
+        ],
+    )
 }
 
 /// `join` renders the parts list back to one string: multiple parts

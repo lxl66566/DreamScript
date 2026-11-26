@@ -72,6 +72,7 @@ fn pool() -> Vec<Const> {
         platform(OP_PROC_WAIT),         // k6
         platform(OP_PROC_TRY_WAIT),     // k7
         platform(OP_PROC_CLOSE),        // k8
+        Const::I64(1),                  // k9: the char tag constant
     ]
 }
 
@@ -89,8 +90,8 @@ fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop])
 /// one word each, the separator joining then splitting them), the
 /// spawn's ok payload the handle word.
 fn spawn_def() -> FunctionDef {
-    def("spawn_child", &[Ref, Ref, Raw, Ref], 1, 3, &[
-        Uop::Funcf { frame_slots: 4 },
+    def("spawn_child", &[Ref, Ref, Raw, Ref, I64, I64], 1, 5, &[
+        Uop::Funcf { frame_slots: 6 },
         // "-c<sep>" ++ script
         Uop::Kstr { dst: 1, kidx: k(2) },
         Uop::Mov { dst: 2, src: 0 },
@@ -98,13 +99,16 @@ fn spawn_def() -> FunctionDef {
             callee: k(0),
             nargs: 2,
         },
-        // split the joined argv on the separator, the union tag word
-        // staging beside it
+        // split the joined argv on the separator: the union's whole
+        // staged span (the tag word, the text Ref, the char member's
+        // dead region word) beside the char tag constant
         Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
         Uop::Kstr { dst: 3, kidx: k(3) },
+        Uop::Kimm { dst: 4, kidx: k(9) }, // the char member's dead region word (any word)
+        Uop::Kimm { dst: 5, kidx: k(9) }, // the char tag constant
         Uop::Call {
             callee: k(1),
-            nargs: 3,
+            nargs: 5,
         },
         // the list word (slot 1) rides as the spawn's second argument
         Uop::Mov { dst: 2, src: 1 },

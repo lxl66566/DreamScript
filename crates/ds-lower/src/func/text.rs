@@ -6,7 +6,7 @@ use super::*;
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// One interpolating string: a STRCAT chain over its parts; a hole
     /// is `str(e)` — printable primitives route through their str
-    /// natives, a string or char passes its Ref word through, and an
+    /// natives, a string passes its Ref word through, and an
     /// operand whose `show` the checker solved at the hole's own span
     /// dispatches through the ordinary member-call machinery.
     pub(super) fn string_expr(&mut self, parts: &[StrPart]) -> Result<Place, LowerError> {
@@ -120,7 +120,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .name
             .clone();
         match name.as_str() {
-            "string" | "char" => {
+            "string" => {
                 let addrs = self.word_addrs(&val.place, val.ty)?;
                 match addrs.as_slice() {
                     [only] if only.slot_ty == SlotType::Ref => Ok(only.slot),
@@ -131,6 +131,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     )),
                 }
             },
+            // a char encodes UTF-8 at the hole: the code point word rides
+            // the integer slot, so the char conversion native renders the
+            // text the interpolation spells
+            "char" => self.str_native_word("str_char", SlotType::I64, val, span),
             // a byte prints its 0-255 value: the word IS the integer
             // slot staging, so the int native renders it; interpolation
             // holes stay checker-gated to the five printable primitives,

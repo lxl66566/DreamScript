@@ -18,8 +18,9 @@
 //! and string-operand `a + b`) stage the two Ref words and dispatch this
 //! native through CALL, so a pool `FuncRef` naming `concat` behaves like
 //! any other builtin. `split` answers a list-object `Ref` (the same list kind
-//! `fs_list` fills): the surface's `char` separator reaches runtime as a
-//! single-char string `Ref`, and an empty separator splits per character.
+//! `fs_list` fills): the separator union's payload word carries a char's
+//! code point in the integer slot or the separator text behind a Ref,
+//! and an empty separator splits per character.
 //!
 //! `parse_int` is the pure fallible one: its ambient row is `error` (the
 //! caller-handled failure, the `int | parse_err` shape exactly as
@@ -240,22 +241,20 @@ pub(super) fn float_stop(text: &str) -> i64 {
 
 /// `char_of(code: int) -> char | none` — the codepoint→char reader:
 /// the one seam a ds-source `\u` decoder needs (codepoint arithmetic
-/// stays in ds, the scalar-width UTF-8 encoding stays native). A `code`
-/// outside the scalar range answers `none`, the payload word carrying
-/// the rejected code.
+/// stays in ds, the scalar range stays native). A `code` outside the
+/// scalar range answers `none`, the payload word carrying the rejected
+/// code; a hit answers the code point itself, the char word's own
+/// unboxed spelling.
 pub(super) fn char_of_fn(
-    heaps: &mut Heaps,
+    _heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let code = i64_arg(args, 0)?;
     Ok(match u32::try_from(code).ok().and_then(char::from_u32) {
-        Some(c) => {
-            let mut buf = [0u8; 4];
-            NativeResult::Tag {
-                tag: PLATFORM_IO_OK,
-                payload: heaps.new_str_part(c.encode_utf8(&mut buf)),
-            }
+        Some(_) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(code),
         },
         None => NativeResult::Tag {
             tag: PLATFORM_NONE,
@@ -266,26 +265,28 @@ pub(super) fn char_of_fn(
 
 /// `code_of(c: char) -> int` — `char_of`'s twin, the char→codepoint
 /// reader the @std json serializer's control-char escaping spells its
-/// `\u00XX` forms through. A malformed word (an empty or multi-char
-/// string riding the char Ref) traps: the checker types the operand,
-/// so only a hand-assembled frame reaches it.
+/// `\u00XX` forms through. The char word IS the code point, so the read
+/// hands the integer straight back.
 pub(super) fn code_of_fn(
-    heaps: &mut Heaps,
+    _heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let id = ref_arg(args, 0)?;
-    let text = heaps.str_at(id)?;
-    // a char word is a one-char string by construction (the literal
-    // lowering and `char_of` both build exactly that), so only a
-    // hand-assembled frame reaches the empty case — the multi-char case
-    // reads the first scalar rather than trap, matching how the string
-    // natives treat a char word leniently
-    let code = text
-        .chars()
-        .next()
-        .ok_or(Trap::UnknownObject { obj: id.id() })?;
-    Ok(NativeResult::Word(Value::I64(i64::from(u32::from(code)))))
+    Ok(NativeResult::Word(Value::I64(i64_arg(args, 0)?)))
+}
+
+/// The char one staged integer spells: the code point validated against
+/// the scalar range, a hand-assembled frame's out-of-range word trapping
+/// at its own slot.
+pub(super) fn char_word_at(code: i64, slot: u8) -> Result<char, Trap> {
+    u32::try_from(code)
+        .ok()
+        .and_then(char::from_u32)
+        .ok_or(Trap::SlotTypeMismatch {
+            slot,
+            expected: SlotType::I64,
+            actual: SlotType::I64,
+        })
 }
 
 /// `bytes_of(xs: list[byte]) -> bytes` — the byte string's construction
@@ -516,20 +517,60 @@ pub(super) fn utf8_decode_fn(
     }
 }
 
-/// How `split` cuts the subject. The surface separator is a `char` (one
-/// scalar value), and an empty one splits per character rather than trap.
+/// How `split` cuts the subject and `join` renders around it. The
+/// surface separator is a `char` (one scalar value), and an empty string
+/// one splits per character rather than trap.
 pub(super) enum SplitSep {
-    /// An empty separator: one part per character. The lowerer types the
-    /// separator `char` and every char word is a one-char string by
-    /// construction, so lowered code never stages the empty spelling: the
-    /// arm answers hand-assembled frames riding an empty string over the
-    /// operand (the lenient seam `code_of` takes).
+    /// An empty separator: one part per character. The empty spelling
+    /// rides the string member (a char word is never empty), so lowered
+    /// code stages it through the string member; the arm answers those
+    /// frames and hand-assembled ones alike.
     PerChar,
-    /// One ASCII character: the split scans the subject's bytes once.
+    /// One character: the split scans the subject's chars once.
     Byte(char),
     /// Any other separator text, owned because the store's routed string
     /// read borrows the whole store mutably.
     Text(String),
+}
+
+/// The separator union's staged span read back: the region's words by
+/// kind (the text Ref beside the char's code point integer), the staged
+/// tag word matched against the char member's tag id the call stages
+/// beside the span — tag ids being per-compile facts, the lowering hands
+/// the body its own. A hand-assembled frame staging no shape the span
+/// admits traps at its slot.
+pub(super) fn separator(heaps: &mut Heaps, args: &[Value]) -> Result<SplitSep, Trap> {
+    // exactly one region word holds each kind: the text member's Ref and
+    // the char member's I64, whichever region order the solved set
+    // sorted the members into
+    let (text_at, code) = match (args[2], args[3]) {
+        (Value::Ref(_), Value::I64(code)) => (2, code),
+        (Value::I64(code), Value::Ref(_)) => (3, code),
+        (a, b) => {
+            return Err(Trap::SlotTypeMismatch {
+                slot: 2,
+                expected: SlotType::Raw,
+                actual: if matches!(a, Value::Ref(_) | Value::I64(_)) {
+                    b.slot_type()
+                } else {
+                    a.slot_type()
+                },
+            })
+        },
+    };
+    let char_tag = i64_arg(args, 4)?;
+    let is_char = matches!(args[1], Value::Tag(tag) if i64::from(tag) == char_tag);
+    if is_char {
+        return Ok(SplitSep::Byte(char_word_at(code, 2)?));
+    }
+    let sep = heaps.str_at(ref_arg(args, text_at)?)?;
+    Ok(match sep {
+        "" => SplitSep::PerChar,
+        sep if sep.chars().count() == 1 => {
+            SplitSep::Byte(sep.chars().next().expect("one char is one char"))
+        },
+        sep => SplitSep::Text(sep.to_owned()),
+    })
 }
 
 pub(super) fn split_fn(
@@ -538,11 +579,7 @@ pub(super) fn split_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let text_id = ref_arg(args, 0)?;
-    let sep = match heaps.str_at(ref_arg(args, 2)?)? {
-        "" => SplitSep::PerChar,
-        sep if sep.len() == 1 => SplitSep::Byte(sep.chars().next().expect("one byte is one char")),
-        sep => SplitSep::Text(sep.to_owned()),
-    };
+    let sep = separator(heaps, args)?;
     // the part boundaries come off one borrow of the subject; the parts
     // materialize after it ends
     let mut bounds: Vec<(usize, usize)> = Vec::new();
@@ -559,7 +596,7 @@ pub(super) fn split_fn(
             SplitSep::Byte(sep) => {
                 for part in text.split(*sep) {
                     bounds.push((begin, begin + part.len()));
-                    begin += part.len() + 1;
+                    begin += part.len() + sep.len_utf8();
                 }
             },
             SplitSep::Text(sep) => {
@@ -608,10 +645,13 @@ pub(super) fn char_at_fn(
     }
     let i = usize::try_from(index).expect("in-range index fits usize");
     let (begin, stop) = heaps.char_byte_range(id, i, i + 1)?;
-    let part = heaps.alloc_substr(id, begin, stop)?;
+    let code = heaps.str_at(id)?[begin..stop]
+        .chars()
+        .next()
+        .map_or(0, |c| i64::from(u32::from(c)));
     Ok(NativeResult::Tag {
         tag: PLATFORM_IO_OK,
-        payload: heaps.word(part),
+        payload: Value::I64(code),
     })
 }
 
@@ -620,7 +660,13 @@ pub(super) fn join_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let sep = heaps.str_at(ref_arg(args, 2)?)?.to_owned();
+    // the separator union's staged span: the live region word carries
+    // the text Ref or the code point integer (the reader's own rules)
+    let sep = match separator(heaps, args)? {
+        SplitSep::PerChar => String::new(),
+        SplitSep::Byte(c) => c.to_string(),
+        SplitSep::Text(text) => text,
+    };
     let (elems, stride) = heaps.list_at(ref_arg(args, 0)?)?;
     // one string Ref per element is the surface's contract (list[string]);
     // a wider stride reaches here only hand-assembled

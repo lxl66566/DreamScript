@@ -15,10 +15,10 @@
 
 // The separator takes the char and the string beside it: `split`
 // slices per the separator's text (an empty string slicing per char)
-// and `join` renders the neighbors around it. Both members read the
-// separator's payload word, so a char (itself a one-char string word)
-// and a string stage identically inside the union's tag-plus-payload
-// span.
+// and `join` renders the neighbors around it. The union stages over the
+// ordinary tagged layout — the tag word beside the member's own payload
+// word, a char the integer slot's code point and a string the text
+// Ref — and both members read that payload back.
 pub extern fn join (parts: list[string], sep: char | string) -> string
 pub extern fn trim (s: string) -> string
 pub extern fn parse_int (s: string) -> int | parse_err
@@ -63,9 +63,9 @@ pub fn hex (n: int) -> string {
   var v = n
   while v > 0 {
     const nibble = v & 15
-    // the codepoint reader answers the one-char string word; the digit
-    // codes are scalars, so the fallback never fires
-    const digit = char_of(if nibble < 10 { 48 + nibble } else { 87 + nibble }).unwrap_or("")
+    // the codepoint reader answers the char word; the digit codes are
+    // scalars, so the fallback never fires
+    const digit = char_of(if nibble < 10 { 48 + nibble } else { 87 + nibble }).unwrap_or('\0')
     out = "${digit}${out}"
     v = v >> 4
   }

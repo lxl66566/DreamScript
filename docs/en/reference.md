@@ -586,14 +586,14 @@ pub extern fn char_hash(c: char) -> int
 #### `char_of`
 
 The codepoint pair, the @std json face's one native seam beside the
-width bridges below: scalar-width UTF-8 encoding is not expressible
-in ds source, so the escape decoder builds its one-scalar strings
-through `char_of` and the serializer's control-char escaping reads a
-codepoint through `code_of`. `char_of` answers none outside the scalar range;
-`code_of` reads the char's scalar.
+width bridges below: the scalar range and the code point's integer
+spelling are not expressible in ds source, so the escape decoder
+builds its chars through `char_of` and the serializer's control-char
+escaping reads a codepoint through `code_of`. `char_of` answers none
+outside the scalar range; `code_of` reads the char's scalar.
 
 ```ds
-pub extern fn char_of(code: int) -> string | none
+pub extern fn char_of(code: int) -> char | none
 ```
 
 #### `close_conn`
@@ -1851,10 +1851,10 @@ pub fn interleave[t](thunks: list[fn() -> t]) -> list[t]
 
 The separator takes the char and the string beside it: `split`
 slices per the separator's text (an empty string slicing per char)
-and `join` renders the neighbors around it. Both members read the
-separator's payload word, so a char (itself a one-char string word)
-and a string stage identically inside the union's tag-plus-payload
-span.
+and `join` renders the neighbors around it. The union stages over the
+ordinary tagged layout — the tag word beside the member's own payload
+word, a char the integer slot's code point and a string the text
+Ref — and both members read that payload back.
 
 ```ds
 pub extern fn join(parts: list[string], sep: char | string) -> string

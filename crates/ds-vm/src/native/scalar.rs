@@ -42,15 +42,14 @@ pub(super) fn str_compare_fn(
 }
 
 pub(super) fn char_compare_fn(
-    heaps: &mut Heaps,
+    _heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // both operands borrow shared, so neither side copies out
-    let a = heaps.str_ref(ref_arg(args, 0)?)?;
-    let b = heaps.str_ref(ref_arg(args, 1)?)?;
+    // the scalar order IS the code point order, so the two integer
+    // words compare directly
     Ok(NativeResult::Word(Value::I64(
-        match a.chars().cmp(b.chars()) {
+        match i64_arg(args, 0)?.cmp(&i64_arg(args, 1)?) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
@@ -128,13 +127,24 @@ pub(super) fn float_hash_fn(
 }
 
 pub(super) fn char_hash_fn(
-    heaps: &mut Heaps,
+    _heaps: &mut Heaps,
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // the routed read borrows the store, so the operand copies out
-    let text = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
-    Ok(NativeResult::Word(Value::I64(fnv1a(text.as_bytes()))))
+    let code = i64_arg(args, 0)?;
+    // the hash folds the code point's UTF-8 bytes, so a char hashes like
+    // its one-character string spells; a hand-assembled frame's
+    // out-of-range word (unreachable through the checker) hashes its own
+    // integer bytes instead of trapping, keeping the native total
+    Ok(NativeResult::Word(Value::I64(
+        match char::from_u32(u32::try_from(code).unwrap_or(u32::MAX)) {
+            Some(c) => {
+                let mut buf = [0u8; 4];
+                fnv1a(c.encode_utf8(&mut buf).as_bytes())
+            },
+            None => fnv1a(&code.to_le_bytes()),
+        },
+    )))
 }
 
 /// `byte_of(n: int) -> byte | none` — the checked byte construction: the
@@ -310,6 +320,30 @@ pub(super) fn str_int_fn(
             actual: args.first().map_or(SlotType::I64, Value::slot_type),
         }),
     }
+}
+
+/// `str_char(c: char) -> string` — the scalar-to-text conversion over
+/// the char width: the code point's UTF-8 encoding, the interpolation
+/// hole's and the `show` impl's seat for a char word.
+pub(super) fn str_char_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let code = i64_arg(args, 0)?;
+    let c = char::from_u32(u32::try_from(code).map_err(|_| Trap::SlotTypeMismatch {
+        slot: 0,
+        expected: SlotType::I64,
+        actual: SlotType::I64,
+    })?)
+    .ok_or(Trap::SlotTypeMismatch {
+        slot: 0,
+        expected: SlotType::I64,
+        actual: SlotType::I64,
+    })?;
+    Ok(NativeResult::Word(
+        heaps.new_str_part(c.encode_utf8(&mut [0u8; 4])),
+    ))
 }
 
 pub(super) fn str_float_fn(

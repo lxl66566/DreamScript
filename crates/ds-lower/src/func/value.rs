@@ -173,14 +173,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 })
             },
             Literal::Char(c) => {
-                // a char rides the string Ref as its one-char string (the
-                // runtime convention the list natives' separator pins)
-                let dst = self.temp_word(SlotType::Ref)?;
-                let kidx = self.pool_str(c.encode_utf8(&mut [0u8; 4]));
-                self.kstr(dst, kidx);
+                // a char stages as its code point: the atom's own scalar
+                // word rides the integer slot, the text spelling encoding
+                // UTF-8 at the conversion seam
+                let dst = self.temp_word(SlotType::I64)?;
+                let kidx = self.pool(Constant::I64(i64::from(u32::from(*c))));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
                 Ok(Place {
                     base: dst,
-                    shape: PlaceShape::Word(SlotType::Ref),
+                    shape: PlaceShape::Word(SlotType::I64),
                 })
             },
             Literal::Byte(b) => {
@@ -266,8 +270,21 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     shape: PlaceShape::Word(SlotType::I64),
                 });
             },
+            ConstFact::Char(c) => {
+                // a char stages as its code point, the literal lowering's
+                // own convention beside the byte's
+                let dst = self.temp_word(SlotType::I64)?;
+                let kidx = self.pool(Constant::I64(i64::from(u32::from(c))));
+                self.emit(Op::Kimm {
+                    dst: Slot::body(dst),
+                    kidx,
+                });
+                return Ok(Place {
+                    base: dst,
+                    shape: PlaceShape::Word(SlotType::I64),
+                });
+            },
             ConstFact::Str(text) => text,
-            ConstFact::Char(c) => c.encode_utf8(&mut [0u8; 4]).to_owned(),
             ConstFact::List(items) => return self.embed_list_fact(items, ty, span),
         };
         let dst = self.temp_word(SlotType::Ref)?;

@@ -51,6 +51,7 @@ fn pool() -> Vec<Const> {
         builtin(BUILTIN_LIST_GET),                // k4
         builtin(BUILTIN_LIST_CONCAT),             // k5
         Const::I64(BuiltinInstance::List as i64), // k6: the evidence word
+        Const::I64(1),                            // k7: the char tag constant
     ]
 }
 
@@ -86,31 +87,39 @@ fn fresh() -> FunctionDef {
     ])
 }
 
-/// `(s: string) -> list`: splits on the KSTR-staged space.
+/// `(s: string) -> list`: splits on the KSTR-staged space, the union's
+/// whole staged span beside the char tag constant.
 fn words() -> FunctionDef {
-    def("words", &[Ref, Ref, Tag, Ref], 1, 3, &[
-        Uop::Funcf { frame_slots: 4 },
+    def("words", &[Ref, Ref, Tag, Ref, I64, I64], 1, 5, &[
+        Uop::Funcf { frame_slots: 6 },
         Uop::Mov { dst: 1, src: 0 },
         Uop::TagNew { dst: 2, tag: 0 }, // the separator's union tag word
         Uop::Kstr { dst: 3, kidx: k(0) },
+        Uop::Kimm { dst: 4, kidx: k(6) }, // the char member's dead region word
+        Uop::Kimm { dst: 5, kidx: k(7) }, // the char tag constant
         Uop::Call {
             callee: k(1),
-            nargs: 3,
+            nargs: 5,
         },
         Uop::Ret { src: 1 },
     ])
 }
 
-/// `(s, sep: string) -> list`: `split` over an arbitrary separator.
+/// `(s, sep: string) -> list`: `split` over an arbitrary separator, the
+/// union's whole staged span (the tag word, the text Ref, the char
+/// member's dead region word) beside the char tag constant the body
+/// reads the span through.
 fn parts() -> FunctionDef {
-    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref], 2, 3, &[
-        Uop::Funcf { frame_slots: 6 },
+    def("parts", &[Ref, Ref, Ref, Ref, Tag, Ref, I64, I64], 2, 5, &[
+        Uop::Funcf { frame_slots: 8 },
         Uop::Mov { dst: 3, src: 0 },
         Uop::TagNew { dst: 4, tag: 0 }, // the separator's union tag word
         Uop::Mov { dst: 5, src: 1 },
+        Uop::Kimm { dst: 6, kidx: k(6) }, // the char member's dead region word
+        Uop::Kimm { dst: 7, kidx: k(7) }, // the char tag constant
         Uop::Call {
             callee: k(1),
-            nargs: 3,
+            nargs: 5,
         },
         Uop::Ret { src: 3 },
     ])

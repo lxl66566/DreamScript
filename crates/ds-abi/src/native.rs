@@ -210,8 +210,8 @@ pub const BUILTIN_TOTAL_COMPARE: u32 = 49;
 /// one i64 word of -1, 0, or 1.
 pub const BUILTIN_STR_COMPARE: u32 = 50;
 /// `char_compare(a: char, b: char) -> int` - the char sort key the `ord` derive orders char parts
-/// through: the Unicode scalar order over the two one-char strings, answered as one i64 word of -1,
-/// 0, or 1.
+/// through: the Unicode scalar order over the two code point words, answered as one i64 word of
+/// -1, 0, or 1.
 pub const BUILTIN_CHAR_COMPARE: u32 = 51;
 /// `byte_compare(a: byte, b: byte) -> int` - the byte sort key the `ord` derive orders byte parts
 /// through: the u8 order over the two byte words, answered as one i64 word of -1, 0, or 1.
@@ -226,8 +226,8 @@ pub const BUILTIN_STR_HASH: u32 = 53;
 /// payload to the one canonical NaN, so bit-structurally equal floats hash equal.
 pub const BUILTIN_FLOAT_HASH: u32 = 54;
 /// `char_hash(c: char) -> int` - the content hash the `hash` derive folds char parts through:
-/// FNV-1a over the one-char string's UTF-8 bytes (a char rides a string `Ref`, the char-compare
-/// convention), so a char and its own one-char string hash identically.
+/// FNV-1a over the code point's UTF-8 bytes, so a char hashes like its one-character string
+/// spells.
 pub const BUILTIN_CHAR_HASH: u32 = 55;
 /// `repl_park(words...)` — the control seam behind the REPL's resumed frame: no source spelling
 /// reaches it, and the only call sites are the ones that module splices into the entry function's
@@ -416,6 +416,10 @@ pub const BUILTIN_CHAN_RECV_DEADLINE: u32 = 109;
 /// handed out, variadic at the element span. The member tier's `list[t].contains` routes here; the
 /// probe compares against every element through the structural content walk (`list_eq`'s judge).
 pub const BUILTIN_LIST_CONTAINS: u32 = 110;
+/// `str_char(c: char) -> string`: the scalar-to-text conversion, the UTF-8 encoding of the code
+/// point (the interpolation hole and the `show` impl stage a char through it, the same seat
+/// `str_int` gives the integer width).
+pub const BUILTIN_STR_CHAR: u32 = 111;
 
 // The comptime reflection module's rows.
 
@@ -703,18 +707,28 @@ pub const NATIVES: &[Native] = &[
             family: FailureClasses::Parse,
         },
     },
+    // the separator union's staged span (the tag word the checker's tag tests read, then the
+    // region's one word per member kind: the text Ref beside the char's code point I64, the live
+    // member's word carrying the value) beside the char member's own tag id — the dispatch
+    // constant the body reads the span through, tag ids being per-compile facts no row can name
     Native {
         name: "split",
         routing: NativeRouting::Lowered,
         module: NativeModule::Builtin,
         index: BUILTIN_SPLIT,
-        params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
+        params: &[
+            SlotType::Ref,
+            SlotType::Tag,
+            SlotType::Raw,
+            SlotType::Raw,
+            SlotType::I64,
+        ],
         variadic: false,
         shape: NativeShape::Total(SlotType::Ref),
     },
-    // the ok/none span re-spans into the call's own `char | none` union (char rides the Ref, the
-    // hit payload the one-scalar word `char_of` mints); an out-of-range index answers the none
-    // member
+    // the ok/none span re-spans into the call's own `char | none` union (the hit payload the
+    // code point in the integer slot, exactly the word `char_of` mints); an out-of-range index
+    // answers the none member
     Native {
         name: "char_at",
         routing: NativeRouting::Lowered,
@@ -835,7 +849,13 @@ pub const NATIVES: &[Native] = &[
         routing: NativeRouting::Lowered,
         module: NativeModule::Builtin,
         index: BUILTIN_JOIN,
-        params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
+        params: &[
+            SlotType::Ref,
+            SlotType::Tag,
+            SlotType::Raw,
+            SlotType::Raw,
+            SlotType::I64,
+        ],
         variadic: false,
         shape: NativeShape::Total(SlotType::Ref),
     },
@@ -862,7 +882,7 @@ pub const NATIVES: &[Native] = &[
         routing: NativeRouting::Lowered,
         module: NativeModule::Builtin,
         index: BUILTIN_CHAR_COMPARE,
-        params: &[SlotType::Ref, SlotType::Ref],
+        params: &[SlotType::I64, SlotType::I64],
         variadic: false,
         shape: NativeShape::Total(SlotType::I64),
     },
@@ -898,7 +918,7 @@ pub const NATIVES: &[Native] = &[
         routing: NativeRouting::Lowered,
         module: NativeModule::Builtin,
         index: BUILTIN_CHAR_HASH,
-        params: &[SlotType::Ref],
+        params: &[SlotType::I64],
         variadic: false,
         shape: NativeShape::Total(SlotType::I64),
     },
@@ -923,7 +943,8 @@ pub const NATIVES: &[Native] = &[
         shape: NativeShape::Total(SlotType::Ref),
     },
     // the codepoint→char reader: the ok/none span the @std json parser's `\u` decoding extracts,
-    // the payload kind the call site's own `char | none` union holds (char rides the Ref)
+    // the payload kind the call site's own `char | none` union holds (the code point in the
+    // integer slot)
     Native {
         name: "char_of",
         routing: NativeRouting::Lowered,
@@ -938,7 +959,7 @@ pub const NATIVES: &[Native] = &[
         routing: NativeRouting::Lowered,
         module: NativeModule::Builtin,
         index: BUILTIN_CODE_OF,
-        params: &[SlotType::Ref],
+        params: &[SlotType::I64],
         variadic: false,
         shape: NativeShape::Total(SlotType::I64),
     },
@@ -1463,6 +1484,17 @@ pub const NATIVES: &[Native] = &[
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: true,
         shape: NativeShape::Total(SlotType::Bool),
+    },
+    // the scalar-to-text conversion over the char width: the code point's UTF-8 encoding, the
+    // interpolation hole's and the `show` impl's seat for a char word
+    Native {
+        name: "str_char",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_STR_CHAR,
+        params: &[SlotType::I64],
+        variadic: false,
+        shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
         name: "fields",

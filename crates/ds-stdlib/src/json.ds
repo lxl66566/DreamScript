@@ -113,14 +113,14 @@ fn json_unicode (text: string, at: int) -> str_step | parse_err {
       if low >= 0xdc00 && low <= 0xdfff {
         const code = 65536 + (high - 0xd800) * 1024 + low - 0xdc00
         const c = char_of(code).ok_or(parse_err(pos: at))?
-        str_step { value: c, next: at + 10 }
+        str_step { value: "$c", next: at + 10 }
       } else { parse_err(pos: at + 6) }
     } else { parse_err(pos: at + 4) }
   } else if high >= 0xdc00 && high <= 0xdfff {
     parse_err(pos: at)
   } else {
     const c = char_of(high).ok_or(parse_err(pos: at))?
-    str_step { value: c, next: at + 4 }
+    str_step { value: "$c", next: at + 4 }
   }
 }
 

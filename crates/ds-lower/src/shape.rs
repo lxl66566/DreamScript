@@ -35,8 +35,9 @@
 //!
 //! The ambient declares `int`/`float`/`string`/`bool`/`char` as tags;
 //! the lowerer maps them onto the slot types of the same names, with
-//! `char` riding the string Ref — one scalar per word, the pinned
-//! list-separator convention. `byte` rides the I64 slot as its 0-255
+//! `char` riding the I64 slot as its code point — one unboxed scalar per
+//! word, the text spelling (`show`, interpolation) encoding UTF-8 at the
+//! conversion seam. `byte` rides the I64 slot as its 0-255
 //! value: its own atom in the u8 width class, outside the int conversion
 //! family — the checker keeps byte and int disjoint, lowering shares the
 //! integer word. `none` is the universe's predeclared unit atom and needs
@@ -61,16 +62,13 @@ const NO_SPAN: ds_diag::Span = ds_diag::Span::new(ds_diag::FileId::new(0), 0, 0)
 const fn scalar_slot(word: ds_check::import::ScalarWord) -> SlotType {
     use ds_check::import::ScalarWord;
     match word {
-        // `byte` and `u32` ride the integer slot: the word carries
-        // the 0-255 or 32-bit value, the checker holding each width
-        // outside the int conversions
-        ScalarWord::Int | ScalarWord::Byte | ScalarWord::U32 => SlotType::I64,
+        // `byte`, `u32`, and `char` ride the integer slot: the word
+        // carries the 0-255 or 32-bit value or the code point, the
+        // checker holding each width outside the int conversions
+        ScalarWord::Int | ScalarWord::Byte | ScalarWord::U32 | ScalarWord::Char => SlotType::I64,
         ScalarWord::Float => SlotType::F64,
         ScalarWord::Bool => SlotType::Bool,
-        // `char` shares the string Ref: one scalar value per one-char
-        // string word, the runtime convention the list natives'
-        // separator pins
-        ScalarWord::Str | ScalarWord::Char => SlotType::Ref,
+        ScalarWord::Str => SlotType::Ref,
     }
 }
 

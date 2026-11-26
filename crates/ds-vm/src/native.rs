@@ -117,13 +117,13 @@ pub use ds_abi::native::{
     BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
     BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARSE_FLOAT, BUILTIN_PARSE_INT, BUILTIN_PARTITION,
     BUILTIN_POW, BUILTIN_REDUCE, BUILTIN_REPL_PARK, BUILTIN_REPLACE, BUILTIN_ROUND, BUILTIN_SIN,
-    BUILTIN_SORT, BUILTIN_SPLIT, BUILTIN_SQRT, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE,
-    BUILTIN_STR_FIXED, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
-    BUILTIN_TAIL, BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER,
-    BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_TRIM, BUILTIN_TRUNC, BUILTIN_U32_OF,
-    BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK,
-    PLATFORM_CANCELLED, PLATFORM_IO_ALREADY_EXISTS, PLATFORM_IO_NOT_FOUND, PLATFORM_IO_OK,
-    PLATFORM_IO_OTHER, PLATFORM_IO_PERMISSION_DENIED, PLATFORM_IO_TIMED_OUT,
+    BUILTIN_SORT, BUILTIN_SPLIT, BUILTIN_SQRT, BUILTIN_STR_BOOL, BUILTIN_STR_CHAR,
+    BUILTIN_STR_COMPARE, BUILTIN_STR_FIXED, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT,
+    BUILTIN_SUBSTRING, BUILTIN_TAIL, BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TO_LOWER,
+    BUILTIN_TO_UPPER, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_TRIM, BUILTIN_TRUNC,
+    BUILTIN_U32_OF, BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE, NURSERY_BOUNDARY_ERR,
+    NURSERY_BOUNDARY_OK, PLATFORM_CANCELLED, PLATFORM_IO_ALREADY_EXISTS, PLATFORM_IO_NOT_FOUND,
+    PLATFORM_IO_OK, PLATFORM_IO_OTHER, PLATFORM_IO_PERMISSION_DENIED, PLATFORM_IO_TIMED_OUT,
     PLATFORM_IO_UNEXPECTED_EOF, PLATFORM_NET_ADDR_IN_USE, PLATFORM_NET_OTHER, PLATFORM_NET_REFUSED,
     PLATFORM_NET_RESET, PLATFORM_NET_TIMEOUT, PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR,
     STD_PLATFORM_NAME,
@@ -148,8 +148,8 @@ use scalar::{ScalarText, abs_fn};
 use scalar::{
     atan2_fn, byte_compare_fn, byte_of_fn, ceil_fn, char_compare_fn, char_hash_fn, cos_fn, exp_fn,
     float_hash_fn, floor_fn, int_of_byte_fn, int_of_u32_fn, log_fn, pow_fn, round_fn, sin_fn,
-    sqrt_fn, str_bool_fn, str_compare_fn, str_fixed_fn, str_float_fn, str_hash_fn, str_int_fn,
-    tan_fn, total_compare_fn, trunc_fn, u32_of_fn,
+    sqrt_fn, str_bool_fn, str_char_fn, str_compare_fn, str_fixed_fn, str_float_fn, str_hash_fn,
+    str_int_fn, tan_fn, total_compare_fn, trunc_fn, u32_of_fn,
 };
 use sink::trap_fn;
 use text::{
@@ -504,13 +504,13 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             Dispatch::Timer(timer) => slot.timer = Some(*timer),
         }
     }
-    debug_assert_eq!(fns.len(), BUILTIN_LIST_CONTAINS as usize + 1);
+    debug_assert_eq!(fns.len(), BUILTIN_STR_CHAR as usize + 1);
     fns
 }
 
 /// One body per builtin table index, in index order: a gap carries its refusal stub.
 #[rustfmt::skip]
-const BUILTIN_BODIES: [NativeFn; BUILTIN_LIST_CONTAINS as usize + 1] = [
+const BUILTIN_BODIES: [NativeFn; BUILTIN_STR_CHAR as usize + 1] = [
     builtin_reserved_0, builtin_reserved_1, str_int_fn, str_float_fn,
     str_bool_fn, builtin_reserved_5, builtin_reserved_6, builtin_reserved_7,
     builtin_reserved_8, builtin_reserved_9, builtin_reserved_10, substring_fn,
@@ -538,7 +538,7 @@ const BUILTIN_BODIES: [NativeFn; BUILTIN_LIST_CONTAINS as usize + 1] = [
     map_contains_fn, map_entries_fn, arena_new_fn, arena_insert_fn,
     arena_remove_fn, arena_at_fn, round_fn, trunc_fn,
     log_fn, exp_fn, tan_fn, chan_refuse_fn,
-    chan_refuse_fn, chan_refuse_fn, list_contains_fn,
+    chan_refuse_fn, chan_refuse_fn, list_contains_fn, str_char_fn,
 ];
 
 /// How the dispatcher intercepts a slot ahead of its body.
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn the_builtin_table_is_row_driven() {
         let fns = builtin_module();
-        assert_eq!(fns.len(), BUILTIN_LIST_CONTAINS as usize + 1);
+        assert_eq!(fns.len(), BUILTIN_STR_CHAR as usize + 1);
         for row in ds_abi::native::rows(NativeModule::Builtin) {
             let slot = &fns[row.index as usize];
             assert_eq!(slot.name, row.name, "{}'s slot", row.name);
@@ -1140,8 +1140,9 @@ mod tests {
         assert_eq!(hash(0.0), hash(-0.0), "the zero pair shares bits");
     }
 
-    /// `char_hash` and `str_hash` fold the same FNV-1a over the same
-    /// UTF-8 bytes, so a char and its one-char string answer identically.
+    /// `char_hash` folds the code point's UTF-8 bytes, so a char and its
+    /// one-char string answer identically; the char word itself is the
+    /// code point integer.
     #[test]
     fn char_hash_answers_str_hash_over_the_same_bytes() {
         let mut objects = Objects::new(FIBER_ROOT);
@@ -1149,16 +1150,17 @@ mod tests {
         let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
         let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
         let mut out = OutputSink::captured();
-        for text in ["a", "\u{6f22}"] {
-            let word = heaps.new_intern(text);
-            let Value::I64(as_char) = char_hash_fn(&mut heaps, &mut out, &[word])
+        for (text, code) in [("a", i64::from(u32::from('a'))), ("\u{6f22}", 0x6f22)] {
+            let char_word = Value::I64(code);
+            let Value::I64(as_char) = char_hash_fn(&mut heaps, &mut out, &[char_word])
                 .expect("char hashes")
                 .word()
                 .expect("a single word")
             else {
                 panic!("an int word")
             };
-            let Value::I64(as_str) = str_hash_fn(&mut heaps, &mut out, &[word])
+            let string_word = heaps.new_intern(text);
+            let Value::I64(as_str) = str_hash_fn(&mut heaps, &mut out, &[string_word])
                 .expect("string hashes")
                 .word()
                 .expect("a single word")
@@ -1225,8 +1227,10 @@ mod tests {
             let sep_id = heaps.current().intern(sep);
             let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
                 Value::Ref(RefId::new(FIBER_ROOT, text_id)),
-                Value::I64(0), // the separator's union tag word
+                Value::Tag(0), // the separator's union tag word
                 Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
+                Value::I64(0), // the char member's dead region word
+                Value::I64(9), // the staged char tag constant (the string member staged)
             ])
             .expect("split runs")
             .word()
@@ -1246,6 +1250,42 @@ mod tests {
         }
     }
 
+    /// The char separator's staged span: the tag word matches the staged
+    /// char tag constant, so the code point reads through the char
+    /// member's region word and the multi-byte scalar splits like the
+    /// spelled text would.
+    #[test]
+    fn a_char_separator_splits_through_its_region_word() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let mut fibers: Vec<Fiber> = Vec::new();
+        let mut claims: Vec<ClaimTable> = vec![ClaimTable::default()];
+        let mut heaps = Heaps::new(FIBER_ROOT, &mut objects, &mut fibers, &mut claims, true);
+        let mut out = OutputSink::captured();
+        let text_id = heaps.current().intern("a\u{2014}b\u{2014}");
+        let code = i64::from(u32::from('\u{2014}'));
+        let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
+            Value::Ref(RefId::new(FIBER_ROOT, text_id)),
+            Value::Tag(9), // the separator's union tag word: the char member staged
+            Value::Ref(RefId::new(FIBER_ROOT, 0)), // the string member's dead word
+            Value::I64(code),
+            Value::I64(9), // the staged char tag constant
+        ])
+        .expect("split runs")
+        .word()
+        .expect("a single word") else {
+            panic!("a list ref")
+        };
+        let words = heaps.list_at(list).expect("the list is live").0.to_vec();
+        let parts: Vec<String> = words
+            .iter()
+            .map(|elem| match elem {
+                Value::Ref(word) => heaps.str_at(*word).expect("a string part").to_owned(),
+                other => panic!("a string part, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(parts, ["a", "b", ""]);
+    }
+
     /// The empty separator's per-character split: the parts fall on char
     /// boundaries, so a multi-byte scalar stays whole. Lowered code never
     /// stages the empty spelling over the `char` separator (every char
@@ -1262,8 +1302,10 @@ mod tests {
         let sep_id = heaps.current().intern("");
         let Value::Ref(list) = split_fn(&mut heaps, &mut out, &[
             Value::Ref(RefId::new(FIBER_ROOT, text_id)),
-            Value::I64(0), // the separator's union tag word
+            Value::Tag(0), // the separator's union tag word
             Value::Ref(RefId::new(FIBER_ROOT, sep_id)),
+            Value::I64(0), // the char member's dead region word
+            Value::I64(9), // the staged char tag constant (the string member staged)
         ])
         .expect("split runs")
         .word()
@@ -1310,11 +1352,13 @@ mod tests {
                 panic!("a list ref")
             };
             let sep_word = heaps.new_str(sep.to_owned());
-            let Value::Ref(joined) = join_fn(
-                &mut heaps,
-                &mut out,
-                &[Value::Ref(list), Value::I64(0), sep_word], // the tag rides index 1
-            )
+            let Value::Ref(joined) = join_fn(&mut heaps, &mut out, &[
+                Value::Ref(list),
+                Value::Tag(0), // the tag rides index 1
+                sep_word,
+                Value::I64(0), // the char member's dead region word
+                Value::I64(9), // the staged char tag constant (the string member staged)
+            ])
             .expect("join runs")
             .word()
             .expect("a single word") else {

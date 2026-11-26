@@ -847,6 +847,45 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(matches!(&*self.shapes.shape(ty)?, Shape::Union(_)))
     }
 
+    /// The char member's tag id in the separator natives' union
+    /// parameter: the dispatch constant a join/split call stages beside
+    /// the union span, so the body reads the region's live payload word
+    /// through a fact the lowering holds and no static row can name.
+    /// Refuses typed when the call site's solved parameter record is
+    /// missing or the union spells no char member.
+    pub(super) fn separator_char_tag(
+        &mut self,
+        params: Option<&[Ty]>,
+        span: Span,
+    ) -> Result<u8, LowerError> {
+        let sep = params
+            .and_then(|types| types.get(1).copied())
+            .ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    "a separator call",
+                    "the call site carries no solved parameter record; report the construct",
+                )
+            })?;
+        let Shape::Union(u) = &*self.shapes.shape(sep)? else {
+            return Err(mismatch("a separator call's union parameter"));
+        };
+        for member in &u.members {
+            let named_char = self
+                .universe()
+                .atom_decl(member.atom)
+                .is_ok_and(|decl| decl.name == "char");
+            if named_char {
+                return Ok(member.tag);
+            }
+        }
+        Err(LowerError::unsupported(
+            span,
+            "a separator call",
+            "the separator union spells no char member; report the construct",
+        ))
+    }
+
     /// A capturing closure never enters a widened union region: the
     /// member's Fn slot and the closure word's Ref classification
     /// disagree, and no payload read-back contract covers that

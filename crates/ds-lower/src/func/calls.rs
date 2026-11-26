@@ -971,6 +971,27 @@ impl<'a> FnLower<'a, '_, '_> {
         // stage through the overlay as their own argument windows, so the
         // call's argument span stages after them, ahead of the CALLT
         let tail_transfer = tail && !in_place_tail;
+        // the separator natives' dispatch constant: the char member's own
+        // tag id rides beside the union span, so the body reads the
+        // staged region through it — tag ids are per-compile facts no
+        // static row can name, and the region's dead words hold their
+        // kind zeros (the empty-string Ref beside the zero code), which
+        // no word-kind test can see through
+        if let Callee::Builtin(native) = target
+            && matches!(native.name, "join" | "split")
+        {
+            let char_tag = self.separator_char_tag(param_types.as_deref(), callee_span)?;
+            let dst = self.temp_word(SlotType::I64)?;
+            let kidx = self.pool(Constant::I64(i64::from(char_tag)));
+            self.emit(Op::Kimm {
+                dst: Slot::body(dst),
+                kidx,
+            });
+            moves.push((staged.len(), dst));
+            staged.push(SlotType::I64);
+            counted.push(false);
+            word_arg.push(usize::MAX);
+        }
         self.guard_staged_count(staged.len())?;
         // the literal arguments' constant loads land on their overlay
         // words at the staging position, in staged order
