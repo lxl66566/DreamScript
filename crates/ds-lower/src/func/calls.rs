@@ -106,15 +106,26 @@ impl<'a> FnLower<'a, '_, '_> {
                 ));
             }
         }
+        // A value-space callee (`fs[0](x)`, a call result): its checked
+        // type is the function, so the computed-callee path reads it
+        // below; the type-application constructors keep their own route.
+        let callee_fn_typed = self
+            .val(callee.span())
+            .map(|val| fn_sig_of(self.universe(), val.ty).is_some())
+            .unwrap_or(false);
         // A generic-application constructor `list[t]()`: the
         // bracketed callee head resolved in the type namespace.
         if let Expr::Index { recv, .. } = &**callee {
-            return self.ctor_call(recv, args, *span);
+            if !callee_fn_typed {
+                return self.ctor_call(recv, args, *span);
+            }
         }
         // The map constructor `map[k, v]()`: the two-argument
         // application of the map struct.
         if let Expr::MapApply { .. } = &**callee {
-            return self.map_ctor_call(args);
+            if !callee_fn_typed {
+                return self.map_ctor_call(args);
+            }
         }
         // A bodiless ambient collection member (`xs.get(i)`, `xs.push(x)`,
         // `xs.concat(ys)`, `m.get(k)`, `m.set(k, v)`) routes to its native
@@ -325,11 +336,40 @@ impl<'a> FnLower<'a, '_, '_> {
             }
         } else {
             let Expr::Path { path, span, .. } = &**callee else {
-                return Err(LowerError::unsupported(
+                // A computed callee: the callee word binds through a
+                // temporary before the arguments stage (argument
+                // evaluation may itself call), the indirect call reading
+                // it like any binding's word.
+                let callee_val = self.value(callee)?;
+                let callee_ty = self.val(callee.span())?.ty;
+                let Some((params, ret)) = fn_sig_of(self.universe(), callee_ty) else {
+                    return Err(LowerError::unsupported(
+                        callee.span(),
+                        "a computed callee",
+                        "its checked type is not a function",
+                    ));
+                };
+                let params = params.to_vec();
+                let word = single(
+                    &self
+                        .word_addrs(&callee_val.place, callee_val.ty)
+                        .map_err(|err| err.respanned(callee.span()))?,
                     callee.span(),
-                    "a computed callee",
-                    "only name and dot callees are lowerable this round",
-                ));
+                )?;
+                let mut arg_exprs: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
+                if let Some(block) = trailing {
+                    arg_exprs.push(&**block);
+                }
+                return self.calls_word(
+                    ty,
+                    &params,
+                    ret,
+                    word,
+                    None,
+                    callee.span(),
+                    &arg_exprs,
+                    tail,
+                );
             };
             // `Trait::f(x)` qualification: the checker records the
             // solved instance at the call's own span like the dot form,
@@ -777,7 +817,7 @@ impl<'a> FnLower<'a, '_, '_> {
                         ty: channel_ty,
                     };
                 }
-                self.guard_list_element(&arg_val, arg.span(), what)?;
+                arg_val = self.stage_heap_element(arg_val, arg.span(), what)?;
                 // an arena element stages exactly one word: the slot array
                 // stores one element word per handle, so a wider element (a
                 // multi-word record or tuple, a union's region) refuses at the
@@ -812,8 +852,11 @@ impl<'a> FnLower<'a, '_, '_> {
             // parameter; its one Ref word marks the borrow-window index.
             // An interior-span generic's callable word rides at the end
             // of the staged span, so the static expected list cannot
-            // name its position there
-            if self.is_closure_word(&arg_val.place, arg_val.ty)? {
+            // name its position there. An element channel's position
+            // keeps its own discipline: the staged closure word is the
+            // payload the collection's count traffic covers
+            let element_position = matches!(element_slot, Some((slot, _)) if slot == index);
+            if self.is_closure_word(&arg_val.place, arg_val.ty)? && !element_position {
                 if interior_span {
                     Self::guard_interior_closure_slot(
                         expected_words.as_deref(),
@@ -1560,19 +1603,7 @@ impl<'a> FnLower<'a, '_, '_> {
     }
 
     /// CALLS (the callable-word call form): the callee is a local
-    /// binding whose single word names the function — a scalar Fn word,
-    /// or a Ref word naming a closure object (the read dispatches on the
-    /// word's kind; the emitted op is the same). Arguments stage on the
-    /// overlay exactly like a pool call, the callee frame overlays it,
-    /// and the result copies out of the overlay. A tail position runs
-    /// the maybe-Ref callee tracking: the callee
-    /// word is maybe-Ref by classification, and the provenance tables
-    /// (`scalar_fn_words` naming the function through `fn_words`) prove
-    /// some words count-free scalars naming exactly one planned function
-    /// — those tails transfer through CALLT with that function's own
-    /// pool FuncRef, and every unprovable word (a closure's Ref, a
-    /// callable-defaulted parameter, an unproven alias) keeps the
-    /// in-place CALLS plus return.
+    /// binding whose single word names the function.
     fn calls_value(
         &mut self,
         ty: Ty,
@@ -1589,6 +1620,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 "its checked type is not a function",
             ));
         };
+        let params = params.to_vec();
         // the callee use is a read of the binder: a closure word's death
         // test compares against this span
         self.rc.use_of(bind, callee_span);
@@ -1605,6 +1637,47 @@ impl<'a> FnLower<'a, '_, '_> {
         // header), or the payload word of a union span an extraction
         // handler's parameter aliases
         let word = single(&self.word_addrs(&place, callee_ty)?, callee_span)?;
+        self.calls_word(
+            ty,
+            &params,
+            ret,
+            word,
+            Some(bind),
+            callee_span,
+            arg_exprs,
+            tail,
+        )
+    }
+
+    /// The indirect call through one callee word — a scalar Fn word, or a
+    /// Ref word naming a closure object (the read dispatches on the
+    /// word's runtime kind; the emitted op is the same). Arguments stage
+    /// on the overlay exactly like a pool call, the callee frame overlays
+    /// it, and the result copies out of the overlay. A tail position runs
+    /// the maybe-Ref callee tracking: the callee word is maybe-Ref by
+    /// classification, and the provenance tables (`scalar_fn_words`
+    /// naming the function through `fn_words`) prove some words
+    /// count-free scalars naming exactly one planned function — those
+    /// tails transfer through CALLT with that function's own pool
+    /// FuncRef, and every unprovable word (a closure's Ref, a
+    /// callable-defaulted parameter, an unproven alias) keeps the
+    /// in-place CALLS plus return.
+    fn calls_word(
+        &mut self,
+        ty: Ty,
+        params: &[Ty],
+        ret: Ty,
+        word: WordAddr,
+        bind: Option<Span>,
+        callee_span: Span,
+        arg_exprs: &[&Expr],
+        tail: bool,
+    ) -> Result<Place, LowerError> {
+        if let Some(bind) = bind {
+            // the callee use is a read of the binder: a closure word's
+            // death test compares against this span
+            self.rc.use_of(bind, callee_span);
+        }
         let closure = word.slot_ty == SlotType::Ref;
         // the maybe-Ref callee tracking: a proven scalar word is
         // count-free by construction and names exactly one planned

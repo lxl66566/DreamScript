@@ -990,14 +990,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<SpanWords, LowerError> {
         let shape = self.shapes.shape(element)?;
         match &*shape {
+            // a fn element's span is the one Ref word the heap position
+            // carries — the fetch hands the closure word out under its own
+            // count and the binder's death releases it
+            Shape::Word(SlotType::Fn) => Ok(vec![SlotType::Ref].into()),
             Shape::Word(
                 SlotType::I64
                 | SlotType::F64
                 | SlotType::Bool
                 | SlotType::Tag
                 | SlotType::Ref
-                | SlotType::Raw
-                | SlotType::Fn,
+                | SlotType::Raw,
             ) => self.shapes.words(element),
             Shape::Struct(_) => {
                 // the list's edge retention owns counts, never claims

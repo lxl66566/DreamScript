@@ -5,17 +5,17 @@
 //! argument — a non-capturing block mints the scalar FuncRef word, a
 //! capturing block the closure Ref word, over every callee class that
 //! takes one (a named fn, the UFCS dot spelling, and an indirect call
-//! through a fn-typed binding). The pinned callable-word refusals keep
-//! the written spelling's honesty: a block capturing a closure word or
-//! a callable-defaulted binding refuses identically, and the lowered
-//! module is byte-identical to the parenthesized spelling. The hosted
+//! through a fn-typed binding). A block capturing a closure word or a
+//! callable-defaulted binding runs over the same capture staging as the
+//! written spelling, and the lowered module is byte-identical to the
+//! parenthesized spelling. The hosted
 //! combinators refuse the zero-parameter block at the check — a lambda
 //! literal's own arity must match the expected fn type's exactly — so
 //! no lowering surface exists for that shape at all.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
-use ds_lower::{LowerError, lower};
+use ds_lower::lower;
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
 use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader, native};
@@ -67,42 +67,6 @@ fn acceptance(name: &str, source: &str, result: Value, stdout: &[u8]) {
         vm.objects().is_empty(),
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
-    );
-}
-
-/// One refusal probe: the source must check clean, and lowering must
-/// report the named seam.
-fn refused(source: &str, needle: &str) {
-    let mut files = Files::new();
-    let id = files.add_source("refusal_probe.ds", source);
-    let asts = [parse(&files, id).expect("the probe parses")];
-    let analyzed = analyze(&files, &asts);
-    assert!(
-        analyzed.checked.diags.is_empty(),
-        "the probe checks clean: {}",
-        analyzed
-            .checked
-            .diags
-            .iter()
-            .map(|diag| human(diag, &files))
-            .collect::<String>()
-    );
-    let Err(error) = lower(
-        "refusal_probe",
-        Hash128::compute(source.as_bytes()),
-        &asts,
-        &analyzed,
-    ) else {
-        panic!("the probe refuses at lowering")
-    };
-    let LowerError::Unsupported { span, what, reason } = &error else {
-        panic!("the refusal is Unsupported, got {error:?}")
-    };
-    assert!(span.start > 0, "the refusal reports at a source span");
-    let rendered = format!("{what}: {reason}");
-    assert!(
-        rendered.contains(needle),
-        "the refusal names the seam, got {rendered:?}"
     );
 }
 
@@ -289,13 +253,12 @@ fn main() -> int {{
     );
 }
 
-/// A trailing block whose body captures a closure word keeps the written
-/// spelling's refusal: the capture block would carry a Ref word behind
-/// a Fn-classified capture slot.
+/// A trailing block whose body captures a closure word runs over the
+/// same capture staging as the written spelling, in both spellings.
 #[test]
-fn a_trailing_block_capturing_a_closure_refuses() {
-    let needle = "a lambda capturing a closure";
-    refused(
+fn a_trailing_block_capturing_a_closure_runs() {
+    acceptance(
+        "block_captures_closure",
         &format!(
             "{PRELUDE}
 fn answer(f: fn() -> int) -> int {{ f() }}
@@ -303,55 +266,37 @@ fn answer(f: fn() -> int) -> int {{ f() }}
 fn main() -> int {{
   const k = 1
   const g = (x: int) => x + k
-  answer {{ g(1) }}
+  println(\"block ${{answer {{ g(1) }}}}\")
+  println(\"written ${{answer(() => g(1))}}\")
+  0
 }}
 "
         ),
-        needle,
-    );
-    refused(
-        &format!(
-            "{PRELUDE}
-fn answer(f: fn() -> int) -> int {{ f() }}
-
-fn main() -> int {{
-  const k = 1
-  const g = (x: int) => x + k
-  answer(() => g(1))
-}}
-"
-        ),
-        needle,
+        Value::I64(0),
+        b"block 2\nwritten 2\n",
     );
 }
 
 /// A trailing block whose body captures a callable-defaulted parameter
-/// keeps the written spelling's refusal: the capture cannot prove a
-/// non-capturing scalar.
+/// runs: the capture carries the parameter's maybe-Ref word, the
+/// construction acquiring its count by the runtime kind.
 #[test]
-fn a_trailing_block_capturing_a_callable_parameter_refuses() {
-    let needle = "a lambda capturing a callable binding";
-    refused(
+fn a_trailing_block_capturing_a_callable_parameter_runs() {
+    acceptance(
+        "block_captures_parameter",
         &format!(
             "{PRELUDE}
 fn answer(f: fn() -> int) -> int {{ f() }}
 fn outer(g: fn() -> int) -> int {{ answer {{ g() }} }}
 
-fn main() -> int {{ 0 }}
+fn main() -> int {{
+  println(\"${{outer(() => 41)}}\")
+  0
+}}
 "
         ),
-        needle,
-    );
-    refused(
-        &format!(
-            "{PRELUDE}
-fn answer(f: fn() -> int) -> int {{ f() }}
-fn outer(g: fn() -> int) -> int {{ answer(() => g()) }}
-
-fn main() -> int {{ 0 }}
-"
-        ),
-        needle,
+        Value::I64(0),
+        b"41\n",
     );
 }
 

@@ -116,6 +116,7 @@ pub(super) const GENERIC_BODIES: &[(&str, GenericFn)] = &[
     ("partition", partition_generic_fn),
     ("fork_reduce", par_reduce_generic_fn),
     ("sort", sort_generic_fn),
+    ("sort_by", sort_generic_fn),
 ];
 
 /// The generic builtin vocabulary, keyed by the (module, native index) `FuncRef` address: the abi

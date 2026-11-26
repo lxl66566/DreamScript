@@ -1149,16 +1149,36 @@ impl Vm {
                         };
                         let overlay_base = slots.len() - f.layout.arg_area_len();
                         let mut captures = Vec::with_capacity(usize::from(n));
+                        // the wrapped fn captures: their wrapper's birth
+                        // count IS the outer object's edge, so the general
+                        // per-Ref acquire below skips them
+                        let mut wrapped: Vec<RefId> = Vec::new();
                         for index in 0..usize::from(n) {
                             let slot = u8::try_from(overlay_base + index)
                                 .expect("overlay words fit u8; frames cap at 256 slots");
-                            captures.push(
-                                read_value(&self.stack, fp, slot, slots, body_len)
-                                    .map_err(|e| (e, pc))?,
-                            );
+                            let word = read_value(&self.stack, fp, slot, slots, body_len)
+                                .map_err(|e| (e, pc))?;
+                            // a fn-typed capture's block word is the
+                            // closure Ref: a scalar FuncRef capture wraps
+                            // into its function's static closure object
+                            // here, so the copy-in and the reading frame's
+                            // own release balance one count per Ref capture
+                            let word = match word {
+                                Value::Fn(fref) => {
+                                    let wrapper = self.objects.alloc_closure(fref, Vec::new());
+                                    let word = RefId::new(self.current, wrapper);
+                                    wrapped.push(word);
+                                    Value::Ref(word)
+                                },
+                                word => word,
+                            };
+                            captures.push(word);
                         }
                         for word in &captures {
                             if let Value::Ref(obj) = *word {
+                                if wrapped.contains(&obj) {
+                                    continue;
+                                }
                                 // the object adopts the block: one edge
                                 // count per Ref capture, no frame claim
                                 self.inc_edge(obj).map_err(|e| (e, pc))?;
@@ -1888,7 +1908,12 @@ impl Vm {
                         // frame is pushed; each write re-checks the word
                         // against the slot's declared type.
                         let capture_body_len = target.layout.body_len();
-                        if let Some(block) = captures {
+                        // an empty capture block dispatches plain: the
+                        // header's function reads no captures and keeps no
+                        // mutation window, so no copy-in and no closure word
+                        // ride the call — a wrapped scalar fn's static
+                        // closure object calls exactly like its own FuncRef
+                        if let Some(block) = captures.filter(|block| !block.is_empty()) {
                             // the range check counts the block plus the
                             // reserved closure word right past it (the
                             // mutation window's address of the object)
@@ -1919,7 +1944,7 @@ impl Vm {
                             st.call(version, func_id, &facts, &f.layout, fp, pc.0 + 1)
                                 .map_err(|e| (e, pc))?
                         };
-                        if let Some(block) = captures {
+                        if let Some(block) = captures.filter(|block| !block.is_empty()) {
                             // the callee's frame base: fp + 1 + the caller's
                             // body span (the pinned physical mapping)
                             let callee_fp = fp + 1 + f.layout.body_len();

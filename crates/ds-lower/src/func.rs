@@ -564,9 +564,14 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// non-capturing lambda value): the callable-provenance oracle. A
     /// fn-typed place outside this set may hold a closure's Ref word at
     /// runtime (a callable-defaulted parameter or an alias of one), so
-    /// the positions that must prove scalar — collection elements, struct
-    /// fields, lambda captures — refuse those.
+    /// the re-storable frame positions and the fn-typed answers keep
+    /// proving scalar before they trust a word.
     scalar_fn_words: HashSet<u8>,
+    /// A fn index to the wrapped closure word standing for it: a
+    /// non-capturing fn entering a Ref-classified heap position wraps
+    /// into its static closure object once per live placement region,
+    /// every entry in the region re-reading the same word.
+    wrap_memo: HashMap<u32, u8>,
     /// Name scopes, innermost last: name -> binder span.
     scopes: Vec<HashMap<String, Span>>,
     /// Overlay word usage: index -> word types seen there.
@@ -797,6 +802,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             binders: HashMap::new(),
             fn_words: HashMap::new(),
             scalar_fn_words: HashSet::new(),
+            wrap_memo: HashMap::new(),
             scopes: vec![HashMap::new()],
             overlay: Vec::new(),
             overlay_len: 0,

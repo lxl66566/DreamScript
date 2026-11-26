@@ -79,9 +79,12 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Ok((func_word, SlotType::Fn));
         }
         // stage the capture block on the overlay, in the order the
-        // synthesized body binds it; a capture whose place is a closure
-        // word refuses (the callable-classification seam: the body's
-        // capture slot would classify Fn and the Ref word cannot sit there)
+        // synthesized body binds it; a fn-typed capture stages whatever
+        // word its binding holds — the scalar FuncRef, a closure object's
+        // Ref, or a callable-defaulted parameter's maybe-Ref word — the
+        // construction acquiring one count per runtime Ref inside the op
+        // and the object's death releasing it, the body reading the
+        // capture as a borrow either way
         let mut staged: Vec<SlotType> = Vec::new();
         let mut moves: Vec<u8> = Vec::new();
         for &(bind, ty) in captures {
@@ -93,14 +96,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 None if self.analyzed.checked.self_fns.contains(&bind) => self.self_fn_word()?,
                 None => return Err(self.missing_binder(span)),
             };
-            if self.is_closure_word(&place, ty)? {
-                return Err(LowerError::unsupported(
-                    span,
-                    "a lambda capturing a closure",
-                    "the capture block would carry a Ref word behind a Fn-classified capture \
-                     slot; pass the callable as a parameter instead",
-                ));
-            }
             // a captured deinit value's hook has no death site: the
             // closure object outlives the frame, but its death frees the
             // captured counts through the object cascade — the VM side
@@ -112,25 +107,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                     "the closure object's death cannot dispatch the hook yet; pass the value as a \
                      parameter instead",
                 ));
-            }
-            // a fn-typed capture must prove scalar provenance: a
-            // callable-defaulted parameter (or an alias of one) may hold a
-            // closure's Ref word at runtime, and the copy-in would write it
-            // into the Fn-classified capture slot
-            if matches!(&*self.shapes.shape(ty)?, Shape::Word(SlotType::Fn)) {
-                let addrs = self
-                    .word_addrs(&place, ty)
-                    .map_err(|err| err.respanned(span))?;
-                let proven = addrs.len() == 1 && self.scalar_fn_words.contains(&addrs[0].slot);
-                if !proven {
-                    return Err(LowerError::unsupported(
-                        span,
-                        "a lambda capturing a callable binding",
-                        "the capture cannot prove a non-capturing scalar; a callable-defaulted \
-                         parameter may hold a closure at runtime — pass the callable as a \
-                         parameter instead",
-                    ));
-                }
             }
             for addr in self
                 .word_addrs(&place, ty)
@@ -607,6 +583,60 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             SlotType::I64,
         ])?;
         Ok(self.unit_value(*span)?.place)
+    }
+
+    /// A fn word entering a Ref-classified heap position (a struct
+    /// field, a tuple element, a collection element, a channel payload):
+    /// a proven scalar FuncRef word wraps into its function's static
+    /// closure object — one allocation per live placement region through
+    /// the memo — and an unproven or Ref-classified word stages as
+    /// itself, the runtime kind every count op checks. The position's
+    /// stored word is the closure Ref the span's count traffic covers.
+    pub(super) fn stage_heap_fn(
+        &mut self,
+        val: &TypedPlace,
+        span: Span,
+    ) -> Result<WordAddr, LowerError> {
+        let addrs = self
+            .word_addrs(&val.place, val.ty)
+            .map_err(|err| err.respanned(span))?;
+        let addr = single(&addrs, span)?;
+        if addr.slot_ty != SlotType::Fn {
+            return Ok(addr);
+        }
+        let wrapped = match self.fn_words.get(&addr.slot).copied() {
+            Some(func) => match self.wrap_memo.get(&func) {
+                Some(&word) if self.rc.owns(word) => word,
+                _ => {
+                    let dst = self.temp_word(SlotType::Ref)?;
+                    self.emit(Op::ClosureNew {
+                        dst,
+                        func: addr.slot,
+                        n: 0,
+                    });
+                    self.rc.produced(dst);
+                    self.wrap_memo.insert(func, dst);
+                    dst
+                },
+            },
+            // an unproven fn word (a callable-defaulted parameter's) may
+            // hold either kind at runtime: the position's Ref slot takes
+            // the closure Ref only, so the word refuses here
+            None => {
+                return Err(LowerError::unsupported(
+                    span,
+                    "a callable word's runtime kind is the caller's fact",
+                    "the heap position's word is the closure Ref the count traffic covers; a \
+                     callable-defaulted parameter's word may hold a scalar at runtime — pass a \
+                     named fn, a lambda, or a value the site constructed",
+                ));
+            },
+        };
+        Ok(WordAddr {
+            name: None,
+            slot: wrapped,
+            slot_ty: SlotType::Ref,
+        })
     }
 
     /// Whether a place holds a capturing lambda's closure word: a

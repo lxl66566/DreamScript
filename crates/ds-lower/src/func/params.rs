@@ -179,26 +179,41 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     ) -> Result<(), LowerError> {
         let mut offset = 0;
         for &(bind, ty) in captures {
-            let words = self.shapes.words(ty).map_err(|err| err.respanned(bind))?;
+            // a fn-typed capture's slot is the one Ref word the capture
+            // block carries: the copy-in acquires its count for the frame
+            // and the frame's own exit releases it, the body reading the
+            // closure word like any value-site word
+            let callable = matches!(&*self.shapes.shape(ty)?, Shape::Word(SlotType::Fn));
+            let words: Vec<SlotType> =
+                if callable { vec![SlotType::Ref] } else { self.shapes.words(ty)?.to_vec() };
             let base = self.alloc(&words)?;
-            let shape = match &*self.shapes.shape(ty)? {
-                Shape::Word(slot) => PlaceShape::Word(*slot),
-                _ => PlaceShape::Span(ty),
+            let shape = if callable {
+                PlaceShape::Word(SlotType::Ref)
+            } else {
+                match &*self.shapes.shape(ty)? {
+                    Shape::Word(slot) => PlaceShape::Word(*slot),
+                    _ => PlaceShape::Span(ty),
+                }
             };
             self.binders.insert(bind, Place { base, shape });
-            for word in self.count_words(base, ty)? {
-                self.rc.produced(word);
+            let counted: Vec<u8> = words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| **word == SlotType::Ref || **word == SlotType::Raw)
+                .map(|(index, _)| base + u8::try_from(index).expect("span width fits u8"))
+                .collect();
+            for word in &counted {
+                self.rc.produced(*word);
             }
             // the mutation window needs no borrowed registration: a
             // deinit-carrying capture refused at the construction, so no
             // claim can anchor here; the plain `bound` keeps the
             // checker's last-use rows in force for the frame copy
             if mutation {
-                let words = self.count_words(base, ty)?;
-                self.rc.bound(bind, &words);
+                self.rc.bound(bind, &counted);
                 self.capture_index.insert(bind, offset);
             } else {
-                self.rc_bind_borrowed(bind, base, ty)?;
+                self.rc.bound_borrowed(bind, base, &counted);
             }
             offset += words.len();
         }

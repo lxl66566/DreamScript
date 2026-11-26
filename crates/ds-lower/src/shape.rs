@@ -1017,6 +1017,10 @@ impl<'a> Shapes<'a> {
                     // nested-tuple elements carry their own spans, and the
                     // tuple vocabulary keeps one word per element until
                     // those spans stage per element.
+                    let callable = matches!(
+                        self.universe.atom_decl(*element).map(|decl| &decl.kind),
+                        Ok(ds_check::AtomKind::FnSig(..))
+                    );
                     let shape = self.atom_shape(*element)?;
                     let Shape::Word(slot) = &*shape else {
                         return Err(unsupported(
@@ -1025,9 +1029,14 @@ impl<'a> Shapes<'a> {
                              its whole span staged per element, which tuple spans do not carry yet",
                         ));
                     };
+                    // a fn-typed element holds the closure Ref word: the
+                    // heap position the span's count traffic covers, a
+                    // non-capturing fn wrapping into its static closure
+                    // object at the literal's store
+                    let slot = if callable { SlotType::Ref } else { *slot };
                     fields.push(MemberField {
                         name: None,
-                        slots: vec![*slot],
+                        slots: vec![slot],
                         word: word_of(index)?,
                     });
                 }
@@ -1293,6 +1302,11 @@ impl<'a> Shapes<'a> {
             ds_check::AtomKind::Apply(ctor, _) if self.heap_ref(*ctor) => {
                 Ok(Some(vec![SlotType::Ref]))
             },
+            // a fn-typed field holds the closure Ref word: the heap
+            // position's word, whose count the span's traffic covers — a
+            // non-capturing fn entering wraps into its static closure
+            // object at the construction
+            ds_check::AtomKind::FnSig(..) => Ok(Some(vec![SlotType::Ref])),
             // a user-declared generic struct's application: its solved
             // fields' whole flattened span claims the field, the same
             // walk a nominal struct's field takes; a deinit-carrying

@@ -175,18 +175,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 )?;
                 continue;
             }
-            // a fn-typed field must prove scalar provenance: a closure word
-            // (or a callable-defaulted binding that may hold one at
-            // runtime) would write a Ref word into the Fn-classified field
-            // slot and trap at the store
-            if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addrs[0].slot) {
-                return Err(LowerError::unsupported(
-                    name.span,
-                    "a fn-typed struct field",
-                    "the value cannot prove a non-capturing scalar word; a closure or an unproven \
-                     callable binding cannot inhabit a struct field",
-                ));
-            }
+            // a fn-typed field holds the closure Ref word: a proven
+            // scalar fn value wraps into its static closure object, an
+            // unproven or Ref-classified word stages as itself — the
+            // runtime kind the field copy's own registration checks
+            let addrs = if field.slot() == SlotType::Ref && addrs[0].slot_ty == SlotType::Fn {
+                vec![self.stage_heap_fn(&v, name.span)?]
+            } else {
+                addrs
+            };
             self.store_field_span(target.base, field, &addrs);
         }
         // the constructed value's deinit claim anchors its base word
@@ -297,19 +294,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             let field = &s.fields[index];
             let v = self.value(item)?;
             let addr = single(&self.word_addrs(&v.place, v.ty)?, item.span())?;
-            // a callable element proves a non-capturing scalar word: the
-            // span's count traffic copies only Ref-classified fields, so a
-            // closure's count rides untracked and the read-back hands a Ref
-            // word to a Fn-classified element slot
-            if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
-                return Err(LowerError::unsupported(
-                    item.span(),
-                    "a callable tuple element",
-                    "the element must prove a non-capturing scalar word (a named fn, a \
-                     non-capturing lambda); a closure or an unproven callable binding cannot \
-                     inhabit a tuple element",
-                ));
-            }
+            // a fn-typed element holds the closure Ref word: a proven
+            // scalar fn value wraps into its static closure object, an
+            // unproven or Ref-classified word stages as itself — the
+            // runtime kind the element copy's own registration checks
+            let addr = if field.slot() == SlotType::Ref && addr.slot_ty == SlotType::Fn {
+                self.stage_heap_fn(&v, item.span())?
+            } else {
+                addr
+            };
             self.emit(Op::Mov {
                 dst: Slot::body(target.base + field.word),
                 src: Slot::body(addr.slot),

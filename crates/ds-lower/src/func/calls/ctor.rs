@@ -55,14 +55,15 @@ impl<'a> FnLower<'a, '_, '_> {
         }
     }
 
-    pub(in crate::func) fn guard_list_element(
+    pub(in crate::func) fn stage_heap_element(
         &mut self,
-        val: &TypedPlace,
+        val: TypedPlace,
         span: Span,
         what: &'static str,
-    ) -> Result<(), LowerError> {
+    ) -> Result<TypedPlace, LowerError> {
         match &*self.shapes.shape(val.ty)? {
             Shape::Struct(_) => {
+                // the list's edge retention owns counts, never claims
                 if self.deinit_hook(val.ty, span)?.is_some() {
                     return Err(LowerError::unsupported(
                         span,
@@ -71,62 +72,23 @@ impl<'a> FnLower<'a, '_, '_> {
                          retention; per-span deinit claims own the seam",
                     ));
                 }
-                Ok(())
+                Ok(val)
             },
-            Shape::Tuple(s) => {
-                // the tuple's one-word elements ride the channel like a
-                // struct's flattened span, gathered positionally; a
-                // callable element word keeps the scalar-provenance rule
-                // (a closure word would read back as a Ref behind a
-                // Fn-classified payload slot)
-                let addrs = self.word_addrs(&val.place, val.ty)?;
-                for (field, addr) in s.fields.iter().zip(addrs.iter()) {
-                    if field.slot() == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
-                        return Err(LowerError::unsupported(
-                            span,
-                            what,
-                            "a callable element must prove a non-capturing scalar word; a closure \
-                             or an unproven callable parameter cannot inhabit a collection element",
-                        ));
-                    }
-                }
-                Ok(())
+            // a fn-typed element stages through the heap classification:
+            // the word is the closure Ref the channel's count traffic
+            // covers, a proven scalar fn wrapping into its static closure
+            // object and an unproven word staging as itself
+            Shape::Word(SlotType::Fn) => {
+                let addr = self.stage_heap_fn(&val, span)?;
+                Ok(TypedPlace {
+                    place: Place {
+                        base: addr.slot,
+                        shape: PlaceShape::Word(addr.slot_ty),
+                    },
+                    ty: val.ty,
+                })
             },
-            Shape::Union(u) => {
-                // a callable word inside the region keeps the
-                // scalar-provenance rule (the tuple arm's own contract,
-                // one address per span word)
-                if u.words.contains(&SlotType::Fn) {
-                    let addrs = self.word_addrs(&val.place, val.ty)?;
-                    for (slot, addr) in u.words.iter().zip(addrs.iter()) {
-                        if *slot == SlotType::Fn && !self.scalar_fn_words.contains(&addr.slot) {
-                            return Err(LowerError::unsupported(
-                                span,
-                                what,
-                                "a callable element must prove a non-capturing scalar word; a \
-                                 closure or an unproven callable parameter cannot inhabit a \
-                                 collection element",
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            },
-            Shape::Word(_) => {
-                if matches!(&*self.shapes.shape(val.ty)?, Shape::Word(SlotType::Fn)) {
-                    let addrs = self.word_addrs(&val.place, val.ty)?;
-                    let proven = addrs.len() == 1 && self.scalar_fn_words.contains(&addrs[0].slot);
-                    if !proven {
-                        return Err(LowerError::unsupported(
-                            span,
-                            what,
-                            "a callable element must prove a non-capturing scalar word; a closure \
-                             or an unproven callable parameter cannot inhabit a collection element",
-                        ));
-                    }
-                }
-                Ok(())
-            },
+            _ => Ok(val),
         }
     }
 
@@ -364,12 +326,13 @@ impl<'a> FnLower<'a, '_, '_> {
         item_val: &TypedPlace,
         span: Span,
     ) -> Result<(), LowerError> {
-        self.guard_list_element(item_val, span, "a list literal element")?;
+        let staged_val =
+            self.stage_heap_element(item_val.clone(), span, "a list literal element")?;
         let push = crate::native::lookup("list_push")
             .expect("the list surface is covered by the native table");
         let mut staged = vec![SlotType::Ref];
         let mut moves = vec![(0usize, list)];
-        for addr in self.word_addrs(&item_val.place, item_val.ty)? {
+        for addr in self.word_addrs(&staged_val.place, staged_val.ty)? {
             moves.push((staged.len(), addr.slot));
             staged.push(addr.slot_ty);
         }
@@ -904,6 +867,14 @@ impl<'a> FnLower<'a, '_, '_> {
                 )?;
                 continue;
             }
+            // a fn-typed payload field holds the closure Ref word: the
+            // struct literal's own store rule (the proven scalar wrapping,
+            // the unproven word refusing)
+            let addrs = if field.slot() == SlotType::Ref && addrs[0].slot_ty == SlotType::Fn {
+                vec![self.stage_heap_fn(&v, arg.span)?]
+            } else {
+                addrs
+            };
             self.store_field_span(target.base, field, &addrs);
         }
         Ok(target)

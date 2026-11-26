@@ -36,18 +36,13 @@
 // runtime word kind, the same reflection fact).
 //
 // The race combinators over the timer capability: the caller builds the
-// thunk list (non-capturing scalar lambdas alone — a closure cannot
-// inhabit a collection element), and one spawned child per index finds
-// its own thunk by a linear scan whose guard is the int match (the
-// quadratic zip scan's own spelling): a spawned body cannot capture a
-// callable binding, a call through a call result is a computed callee,
-// a callable word cannot ride a channel payload (the send's element
-// proof refuses an unproven callable), the member `get` is shadowable
-// by a user's private declaration (the dot-call's free tier prefers
-// the flat name first, the file privacy refusal), and the private
-// `list_get` seam is cross-file inside the @std package — so the
-// iteration binding, held and called inside the child's own frame
-// alone, is the one shape that composes everywhere — racing the answer
+// thunk list (a fn-typed collection element holds the closure Ref word,
+// so capturing lambdas and wrapped named fns both inhabit it), and one
+// spawned child per element captures the iteration binding and calls it
+// — the whole walk one linear scan: a fn-typed capture stages the
+// closure word (the construction acquiring its count inside the op,
+// the object's death releasing it), and the child's CALLS dispatches
+// the word's runtime kind. The child races its answer
 // into the bounded answers channel; the join-all boundary drains after every
 // child completed — the channel's FIFO is the arrival order.
 // `firstof` answers the first arrival; `interleave` collects in
@@ -55,7 +50,10 @@
 // with no fiber left to serve it, the stall guard answering the honest
 // deadlock, and a wider-than-one-word answer refuses at the call's
 // one-word instantiation. `sum` is the fold spelling over reduce's
-// hosted callable (the CALLG lambda seam).
+// hosted callable (the CALLG lambda seam), `fold` the two-type spelling
+// whose accumulator body instantiates over its own argument shape (a
+// `var` binding and a call through the callable-defaulted parameter
+// under the entering site's substitution).
 //
 // The fork-join engine seams: fork_map/fork_reduce are private
 // bodiless generic externs, the natives the engine routes by name (the
@@ -98,17 +96,8 @@ pub fn sum (xs: list[int]) -> int {
 pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
   const answers = chan[t](len(thunks))
   nursery {
-    for i in 0..len(thunks) {
-      spawn {
-        var seen: int = 0
-        for x in thunks {
-          match seen - i {
-            0 => { answers.send(x()) }
-            _ => {}
-          }
-          seen += 1
-        }
-      }
+    for x in thunks {
+      spawn { answers.send(x()) }
     }
   }
   answers.recv()
@@ -116,17 +105,8 @@ pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
 pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
   const answers = chan[t](len(thunks))
   nursery {
-    for i in 0..len(thunks) {
-      spawn {
-        var seen: int = 0
-        for x in thunks {
-          match seen - i {
-            0 => { answers.send(x()) }
-            _ => {}
-          }
-          seen += 1
-        }
-      }
+    for x in thunks {
+      spawn { answers.send(x()) }
     }
   }
   var out = list[t]()
@@ -136,6 +116,13 @@ pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
     j += 1
   }
   out
+}
+pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
+  var acc = init
+  for x in xs {
+    acc = f(acc, x)
+  }
+  acc
 }
 pub fn take[t] (xs: list[t], n: int) -> list[t] {
   var out = list[t]()

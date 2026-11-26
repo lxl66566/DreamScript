@@ -118,16 +118,16 @@ pub use ds_abi::native::{
     BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN,
     BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARSE_FLOAT,
     BUILTIN_PARSE_INT, BUILTIN_PARTITION, BUILTIN_POW, BUILTIN_REDUCE, BUILTIN_REPL_PARK,
-    BUILTIN_REPLACE, BUILTIN_ROUND, BUILTIN_SIN, BUILTIN_SORT, BUILTIN_SPLIT, BUILTIN_SQRT,
-    BUILTIN_STR_BOOL, BUILTIN_STR_CHAR, BUILTIN_STR_COMPARE, BUILTIN_STR_FIXED, BUILTIN_STR_FLOAT,
-    BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_SUBSTRING, BUILTIN_TAIL, BUILTIN_TAN,
-    BUILTIN_TIMEOUT, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP,
-    BUILTIN_TRIM, BUILTIN_TRUNC, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
-    NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, PLATFORM_CANCELLED, PLATFORM_IO_ALREADY_EXISTS,
-    PLATFORM_IO_NOT_FOUND, PLATFORM_IO_OK, PLATFORM_IO_OTHER, PLATFORM_IO_PERMISSION_DENIED,
-    PLATFORM_IO_TIMED_OUT, PLATFORM_IO_UNEXPECTED_EOF, PLATFORM_NET_ADDR_IN_USE,
-    PLATFORM_NET_OTHER, PLATFORM_NET_REFUSED, PLATFORM_NET_RESET, PLATFORM_NET_TIMEOUT,
-    PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, STD_PLATFORM_NAME,
+    BUILTIN_REPLACE, BUILTIN_ROUND, BUILTIN_SIN, BUILTIN_SORT, BUILTIN_SORT_BY, BUILTIN_SPLIT,
+    BUILTIN_SQRT, BUILTIN_STR_BOOL, BUILTIN_STR_CHAR, BUILTIN_STR_COMPARE, BUILTIN_STR_FIXED,
+    BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_SUBSTRING, BUILTIN_TAIL,
+    BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER, BUILTIN_TOTAL_COMPARE,
+    BUILTIN_TRAP, BUILTIN_TRIM, BUILTIN_TRUNC, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
+    BUILTIN_UTF8_ENCODE, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK, PLATFORM_CANCELLED,
+    PLATFORM_IO_ALREADY_EXISTS, PLATFORM_IO_NOT_FOUND, PLATFORM_IO_OK, PLATFORM_IO_OTHER,
+    PLATFORM_IO_PERMISSION_DENIED, PLATFORM_IO_TIMED_OUT, PLATFORM_IO_UNEXPECTED_EOF,
+    PLATFORM_NET_ADDR_IN_USE, PLATFORM_NET_OTHER, PLATFORM_NET_REFUSED, PLATFORM_NET_RESET,
+    PLATFORM_NET_TIMEOUT, PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, STD_PLATFORM_NAME,
 };
 use ds_abi::{NativeModule, SlotType};
 use fork::{chan_refuse_fn, fiber_control_bounce_fn};
@@ -462,6 +462,7 @@ reserved!(builtin_reserved_46 in BUILTIN_MODULE at 46); // partition; the reentr
 reserved!(builtin_reserved_47 in BUILTIN_MODULE at 47); // par_map; the fork-join generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_59 in BUILTIN_MODULE at 59); // map_keys; the generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_90 in BUILTIN_MODULE at 90); // sort; the reentrant generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_115 in BUILTIN_MODULE at 115); // sort_by; the reentrant generic body lives in GENERIC_FUNCTIONS
 
 /// One reserved gap entry: a call to the historical index traps exactly
 /// like an uninstalled one (`UnknownCallee` naming the module and index).
@@ -506,13 +507,13 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             Dispatch::Timer(timer) => slot.timer = Some(*timer),
         }
     }
-    debug_assert_eq!(fns.len(), BUILTIN_BOX_SET as usize + 1);
+    debug_assert_eq!(fns.len(), BUILTIN_SORT_BY as usize + 1);
     fns
 }
 
 /// One body per builtin table index, in index order: a gap carries its refusal stub.
 #[rustfmt::skip]
-const BUILTIN_BODIES: [NativeFn; BUILTIN_BOX_SET as usize + 1] = [
+const BUILTIN_BODIES: [NativeFn; BUILTIN_SORT_BY as usize + 1] = [
     builtin_reserved_0, builtin_reserved_1, str_int_fn, str_float_fn,
     str_bool_fn, builtin_reserved_5, builtin_reserved_6, builtin_reserved_7,
     builtin_reserved_8, builtin_reserved_9, builtin_reserved_10, substring_fn,
@@ -541,7 +542,7 @@ const BUILTIN_BODIES: [NativeFn; BUILTIN_BOX_SET as usize + 1] = [
     arena_remove_fn, arena_at_fn, round_fn, trunc_fn,
     log_fn, exp_fn, tan_fn, chan_refuse_fn,
     chan_refuse_fn, chan_refuse_fn, list_contains_fn, str_char_fn, box_new_fn,
-    box_get_fn, box_set_fn,
+    box_get_fn, box_set_fn, builtin_reserved_115,
 ];
 
 /// How the dispatcher intercepts a slot ahead of its body.
@@ -612,7 +613,7 @@ mod tests {
     #[test]
     fn the_builtin_table_is_row_driven() {
         let fns = builtin_module();
-        assert_eq!(fns.len(), BUILTIN_BOX_SET as usize + 1);
+        assert_eq!(fns.len(), BUILTIN_SORT_BY as usize + 1);
         for row in ds_abi::native::rows(NativeModule::Builtin) {
             let slot = &fns[row.index as usize];
             assert_eq!(slot.name, row.name, "{}'s slot", row.name);

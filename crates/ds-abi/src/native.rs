@@ -431,6 +431,10 @@ pub const BUILTIN_BOX_GET: u32 = 113;
 /// `Ref` counts release, the incoming span stores under its own counts. The member tier's
 /// `box[t].set` re-answers the receiver's word after the unit answer.
 pub const BUILTIN_BOX_SET: u32 = 114;
+/// `sort_by`'s builtin slot, appended after the core run: the
+/// comparator-taking sort riding the same stable merge sort body, the
+/// callable word staged from the call site's own argument.
+pub const BUILTIN_SORT_BY: u32 = 115;
 
 // The comptime reflection module's rows.
 
@@ -2342,6 +2346,16 @@ pub const GENERIC_NATIVES: &[GenericNative] = &[
         name: "sort",
         module: NativeModule::Builtin,
         index: BUILTIN_SORT,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
+    GenericNative {
+        name: "sort_by",
+        module: NativeModule::Builtin,
+        index: BUILTIN_SORT_BY,
         evidence: 1,
         params: &[SlotType::Ref, SlotType::Fn],
         staging: Staging::Fixed,

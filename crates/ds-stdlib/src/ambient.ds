@@ -652,6 +652,11 @@ pub extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
 // reenters through it per comparison (the reduce seam's CALLG
 // discipline).
 pub extern fn sort[t: ord] (xs: list[t]) -> list[t]
+// The explicit-comparator sort over the same stable merge sort body:
+// the call site's callable stages beside the list (a lambda, a named
+// fn, or a closure word), the body reentering it per comparison — the
+// ord-routed spelling's surface over heads that carry no ord instance.
+pub extern fn sort_by[t] (xs: list[t], cmp: fn(t, t) -> int) -> list[t]
 pub extern fn str[t] (v: t) -> string
 pub extern fn total_compare (a: float, b: float) -> int
 pub extern fn str_compare (a: string, b: string) -> int

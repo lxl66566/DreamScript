@@ -9,10 +9,12 @@
 //! Ref capture — and CALLS reads the FuncRef behind the object's header
 //! whether the word sits a Ref-classified value site or a
 //! callable-defaulted fn-typed parameter slot (the closure-capable
-//! surface the callable_e2e suite runs end to end). The refusals here
-//! pin the boundary that stays: a closure in a var binding, a lambda
-//! capturing a closure, and an omitted default on a callable value
-//! (the last refused by the checker's indirect-call arity check).
+//! surface the callable_e2e suite runs end to end). A lambda may
+//! capture a fn-typed value — one closure word capturing another runs
+//! through the same capture staging. The refusals here pin the boundary
+//! that stays: a closure in a var binding, and an omitted default on a
+//! callable value (the last refused by the checker's indirect-call
+//! arity check).
 
 use ds_abi::Uop;
 use ds_check::analyze;
@@ -194,22 +196,57 @@ fn main() -> int {
     );
 }
 
-/// One lambda capturing another lambda's closure word refuses: the
-/// synthesized body's capture slot would classify Fn while the captured
-/// value is a Ref word (capturing a callable is outside the surface —
-/// pass the callable as a parameter instead).
+/// One lambda capturing another lambda's closure word runs: the capture
+/// block carries the Ref word, the construction acquiring one count per
+/// Ref capture inside the op, and the outer body's call dispatches the
+/// captured word's kind.
 #[test]
-fn a_lambda_capturing_a_closure_refuses() {
-    refused(
-        "tag int
+fn a_lambda_capturing_a_closure_runs() {
+    let source = "tag int
+tag string
+extern fn println (s: string) -> ()
 fn main() -> int {
   const k = 1
   const g = (x: int) => x + k
   const h = (y: int) => g(y)
-  h(1)
-}",
-        "a lambda capturing a closure",
+  println(\"captured ${h(1)}\")
+  0
+}";
+    let mut files = Files::new();
+    let id = files.add_source("closure_capture.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the probe checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
     );
+    let lowered = lower(
+        "closure_capture",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the probe lowers");
+    let bytes = write(lowered.module());
+    let module = read(&bytes).expect("the module round-trips");
+    let mut registry = ModuleRegistry::new();
+    registry.install_native(native::BUILTIN_MODULE, native::builtin_module());
+    registry.install_platform(Platform::std());
+    loader::install(&mut registry, module).expect("the module installs");
+    let mut vm = Vm::new(registry);
+    vm.capture_output();
+    assert_eq!(
+        vm.run("closure_capture", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0)))
+    );
+    assert_eq!(vm.captured_output(), b"captured 2\n");
+    assert!(vm.objects().is_empty(), "the heap drains");
 }
 
 /// A call through a callable value that omits a defaulted parameter is

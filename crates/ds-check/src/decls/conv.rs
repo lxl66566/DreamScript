@@ -136,7 +136,50 @@ pub(super) fn conv_expr(
         // conversion form, so a `comptime t: type` parameter's solved
         // binder type is the builtin atom
         Type::TypeKw(_) => TypeExpr::Atom(TypeId::TYPE),
-        Type::Fn { .. } | Type::Ptr { .. } | Type::Foreign { .. } => return None,
+        // a fn type converts to its hash-consed signature atom: a
+        // fn-typed field's atom enters the declaration the shape walk
+        // reads, the field's word the closure Ref the count traffic
+        // covers. A bare fn-type parameter names a variable the
+        // declaration-side conversion cannot resolve, so it drops.
+        Type::Fn { params, ret, .. } => {
+            let mut param_tys = Vec::with_capacity(params.len());
+            for param in params {
+                // a bare fn-type parameter (`fn(t) -> r`) names the type
+                // the surface spelling carries, the same reading the
+                // checker's own fn-type solve takes
+                let bare;
+                let written = match param.ty.as_ref() {
+                    Some(ty) => ty,
+                    None => {
+                        bare = Type::Path {
+                            span: param.span,
+                            path: ds_parse::Path {
+                                span: param.span,
+                                segments: vec![Ident {
+                                    span: param.span,
+                                    name: param.name.name.clone(),
+                                }],
+                            },
+                            args: Vec::new(),
+                            delim: Delim::Bracket,
+                        };
+                        &bare
+                    },
+                };
+                let expr = conv_expr(package, written, decls, diags)?;
+                param_tys.push(decls.universe.solve(&expr).ok()?);
+            }
+            let ret_ty = match ret {
+                Some(ret) => {
+                    let expr = conv_expr(package, ret, decls, diags)?;
+                    decls.universe.solve(&expr).ok()?
+                },
+                None => decls.universe.solve(&TypeExpr::Tuple(Vec::new())).ok()?,
+            };
+            let atom = decls.universe.fn_atom(&param_tys, ret_ty).ok()?;
+            TypeExpr::Atom(atom)
+        },
+        Type::Ptr { .. } | Type::Foreign { .. } => return None,
     })
 }
 

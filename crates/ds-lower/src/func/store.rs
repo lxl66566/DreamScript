@@ -67,7 +67,8 @@ impl FnLower<'_, '_, '_> {
                         // the value evaluates, then the `set` member call
                         // stages — the exact code `xs.set(i, v)` takes
                         let value = self.value(right)?;
-                        self.guard_list_element(&value, *span, "a subscript store element")?;
+                        let value =
+                            self.stage_heap_element(value, *span, "a subscript store element")?;
                         if self.deinit_claim(value.ty, *span)?.is_some() {
                             return Err(LowerError::unsupported(
                                 *span,
@@ -357,7 +358,12 @@ impl FnLower<'_, '_, '_> {
         };
         let recv_addr = single(&self.word_addrs(&place.place, place.ty)?, no_span())?;
         let probe_addr = single(&self.word_addrs(&probe.place, probe.ty)?, no_span())?;
-        let elem_words = self.shapes.words(elem)?;
+        // a fn-typed element's span is the one Ref word the heap position
+        // carries — the read hands the closure word out under its own
+        // count — every other element rides its checked words verbatim
+        let callable_element = matches!(&*self.shapes.shape(elem)?, Shape::Word(SlotType::Fn));
+        let elem_words: Vec<SlotType> =
+            if callable_element { vec![SlotType::Ref] } else { self.shapes.words(elem)?.to_vec() };
         let mut result_words = vec![SlotType::Tag];
         result_words.extend_from_slice(&elem_words);
         // the staged span ends in the generic's evidence words, one per
@@ -390,11 +396,13 @@ impl FnLower<'_, '_, '_> {
         self.emit(Op::Callg { callee, nargs: 2 });
         self.rc.native_done(&mut self.code);
         let base = self.alloc(&elem_words)?;
+        // a fn-typed element's one-word read classifies the word Ref (the
+        // stored position's own word); every wider element keeps the span
+        // place its field walk addresses
+        let shape =
+            if callable_element { PlaceShape::Word(SlotType::Ref) } else { PlaceShape::Span(elem) };
         let temp = TypedPlace {
-            place: Place {
-                base,
-                shape: PlaceShape::Span(elem),
-            },
+            place: Place { base, shape },
             ty: elem,
         };
         let cond = self.temp_word(SlotType::Bool)?;

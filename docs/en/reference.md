@@ -1141,6 +1141,17 @@ discipline).
 pub extern fn sort[t: ord](xs: list[t]) -> list[t]
 ```
 
+#### `sort_by`
+
+The explicit-comparator sort over the same stable merge sort body:
+the call site's callable stages beside the list (a lambda, a named
+fn, or a closure word), the body reentering it per comparison — the
+ord-routed spelling's surface over heads that carry no ord instance.
+
+```ds
+pub extern fn sort_by[t](xs: list[t], cmp: fn(t, t) -> int) -> list[t]
+```
+
 #### `sqrt`
 
 The float math family: IEEE f64 semantics over the float type, total
@@ -1849,6 +1860,12 @@ pub fn firstof[t](thunks: list[fn() -> t]) -> t
 pub fn flatten[r](xss: list[list[r]]) -> list[r]
 ```
 
+#### `fold`
+
+```ds
+pub fn fold[t, r](xs: list[t], init: r, f: fn(r, t) -> r) -> r
+```
+
 #### `hex`
 
 The format family: plain ds source over the builtin faces. `hex`
@@ -2041,18 +2058,13 @@ wait behind the seams above (their bodies need the type variable's
 runtime word kind, the same reflection fact).
 
 The race combinators over the timer capability: the caller builds the
-thunk list (non-capturing scalar lambdas alone — a closure cannot
-inhabit a collection element), and one spawned child per index finds
-its own thunk by a linear scan whose guard is the int match (the
-quadratic zip scan's own spelling): a spawned body cannot capture a
-callable binding, a call through a call result is a computed callee,
-a callable word cannot ride a channel payload (the send's element
-proof refuses an unproven callable), the member `get` is shadowable
-by a user's private declaration (the dot-call's free tier prefers
-the flat name first, the file privacy refusal), and the private
-`list_get` seam is cross-file inside the @std package — so the
-iteration binding, held and called inside the child's own frame
-alone, is the one shape that composes everywhere — racing the answer
+thunk list (a fn-typed collection element holds the closure Ref word,
+so capturing lambdas and wrapped named fns both inhabit it), and one
+spawned child per element captures the iteration binding and calls it
+— the whole walk one linear scan: a fn-typed capture stages the
+closure word (the construction acquiring its count inside the op,
+the object's death releasing it), and the child's CALLS dispatches
+the word's runtime kind. The child races its answer
 into the bounded answers channel; the join-all boundary drains after every
 child completed — the channel's FIFO is the arrival order.
 `firstof` answers the first arrival; `interleave` collects in
@@ -2060,7 +2072,10 @@ arrival order. The empty race parks the zero-bound answers channel
 with no fiber left to serve it, the stall guard answering the honest
 deadlock, and a wider-than-one-word answer refuses at the call's
 one-word instantiation. `sum` is the fold spelling over reduce's
-hosted callable (the CALLG lambda seam).
+hosted callable (the CALLG lambda seam), `fold` the two-type spelling
+whose accumulator body instantiates over its own argument shape (a
+`var` binding and a call through the callable-defaulted parameter
+under the entering site's substitution).
 
 The fork-join engine seams: fork_map/fork_reduce are private
 bodiless generic externs, the natives the engine routes by name (the

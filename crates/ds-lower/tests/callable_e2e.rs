@@ -2,26 +2,26 @@
 //! scalar FuncRef word through the pool const channel (the same channel a
 //! non-capturing lambda mints), so a named function passes to
 //! map/filter/reduce, binds and calls, and stores in a list for a
-//! list_get call; and fn-typed parameter slots are callable-defaulted —
+//! subscript call; and fn-typed parameter slots are callable-defaulted —
 //! a closure's Ref word inhabits them as a borrow (the callee reads the
 //! word and never owns its count, each hosted/CALLS copy-in acquiring
 //! one count per `Ref` capture that the callee body's placement
 //! balances), while the call readers resolve the callee word by its
-//! runtime kind. The unproven-callable boundaries refuse at lowering:
-//! a closure or a callable parameter as a collection element (a list
-//! element or a tuple element), a lambda capturing a callable binding,
-//! an unproven callable in a var span (the binding and the
-//! re-assignment), a fn-typed struct field (whose type the core's span
-//! vocabulary drops, so the literal refuses at the field's own span),
-//! a native or generic callee's value, and a callable word widened into
-//! a union region's fn-typed payload slot (the binding, the
+//! runtime kind. A fn-typed struct field, tuple element, and collection
+//! element hold the closure Ref word: a non-capturing fn entering one of
+//! those positions wraps into its static closure object, a capturing
+//! closure or an unproven callable word stages as itself, and a lambda
+//! may capture a fn-typed value — the capture block carrying whatever
+//! word the binding holds. The frame's re-storable slots keep the
+//! scalar rule: a closure or an unproven callable word refuses at a var
+//! span, at a union region's fn-typed payload slot (the binding, the
 //! re-assignment, the call argument, the join arm, the return — every
 //! construction site funnels through the widening write, ok_or's err
-//! arm staging directly). The fn-typed word answers carry the same
-//! rule where the answer stages: unwrap_or's and unwrap_or_else's
-//! fallbacks, the .ok/.err handler bodies, the same-type join arms, and
-//! the fn-typed return (the unproven callable words only — a closure
-//! word's own return keeps the factory boundary).
+//! arm staging directly), and at the fn-typed word answers where they
+//! stage: unwrap_or's and unwrap_or_else's fallbacks, the .ok/.err
+//! handler bodies, the same-type join arms, and the fn-typed return.
+//! A computed callee (`f()()`, a subscript read's word) lowers through a
+//! temporary binding, the indirect call reading it like any binding's.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -167,9 +167,10 @@ fn at(xs: list[int], i: int) -> int {{
     );
 }
 
-/// A named fn binds then calls, and stores in a list for a list_get call:
-/// the minted word is the copyable scalar, so binding aliases it and the
-/// stored element hands the same word back through the checked read.
+/// A named fn binds then calls, and stores in a list: the minted word
+/// wraps into the function's static closure object at the literal's
+/// store, the element holds the closure Ref word, and the subscript
+/// read hands it out under its own count for the computed call.
 #[test]
 fn a_named_fn_binds_calls_and_stores_in_a_list() {
     acceptance(
@@ -184,8 +185,7 @@ fn main() -> int {{
   const f = add
   println(\"bound ${{f(3, 4)}}\")
   const fs = [double, bump]
-  const second = list_get(fs, 1)
-  const called = second.ok((g: fn(int) -> int) -> int {{ g(7) }}).err((_: none) => 0)
+  const called = fs[1](7)
   println(\"stored ${{called}}\")
   f(1, 1)
 }}
@@ -282,12 +282,14 @@ fn main() -> int {{
     );
 }
 
-/// A lambda capturing a callable-defaulted parameter refuses: the capture
-/// slot classifies Fn while the parameter may hold a closure's Ref word
-/// at runtime, and the copy-in would write it there.
+/// A lambda captures a fn-typed value: the callable-defaulted
+/// parameter's maybe-Ref word stages into the capture block as itself,
+/// the construction acquiring one count per runtime Ref inside the op,
+/// and the body's call dispatches the word's kind.
 #[test]
-fn a_lambda_capturing_a_callable_parameter_refuses() {
-    refused(
+fn a_lambda_capturing_a_callable_parameter_runs() {
+    acceptance(
+        "capture_callable",
         &format!(
             "{PRELUDE}
 fn apply(f: fn(int) -> int) -> int {{
@@ -295,43 +297,51 @@ fn apply(f: fn(int) -> int) -> int {{
   g(1)
 }}
 
-fn main() -> int {{ 0 }}
+fn main() -> int {{ apply((x: int) => x + 40) }}
 "
         ),
-        "a lambda capturing a callable binding",
+        Value::I64(41),
+        b"",
     );
 }
 
-/// A collection element must prove a non-capturing scalar callable: a
-/// fresh closure and a callable-defaulted parameter both refuse — the
-/// element staging could not track the closure's count and the read-back
-/// would hand a Ref word to a Fn-classified payload slot.
+/// A collection element holds the closure Ref word: a capturing lambda
+/// and a named fn both inhabit the element (the staging wrapping the
+/// proven scalar, the channel's count traffic covering the Ref), and
+/// the subscript read hands the word out for the computed call — the
+/// capture-composing shape the @std race combinators ride. An unproven
+/// callable word (a callable-defaulted parameter's) refuses: its
+/// runtime kind is the caller's fact, and the element's Ref slot takes
+/// the closure Ref only.
 #[test]
-fn unproven_callable_collection_elements_refuse() {
-    refused(
+fn callables_inhabit_collection_elements() {
+    acceptance(
+        "callable_elements",
         &format!(
             "{PRELUDE}
 fn main() -> int {{
-  const k = 1
-  const fs = [(x: int) => x + k]
+  const k = 10
+  const thunks = [(x: int) => x + k, (x: int) => x * k]
+  println(\"race ${{thunks[0](1) + thunks[1](2)}}\")
   0
 }}
 "
         ),
-        "a callable element must prove a non-capturing scalar",
+        Value::I64(0),
+        b"race 31\n",
     );
     refused(
         &format!(
             "{PRELUDE}
 fn keep(f: fn(int) -> int) -> int {{
   const fs = [f]
-  0
+  fs[0](6)
 }}
 
-fn main() -> int {{ 0 }}
+fn main() -> int {{ keep((x: int) => x * 7) }}
 "
         ),
-        "a callable element must prove a non-capturing scalar",
+        "a callable word's runtime kind is the caller's fact",
     );
 }
 
@@ -541,7 +551,9 @@ fn main() -> int {{ 0 }}
 
 /// The just-inside sides run: a named fn and a non-capturing lambda (the
 /// proven scalar words) inhabit and re-assign a re-storable fn-typed var
-/// slot, and a named fn element destructures out of a tuple into one.
+/// slot. A fn-typed tuple element destructuring into a var refuses: the
+/// element holds the closure Ref word and the re-storable var slot
+/// stays scalar.
 #[test]
 fn proven_scalars_inhabit_re_storable_var_slots() {
     acceptance(
@@ -558,73 +570,94 @@ fn main() -> int {{
   println(\"second ${{v(7)}}\")
   var l = (x: int) => x - 1
   println(\"lambda ${{l(7)}}\")
-  var (g, n) = (two, 4)
-  println(\"destructured ${{g(n)}}\")
   l(0)
 }}
 "
         ),
         Value::I64(-1),
-        b"first 8\nsecond 21\nlambda 6\ndestructured 12\n",
+        b"first 8\nsecond 21\nlambda 6\n",
     );
-}
-
-/// A callable tuple element proves a non-capturing scalar word: the
-/// span's count traffic copies only Ref-classified fields, so a closure
-/// or an unproven callable binding cannot ride one (the element staging
-/// would lose its count and the read-back hands a Ref word to a
-/// Fn-classified slot) — the tuple joins the lists' provenance guard.
-#[test]
-fn unproven_callable_tuple_elements_refuse() {
     refused(
         &format!(
             "{PRELUDE}
+fn two(x: int) -> int {{ x * 3 }}
+
 fn main() -> int {{
-  const k = 1
-  const t = ((x: int) => x + k, 1)
+  var (g, n) = (two, 4)
+  g(n)
+}}
+"
+        ),
+        "a var destructuring element word",
+    );
+}
+
+/// A tuple element holds the closure Ref word: the span's count traffic
+/// copies the Ref-classified field, a capturing lambda rides one, and
+/// the destructured binder aliases the element's word for the call. An
+/// unproven callable word refuses at the literal (the runtime kind the
+/// caller's fact, the element's Ref slot taking the closure Ref only).
+#[test]
+fn callables_inhabit_tuple_elements() {
+    acceptance(
+        "callable_tuple_elements",
+        &format!(
+            "{PRELUDE}
+fn main() -> int {{
+  const k = 4
+  const (tf, tn) = ((x: int) => x + k, 8)
+  println(\"tuple ${{tf(tn)}}\")
   0
 }}
 "
         ),
-        "a callable tuple element",
+        Value::I64(0),
+        b"tuple 12\n",
     );
     refused(
         &format!(
             "{PRELUDE}
 fn take(f: fn(int) -> int) -> int {{
-  const t = (f, 1)
-  0
+  const (g, n) = (f, 6)
+  g(n)
 }}
 
-fn main() -> int {{ 0 }}
+fn main() -> int {{ take((x: int) => x * 7) }}
 "
         ),
-        "a callable tuple element",
+        "a callable word's runtime kind is the caller's fact",
     );
 }
 
-/// A fn-typed struct field carries no planned shape: the field's type
-/// stays outside the core's span vocabulary, so the literal's field
-/// lookup misses and the refusal names the seam at the field's own
-/// span — no callable ever reaches a struct field slot (the literal
-/// guard for provenance stays unreachable behind this earlier one).
+/// A fn-typed struct field holds the closure Ref word: the field's span
+/// is the one Ref word the count traffic covers, a named fn and a
+/// capturing lambda both construct through the literal (the named fn
+/// wrapping into its static closure object), and the field read's word
+/// stages as a callable argument. The dot-call spelling through a field
+/// name stays refused at the check (the resolver's dot tiers name free
+/// functions and members, never fields).
 #[test]
-fn a_fn_typed_struct_field_refuses_at_its_own_span() {
-    refused(
+fn fn_typed_struct_fields_hold_closures() {
+    acceptance(
+        "fn_fields",
         &format!(
             "{PRELUDE}
 struct box {{ f: fn(int) -> int }}
 
 fn one(x: int) -> int {{ x + 1 }}
+fn apply(f: fn(int) -> int, v: int) -> int {{ f(v) }}
 
 fn main() -> int {{
+  const k = 2
   const a = box {{ f: one }}
-  const b = box {{ f: (x: int) => x + 1 }}
+  const b = box {{ f: (x: int) => x + k }}
+  println(\"a ${{apply(a.f, 1)}} b ${{apply(b.f, 2)}}\")
   0
 }}
 "
         ),
-        "the planned shape carries no such field",
+        Value::I64(0),
+        b"a 2 b 4\n",
     );
 }
 
@@ -910,12 +943,14 @@ fn main() -> int {{
     );
 }
 
-/// The enum vocabulary keeps no reachable fn-payload slot: an enum case
-/// with a fn-typed payload refuses at its own seam, so the union-payload
-/// guard's surface stays the spelled union.
+/// The enum vocabulary's fn payload holds the closure Ref word the
+/// struct field carries: a proven scalar wraps at the case construction,
+/// and the payload binder's word calls through the member arm (the
+/// fn-typed join keeps the scalar rule, so the call lives in the arm).
 #[test]
-fn an_enum_fn_payload_refuses_at_its_own_seam() {
-    refused(
+fn an_enum_fn_payload_holds_proven_scalars() {
+    acceptance(
+        "enum_fn_payload",
         &format!(
             "{PRELUDE}
 enum handler {{
@@ -927,11 +962,17 @@ fn inc(x: int) -> int {{ x + 1 }}
 
 fn main() -> int {{
   const g: handler = boxed(inc)
+  const r = match g {{
+    boxed(f) => f(5)
+    nada => 0
+  }}
+  println(\"boxed ${{r}}\")
   0
 }}
 "
         ),
-        "an atom with no resolved shape",
+        Value::I64(0),
+        b"boxed 6\n",
     );
 }
 
@@ -1237,6 +1278,61 @@ fn main() -> int {{
         ),
         Value::I64(6),
         b"",
+    );
+}
+
+/// A computed callee lowers through a temporary binding: the inner
+/// call's fn-typed answer word binds ahead of the argument staging, and
+/// the indirect call reads it like any binding's word.
+#[test]
+fn a_computed_callee_calls_through_a_temporary() {
+    acceptance(
+        "computed_callee",
+        &format!(
+            "{PRELUDE}
+fn inc(x: int) -> int {{ x + 1 }}
+fn choose() -> fn(int) -> int {{ inc }}
+
+fn main() -> int {{
+  const fs = [(x: int) => x * 3]
+  println(\"a ${{choose()(5)}} b ${{fs[0](7)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"a 6 b 21\n",
+    );
+}
+
+/// The element-capture composition: a fn-typed list's iteration binder
+/// carries the closure Ref word (the fetch handing it out under its own
+/// count), the spawned-style sequential walk calling it per element, and
+/// a lambda capturing a fn-typed value rides the same staging.
+#[test]
+fn a_fn_element_walk_calls_and_captures() {
+    acceptance(
+        "fn_element_walk",
+        &format!(
+            "{PRELUDE}
+fn run(thunks: list[fn() -> int]) -> int {{
+  var seen = 0
+  for x in thunks {{
+    seen += x()
+  }}
+  seen
+}}
+
+fn main() -> int {{
+  const k = 20
+  const pass = (thunks: list[fn() -> int]) => run(thunks)
+  println(\"${{pass([() => 1 + k, () => 2 + k])}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"43\n",
     );
 }
 
