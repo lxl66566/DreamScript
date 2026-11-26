@@ -29,118 +29,17 @@
 //! means no world call site validates). The `@std` ds-source package
 //! layer above both is future work.
 //!
-//! Core indices are contract: pool entries name them positionally, and a
-//! gap (a spare slot, or a generic builtin's monomorphic slot) keeps its
-//! table position as a reserved entry whose body traps exactly like an
-//! uninstalled index — the lowering never emits these. The world ops'
-//! indices are the platform ABI's own dense run (0-11,
-//! [`crate::platform`]), no longer interleaved with the core's.
+//! The table's rows are the call ABI's ([`ds_abi::native`]): this module attaches one body per
+//! row and the dispatcher's interception markers. Pool entries name rows positionally, and a gap (a
+//! retired native's slot, or a generic builtin's monomorphic slot) keeps its table position as a
+//! reserved entry whose body traps exactly like an uninstalled index.
 //!
-//! | index | `builtin` (core) |
-//! |-------|------------------|
-//! | 0     | reserved (the historical world-surface slots) |
-//! | 1     | reserved |
-//! | 2     | `str_int (x: int) -> string` |
-//! | 3     | `str_float (x: float) -> string` |
-//! | 4     | `str_bool (x: bool) -> string` |
-//! | 5     | reserved |
-//! | 6     | reserved |
-//! | 7     | reserved |
-//! | 8     | reserved |
-//! | 9     | reserved |
-//! | 10    | `len[t] (xs: t) -> int` (generic; CALLG, evidence-dispatched) |
-//! | 11    | `substring (s, start, end: int) -> string \| none` (the checked slice) |
-//! | 12    | `concat (a, b: string) -> string` |
-//! | 13    | `to_upper (s: string) -> string` |
-//! | 14    | `to_lower (s: string) -> string` |
-//! | 15    | `trim (s: string) -> string` |
-//! | 16    | `parse_int (s: string) -> int \| parse_err` |
-//! | 17    | `split (s, sep: string) -> list[string]` |
-//! | 18    | `char_at (s: string, i: int) -> char \| none` (the checked char read) |
-//! | 19    | reserved (the string block's spare slot) |
-//! | 20    | `list_new () -> list` |
-//! | 21    | `list_len[t] (list) -> int` (generic; CALLG) |
-//! | 22    | `list_get[t] (list, i: int) -> t \| none` (generic; CALLG) |
-//! | 23    | `list_concat[t] (a, b: list) -> list` (generic; CALLG) |
-//! | 24    | reserved (the retired `fiber_yield` debug yield's slot; the dev host injects suspension through its own face) |
-//! | 25    | `fiber_resume (fiber, value: int) -> int` |
-//! | 26    | `nursery_join (nursery: int) -> int` |
-//! | 27    | `list_push (xs: list, x: value) -> unit` |
-//! | 28    | `map_new () -> map` |
-//! | 29    | `map_len[k, v] (map) -> int` (generic; CALLG) |
-//! | 30    | `map_get[k, v] (map, key: value) -> v \| none` (generic; CALLG) |
-//! | 31    | `map_set (map, key, value words, variadic) -> unit` — the value's whole inline word span |
-//! | 32    | `cons[t] (x: value, xs: list) -> list` (generic; CALLG) |
-//! | 33    | reserved (was `head`, retired 2026-11-17; `first` is the one list-front spelling) |
-//! | 34    | `tail[t] (xs: list) -> list` (generic; CALLG) |
-//! | 35    | `collect[t] (xs: list) -> list` (generic; CALLG) |
-//! | 36    | `first[t] (xs: list) -> t \| none` (generic; CALLG) |
-//! | 37    | `max[t] (a, b: value) -> value` (generic; CALLG) |
-//! | 38    | `map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, reentrant) |
-//! | 39    | `filter[t] (xs: list, f: fn(t) -> bool) -> list[t]` (generic; CALLG, reentrant) |
-//! | 40    | `reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, reentrant) |
-//! | 41    | `nursery_open () -> int` (control seam; the `nursery` block) |
-//! | 42    | `nursery_spawn (nursery: int, child: fn) -> unit` (control seam; `spawn`) |
-//! | 43    | `nursery_boundary (nursery: int, mask: int) -> discriminant + answers list or member span` (control seam; the block's join) |
-//! | 44    | `nursery_cancel (e: tag + payload words) -> unit` (control seam; `cancel`, variadic) |
-//! | 45    | `join (parts: list[string], sep: string) -> string` |
-//! | 46    | `partition[t] (xs: list, f: fn(t) -> bool) -> two list refs` (generic; CALLG, reentrant, the tag-less two-word total) |
-//! | 47    | `fork_map[t, r] (xs: list, f: fn(t) -> r) -> list[r]` (generic; CALLG, fork-join; the @std `par_map` library fn's engine seam) |
-//! | 48    | `fork_reduce[t] (xs: list, init: t, f: fn(t, t) -> t) -> t` (generic; CALLG, fork-join; the @std `par_reduce` library fn's engine seam) |
-//! | 49    | `total_compare (a, b: float) -> int` |
-//! | 50    | `str_compare (a, b: string) -> int` |
-//! | 51    | `char_compare (a, b: char) -> int` |
-//! | 52    | `byte_compare (a, b: byte) -> int` |
-//! | 53    | `str_hash (s: string) -> int` |
-//! | 54    | `float_hash (f: float) -> int` |
-//! | 55    | `char_hash (c: char) -> int` |
-//! | 56    | `repl_park (answer words, variadic)` (control seam; the REPL's spliced park) |
-//! | 57    | `str_fixed (x: float, digits: int) -> string` — the fixed-point float formatter |
-//! | 58    | `char_of (code: int) -> char \| none` — the codepoint→char reader |
-//! | 59    | `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the entry-order key list |
-//! | 60    | `code_of (c: char) -> int` — the char→codepoint reader |
-//! | 61    | `bytes_of (xs: list[byte]) -> bytes` — the byte string's construction seam |
-//! | 62    | `byte_list (b: bytes) -> list[byte]` — the bridge back out |
-//! | 63    | `byte_at (b: bytes, i: int) -> byte \| none` — the checked indexed read |
-//! | 64    | `bytes_eq (a, b: bytes) -> bool` — the structural content compare the `==`/`!=` chain dispatches over bytes operands |
-//! | 65    | `bytes_compare (a, b: bytes) -> int` — the bytes sort key the `ord` derive orders bytes parts through |
-//! | 66    | `bytes_hash (b: bytes) -> int` — the content hash the `hash` derive folds bytes parts through |
-//! | 67    | `utf8_encode (s: string) -> bytes` — the string→bytes bridge, the string's own bytes |
-//! | 68    | `utf8_decode (b: bytes) -> string \| utf8_err` — the bytes→string bridge, UTF-8 validated on the way back |
-//! | 69    | `trap (msg: string) -> unit` — the bare trap primitive; never returns, never prints (the die split) |
-//! | 70    | `list_eq (a, b: list) -> bool` — the list collection's structural content compare the `==`/`!=` chain dispatches over list operands |
-//! | 71    | `map_eq (a, b: map) -> bool` — the map collection's structural content compare the `==`/`!=` chain dispatches over map operands |
-//! | 76    | `sqrt (x: float) -> float` |
-//! | 77    | `sin (x: float) -> float` |
-//! | 78    | `cos (x: float) -> float` |
-//! | 79    | `atan2 (y, x: float) -> float` |
-//! | 80    | `floor (x: float) -> float` |
-//! | 81    | `ceil (x: float) -> float` |
-//! | 82    | `pow (base, exp: float) -> float` |
-//! | 83    | `abs (x: float) -> float` |
-//! | 84    | `contains (haystack, needle: string) -> bool` |
-//! | 85    | `index_of (haystack, needle: string) -> int \| none` (the checked search, char-indexed) |
-//! | 86    | `replace (haystack, needle, with: string) -> string` |
-//! | 91    | `list_set (xs: list, i: int, x: element words, variadic) -> unit` — the in-place element replacement, out-of-range trapping (the member tier's `set`) |
-//! | 92    | `list_remove (xs: list, i: int) -> unit` — the in-place element removal, the removed words releasing their counts (the member tier's `remove`) |
-//! | 93    | `list_insert (xs: list, i: int, x: element words, variadic) -> unit` — the in-place splice before `i`, `i == len` appending (the member tier's `insert`) |
-//! | 94    | `list_clear (xs: list) -> unit` — the in-place emptying (the member tier's `clear`) |
-//! | 95    | `map_remove (m: map, key: value) -> unit` — the in-place row removal, a missing key a no-op (the member tier's `remove`) |
-//! | 96    | `map_contains (m: map, key: value) -> bool` — the membership read (the member tier's `contains`) |
-//! | 97    | `map_entries (m: map) -> list` — the entry-order pair list, one key word then the value span per row (the member tier's `entries`) |
-//! | 102   | `round (x: float) -> float` — the half-away-from-zero round |
-//! | 103   | `trunc (x: float) -> float` — the integer-valued float |
-//! | 104   | `ln (x: float) -> float` — the natural logarithm |
-//! | 105   | `exp (x: float) -> float` |
-//! | 106   | `tan (x: float) -> float` |
+//! Unit natives return the inert unit word `Value::I64(0)`: the caller of a unit callee never reads
+//! the overlay word (a lowering discipline), and a tail call to a unit native still needs a return
+//! word to overlay.
 //!
-//! The surface-level `str()` is one function in source; the core table
-//! carries its typed instances, and lowering emits the `str_*` FuncRef for
-//! the operand's type [B7's explicit conversions].
-//!
-//! Unit natives return the inert unit word `Value::I64(0)`: the caller of a
-//! unit callee never reads the overlay word (a lowering discipline), and a
-//! tail call to a unit native still needs a return word to overlay.
+//! The surface-level `str()` is one function in source; the core table carries its typed
+//! instances, and lowering emits the `str_*` FuncRef for the operand's type.
 //!
 //! # Result spans and the platform tag ids
 //!
@@ -377,7 +276,39 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ds_abi::{SlotType, Staging};
+/// The reserved native modules, the row indices, and the discriminants: the one vocabulary the
+/// lowering and this VM read.
+pub use ds_abi::native::BUILTIN_MODULE;
+pub use ds_abi::native::{
+    BUILTIN_ABS, BUILTIN_ARENA_AT, BUILTIN_ARENA_INSERT, BUILTIN_ARENA_NEW, BUILTIN_ARENA_REMOVE,
+    BUILTIN_ATAN2, BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF,
+    BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CEIL,
+    BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAN_RECV_DEADLINE, BUILTIN_CHAN_SEND,
+    BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH,
+    BUILTIN_CHAR_OF, BUILTIN_CODE_OF, BUILTIN_COLLECT, BUILTIN_CONCAT, BUILTIN_CONS,
+    BUILTIN_CONTAINS, BUILTIN_COS, BUILTIN_EXP, BUILTIN_FIBER_RESUME, BUILTIN_FIBER_YIELD,
+    BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_FLOOR, BUILTIN_HEAD,
+    BUILTIN_INDEX_OF, BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN,
+    BUILTIN_LIST_CLEAR, BUILTIN_LIST_CONCAT, BUILTIN_LIST_EQ, BUILTIN_LIST_GET,
+    BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
+    BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_LN, BUILTIN_MAP, BUILTIN_MAP_CONTAINS,
+    BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_KEYS, BUILTIN_MAP_LEN,
+    BUILTIN_MAP_NEW, BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY,
+    BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
+    BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARSE_FLOAT, BUILTIN_PARSE_INT, BUILTIN_PARTITION,
+    BUILTIN_POW, BUILTIN_REDUCE, BUILTIN_REPL_PARK, BUILTIN_REPLACE, BUILTIN_ROUND, BUILTIN_SIN,
+    BUILTIN_SORT, BUILTIN_SPLIT, BUILTIN_SQRT, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE,
+    BUILTIN_STR_FIXED, BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_SUBSTRING,
+    BUILTIN_TAIL, BUILTIN_TAN, BUILTIN_TIMEOUT, BUILTIN_TO_LOWER, BUILTIN_TO_UPPER,
+    BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_TRIM, BUILTIN_TRUNC, BUILTIN_U32_OF,
+    BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE, NURSERY_BOUNDARY_ERR, NURSERY_BOUNDARY_OK,
+    PLATFORM_CANCELLED, PLATFORM_IO_ALREADY_EXISTS, PLATFORM_IO_NOT_FOUND, PLATFORM_IO_OK,
+    PLATFORM_IO_OTHER, PLATFORM_IO_PERMISSION_DENIED, PLATFORM_IO_TIMED_OUT,
+    PLATFORM_IO_UNEXPECTED_EOF, PLATFORM_NET_ADDR_IN_USE, PLATFORM_NET_OTHER, PLATFORM_NET_REFUSED,
+    PLATFORM_NET_RESET, PLATFORM_NET_TIMEOUT, PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR,
+    STD_PLATFORM_NAME,
+};
+use ds_abi::{NativeModule, SlotType, Staging};
 
 use crate::{
     fiber::FiberId,
@@ -387,533 +318,6 @@ use crate::{
     value::{FuncRef, RefId, Value},
     vm::{Trap, Vm},
 };
-
-/// The reserved core native module every VM pre-installs: the pure,
-/// irreducible primitives (the `str_*` conversions and the string ops).
-pub const BUILTIN_MODULE: &str = "builtin";
-
-/// `str_int(x: int) -> string`.
-pub const BUILTIN_STR_INT: u32 = 2;
-/// `str_float(x: float) -> string`.
-pub const BUILTIN_STR_FLOAT: u32 = 3;
-/// `str_bool(x: bool) -> string`.
-pub const BUILTIN_STR_BOOL: u32 = 4;
-/// The generic `len[t] (xs: t) -> int`: CALLG-addressed with one evidence
-/// word, its one body dispatches on the instance ([`GENERIC_FUNCTIONS`]);
-/// the table slot itself stays reserved, so a plain CALL cannot reach a
-/// monomorphic instance.
-pub const BUILTIN_LEN: u32 = 10;
-/// `substring(s: string, start, end: int) -> string` (char-indexed, clamped).
-pub const BUILTIN_SUBSTRING: u32 = 11;
-/// `concat(a, b: string) -> string` (the callable face of the STRCAT uop).
-pub const BUILTIN_CONCAT: u32 = 12;
-/// `to_upper(s: string) -> string`.
-pub const BUILTIN_TO_UPPER: u32 = 13;
-/// `to_lower(s: string) -> string`.
-pub const BUILTIN_TO_LOWER: u32 = 14;
-/// `trim(s: string) -> string` (leading and trailing whitespace dropped).
-pub const BUILTIN_TRIM: u32 = 15;
-/// `parse_int(s: string) -> int | parse_err` (the position the reader gave up at rides the error
-/// payload).
-pub const BUILTIN_PARSE_INT: u32 = 16;
-/// `split(s, sep: string) -> list[string]` (a list object of part refs).
-pub const BUILTIN_SPLIT: u32 = 17;
-/// `char_at(s: string, i: int) -> string` (empty when out of range).
-pub const BUILTIN_CHAR_AT: u32 = 18;
-/// `list_new() -> list` (the empty list object).
-pub const BUILTIN_LIST_NEW: u32 = 20;
-/// `list_len[t](list) -> int` (generic; the ONE body lives in
-/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_LIST_LEN: u32 = 21;
-/// `list_get[t](list, i: int) -> t | none` (generic; the checked read,
-/// out of range answers the `none` span member, never a trap; the ONE
-/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_LIST_GET: u32 = 22;
-/// `list_concat[t](a, b: list) -> list` (generic; a fresh list over
-/// both element runs; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_LIST_CONCAT: u32 = 23;
-/// The retired `fiber_yield` debug yield's historical slot, kept reserved
-/// so the index run never renumbers (the 2026-11-17 ruling: the spelling
-/// leaves the language surface, the dev host injecting suspension through
-/// its own capability face; no native serves the slot, so a CALL naming it
-/// traps like an uninstalled index).
-pub const BUILTIN_FIBER_YIELD: u32 = 24;
-/// `fiber_resume(fiber: int, value: int) -> int` — the substrate's debug
-/// switch [E2]: parks the current fiber and enters `fiber` with `value`
-/// (a never-started fiber drops the payload); the call answers the value
-/// the entered fiber next parks with or completes with. An absent, dead,
-/// or self target answers the bare `PLATFORM_NONE` tag (no switch), the
-/// checked-read convention of `list_get` at one word.
-pub const BUILTIN_FIBER_RESUME: u32 = 25;
-/// `nursery_join(nursery: int) -> int` — the nursery boundary's debug face
-/// [E2]: parks the caller, drives the named nursery's children to death in
-/// spawn order (first failure raises the cancel flag for the rest [E5]),
-/// and answers the failed-children count (0 = all joined). Per-child
-/// outcomes union out through [`crate::Vm::join_nursery`]. An absent or
-/// consumed nursery answers the bare [`PLATFORM_NONE`] tag (the
-/// checked-read convention); a child joining its own nursery traps — the
-/// single-threaded driver would deadlock on itself.
-pub const BUILTIN_NURSERY_JOIN: u32 = 26;
-
-/// `list_push(xs: list, x: value) -> unit` — the construction append
-/// list literals lower to: one element word onto a list the constructing
-/// frame uniquely owns. The element parameter is `Raw`, the one native
-/// whose argument kind varies by call site, so it accepts every kind. A
-/// non-list first argument traps; the unit result is the inert unit word.
-pub const BUILTIN_LIST_PUSH: u32 = 27;
-/// `map_new() -> map` (the empty map object; the `map[k, v]()`
-/// constructor's runtime half).
-pub const BUILTIN_MAP_NEW: u32 = 28;
-/// `map_len[k, v](map) -> int` (generic; the entry count; the ONE body
-/// lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_MAP_LEN: u32 = 29;
-/// `map_get[k, v](map, key: value) -> v | none` (generic; the checked
-/// read in `list_get`'s span shape, a miss answers the `none` span
-/// member with the probe key as the payload, never a trap; the ONE body
-/// lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_MAP_GET: u32 = 30;
-/// `map_set(map, key, value: value) -> unit` — the one mutation, through
-/// the checker's exclusive `mut` window. The key and value parameters
-/// are `Raw`, their kinds varying by call site like `list_push`'s
-/// element. A non-map first argument traps; the unit result is the inert
-/// unit word.
-pub const BUILTIN_MAP_SET: u32 = 31;
-
-/// `cons[t](x: value, xs: list) -> list` (generic; the one-element
-/// prepend, a fresh list over `x` then `xs`'s element words —
-/// construction copies, the copy acquiring one count per `Ref` element
-/// it adopts; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_CONS: u32 = 32;
-/// The retired `head` spelling's historical slot, kept reserved so the
-/// index run never renumbers (the 2026-11-17 retirement ruling: `first`
-/// is the one list-front spelling; no generic body serves the slot, so
-/// a CALLG naming it traps like an uninstalled native).
-pub const BUILTIN_HEAD: u32 = 33;
-/// `tail[t](xs: list) -> list` (generic; a fresh list over the elements
-/// after the first — construction copies; an empty list answers the
-/// empty list; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_TAIL: u32 = 34;
-/// `collect[t](xs: list) -> list` (generic; the pipeline closer, a plain
-/// fresh copy of its list; the ONE body lives in
-/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_COLLECT: u32 = 35;
-/// `first[t](xs: list) -> t | none` (generic; the checked first element
-/// in `list_get`'s span shape, the one list-front spelling; the ONE
-/// body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_FIRST: u32 = 36;
-/// `max[t](a, b: value) -> value` (generic; the greater of the two
-/// numeric words — int compares in i64's total order, float follows
-/// IEEE and never traps; any other word kind refuses like a comparison
-/// against a mismatched slot; the ONE body lives in
-/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_MAX: u32 = 37;
-/// `map[t, r](xs: list, f: fn) -> list` (generic; the one body reenters
-/// the dispatcher per element through the VM's hosted-call seam,
-/// running the staged lambda word over each element — the reentrant
-/// CALLG seam; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_MAP: u32 = 38;
-/// `filter[t](xs: list, f: fn) -> list` (generic; the predicate keeps
-/// or drops each element through the same reentrant per-element call;
-/// the ONE body lives in [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_FILTER: u32 = 39;
-/// `reduce[t](xs: list, init: value, f: fn) -> value` (generic; the
-/// left fold over the same reentrant per-element call, the borrowed
-/// init's whole word span seeding the accumulator and an empty list
-/// answering it; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_REDUCE: u32 = 40;
-/// `nursery_open() -> int` — the in-language `nursery` block's open seam
-/// [E2]: opens a fresh block-scoped nursery (not the root) and answers
-/// its pool id. Never user-callable: the lowerer synthesizes the call.
-pub const BUILTIN_NURSERY_OPEN: u32 = 41;
-/// `nursery_spawn(nursery: int, child: fn) -> unit` — the `spawn`
-/// expression's seam [E2]: the callable word names the synthesized child
-/// (a scalar `Fn` word or a closure object's `Ref` whose captures become
-/// the entry arguments); the fiber is born ready into the open nursery —
-/// the join at the block's exit drives it. Never user-callable.
-pub const BUILTIN_NURSERY_SPAWN: u32 = 42;
-/// `nursery_boundary(nursery: int, mask: int) -> tag+payload` — the
-/// in-language join seam [E2]: parks the caller, drives the named
-/// nursery's children to death in spawn order (first failure raises the
-/// cancel flag for the rest [E5]), and answers the boundary result: a
-/// two-word span whose word 0 is [`NURSERY_BOUNDARY_OK`] on a clean join
-/// or [`NURSERY_BOUNDARY_ERR`] on a first failure. A clean join's word 1
-/// is the collected answers list's `Ref` — one element per child, each
-/// child's whole answer span in spawn order, the list living in the
-/// joiner's own heap (the join channel of the 2026-11-21 scheduler
-/// rulings); a failure's word 1 begins the failing child's error
-/// payload. The staged mask is the caller's return-union member
-/// containment set: a failure payload whose tag sits outside it traps
-/// (the boundary refuses to union an uncontained error out); a trapped
-/// child that died by a real trap re-raises that trap on the joiner
-/// (let-it-crash surfaces at the boundary). Never user-callable.
-pub const BUILTIN_NURSERY_BOUNDARY: u32 = 43;
-/// `nursery_cancel(e: word) -> unit` — the `cancel(e)` call's seam [E1,
-/// E2]: the current fiber dies trapped carrying the payload, the trap
-/// path ledgers the outcome and raises its nursery's cancel flag. Never
-/// returns; the unit result shape only satisfies the call site's width
-/// check.
-pub const BUILTIN_NURSERY_CANCEL: u32 = 44;
-
-/// `join (parts: list[string], sep: string) -> string` — the list of
-/// strings rendered back to one string, the separator between
-/// neighbors. An empty list answers the empty string; the elements and
-/// the separator stay borrowed (the `list_len` discipline), the answer
-/// one fresh string object.
-pub const BUILTIN_JOIN: u32 = 45;
-
-/// `fork_map[t, r](xs: list, f: fn) -> list` (generic; E3's fork-join
-/// combinator seam behind the @std `par_map` library fn, the parked-CALLG slice: fork is one
-/// spawned child per element through the nursery substrate — the callable's own function
-/// entered with the element's whole inline span — and join parks the
-/// CALLG site through the interlock drive, so the answers assemble in
-/// input order and the first failure cancels the siblings and re-raises
-/// at the call [E5]; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_PAR_MAP: u32 = 47;
-
-/// `fork_reduce[t](xs: list, init: t, f: fn(t, t) -> t) -> t` (generic;
-/// E3's fork-join fold seam behind the @std `par_reduce` library fn, the parked-CALLG slice: the
-/// left data dependency chains one spawned child per element — the callable's
-/// own function entered with the running accumulator and the element,
-/// the seam's chain state carrying the fold between per-step joins —
-/// so the reduction applies strictly in input order [E5's first-failure
-/// re-raise at the call; the ONE body lives in [`GENERIC_FUNCTIONS`],
-/// CALLG-addressed).
-pub const BUILTIN_PAR_REDUCE: u32 = 48;
-
-/// `partition[t](xs: list, f: fn(t) -> bool) -> two list refs` (generic;
-/// `filter`'s per-element predicate with two destinations — a true answer
-/// pushes onto the first fresh list, a false one onto the second, each
-/// push taking the list's own edge count per `Ref` word so no
-/// element-side count moves — and the two list `Ref`s answer as the
-/// tag-less multi-word total, no discriminant; the ONE body lives in
-/// [`GENERIC_FUNCTIONS`], CALLG-addressed).
-pub const BUILTIN_PARTITION: u32 = 46;
-
-/// `total_compare(a: float, b: float) -> int` - the explicit float sort
-/// key the `ord` derive orders float parts through (B7): the IEEE-754
-/// total order over f64 (negative NaN least, positive NaN greatest,
-/// `-0.0` before `+0.0`), answered as one i64 word of -1, 0, or 1. Every
-/// pair is ordered, so it is the one total comparison the op set's
-/// trapping `<`/`>` cannot spell.
-pub const BUILTIN_TOTAL_COMPARE: u32 = 49;
-
-/// `str_compare(a: string, b: string) -> int` - the string sort key the
-/// `ord` derive orders string parts through: the lexicographic order
-/// over the UTF-8 bytes (the code-point order), answered as one i64
-/// word of -1, 0, or 1.
-pub const BUILTIN_STR_COMPARE: u32 = 50;
-
-/// `char_compare(a: char, b: char) -> int` - the char sort key the `ord`
-/// derive orders char parts through: the Unicode scalar order over the
-/// two one-char strings, answered as one i64 word of -1, 0, or 1.
-pub const BUILTIN_CHAR_COMPARE: u32 = 51;
-
-/// `byte_compare(a: byte, b: byte) -> int` - the byte sort key the `ord`
-/// derive orders byte parts through: the u8 order over the two byte
-/// words, answered as one i64 word of -1, 0, or 1.
-pub const BUILTIN_BYTE_COMPARE: u32 = 52;
-
-/// `str_hash(s: string) -> int` - the content hash the `hash` derive
-/// folds string parts through: FNV-1a over the UTF-8 bytes (offset
-/// basis 14695981039346656037, prime 1099511628211, the same pair the
-/// derive's fold mixes through), answered as one i64 word. The value is
-/// an implementation detail; consistency with structural `==` is the
-/// contract [B9].
-pub const BUILTIN_STR_HASH: u32 = 53;
-
-/// `float_hash(f: float) -> int` - the content hash the `hash` derive
-/// folds float parts through: the FNV-1a over the f64's canonical bits —
-/// the fold normalizes `-0.0` to `+0.0` and every NaN payload to the one
-/// canonical NaN, so bit-structurally equal floats hash equal [B9].
-pub const BUILTIN_FLOAT_HASH: u32 = 54;
-
-/// `char_hash(c: char) -> int` - the content hash the `hash` derive
-/// folds char parts through: FNV-1a over the one-char string's UTF-8
-/// bytes (a char rides a string `Ref`, the char-compare convention), so
-/// a char and its own one-char string hash identically.
-pub const BUILTIN_CHAR_HASH: u32 = 55;
-
-/// `repl_park(words...)` — the control seam behind the REPL's resumed
-/// frame (crates/ds-vm/src/repl.rs): no source spelling reaches it, and
-/// the only call sites are the ones that module splices into the entry
-/// function's body, so the table row exists for the splice's pool
-/// reference and the dispatcher's interception.
-pub const BUILTIN_REPL_PARK: u32 = 56;
-/// `parse_float(s: string) -> float | parse_err` — `parse_int`'s twin
-/// over the float slot (index 19, the string block's former spare).
-pub const BUILTIN_PARSE_FLOAT: u32 = 19;
-/// `char_of(code: int) -> char | none` — the codepoint→char reader: the
-/// one native seam the @std json parser's `\u` decoding needs.
-pub const BUILTIN_CHAR_OF: u32 = 58;
-/// `map_keys[k, v] (map) -> list[k]` (generic; CALLG) — the ordered key
-/// face, entry order, one word per key.
-pub const BUILTIN_MAP_KEYS: u32 = 59;
-/// `code_of(c: char) -> int` — the char→codepoint reader, `char_of`'s
-/// twin, the one seam the @std json serializer's control-char escaping
-/// needs.
-pub const BUILTIN_CODE_OF: u32 = 60;
-/// `bytes_of(xs: list[byte]) -> bytes` — the byte string's construction
-/// seam, the `list[byte]` bridge in: one word per byte element folds
-/// into one counted block.
-pub const BUILTIN_BYTES_OF: u32 = 61;
-/// `byte_list(b: bytes) -> list[byte]` — the bridge back out, one word
-/// per byte.
-pub const BUILTIN_BYTE_LIST: u32 = 62;
-/// `byte_at(b: bytes, i: int) -> byte | none` — the checked indexed
-/// read, the ok/none span shape over the one-word byte payload.
-pub const BUILTIN_BYTE_AT: u32 = 63;
-/// `bytes_eq(a, b: bytes) -> bool` — the bytes collection's structural
-/// content compare [B9]: equal payloads answer true, a different length
-/// or content false. The `==`/`!=` chain over bytes operands dispatches
-/// here — the string's EqStr uop reads string objects, so the one Ref
-/// word's shape needs its own body over the raw payload.
-pub const BUILTIN_BYTES_EQ: u32 = 64;
-/// `bytes_compare(a, b: bytes) -> int` — the bytes sort key the `ord`
-/// derive orders bytes parts through: the lexicographic order over the
-/// payloads, a shorter prefix ordering first, answered as one i64 word
-/// of -1, 0, or 1.
-pub const BUILTIN_BYTES_COMPARE: u32 = 65;
-/// `bytes_hash(b: bytes) -> int` — the content hash the `hash` derive
-/// folds bytes parts through: FNV-1a over the payload bytes (the same
-/// pair the derive's fold mixes through), answered as one i64 word. The
-/// value is an implementation detail; consistency with structural `==`
-/// is the contract [B9].
-pub const BUILTIN_BYTES_HASH: u32 = 66;
-/// `utf8_encode(s: string) -> bytes` — the string→bytes bridge: the
-/// string's own UTF-8 bytes become one counted block, no re-encoding.
-pub const BUILTIN_UTF8_ENCODE: u32 = 67;
-/// `utf8_decode(b: bytes) -> string | utf8_err` — the bytes→string
-/// bridge: the payload validates as UTF-8 on the way back, an invalid
-/// sequence answering the taxonomy's `utf8_err` tag with the rejection
-/// message in the payload word.
-pub const BUILTIN_UTF8_DECODE: u32 = 68;
-/// `trap(msg: string) -> unit` — the bare trap primitive (the 2026-11-17
-/// die split): the message-bearing deliberate trap a `die` spelling's
-/// lowering routes to. Never returns and never prints — the trap carries
-/// the message out to the drive, and what a die trap reports (the printing
-/// and the exit code) is the host's own policy; the unit result shape only
-/// satisfies the call site's width check.
-pub const BUILTIN_TRAP: u32 = 69;
-/// `list_eq(a, b: list) -> bool` — the list collection's structural
-/// content compare [B9]: equal lengths and pairwise-equal element words,
-/// every nested reference pair compared by its content. The `==`/`!=`
-/// chain over list operands dispatches here — the string's EqStr uop
-/// reads string objects alone, so the one Ref word's shape needs its own
-/// body. Both operands stay borrowed.
-pub const BUILTIN_LIST_EQ: u32 = 70;
-/// `map_eq(a, b: map) -> bool` — the map collection's structural content
-/// compare [B9]: equal row counts and, per key of one side, the same row
-/// in the other through the lookup face `map_get` serves (string keys by
-/// content, every other word by identity), the value spans pairwise
-/// equal. The `==`/`!=` chain over map operands dispatches here. Both
-/// operands stay borrowed.
-pub const BUILTIN_MAP_EQ: u32 = 71;
-/// `byte_of(n: int) -> byte | none` — the byte width bridge: the in-range
-/// number's word under the ok discriminant, none outside 0-255 (B8's
-/// convention). ds source cannot cross the width (the atom sits outside
-/// the int conversion family), so the json face's byte readers build
-/// their values through this.
-pub const BUILTIN_BYTE_OF: u32 = 72;
-/// `int_of_byte(b: byte) -> int` — the byte width bridge read back: the
-/// word's 0-255 number, for the json_int construction.
-pub const BUILTIN_INT_OF_BYTE: u32 = 73;
-/// `u32_of(n: int) -> u32 | none` — the u32 width bridge: the in-range
-/// number's word under the ok discriminant, none outside the u32 range.
-/// The width carries no literal or constructor, so the json face's u32
-/// readers build their values through this.
-pub const BUILTIN_U32_OF: u32 = 74;
-/// `int_of_u32(v: u32) -> int` — the u32 width bridge read back: the
-/// word's number, for the json_int construction.
-pub const BUILTIN_INT_OF_U32: u32 = 75;
-/// `sqrt(x: float) -> float` — the float math family's square root (the
-/// 2026-11-21 pure-builtin round): IEEE over the f64 word, total by
-/// construction — a negative operand answers NaN, never a trap.
-pub const BUILTIN_SQRT: u32 = 76;
-/// `sin(x: float) -> float`.
-pub const BUILTIN_SIN: u32 = 77;
-/// `cos(x: float) -> float`.
-pub const BUILTIN_COS: u32 = 78;
-/// `atan2(y: float, x: float) -> float` — the two-argument arctangent,
-/// the quadrant read off both signs.
-pub const BUILTIN_ATAN2: u32 = 79;
-/// `floor(x: float) -> float` — the greatest integer not above `x`, as
-/// a float.
-pub const BUILTIN_FLOOR: u32 = 80;
-/// `ceil(x: float) -> float` — the least integer not below `x`, as a
-/// float.
-pub const BUILTIN_CEIL: u32 = 81;
-/// `pow(base: float, exp: float) -> float`.
-pub const BUILTIN_POW: u32 = 82;
-/// `abs[t](x: t) -> t` — the absolute value over the numeric widths,
-/// the solved argument type naming the instance the CALLG evidence word
-/// stages (int answers int with the overflow family's trap at the
-/// `i64::MIN` magnitude, float float). The ONE body lives in
-/// [`GENERIC_FUNCTIONS`], CALLG-addressed; the native slot stays a
-/// reserved trap.
-pub const BUILTIN_ABS: u32 = 83;
-/// `str_fixed(x: float, digits: int) -> string` — the fixed-point float
-/// formatter: exactly `digits` fraction digits, half-to-even rounding
-/// at the cut, `digits` riding 0..=767 (the widest exact f64 fraction;
-/// a negative width clamps to 0, a wider one clamps to 767). NaN and
-/// the infinities answer `str_float`'s own spellings. Pure; the
-/// comptime fence serves it.
-pub const BUILTIN_STR_FIXED: u32 = 57;
-/// `contains(haystack, needle: string) -> bool` — the string search
-/// family's membership read (the 2026-11-21 pure-builtin round): the
-/// needle occurs in the haystack, the empty needle always occurring.
-pub const BUILTIN_CONTAINS: u32 = 84;
-/// `index_of(haystack, needle: string) -> int | none` — the checked
-/// search: the first occurrence's char index under the ok discriminant
-/// (`substring`'s indexing), a miss the `none` member with the inert
-/// unit word as payload.
-pub const BUILTIN_INDEX_OF: u32 = 85;
-/// `replace(haystack, needle, with: string) -> string` — every
-/// non-overlapping occurrence swapped for `with` in one left-to-right
-/// pass, the inserted text never re-scanned; the empty needle inserts
-/// `with` at every char boundary.
-pub const BUILTIN_REPLACE: u32 = 86;
-/// `chan_new(cap: int) -> chan[t]` — the bounded channel's construction
-/// seam (the 2026-11-21 shared-state ruling): a fresh channel object on
-/// the calling fiber's store, the one owning heap. Intercepted by the
-/// dispatcher like the control natives (the channel step needs the
-/// scheduler); the body is the never-run placeholder.
-pub const BUILTIN_CHAN_NEW: u32 = 87;
-/// `chan_send(ch: mut chan[t], x: t) -> ()` — deposit one payload word,
-/// parking on full. Intercepted; the body never runs from a `CALL` site.
-pub const BUILTIN_CHAN_SEND: u32 = 88;
-/// `chan_recv(ch: mut chan[t]) -> t` — take one payload word off the
-/// buffer head, parking on empty. Intercepted; the body never runs from
-/// a `CALL` site.
-pub const BUILTIN_CHAN_RECV: u32 = 89;
-/// `sort[t: ord](xs: list[t]) -> list[t]` — the stable merge sort over the
-/// `ord` trait's compare callable, staged by the call site's lowering
-/// from the solved element type's serving instance. The ONE body lives
-/// in [`GENERIC_FUNCTIONS`], CALLG-addressed; the native slot stays a
-/// reserved trap.
-pub const BUILTIN_SORT: u32 = 90;
-/// `list_set (xs: list, i: int, x: element words) -> unit` — the
-/// in-place element replacement at the index, variadic at the element
-/// span (`list_push`'s staging shape), the store acquiring one count per
-/// incoming `Ref` word and the replaced span releasing its own. The
-/// member tier's `list[t].set` mut-window member routes here; an
-/// out-of-range index traps (the store carries no miss answer).
-pub const BUILTIN_LIST_SET: u32 = 91;
-/// `list_remove (xs: list, i: int) -> unit` — the in-place element
-/// removal, the removed span releasing one count per `Ref` word. The
-/// member tier's `list[t].remove` mut-window member routes here; an
-/// out-of-range index traps.
-pub const BUILTIN_LIST_REMOVE: u32 = 92;
-/// `list_insert (xs: list, i: int, x: element words) -> unit` — the
-/// in-place splice before the index (`index == len` appends), variadic
-/// at the element span. The member tier's `list[t].insert` mut-window
-/// member routes here; an index outside `0..=len` traps.
-pub const BUILTIN_LIST_INSERT: u32 = 93;
-/// `list_clear (xs: list) -> unit` — the in-place emptying, every
-/// element word releasing its count. The member tier's `list[t].clear`
-/// mut-window member routes here.
-pub const BUILTIN_LIST_CLEAR: u32 = 94;
-/// `map_remove (m: map, key: value) -> unit` — the in-place row removal,
-/// the removed key and value span releasing their counts. The member
-/// tier's `map[k, v].remove` mut-window member routes here; a missing
-/// key is a no-op.
-pub const BUILTIN_MAP_REMOVE: u32 = 95;
-/// `map_contains (m: map, key: value) -> bool` — the membership read,
-/// no value handed out. The member tier's `map[k, v].contains` routes
-/// here.
-pub const BUILTIN_MAP_CONTAINS: u32 = 96;
-/// `map_entries (m: map) -> list` — the entry-order pair list: one key
-/// word then its value span per row, one count per `Ref` word acquired
-/// for the fresh list's edge (the map keeps its own, C4). The member
-/// tier's `map[k, v].entries` routes here.
-pub const BUILTIN_MAP_ENTRIES: u32 = 97;
-/// `arena_new() -> arena[t]` — the read-side aliasing container's
-/// construction seam: a fresh empty arena object on the calling
-/// fiber's store. The element type never reaches the code (every arena
-/// one Ref word).
-pub const BUILTIN_ARENA_NEW: u32 = 98;
-/// `arena_insert(a: mut arena[t], x: t) -> int` — store one element
-/// word, answer the packed `(index, generation)` handle. The element
-/// stages as exactly one word (the one-word element policy the call's
-/// staging enforces).
-pub const BUILTIN_ARENA_INSERT: u32 = 99;
-/// `arena_remove(a: mut arena[t], h: int) -> ()` — retire the element
-/// behind a live handle, the slot tombstoning onto the free list with a
-/// generation bump at reuse.
-pub const BUILTIN_ARENA_REMOVE: u32 = 100;
-/// `arena_at(a: mut arena[t], h: int) -> t` — the element word behind a
-/// live handle, a `Ref` element answering as one retained count; a
-/// dangling handle traps deterministically.
-pub const BUILTIN_ARENA_AT: u32 = 101;
-/// `round(x: float) -> float` — the nearest integer, the half away from zero, as a float.
-pub const BUILTIN_ROUND: u32 = 102;
-/// `trunc(x: float) -> float` — the integer-valued float (the fraction discarded).
-pub const BUILTIN_TRUNC: u32 = 103;
-/// `ln(x: float) -> float` — the natural logarithm (`ln(0.0)` answers negative infinity, a
-/// negative operand NaN).
-pub const BUILTIN_LN: u32 = 104;
-/// `exp(x: float) -> float` — the natural exponential.
-pub const BUILTIN_EXP: u32 = 105;
-/// `tan(x: float) -> float`.
-pub const BUILTIN_TAN: u32 = 106;
-/// `timeout(nanos: int, thunk: fn() -> t) -> t` — the timer capability's
-/// race: the callable runs as the calling fiber's racer while the caller
-/// parks on the deadline, the first to finish winning (the two-word
-/// platform span delivered at the parked call site: the racer's one
-/// answer word under the ok discriminant, the `timed_out` class tag
-/// with the inert unit word on expiry, so the call's `t | timed_out`
-/// union handles the deadline through the ordinary error machinery).
-/// Intercepted at `CALL` sites like the channel natives; the body is
-/// the never-run placeholder.
-pub const BUILTIN_TIMEOUT: u32 = 107;
-/// `chan_send_deadline(ch, nanos, x)`: the bounded channel's deadline
-/// send, the loser the io taxonomy's own `timed_out` member.
-pub const BUILTIN_CHAN_SEND_DEADLINE: u32 = 108;
-/// `chan_recv_deadline(ch, nanos)`: the bounded channel's deadline
-/// recv, the loser the same member.
-pub const BUILTIN_CHAN_RECV_DEADLINE: u32 = 109;
-
-/// The success discriminant of every fallible native's result span: the
-/// top of the platform tag-id reservation both native modules share (see
-/// the module docs).
-pub const PLATFORM_IO_OK: u8 = u8::MAX;
-/// The net natives' timeout-class failure discriminant: a bounded wait
-/// expired (the ambient `net_err` case `timeout`), the message `Ref` in
-/// the payload word. Reserved below the lowerer's claim-band pair in
-/// the platform reservation's countdown.
-pub const PLATFORM_NET_TIMEOUT: u8 = u8::MAX - 10;
-/// The net natives' refused-class failure discriminant: every failure
-/// that is not a bounded wait (the ambient `net_err` case `refused`),
-/// the message `Ref` in the payload word.
-pub const PLATFORM_NET_REFUSED: u8 = u8::MAX - 11;
-/// The utf8 decode failure discriminant: the `utf8_err` tag (the
-/// taxonomy's UTF-8 validation member — `parse_err` names document
-/// shape failures alone), the rejection message `Ref` in the payload
-/// word.
-pub const PLATFORM_UTF8_ERR: u8 = u8::MAX - 12;
-
-// The io failure classes (the 2026-11-21 failure-taxonomy ruling): each
-// platform io failure lands on the class tag it names, the classes a
-// platform cannot discriminate portably folding into the `io_other`
-// floor — the OS message `Ref` rides the payload word on every class,
-// but only `io_other`'s member carries it out.
-/// The io class of `ErrorKind::NotFound` (`not_found`).
-pub const PLATFORM_IO_NOT_FOUND: u8 = u8::MAX - 13;
-/// The io class of `ErrorKind::PermissionDenied` (`permission_denied`).
-pub const PLATFORM_IO_PERMISSION_DENIED: u8 = u8::MAX - 14;
-/// The io class of `ErrorKind::AlreadyExists` (`already_exists`).
-pub const PLATFORM_IO_ALREADY_EXISTS: u8 = u8::MAX - 15;
-/// The io class of an expired bounded wait (`timed_out`).
-pub const PLATFORM_IO_TIMED_OUT: u8 = u8::MAX - 16;
-/// The io class of `ErrorKind::UnexpectedEof` (`unexpected_eof`).
-pub const PLATFORM_IO_UNEXPECTED_EOF: u8 = u8::MAX - 17;
-/// The `io_other` floor: every failure no io class names portably.
-pub const PLATFORM_IO_OTHER: u8 = u8::MAX - 18;
 
 /// Whether a platform discriminant is one of the io failure classes.
 #[must_use]
@@ -941,35 +345,6 @@ pub fn is_net_class(tag: u8) -> bool {
             | PLATFORM_NET_OTHER
     )
 }
-/// The net class of `ErrorKind::AddrInUse` (`addr_in_use`).
-pub const PLATFORM_NET_ADDR_IN_USE: u8 = u8::MAX - 19;
-/// The net class of a connection torn down mid-flight, reset or aborted
-/// (`reset`).
-pub const PLATFORM_NET_RESET: u8 = u8::MAX - 20;
-/// The `net_other` floor: every failure no net class names portably.
-pub const PLATFORM_NET_OTHER: u8 = u8::MAX - 21;
-/// The `parse_int` failure discriminant: the `parse_err` tag, one id
-/// below the retired `net_err` slot in the platform reservation's
-/// countdown; the payload word holds the position the reader gave up at.
-pub const PLATFORM_PARSE_ERR: u8 = u8::MAX - 3;
-/// The `none` discriminant of a checked collection read (`list_get`): the
-/// `t | none` member callers extract, the next id below `parse_err` in the
-/// platform reservation's countdown; the payload word holds the
-/// rejected index.
-pub const PLATFORM_NONE: u8 = u8::MAX - 4;
-/// The cancel sentinel of the nursery substrate [E5]: the death value of a
-/// fiber stopped at a preemption point under its nursery's cancel flag,
-/// delivered to its resumer and to a host driver — the next id below
-/// `none` in the platform reservation's countdown.
-pub const PLATFORM_CANCELLED: u8 = u8::MAX - 5;
-
-/// The clean-join discriminant of the nursery boundary seam's result
-/// span: shares the cross-module tag-id reservation, counting down past
-/// the cancellation sentinel.
-pub const NURSERY_BOUNDARY_OK: u8 = u8::MAX - 6;
-/// The first-failure discriminant of the nursery boundary seam's result
-/// span; the payload word carries the failing child's error value.
-pub const NURSERY_BOUNDARY_ERR: u8 = u8::MAX - 7;
 
 /// The control natives of the fiber substrate [E2]: the dispatcher
 /// intercepts them at `CALL` sites and performs the switch itself — the
@@ -2589,221 +1964,65 @@ pub struct GenericFunction {
 /// rest.
 pub type GenericFn = fn(&mut Vm, &[Value], &[Value]) -> Result<NativeResult, Trap>;
 
-/// The generic builtin vocabulary, keyed by the (module, native index)
-/// FuncRef address [H3]. `len[t]`'s one body dispatches on the single
-/// evidence word and answers the string char count, the bytes payload
-/// count, the list element count, or the map pair count. The container reads and counts
-/// (`list_len`, `list_get`, `list_concat`, `map_len`, `map_get`) share the same discipline with
-/// element-agnostic bodies: the container word is one `Ref` whatever the
-/// element, so the evidence words (one per constraint-list entry, each
-/// naming the receiver's container instance) carry no dispatch — they
-/// record the instance for the future registry. No monomorphic instance
-/// exists at runtime, and the table slots the entries address stay
-/// reserved, so a plain CALL never reaches a monomorphic fallback. The
-/// container closes past the map block — `cons`, `tail`, `collect`,
-/// `first` — join them with element-agnostic bodies, `first` carrying
-/// the checked first-element body; `max` dispatches on the numeric
-/// instance its evidence word names. The lambda-taking combinators —
-/// `map`, `filter`, `reduce`, `partition` — append past the closes with
-/// reentrant bodies that call the staged `Fn` word per element through
-/// the VM's hosted-call seam; their evidence words record the
-/// receiver's list instance like every element-agnostic body's, and the
-/// fork-join combinator `par_map` joins them with a nursery-spawning
-/// body whose evidence words record the receiver's list instance the
-/// same way.
-pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
-    (BUILTIN_MODULE, BUILTIN_LEN, GenericFunction {
-        name: "len",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: len_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_LIST_LEN, GenericFunction {
-        name: "list_len",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: list_len_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_LIST_GET, GenericFunction {
-        name: "list_get",
-        params: &[SlotType::Ref, SlotType::I64],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 2,
-        func: list_get_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_LIST_CONCAT, GenericFunction {
-        name: "list_concat",
-        params: &[SlotType::Ref, SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: list_concat_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_MAP_LEN, GenericFunction {
-        name: "map_len",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 2,
-        result_words: 1,
-        func: map_len_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_MAP_GET, GenericFunction {
-        name: "map_get",
-        params: &[SlotType::Ref, SlotType::Raw],
-        staging: Staging::Fixed,
-        evidence: 2,
-        result_words: 2,
-        func: map_get_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_MAP_KEYS, GenericFunction {
-        name: "map_keys",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 2,
-        result_words: 1,
-        func: map_keys_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_CONS, GenericFunction {
-        // the staged span is the head element's whole inline span (the
-        // front, however wide) then the list `Ref` as the trailing named
-        // word — the stride-aware prepend
-        name: "cons",
-        params: &[SlotType::Ref],
-        staging: Staging::Leading,
-        evidence: 1,
-        result_words: 1,
-        func: cons_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_TAIL, GenericFunction {
-        name: "tail",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: tail_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_COLLECT, GenericFunction {
-        name: "collect",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: collect_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_FIRST, GenericFunction {
-        name: "first",
-        params: &[SlotType::Ref],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 2,
-        func: first_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_MAX, GenericFunction {
-        name: "max",
-        params: &[SlotType::Raw, SlotType::Raw],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: max_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_ABS, GenericFunction {
-        // abs over the numeric widths: the evidence word names the
-        // instance, int answering the checked magnitude (the
-        // `i64::MIN` trap the arithmetic family carries) and float the
-        // IEEE absolute value
-        name: "abs",
-        params: &[SlotType::Raw],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: abs_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_MAP, GenericFunction {
-        name: "map",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Fixed,
-        evidence: 2,
-        result_words: 1,
-        func: map_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_FILTER, GenericFunction {
-        name: "filter",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: filter_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_REDUCE, GenericFunction {
-        // the accumulator's whole word span stages between the leading
-        // list `Ref` and the trailing callable word, so its width is
-        // dynamic per call and the callable rides at the staged span's
-        // end; the result floor is the one-word fold, the answer's whole
-        // span riding the tag-less total (bounds-checked against the
-        // caller's area at the write)
-        name: "reduce",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Interior,
-        evidence: 1,
-        result_words: 1,
-        func: reduce_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_PARTITION, GenericFunction {
-        name: "partition",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Fixed,
-        evidence: 1,
-        // the tag-less two-word total: the static floor is the two list
-        // Refs the one body answers
-        result_words: 2,
-        func: partition_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_PAR_MAP, GenericFunction {
-        name: "fork_map",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Fixed,
-        evidence: 2,
-        result_words: 1,
-        func: par_map_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_PAR_REDUCE, GenericFunction {
-        // the accumulator's whole word span stages between the leading
-        // list `Ref` and the trailing callable word (reduce's interior
-        // staging); the result floor is the one-word fold, the answer's
-        // whole span riding the tag-less total
-        name: "fork_reduce",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Interior,
-        evidence: 1,
-        result_words: 1,
-        func: par_reduce_generic_fn,
-    }),
-    (BUILTIN_MODULE, BUILTIN_SORT, GenericFunction {
-        // the list `Ref` leads, the compare callable word follows, and
-        // the receiver's list-instance evidence word trails the real
-        // arguments like filter's; the result floor is the one fresh
-        // list `Ref`
-        name: "sort",
-        params: &[SlotType::Ref, SlotType::Fn],
-        staging: Staging::Fixed,
-        evidence: 1,
-        result_words: 1,
-        func: sort_generic_fn,
-    }),
+/// One body per generic row name: a name and its own body cannot drift apart, since two rows
+/// can share every declarative field.
+const GENERIC_BODIES: &[(&str, GenericFn)] = &[
+    ("len", len_generic_fn),
+    ("list_len", list_len_generic_fn),
+    ("list_get", list_get_generic_fn),
+    ("list_concat", list_concat_generic_fn),
+    ("map_len", map_len_generic_fn),
+    ("map_get", map_get_generic_fn),
+    ("map_keys", map_keys_generic_fn),
+    ("cons", cons_generic_fn),
+    ("tail", tail_generic_fn),
+    ("collect", collect_generic_fn),
+    ("first", first_generic_fn),
+    ("max", max_generic_fn),
+    ("abs", abs_generic_fn),
+    ("map", map_generic_fn),
+    ("filter", filter_generic_fn),
+    ("reduce", reduce_generic_fn),
+    ("fork_map", par_map_generic_fn),
+    ("partition", partition_generic_fn),
+    ("fork_reduce", par_reduce_generic_fn),
+    ("sort", sort_generic_fn),
 ];
 
-/// Resolves the generic builtin a CALLG FuncRef addresses, if any.
+/// The generic builtin vocabulary, keyed by the (module, native index) `FuncRef` address: the abi
+/// rows with this VM's one body per row attached.
+static GENERIC_FUNCTIONS: LazyLock<Vec<GenericFunction>> = LazyLock::new(|| {
+    ds_abi::native::GENERIC_NATIVES
+        .iter()
+        .map(|row| GenericFunction {
+            name: row.name,
+            params: row.params,
+            staging: row.staging,
+            evidence: row.evidence,
+            result_words: row.shape.result_words(),
+            func: generic_body(row.name),
+        })
+        .collect()
+});
+
+/// The one body a generic row names.
+fn generic_body(name: &str) -> GenericFn {
+    GENERIC_BODIES
+        .iter()
+        .find_map(|(row, func)| (*row == name).then_some(*func))
+        .unwrap_or_else(|| panic!("the generic `{name}` row carries a body"))
+}
+
+/// Resolves the generic builtin a CALLG `FuncRef` addresses, if any.
 #[must_use]
 pub fn resolve_generic(module: &str, index: u32) -> Option<&'static GenericFunction> {
-    GENERIC_FUNCTIONS
+    if module != BUILTIN_MODULE {
+        return None;
+    }
+    let at = ds_abi::native::GENERIC_NATIVES
         .iter()
-        .find(|(m, i, _)| *m == module && *i == index)
-        .map(|(_, _, g)| g)
+        .position(|row| row.index == index)?;
+    Some(&GENERIC_FUNCTIONS[at])
 }
 
 /// The one `len` body: dispatch on the call's evidence word, the
@@ -3603,931 +2822,121 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
     }
 }
 
-/// The core native table every VM installs as [`BUILTIN_MODULE`]: the
-/// pure, irreducible primitives — the typed `str_*` conversions (2-4),
-/// the string ops (11-18), and the list and map construction and
-/// mutation surfaces — pure with no world effects. The historical
-/// world-surface indices (0-1, 5-9), the string block's spare slot (19),
-/// every generic builtin's slot (10, 21-23, 29-30, 32-37 — their ONE
-/// bodies live in [`GENERIC_FUNCTIONS`], CALLG-addressed), and the
-/// retired `fiber_yield` debug yield's slot (24) stay as
-/// reserved trap entries; the list block appends past the historical
-/// run (indices freeze at M7), the fiber substrate's debug switch
-/// ([`BUILTIN_FIBER_RESUME`]) appends past the list block, and the
-/// nursery boundary's debug join
-/// ([`BUILTIN_NURSERY_JOIN`]) appends past the pair, the generic
-/// container closes (`cons`, `head`, `tail`, `collect`, `first`,
-/// `max`) append past the map block, the reentrant combinators
-/// (`map`, `filter`, `reduce`) append past the closes, the
-/// string-list renderer `join` ([`BUILTIN_JOIN`]) appends past the
-/// nursery controls, `partition` ([`BUILTIN_PARTITION`], the tag-less
-/// two-word total) appends past `join`, and the fork-join combinator
-/// `par_map` ([`BUILTIN_PAR_MAP`]) appends past `partition`, and the fork-join fold `par_reduce`
-/// ([`BUILTIN_PAR_REDUCE`]) appends past `par_map`, and the float sort key
-/// `total_compare` ([`BUILTIN_TOTAL_COMPARE`], the `ord` derive's) appends
-/// past the generic tail, and the string, char, and byte sort keys
-/// ([`BUILTIN_STR_COMPARE`], [`BUILTIN_CHAR_COMPARE`],
-/// [`BUILTIN_BYTE_COMPARE`]) append past it, the content-eq pair
-/// (`list_eq`, `map_eq`) past those, and the byte/u32 width bridges
-/// ([`BUILTIN_BYTE_OF`]..[`BUILTIN_INT_OF_U32`], the json face's scalar
-/// readers) past the pair, and the float math family and the string
-/// search triple ([`BUILTIN_SQRT`]..[`BUILTIN_REPLACE`], the 2026-11-21
-/// pure-builtin round) past the bridges, and the ord-routed list sort's
-/// reserved slot ([`BUILTIN_SORT`], its reentrant ONE body in
-/// [`GENERIC_FUNCTIONS`]) past the channel triple.
-// one flat registration table whose entry order is contract (the
-// reserved head and the compare natives' tail positions); splitting it
-// would only relocate entries between functions
-#[allow(clippy::too_many_lines)]
+/// The builtin table every VM installs as [`BUILTIN_MODULE`]: the pure, irreducible primitives and
+/// the fiber, channel, and timer seams the dispatcher intercepts. The rows are the abi's
+/// ([`ds_abi::native`]); this module supplies one body per row and the interception markers, and
+/// keeps every gap — a retired native's slot, or a generic row's monomorphic slot — a trap.
 #[must_use]
 pub fn builtin_module() -> Vec<NativeFunction> {
-    let fns = vec![
-        reserved_entry(builtin_reserved_0),
-        reserved_entry(builtin_reserved_1),
-        NativeFunction {
-            name: "str_int",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_int_fn,
-        },
-        NativeFunction {
-            name: "str_float",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_float_fn,
-        },
-        NativeFunction {
-            name: "str_bool",
-            params: &[SlotType::Bool],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_bool_fn,
-        },
-        reserved_entry(builtin_reserved_5),
-        reserved_entry(builtin_reserved_6),
-        reserved_entry(builtin_reserved_7),
-        reserved_entry(builtin_reserved_8),
-        reserved_entry(builtin_reserved_9),
-        reserved_entry(builtin_reserved_10),
-        NativeFunction {
-            name: "substring",
-            params: &[SlotType::Ref, SlotType::I64, SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: substring_fn,
-        },
-        NativeFunction {
-            name: "concat",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: concat_fn,
-        },
-        NativeFunction {
-            name: "to_upper",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: to_upper_fn,
-        },
-        NativeFunction {
-            name: "to_lower",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: to_lower_fn,
-        },
-        NativeFunction {
-            name: "trim",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: trim_fn,
-        },
-        NativeFunction {
-            name: "parse_int",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: parse_int_fn,
-        },
-        NativeFunction {
-            // the separator stages as the checked union's whole span (the
-            // tag word, then the one-char string or separator text) — a
-            // char word and a string word share the Ref spelling, so the
-            // body reads the payload alone
-            name: "split",
-            params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: split_fn,
-        },
-        NativeFunction {
-            name: "char_at",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: char_at_fn,
-        },
-        NativeFunction {
-            // `parse_float(s: string) -> float | parse_err` — the
-            // correctly-rounded decimal reader, `parse_int`'s twin over
-            // the float slot (strict: no implicit whitespace handling,
-            // the `trim` native composes)
-            name: "parse_float",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: parse_float_fn,
-        },
-        NativeFunction {
-            name: "list_new",
-            params: &[],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_new_fn,
-        },
-        reserved_entry(builtin_reserved_21),
-        reserved_entry(builtin_reserved_22),
-        reserved_entry(builtin_reserved_23),
-        reserved_entry(builtin_reserved_24),
-        NativeFunction {
-            name: "fiber_resume",
-            params: &[SlotType::I64, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: Some(ControlNative::Resume),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            name: "nursery_join",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: Some(ControlNative::NurseryJoin),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            name: "list_push",
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: true,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_push_fn,
-        },
-        NativeFunction {
-            name: "map_new",
-            params: &[],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_new_fn,
-        },
-        reserved_entry(builtin_reserved_29),
-        reserved_entry(builtin_reserved_30),
-        NativeFunction {
-            name: "map_set",
-            // the variadic tail is the value's whole inline word span
-            // (one word per map value word, the `list_push` shape)
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: true,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_set_fn,
-        },
-        reserved_entry(builtin_reserved_32),
-        reserved_entry(builtin_reserved_33),
-        reserved_entry(builtin_reserved_34),
-        reserved_entry(builtin_reserved_35),
-        reserved_entry(builtin_reserved_36),
-        reserved_entry(builtin_reserved_37),
-        reserved_entry(builtin_reserved_38),
-        reserved_entry(builtin_reserved_39),
-        reserved_entry(builtin_reserved_40),
-        NativeFunction {
-            name: "nursery_open",
-            params: &[],
-            variadic: false,
-            result_words: 1,
-            control: Some(ControlNative::NurseryOpen),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            name: "nursery_spawn",
-            params: &[SlotType::I64, SlotType::Fn],
-            variadic: false,
-            result_words: 1,
-            control: Some(ControlNative::NurserySpawn),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            name: "nursery_boundary",
-            params: &[SlotType::I64, SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: Some(ControlNative::NurseryBoundary),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            name: "nursery_cancel",
-            // the staged span is the failing value's flat word span: word 0
-            // the member's tag (the named Tag parameter), the tail its
-            // payload words in declaration order — the native channel's
-            // staging shape, so the arity relaxes to "at least"
-            params: &[SlotType::Tag],
-            variadic: true,
-            result_words: 1,
-            control: Some(ControlNative::NurseryCancel),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            // the separator stages as the checked union's whole span (the
-            // tag word, then the one-char string or separator text) — a
-            // char word and a string word share the Ref spelling, so the
-            // body reads the payload alone
-            name: "join",
-            params: &[SlotType::Ref, SlotType::Tag, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: join_fn,
-        },
-        reserved_entry(builtin_reserved_46),
-        reserved_entry(builtin_reserved_47),
-        reserved_entry(builtin_reserved_48),
-        NativeFunction {
-            name: "total_compare",
-            params: &[SlotType::F64, SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: total_compare_fn,
-        },
-        NativeFunction {
-            name: "str_compare",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_compare_fn,
-        },
-        NativeFunction {
-            name: "char_compare",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: char_compare_fn,
-        },
-        NativeFunction {
-            name: "byte_compare",
-            params: &[SlotType::I64, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: byte_compare_fn,
-        },
-        NativeFunction {
-            name: "str_hash",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_hash_fn,
-        },
-        NativeFunction {
-            name: "float_hash",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: float_hash_fn,
-        },
-        NativeFunction {
-            name: "char_hash",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: char_hash_fn,
-        },
-        NativeFunction {
-            name: "repl_park",
-            // the REPL's park seam: the staged words are the submission's
-            // answer span (word 0 rides the park event to the host), so the
-            // arity is whatever the splice staged and no kind is checked
-            params: &[],
-            variadic: true,
-            result_words: 1,
-            control: Some(ControlNative::ReplPark),
-            channel: None,
-            timer: None,
-            func: fiber_control_bounce_fn,
-        },
-        NativeFunction {
-            // the fixed-point float formatter over the string slot: the
-            // digits word clamps into the honest f64 fraction window
-            name: "str_fixed",
-            params: &[SlotType::F64, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: str_fixed_fn,
-        }, /* was parse_json; the reader lives in @std ds
-            * source now */
-        NativeFunction {
-            name: "char_of",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: char_of_fn,
-        },
-        reserved_entry(builtin_reserved_59), /* was map_keys; the generic body lives in
-                                              * GENERIC_FUNCTIONS */
-        NativeFunction {
-            name: "code_of",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: code_of_fn,
-        },
-        NativeFunction {
-            name: "bytes_of",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: bytes_of_fn,
-        },
-        NativeFunction {
-            name: "byte_list",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: byte_list_fn,
-        },
-        NativeFunction {
-            name: "byte_at",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: byte_at_fn,
-        },
-        NativeFunction {
-            name: "bytes_eq",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: bytes_eq_fn,
-        },
-        NativeFunction {
-            name: "bytes_compare",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: bytes_compare_fn,
-        },
-        NativeFunction {
-            name: "bytes_hash",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: bytes_hash_fn,
-        },
-        NativeFunction {
-            name: "utf8_encode",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: utf8_encode_fn,
-        },
-        NativeFunction {
-            name: "utf8_decode",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: utf8_decode_fn,
-        },
-        NativeFunction {
-            name: "trap",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: trap_fn,
-        },
-        NativeFunction {
-            name: "list_eq",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_eq_fn,
-        },
-        NativeFunction {
-            name: "map_eq",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_eq_fn,
-        },
-        NativeFunction {
-            name: "byte_of",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: byte_of_fn,
-        },
-        NativeFunction {
-            name: "int_of_byte",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: int_of_byte_fn,
-        },
-        NativeFunction {
-            name: "u32_of",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: u32_of_fn,
-        },
-        NativeFunction {
-            name: "int_of_u32",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: int_of_u32_fn,
-        },
-        NativeFunction {
-            name: "sqrt",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: sqrt_fn,
-        },
-        NativeFunction {
-            name: "sin",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: sin_fn,
-        },
-        NativeFunction {
-            name: "cos",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: cos_fn,
-        },
-        NativeFunction {
-            name: "atan2",
-            params: &[SlotType::F64, SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: atan2_fn,
-        },
-        NativeFunction {
-            name: "floor",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: floor_fn,
-        },
-        NativeFunction {
-            name: "ceil",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: ceil_fn,
-        },
-        NativeFunction {
-            name: "pow",
-            params: &[SlotType::F64, SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: pow_fn,
-        },
-        reserved_entry(builtin_reserved_83),
-        NativeFunction {
-            name: "contains",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: contains_fn,
-        },
-        NativeFunction {
-            name: "index_of",
-            params: &[SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: None,
-            func: index_of_fn,
-        },
-        NativeFunction {
-            name: "replace",
-            params: &[SlotType::Ref, SlotType::Ref, SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: replace_fn,
-        },
-        NativeFunction {
-            name: "chan_new",
-            params: &[SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: Some(ChannelNative::New),
-            timer: None,
-            func: chan_refuse_fn,
-        },
-        NativeFunction {
-            name: "chan_send",
-            // the staged tail past the channel word is one payload
-            // element's whole inline word span (`list_push`'s variadic
-            // shape at the hand-off position)
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: true,
-            result_words: 1,
-            control: None,
-            channel: Some(ChannelNative::Send),
-            timer: None,
-            func: chan_refuse_fn,
-        },
-        NativeFunction {
-            name: "chan_recv",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: Some(ChannelNative::Recv),
-            timer: None,
-            func: chan_refuse_fn,
-        },
-        reserved_entry(builtin_reserved_90),
-        NativeFunction {
-            name: "list_set",
-            // the staged tail is the list word, the index word, then the
-            // element's whole inline word span (`list_push`'s variadic
-            // shape at the element position)
-            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
-            variadic: true,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_set_fn,
-        },
-        NativeFunction {
-            name: "list_remove",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_remove_fn,
-        },
-        NativeFunction {
-            name: "list_insert",
-            // `list_set`'s staging shape
-            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
-            variadic: true,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_insert_fn,
-        },
-        NativeFunction {
-            name: "list_clear",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: list_clear_fn,
-        },
-        NativeFunction {
-            name: "map_remove",
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_remove_fn,
-        },
-        NativeFunction {
-            name: "map_contains",
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_contains_fn,
-        },
-        NativeFunction {
-            name: "map_entries",
-            params: &[SlotType::Ref],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: map_entries_fn,
-        },
-        NativeFunction {
-            name: "arena_new",
-            params: &[],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: arena_new_fn,
-        },
-        NativeFunction {
-            name: "arena_insert",
-            params: &[SlotType::Ref, SlotType::Raw],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: arena_insert_fn,
-        },
-        NativeFunction {
-            name: "arena_remove",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: arena_remove_fn,
-        },
-        NativeFunction {
-            name: "arena_at",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: arena_at_fn,
-        },
-        NativeFunction {
-            name: "round",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: round_fn,
-        },
-        NativeFunction {
-            name: "trunc",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: trunc_fn,
-        },
-        NativeFunction {
-            name: "ln",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: log_fn,
-        },
-        NativeFunction {
-            name: "exp",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: exp_fn,
-        },
-        NativeFunction {
-            name: "tan",
-            params: &[SlotType::F64],
-            variadic: false,
-            result_words: 1,
-            control: None,
-            channel: None,
-            timer: None,
-            func: tan_fn,
-        },
-        NativeFunction {
-            name: "timeout",
-            // the deadline's nanoseconds, then the callable's word (the
-            // scalar FuncRef or a closure object's `Ref`); the answer
-            // spans two overlay words — the discriminant plus the
-            // payload word — exactly a fallible native's own shape
-            params: &[SlotType::I64, SlotType::Fn],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: None,
-            timer: Some(TimerNative::Timeout),
-            func: chan_refuse_fn,
-        },
-        NativeFunction {
-            name: "chan_send_deadline",
-            // the channel word, the deadline's nanoseconds, then the
-            // staged payload span (`chan_send`'s variadic shape one
-            // word later); the answer spans two overlay words — the ok
-            // unit or the `timed_out` class tag with the inert unit
-            // word — exactly a fallible native's own shape
-            params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
-            variadic: true,
-            result_words: 2,
-            control: None,
-            channel: Some(ChannelNative::SendDeadline),
-            timer: None,
-            func: chan_refuse_fn,
-        },
-        NativeFunction {
-            name: "chan_recv_deadline",
-            params: &[SlotType::Ref, SlotType::I64],
-            variadic: false,
-            result_words: 2,
-            control: None,
-            channel: Some(ChannelNative::RecvDeadline),
-            timer: None,
-            func: chan_refuse_fn,
-        },
-    ];
-    // install-time guard (debug builds): the pinned index run ends at
-    // the channel deadlines, so the table must cover exactly that run
+    let mut fns: Vec<NativeFunction> = BUILTIN_BODIES
+        .iter()
+        .map(|body| reserved_entry(*body))
+        .collect();
+    for row in ds_abi::native::rows(NativeModule::Builtin) {
+        let slot = &mut fns[row.index as usize];
+        slot.name = row.name;
+        slot.params = row.params;
+        slot.variadic = row.variadic;
+        slot.result_words = row.shape.result_words();
+    }
+    for (index, dispatch) in BUILTIN_DISPATCH {
+        let slot = &mut fns[*index as usize];
+        match dispatch {
+            Dispatch::Control(control) => slot.control = Some(*control),
+            Dispatch::Channel(channel) => slot.channel = Some(*channel),
+            Dispatch::Timer(timer) => slot.timer = Some(*timer),
+        }
+    }
     debug_assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
     fns
 }
+
+/// One body per builtin table index, in index order: a gap carries its refusal stub.
+#[rustfmt::skip]
+const BUILTIN_BODIES: [NativeFn; BUILTIN_CHAN_RECV_DEADLINE as usize + 1] = [
+    builtin_reserved_0, builtin_reserved_1, str_int_fn, str_float_fn,
+    str_bool_fn, builtin_reserved_5, builtin_reserved_6, builtin_reserved_7,
+    builtin_reserved_8, builtin_reserved_9, builtin_reserved_10, substring_fn,
+    concat_fn, to_upper_fn, to_lower_fn, trim_fn,
+    parse_int_fn, split_fn, char_at_fn, parse_float_fn,
+    list_new_fn, builtin_reserved_21, builtin_reserved_22, builtin_reserved_23,
+    builtin_reserved_24, fiber_control_bounce_fn, fiber_control_bounce_fn, list_push_fn,
+    map_new_fn, builtin_reserved_29, builtin_reserved_30, map_set_fn,
+    builtin_reserved_32, builtin_reserved_33, builtin_reserved_34, builtin_reserved_35,
+    builtin_reserved_36, builtin_reserved_37, builtin_reserved_38, builtin_reserved_39,
+    builtin_reserved_40, fiber_control_bounce_fn, fiber_control_bounce_fn, fiber_control_bounce_fn,
+    fiber_control_bounce_fn, join_fn, builtin_reserved_46, builtin_reserved_47,
+    builtin_reserved_48, total_compare_fn, str_compare_fn, char_compare_fn,
+    byte_compare_fn, str_hash_fn, float_hash_fn, char_hash_fn,
+    fiber_control_bounce_fn, str_fixed_fn, char_of_fn, builtin_reserved_59,
+    code_of_fn, bytes_of_fn, byte_list_fn, byte_at_fn,
+    bytes_eq_fn, bytes_compare_fn, bytes_hash_fn, utf8_encode_fn,
+    utf8_decode_fn, trap_fn, list_eq_fn, map_eq_fn,
+    byte_of_fn, int_of_byte_fn, u32_of_fn, int_of_u32_fn,
+    sqrt_fn, sin_fn, cos_fn, atan2_fn,
+    floor_fn, ceil_fn, pow_fn, builtin_reserved_83,
+    contains_fn, index_of_fn, replace_fn, chan_refuse_fn,
+    chan_refuse_fn, chan_refuse_fn, builtin_reserved_90, list_set_fn,
+    list_remove_fn, list_insert_fn, list_clear_fn, map_remove_fn,
+    map_contains_fn, map_entries_fn, arena_new_fn, arena_insert_fn,
+    arena_remove_fn, arena_at_fn, round_fn, trunc_fn,
+    log_fn, exp_fn, tan_fn, chan_refuse_fn,
+    chan_refuse_fn, chan_refuse_fn,
+];
+
+/// How the dispatcher intercepts a slot ahead of its body.
+enum Dispatch {
+    /// The fiber substrate's switch, performed by the dispatcher.
+    Control(ControlNative),
+    /// The channel step, which needs the scheduler.
+    Channel(ChannelNative),
+    /// The timer race, which needs the run queue and the deadline wheel.
+    Timer(TimerNative),
+}
+
+/// The intercepted slots; every other slot runs its body directly.
+const BUILTIN_DISPATCH: &[(u32, Dispatch)] = &[
+    (
+        BUILTIN_FIBER_RESUME,
+        Dispatch::Control(ControlNative::Resume),
+    ),
+    (
+        BUILTIN_NURSERY_JOIN,
+        Dispatch::Control(ControlNative::NurseryJoin),
+    ),
+    (
+        BUILTIN_NURSERY_OPEN,
+        Dispatch::Control(ControlNative::NurseryOpen),
+    ),
+    (
+        BUILTIN_NURSERY_SPAWN,
+        Dispatch::Control(ControlNative::NurserySpawn),
+    ),
+    (
+        BUILTIN_NURSERY_BOUNDARY,
+        Dispatch::Control(ControlNative::NurseryBoundary),
+    ),
+    (
+        BUILTIN_NURSERY_CANCEL,
+        Dispatch::Control(ControlNative::NurseryCancel),
+    ),
+    (
+        BUILTIN_REPL_PARK,
+        Dispatch::Control(ControlNative::ReplPark),
+    ),
+    (BUILTIN_CHAN_NEW, Dispatch::Channel(ChannelNative::New)),
+    (BUILTIN_CHAN_SEND, Dispatch::Channel(ChannelNative::Send)),
+    (BUILTIN_CHAN_RECV, Dispatch::Channel(ChannelNative::Recv)),
+    (BUILTIN_TIMEOUT, Dispatch::Timer(TimerNative::Timeout)),
+    (
+        BUILTIN_CHAN_SEND_DEADLINE,
+        Dispatch::Channel(ChannelNative::SendDeadline),
+    ),
+    (
+        BUILTIN_CHAN_RECV_DEADLINE,
+        Dispatch::Channel(ChannelNative::RecvDeadline),
+    ),
+];
 
 /// The intercepted natives' placeholder body (the channel steps and the
 /// timer race): the dispatcher intercepts every `CALL` and `CALLT` site
@@ -5318,230 +3727,110 @@ mod tests {
         object::Objects,
     };
 
+    /// The builtin table is the abi's row set: every row lands on its reserved slot with its own
+    /// name, parameter kinds, and result width, and every slot no row names stays a trap.
     #[test]
-    fn builtin_core_table_indices_are_contract() {
+    fn the_builtin_table_is_row_driven() {
         let fns = builtin_module();
-        assert_eq!(fns[BUILTIN_STR_INT as usize].name, "str_int");
-        assert_eq!(fns[BUILTIN_STR_FLOAT as usize].name, "str_float");
-        assert_eq!(fns[BUILTIN_STR_BOOL as usize].name, "str_bool");
-        // the generic builtins' table slots stay reserved (a plain CALL
-        // must not reach a monomorphic instance), and the ONE bodies live
-        // in the generic table keyed by the same FuncRef
-        for (index, name, evidence, words) in [
-            (BUILTIN_LEN, "len", 1, 1),
-            (BUILTIN_LIST_LEN, "list_len", 1, 1),
-            (BUILTIN_LIST_GET, "list_get", 1, 2),
-            (BUILTIN_LIST_CONCAT, "list_concat", 1, 1),
-            (BUILTIN_MAP_LEN, "map_len", 2, 1),
-            (BUILTIN_MAP_GET, "map_get", 2, 2),
-            (BUILTIN_MAP_KEYS, "map_keys", 2, 1),
-            (BUILTIN_CONS, "cons", 1, 1),
-            (BUILTIN_TAIL, "tail", 1, 1),
-            (BUILTIN_COLLECT, "collect", 1, 1),
-            (BUILTIN_FIRST, "first", 1, 2),
-            (BUILTIN_MAX, "max", 1, 1),
-            (BUILTIN_ABS, "abs", 1, 1),
-            (BUILTIN_MAP, "map", 2, 1),
-            (BUILTIN_FILTER, "filter", 1, 1),
-            (BUILTIN_REDUCE, "reduce", 1, 1),
-            (BUILTIN_PARTITION, "partition", 1, 2),
-            (BUILTIN_PAR_MAP, "fork_map", 2, 1),
-            (BUILTIN_PAR_REDUCE, "fork_reduce", 1, 1),
-        ] {
-            assert_eq!(fns[index as usize].name, "reserved", "{name}'s slot");
-            let body = resolve_generic(BUILTIN_MODULE, index)
-                .unwrap_or_else(|| panic!("the generic {name} body resolves"));
-            assert_eq!(body.name, name);
-            assert_eq!(body.evidence, evidence);
-            assert_eq!(body.result_words, words);
-        }
-        assert_eq!(fns[BUILTIN_SUBSTRING as usize].name, "substring");
-        assert_eq!(fns[BUILTIN_CONCAT as usize].name, "concat");
-        assert_eq!(fns[BUILTIN_TO_UPPER as usize].name, "to_upper");
-        assert_eq!(fns[BUILTIN_TO_LOWER as usize].name, "to_lower");
-        assert_eq!(fns[BUILTIN_TRIM as usize].name, "trim");
-        assert_eq!(fns[BUILTIN_PARSE_INT as usize].name, "parse_int");
-        assert_eq!(fns[BUILTIN_SPLIT as usize].name, "split");
-        assert_eq!(fns[BUILTIN_CHAR_AT as usize].name, "char_at");
-        assert_eq!(fns[BUILTIN_LIST_NEW as usize].name, "list_new");
-        assert_eq!(fns[BUILTIN_FIBER_RESUME as usize].name, "fiber_resume");
-        assert_eq!(fns[BUILTIN_NURSERY_JOIN as usize].name, "nursery_join");
-        assert_eq!(fns[BUILTIN_LIST_PUSH as usize].name, "list_push");
-        assert_eq!(fns[BUILTIN_MAP_NEW as usize].name, "map_new");
-        assert_eq!(fns[BUILTIN_MAP_SET as usize].name, "map_set");
-        assert_eq!(fns[BUILTIN_NURSERY_OPEN as usize].name, "nursery_open");
-        assert_eq!(fns[BUILTIN_NURSERY_SPAWN as usize].name, "nursery_spawn");
-        assert_eq!(
-            fns[BUILTIN_NURSERY_BOUNDARY as usize].name,
-            "nursery_boundary"
-        );
-        assert_eq!(fns[BUILTIN_NURSERY_CANCEL as usize].name, "nursery_cancel");
-        assert_eq!(fns[BUILTIN_JOIN as usize].name, "join");
-        assert_eq!(fns[BUILTIN_TOTAL_COMPARE as usize].name, "total_compare");
-        assert_eq!(fns[BUILTIN_STR_COMPARE as usize].name, "str_compare");
-        assert_eq!(fns[BUILTIN_CHAR_COMPARE as usize].name, "char_compare");
-        assert_eq!(fns[BUILTIN_BYTE_COMPARE as usize].name, "byte_compare");
-        assert_eq!(fns[BUILTIN_STR_HASH as usize].name, "str_hash");
-        assert_eq!(fns[BUILTIN_FLOAT_HASH as usize].name, "float_hash");
-        assert_eq!(fns[BUILTIN_CHAR_HASH as usize].name, "char_hash");
-        assert_eq!(fns[BUILTIN_REPL_PARK as usize].name, "repl_park");
-        assert_eq!(fns[BUILTIN_PARSE_FLOAT as usize].name, "parse_float");
-        assert_eq!(fns[BUILTIN_CHAR_OF as usize].name, "char_of");
-        assert_eq!(fns[BUILTIN_CODE_OF as usize].name, "code_of");
-        assert_eq!(fns[BUILTIN_BYTES_OF as usize].name, "bytes_of");
-        assert_eq!(fns[BUILTIN_BYTE_LIST as usize].name, "byte_list");
-        assert_eq!(fns[BUILTIN_BYTE_AT as usize].name, "byte_at");
-        assert_eq!(fns[BUILTIN_BYTES_EQ as usize].name, "bytes_eq");
-        assert_eq!(fns[BUILTIN_BYTES_COMPARE as usize].name, "bytes_compare");
-        assert_eq!(fns[BUILTIN_BYTES_HASH as usize].name, "bytes_hash");
-        assert_eq!(fns[BUILTIN_UTF8_ENCODE as usize].name, "utf8_encode");
-        assert_eq!(fns[BUILTIN_UTF8_DECODE as usize].name, "utf8_decode");
-        assert_eq!(fns[BUILTIN_TRAP as usize].name, "trap");
-        assert_eq!(fns[BUILTIN_LIST_EQ as usize].name, "list_eq");
-        assert_eq!(fns[BUILTIN_MAP_EQ as usize].name, "map_eq");
-        assert_eq!(fns[BUILTIN_BYTE_OF as usize].name, "byte_of");
-        assert_eq!(fns[BUILTIN_INT_OF_BYTE as usize].name, "int_of_byte");
-        assert_eq!(fns[BUILTIN_U32_OF as usize].name, "u32_of");
-        assert_eq!(fns[BUILTIN_INT_OF_U32 as usize].name, "int_of_u32");
-        assert_eq!(fns[BUILTIN_SQRT as usize].name, "sqrt");
-        assert_eq!(fns[BUILTIN_SIN as usize].name, "sin");
-        assert_eq!(fns[BUILTIN_COS as usize].name, "cos");
-        assert_eq!(fns[BUILTIN_ATAN2 as usize].name, "atan2");
-        assert_eq!(fns[BUILTIN_FLOOR as usize].name, "floor");
-        assert_eq!(fns[BUILTIN_CEIL as usize].name, "ceil");
-        assert_eq!(fns[BUILTIN_POW as usize].name, "pow");
-        assert_eq!(fns[BUILTIN_ABS as usize].name, "reserved");
-        assert_eq!(fns[BUILTIN_CONTAINS as usize].name, "contains");
-        assert_eq!(fns[BUILTIN_INDEX_OF as usize].name, "index_of");
-        assert_eq!(fns[BUILTIN_REPLACE as usize].name, "replace");
-        assert_eq!(fns[BUILTIN_CHAN_NEW as usize].name, "chan_new");
-        assert_eq!(fns[BUILTIN_CHAN_SEND as usize].name, "chan_send");
-        assert_eq!(fns[BUILTIN_CHAN_RECV as usize].name, "chan_recv");
-        assert_eq!(fns[BUILTIN_LIST_SET as usize].name, "list_set");
-        assert_eq!(fns[BUILTIN_LIST_REMOVE as usize].name, "list_remove");
-        assert_eq!(fns[BUILTIN_LIST_INSERT as usize].name, "list_insert");
-        assert_eq!(fns[BUILTIN_LIST_CLEAR as usize].name, "list_clear");
-        assert_eq!(fns[BUILTIN_MAP_REMOVE as usize].name, "map_remove");
-        assert_eq!(fns[BUILTIN_MAP_CONTAINS as usize].name, "map_contains");
-        assert_eq!(fns[BUILTIN_MAP_ENTRIES as usize].name, "map_entries");
-        assert_eq!(fns[BUILTIN_ARENA_NEW as usize].name, "arena_new");
-        assert_eq!(fns[BUILTIN_ARENA_INSERT as usize].name, "arena_insert");
-        assert_eq!(fns[BUILTIN_ARENA_REMOVE as usize].name, "arena_remove");
-        assert_eq!(fns[BUILTIN_ARENA_AT as usize].name, "arena_at");
-        assert_eq!(fns[BUILTIN_ROUND as usize].name, "round");
-        assert_eq!(fns[BUILTIN_TRUNC as usize].name, "trunc");
-        assert_eq!(fns[BUILTIN_LN as usize].name, "ln");
-        assert_eq!(fns[BUILTIN_EXP as usize].name, "exp");
-        assert_eq!(fns[BUILTIN_TAN as usize].name, "tan");
-        assert_eq!(fns[BUILTIN_TIMEOUT as usize].name, "timeout");
-        assert_eq!(
-            fns[BUILTIN_CHAN_SEND_DEADLINE as usize].name,
-            "chan_send_deadline"
-        );
-        assert_eq!(
-            fns[BUILTIN_CHAN_RECV_DEADLINE as usize].name,
-            "chan_recv_deadline"
-        );
         assert_eq!(fns.len(), BUILTIN_CHAN_RECV_DEADLINE as usize + 1);
-        // every world index, the spare slot, and the generic builtins'
-        // slots stay a reserved trap
+        for row in ds_abi::native::rows(NativeModule::Builtin) {
+            let slot = &fns[row.index as usize];
+            assert_eq!(slot.name, row.name, "{}'s slot", row.name);
+            assert_eq!(slot.params, row.params, "{}'s params", row.name);
+            assert_eq!(slot.variadic, row.variadic, "{}'s staging", row.name);
+            assert_eq!(
+                slot.result_words,
+                row.shape.result_words(),
+                "{}'s result width",
+                row.name
+            );
+        }
+        // a gap keeps its position as a refused slot: the retired world
+        // rows, the string block's spare, the retired yield, the generic
+        // rows' monomorphic slots, and the retired `head`
         for index in [
-            0u32, 1, 5, 6, 7, 8, 9, 10, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 46,
-            47, 48, 59, 90,
+            0u32, 1, 5, 6, 7, 8, 9, 10, 21, 22, 23, 24, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            46, 47, 48, 59, 83, 90,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
+            assert!(
+                ds_abi::native::rows(NativeModule::Builtin).all(|row| row.index != index),
+                "index {index} carries no row"
+            );
         }
-        // the fallible ones need a two-word overlay; the rest one word
-        for (index, want) in [
-            (BUILTIN_STR_INT, 1),
-            (BUILTIN_STR_FLOAT, 1),
-            (BUILTIN_STR_BOOL, 1),
-            (BUILTIN_SUBSTRING, 2),
-            (BUILTIN_CONCAT, 1),
-            (BUILTIN_TO_UPPER, 1),
-            (BUILTIN_TO_LOWER, 1),
-            (BUILTIN_TRIM, 1),
-            (BUILTIN_PARSE_INT, 2),
-            (BUILTIN_SPLIT, 1),
-            (BUILTIN_CHAR_AT, 2),
-            (BUILTIN_LIST_NEW, 1),
-            (BUILTIN_FIBER_RESUME, 1),
-            (BUILTIN_NURSERY_JOIN, 1),
-            (BUILTIN_NURSERY_OPEN, 1),
-            (BUILTIN_NURSERY_SPAWN, 1),
-            (BUILTIN_NURSERY_BOUNDARY, 2),
-            (BUILTIN_NURSERY_CANCEL, 1),
-            (BUILTIN_JOIN, 1),
-            (BUILTIN_MAP_NEW, 1),
-            (BUILTIN_MAP_SET, 1),
-            (BUILTIN_TOTAL_COMPARE, 1),
-            (BUILTIN_STR_COMPARE, 1),
-            (BUILTIN_CHAR_COMPARE, 1),
-            (BUILTIN_BYTE_COMPARE, 1),
-            (BUILTIN_STR_HASH, 1),
-            (BUILTIN_FLOAT_HASH, 1),
-            (BUILTIN_CHAR_HASH, 1),
-            (BUILTIN_REPL_PARK, 1),
-            (BUILTIN_BYTES_OF, 1),
-            (BUILTIN_BYTE_LIST, 1),
-            (BUILTIN_BYTE_AT, 2),
-            (BUILTIN_BYTES_EQ, 1),
-            (BUILTIN_TRAP, 1),
-            (BUILTIN_LIST_EQ, 1),
-            (BUILTIN_MAP_EQ, 1),
-            (BUILTIN_BYTE_OF, 2),
-            (BUILTIN_INT_OF_BYTE, 1),
-            (BUILTIN_U32_OF, 2),
-            (BUILTIN_INT_OF_U32, 1),
-            (BUILTIN_SQRT, 1),
-            (BUILTIN_SIN, 1),
-            (BUILTIN_COS, 1),
-            (BUILTIN_ATAN2, 1),
-            (BUILTIN_FLOOR, 1),
-            (BUILTIN_CEIL, 1),
-            (BUILTIN_POW, 1),
-            (BUILTIN_ABS, 1),
-            (BUILTIN_CONTAINS, 1),
-            (BUILTIN_INDEX_OF, 2),
-            (BUILTIN_REPLACE, 1),
+    }
+
+    /// The intercepted slots are the dispatcher's: the control and channel natives and the timer
+    /// race, each marked on its own row's slot.
+    #[test]
+    fn the_intercepted_slots_carry_their_dispatch_marker() {
+        let fns = builtin_module();
+        for (index, control) in [
+            (BUILTIN_FIBER_RESUME, ControlNative::Resume),
+            (BUILTIN_NURSERY_JOIN, ControlNative::NurseryJoin),
+            (BUILTIN_NURSERY_OPEN, ControlNative::NurseryOpen),
+            (BUILTIN_NURSERY_SPAWN, ControlNative::NurserySpawn),
+            (BUILTIN_NURSERY_BOUNDARY, ControlNative::NurseryBoundary),
+            (BUILTIN_NURSERY_CANCEL, ControlNative::NurseryCancel),
+            (BUILTIN_REPL_PARK, ControlNative::ReplPark),
         ] {
-            assert_eq!(fns[index as usize].result_words, want);
+            assert_eq!(fns[index as usize].control, Some(control), "index {index}");
         }
-        // the control natives are the dispatcher-intercepted tail of the
-        // table
+        for (index, channel) in [
+            (BUILTIN_CHAN_NEW, ChannelNative::New),
+            (BUILTIN_CHAN_SEND, ChannelNative::Send),
+            (BUILTIN_CHAN_RECV, ChannelNative::Recv),
+            (BUILTIN_CHAN_SEND_DEADLINE, ChannelNative::SendDeadline),
+            (BUILTIN_CHAN_RECV_DEADLINE, ChannelNative::RecvDeadline),
+        ] {
+            assert_eq!(fns[index as usize].channel, Some(channel), "index {index}");
+        }
         assert_eq!(
-            fns[BUILTIN_FIBER_YIELD as usize].control, None,
-            "the retired fiber_yield slot is an inert reserved gap"
+            fns[BUILTIN_TIMEOUT as usize].timer,
+            Some(TimerNative::Timeout)
+        );
+        // no other slot carries an interception
+        let count = |f: &NativeFunction| u8::from(f.control.is_some());
+        assert_eq!(fns.iter().map(count).sum::<u8>(), 7, "the control natives");
+        assert_eq!(
+            fns.iter().filter(|f| f.channel.is_some()).count(),
+            5,
+            "the channel natives"
         );
         assert_eq!(
-            fns[BUILTIN_FIBER_RESUME as usize].control,
-            Some(ControlNative::Resume)
+            fns.iter().filter(|f| f.timer.is_some()).count(),
+            1,
+            "the timer race"
         );
-        assert_eq!(
-            fns[BUILTIN_NURSERY_JOIN as usize].control,
-            Some(ControlNative::NurseryJoin)
-        );
-        assert_eq!(
-            fns[BUILTIN_NURSERY_OPEN as usize].control,
-            Some(ControlNative::NurseryOpen)
-        );
-        assert_eq!(
-            fns[BUILTIN_NURSERY_SPAWN as usize].control,
-            Some(ControlNative::NurserySpawn)
-        );
-        assert_eq!(
-            fns[BUILTIN_NURSERY_BOUNDARY as usize].control,
-            Some(ControlNative::NurseryBoundary)
-        );
-        assert_eq!(
-            fns[BUILTIN_NURSERY_CANCEL as usize].control,
-            Some(ControlNative::NurseryCancel)
-        );
+    }
+
+    /// The generic rows address reserved monomorphic slots and resolve to their one body with the
+    /// row's own evidence arity and result width.
+    #[test]
+    fn the_generic_rows_resolve_to_their_one_body() {
+        let fns = builtin_module();
+        for row in ds_abi::native::GENERIC_NATIVES {
+            assert_eq!(
+                fns[row.index as usize].name, "reserved",
+                "{}'s slot",
+                row.name
+            );
+            let body = resolve_generic(BUILTIN_MODULE, row.index)
+                .unwrap_or_else(|| panic!("the generic {} body resolves", row.name));
+            assert_eq!(body.name, row.name);
+            assert_eq!(body.evidence, row.evidence);
+            assert_eq!(body.params, row.params);
+            assert_eq!(body.staging, row.staging);
+            assert_eq!(body.result_words, row.shape.result_words());
+        }
         assert!(
-            fns.iter()
-                .take(BUILTIN_FIBER_RESUME as usize)
-                .all(|f| f.control.is_none()),
-            "no earlier entry is a control native"
+            resolve_generic(STD_PLATFORM_NAME, BUILTIN_LEN).is_none(),
+            "the generic bodies live on the builtin surface alone"
+        );
+        assert_eq!(
+            GENERIC_BODIES.len(),
+            ds_abi::native::GENERIC_NATIVES.len(),
+            "every generic row carries exactly one body"
         );
     }
 

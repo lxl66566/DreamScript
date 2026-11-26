@@ -3,7 +3,7 @@ name                   = "ds-meta"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
-description            = "The DreamScript meta layer: the derive engine, the derive-expanding analyze entries, and the comptime evaluator on the same uop VM in a world-fenced context (M6)"
+description            = "The DreamScript meta layer: the derive engine and the derive-expanding analyze entries"
 readme.workspace       = true
 repository.workspace   = true
 license.workspace      = true
@@ -13,10 +13,7 @@ categories.workspace   = true
 [dependencies]
 ds-check = { workspace = true }
 ds-diag  = { workspace = true }
-ds-lower = { workspace = true }
-ds-mod   = { workspace = true }
 ds-parse = { workspace = true }
-ds-vm    = { workspace = true }
 
 [dev-dependencies]
 # run-time corpus resolution for the derive conformance gate

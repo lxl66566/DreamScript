@@ -14,9 +14,10 @@ use std::{
 /// The workspace crates whose code turns source text into module
 /// bytes, ds-vm deliberately absent (it executes the artifact but
 /// never shapes it) alongside the lsp/repl/fmt subcommands.
-pub const BYTECODE_CRATES: [&str; 9] = [
+pub const BYTECODE_CRATES: [&str; 10] = [
     "ds-abi",
     "ds-check",
+    "ds-comptime",
     "ds-meta",
     "ds-diag",
     "ds-lower",

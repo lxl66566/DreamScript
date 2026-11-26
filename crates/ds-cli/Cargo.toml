@@ -20,6 +20,8 @@ anyhow.workspace   = true
 blake3             = { workspace = true }
 clap.workspace     = true
 ds-check.workspace = true
+# the comptime evaluator the source pipeline drives before lowering
+ds-comptime        = { workspace = true }
 ds-diag            = { workspace = true, features = ["json"] }
 ds-dsi.workspace   = true
 # the H5 binding face: `ds bind` loads an installed artifact library and
@@ -28,6 +30,7 @@ ds-ffi.workspace   = true
 ds-fmt             = { path = "../ds-fmt" }
 ds-lower           = { path = "../ds-lower" }
 ds-lsp             = { path = "../ds-lsp" }
+# the derive expansion and the expanding analyze entries the compile seam runs
 ds-meta            = { path = "../ds-meta" }
 ds-mod.workspace   = true
 ds-parse           = { path = "../ds-parse" }

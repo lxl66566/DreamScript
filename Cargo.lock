@@ -522,6 +522,7 @@ dependencies = [
  "blake3",
  "clap",
  "ds-check",
+ "ds-comptime",
  "ds-corpus-path",
  "ds-diag",
  "ds-dsi",
@@ -540,6 +541,18 @@ dependencies = [
  "rustyline",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "ds-comptime"
+version = "0.1.0"
+dependencies = [
+ "ds-check",
+ "ds-diag",
+ "ds-lower",
+ "ds-mod",
+ "ds-parse",
+ "ds-vm",
 ]
 
 [[package]]
@@ -625,10 +638,7 @@ dependencies = [
  "ds-check",
  "ds-corpus-path",
  "ds-diag",
- "ds-lower",
- "ds-mod",
  "ds-parse",
- "ds-vm",
 ]
 
 [[package]]
@@ -664,9 +674,9 @@ version = "0.1.0"
 dependencies = [
  "ds-abi",
  "ds-check",
+ "ds-comptime",
  "ds-diag",
  "ds-lower",
- "ds-meta",
  "ds-mod",
  "ds-parse",
  "ds-stdlib",

@@ -24,8 +24,6 @@
 //! capability answers the wall clock, the monotonic clock, and the
 //! parking sleep (the 2026-11-21 timer ruling).
 
-use ds_abi::SlotType;
-
 use crate::{
     native::{NativeFn, NativeFunction, NativeResult, OutputSink},
     net,
@@ -93,190 +91,81 @@ impl Capability {
     }
 }
 
-/// The default platform's name (H5, E1): the `ds` CLI's provider, the
-/// name the stdlib ambient's declaration writes and world calls lower
-/// against when no other declaration names one.
-pub const STD_NAME: &str = "std";
+/// The default platform's name: the `ds` CLI's provider, and what a source that declares no
+/// platform of its own addresses.
+pub const STD_NAME: &str = ds_abi::native::STD_PLATFORM_NAME;
 
-/// The embed platform's name (H5): the minimal host-facing surface a
-/// bare deployment declares — `platform "embed"` — and the run path's
-/// second installed handler serves.
+/// The embed platform's name (H5): the minimal host-facing surface a bare deployment declares,
+/// served beside the default platform.
 pub const EMBED_NAME: &str = "embed";
 
-/// `println`: console.
-pub const OP_PRINTLN: u32 = 0;
-/// `print`: console.
-pub const OP_PRINT: u32 = 1;
-/// `read_file`: fsys.
-pub const OP_READ_FILE: u32 = 2;
-/// `write_file`: fsys.
-pub const OP_WRITE_FILE: u32 = 3;
-/// `file_exists`: fsys.
-pub const OP_FILE_EXISTS: u32 = 4;
-/// `fs_list`: fsys.
-pub const OP_FS_LIST: u32 = 5;
-/// `file_size`: fsys.
-pub const OP_FILE_SIZE: u32 = 6;
-/// `net_connect`: net.
-pub const OP_NET_CONNECT: u32 = 7;
-/// `net_send`: net.
-pub const OP_NET_SEND: u32 = 8;
-/// `net_recv`: net.
-pub const OP_NET_RECV: u32 = 9;
-/// `net_close`: net (the raw idempotent-close seam, `close_raw`'s
-/// contract — the handle deinit pairs with it).
-pub const OP_NET_CLOSE: u32 = 10;
-/// `http_get`: net.
-pub const OP_HTTP_GET: u32 = 11;
-/// `open_file`: fsys (answers the package-owned file handle's word).
-pub const OP_OPEN_FILE: u32 = 12;
-/// `read_raw`: fsys (the raw exact-read seam the ds-source face wraps).
-pub const OP_READ_RAW: u32 = 13;
-/// `close_raw`: fsys (the raw idempotent-close seam).
-pub const OP_CLOSE_RAW: u32 = 14;
-/// `time`: time (the clock op, epoch nanoseconds).
-pub const OP_TIME: u32 = 15;
-/// `https_get`: tls (the TLS capability's own op, https only — no
-/// ambient spelling declares it; the net face's `http_get` routes
-/// https URLs onto the tier).
-pub const OP_HTTPS_GET: u32 = 16;
-/// `read_line`: console (the stdin read, one line per call).
-pub const OP_READ_LINE: u32 = 17;
-/// `eprintln`: console (the stderr twin of `println`).
-pub const OP_EPRINTLN: u32 = 18;
-/// `eprint`: console (the stderr twin of `print`).
-pub const OP_EPRINT: u32 = 19;
-/// `args`: proc (the host-staged process arguments).
-pub const OP_ARGS: u32 = 20;
-/// `env`: proc (the environment-variable read).
-pub const OP_ENV: u32 = 21;
-/// `proc_run`: proc (spawn one child, answer its exit status).
-pub const OP_PROC_RUN: u32 = 22;
-/// `exit`: proc (the deliberate-status row: the native never answers,
-/// the status riding the trap out to the drive).
-pub const OP_EXIT: u32 = 23;
-/// `mono`: time (the monotonic clock read, the 2026-11-21 timer ruling).
-pub const OP_MONO: u32 = 24;
-/// `sleep`: time (the parking sleep op over the timer-only wait shape).
-pub const OP_SLEEP: u32 = 25;
-/// `net_listen`: net (binds a listener, answers its handle's word).
-pub const OP_NET_LISTEN: u32 = 26;
-/// `net_accept`: net (takes one pending connection, answers the
-/// accepted connection's handle's word; parks under a reactor).
-pub const OP_NET_ACCEPT: u32 = 27;
-/// `net_listener_close`: net (the raw idempotent-close seam the
-/// `net_listener` deinit pairs with, `net_close`'s contract).
-/// `net_local_addr`: net (the bound listener's local address, the
-/// port-0 bind's report).
-pub const OP_NET_LISTENER_CLOSE: u32 = 28;
-/// `proc_spawn`: proc (spawns one child over pipes, answers the
-/// linear `proc_handle`'s word; the ambient's total spelling pairs
-/// with the fallible span on the printing-halt path).
-pub const OP_PROC_SPAWN: u32 = 29;
-/// `proc_write`: proc (writes the child's stdin pipe, the unit span
-/// on success).
-pub const OP_PROC_WRITE: u32 = 30;
-/// `proc_read`: proc (reads the child's captured stdout, one read of
-/// at most the requested bytes).
-pub const OP_PROC_READ: u32 = 31;
-/// `proc_wait`: proc (waits for the child, answers its exit status
-/// idempotently).
-pub const OP_PROC_WAIT: u32 = 32;
-/// `proc_close`: proc (the raw idempotent-close seam the `proc_handle`
-/// deinit pairs with — kills and reaps a still-running child).
-pub const OP_PROC_CLOSE: u32 = 33;
-/// `proc_close_in`: proc (closes the child's stdin pipe, the child's
-/// end-of-input while the handle stays live; total and idempotent).
-pub const OP_PROC_CLOSE_IN: u32 = 34;
-/// `proc_read_err`: proc (reads the child's captured stderr, one read
-/// of at most the requested bytes).
-pub const OP_PROC_READ_ERR: u32 = 35;
-/// `proc_try_wait`: proc (polls the child without blocking — the
-/// already-reaped status under the ok member, none while it runs).
-pub const OP_PROC_TRY_WAIT: u32 = 36;
-/// `net_local_addr`: net (the bound listener's local address, the
-/// port-0 bind's report — the `net_listener` face's one address op).
-pub const OP_NET_LOCAL_ADDR: u32 = 37;
-/// `net_accept_tls`: tls (takes one pending connection off the bound
-/// listener, upgrades it over the host-pinned rustls server identity,
-/// answers the accepted connection's handle word — the raw seam
-/// behind the ambient's total `accept_tls`).
-pub const OP_NET_ACCEPT_TLS: u32 = 38;
-/// `mkdir`: fsys (creates one directory, a single level; the io error
-/// class answers the fallible span's failure side).
-pub const OP_MKDIR: u32 = 39;
-/// `remove`: fsys (removes one entry — a file or link over
-/// `remove_file`, a directory over the empty-only `remove_dir`).
-pub const OP_REMOVE: u32 = 40;
-/// `fs_size`: fsys (the entry's byte count, the same read as `file_size`).
-pub const OP_FS_SIZE: u32 = 41;
-/// `utc_offset`: time (the host's local UTC offset for a timestamp,
-/// seconds east — the datetime face's one world touch; the calendar
-/// math and formatting compose in @std ds source over it).
-pub const OP_UTC_OFFSET: u32 = 42;
+// The world ops' reserved indices: the fixed, densely indexed run the abi's
+// [`ds_abi::native`] rows carry, and the platform ABI's own width.
+pub use ds_abi::native::{
+    OP_ARGS, OP_CLOSE_RAW, OP_COUNT, OP_ENV, OP_EPRINT, OP_EPRINTLN, OP_EXIT, OP_FILE_EXISTS,
+    OP_FILE_SIZE, OP_FS_LIST, OP_FS_SIZE, OP_HTTP_GET, OP_HTTPS_GET, OP_MKDIR, OP_MONO,
+    OP_NET_ACCEPT, OP_NET_ACCEPT_TLS, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_LISTEN,
+    OP_NET_LISTENER_CLOSE, OP_NET_LOCAL_ADDR, OP_NET_RECV, OP_NET_SEND, OP_OPEN_FILE, OP_PRINT,
+    OP_PRINTLN, OP_PROC_CLOSE, OP_PROC_CLOSE_IN, OP_PROC_READ, OP_PROC_READ_ERR, OP_PROC_RUN,
+    OP_PROC_SPAWN, OP_PROC_TRY_WAIT, OP_PROC_WAIT, OP_PROC_WRITE, OP_READ_FILE, OP_READ_LINE,
+    OP_READ_RAW, OP_REMOVE, OP_SLEEP, OP_TIME, OP_UTC_OFFSET, OP_WRITE_FILE,
+};
 
-/// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 43;
-
-/// One op of the fixed table: its call name, owning capability,
-/// signature, result span, and body.
+/// One op's owning capability and body; the call name, signature, and result span are the abi's
+/// rows, index-parallel to this table.
 struct Op {
-    name: &'static str,
     capability: Capability,
-    params: &'static [SlotType],
-    result_words: u8,
     func: NativeFn,
 }
 
-/// The fixed op table, densely indexed: the platform ABI both the
-/// lowering's world natives and the installed platform serve. The
-/// indices are contract (pool FuncRefs address them positionally); the
-/// fallible fsys and net ops each answer the two-word platform span.
+/// The fixed op table, densely indexed: the world surface the abi rows declare, with this crate's
+/// capability ownership and body per op. The indices are contract (pool `FuncRef`s address them
+/// positionally); the fallible fsys and net ops each answer the two-word platform span.
 #[rustfmt::skip]
 const OPS: [Op; OP_COUNT as usize] = [
-    Op { name: "println",     capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::println_fn },
-    Op { name: "print",       capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::print_fn },
-    Op { name: "read_file",   capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::native::read_file_fn },
-    Op { name: "write_file",  capability: Capability::Fsys,    params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::native::write_file_fn },
-    Op { name: "file_exists", capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 1, func: crate::native::file_exists_fn },
-    Op { name: "fs_list",     capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::native::fs_list_fn },
-    Op { name: "file_size",   capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::native::file_size_fn },
-    Op { name: "net_connect", capability: Capability::Net,     params: &[SlotType::Ref, SlotType::I64], result_words: 2, func: net::net_connect_fn },
-    Op { name: "net_send",    capability: Capability::Net,     params: &[SlotType::I64, SlotType::Ref], result_words: 2, func: net::net_send_fn },
-    Op { name: "net_recv",    capability: Capability::Net,     params: &[SlotType::I64, SlotType::I64], result_words: 2, func: net::net_recv_fn },
-    Op { name: "net_close",   capability: Capability::Net,     params: &[SlotType::I64],        result_words: 1, func: net::net_close_fn },
-    Op { name: "http_get",    capability: Capability::Net,     params: &[SlotType::Ref],        result_words: 2, func: net::http_get_fn },
-    Op { name: "open_file",    capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::open_fn },
-    Op { name: "read_raw",    capability: Capability::Fsys,    params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::fsys::read_raw_fn },
-    Op { name: "close_raw",   capability: Capability::Fsys,    params: &[SlotType::I64],        result_words: 1, func: crate::fsys::close_raw_fn },
-    Op { name: "time",        capability: Capability::Time,    params: &[],                    result_words: 1, func: crate::native::time_fn },
-    Op { name: "https_get",   capability: Capability::Tls,     params: &[SlotType::Ref],       result_words: 2, func: crate::tls::https_get_fn },
-    Op { name: "read_line",   capability: Capability::Console, params: &[],                    result_words: 2, func: crate::native::read_line_fn },
-    Op { name: "eprintln",    capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::eprintln_fn },
-    Op { name: "eprint",      capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::eprint_fn },
-    Op { name: "args",        capability: Capability::Proc,    params: &[],                    result_words: 1, func: crate::proc::args_fn },
-    Op { name: "env",         capability: Capability::Proc,    params: &[SlotType::Ref],        result_words: 2, func: crate::proc::env_fn },
-    Op { name: "proc_run",    capability: Capability::Proc,    params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::proc::proc_run_fn },
-    Op { name: "exit",        capability: Capability::Proc,    params: &[SlotType::I64],       result_words: 1, func: crate::proc::exit_fn },
-    Op { name: "mono",        capability: Capability::Time,    params: &[],                    result_words: 1, func: crate::native::mono_fn },
-    Op { name: "sleep",       capability: Capability::Time,    params: &[SlotType::I64],       result_words: 1, func: crate::native::sleep_fn },
-    Op { name: "net_listen", capability: Capability::Net,     params: &[SlotType::Ref, SlotType::I64], result_words: 2, func: net::net_listen_fn },
-    Op { name: "net_accept",  capability: Capability::Net,     params: &[SlotType::I64],       result_words: 2, func: net::net_accept_fn },
-    Op { name: "net_listener_close", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_listener_close_fn },
-    Op { name: "proc_spawn", capability: Capability::Proc, params: &[SlotType::Ref, SlotType::Ref], result_words: 2, func: crate::proc::proc_spawn_fn },
-    Op { name: "proc_write", capability: Capability::Proc, params: &[SlotType::I64, SlotType::Ref], result_words: 2, func: crate::proc::proc_write_fn },
-    Op { name: "proc_read", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_fn },
-    Op { name: "proc_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_wait_fn },
-    Op { name: "proc_close", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_fn },
-    Op { name: "proc_close_in", capability: Capability::Proc, params: &[SlotType::I64], result_words: 1, func: crate::proc::proc_close_in_fn },
-    Op { name: "proc_read_err", capability: Capability::Proc, params: &[SlotType::I64, SlotType::I64], result_words: 2, func: crate::proc::proc_read_err_fn },
-    Op { name: "proc_try_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_try_wait_fn },
-    Op { name: "net_local_addr", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_local_addr_fn },
-    Op { name: "net_accept_tls", capability: Capability::Tls, params: &[SlotType::I64], result_words: 2, func: crate::tls::net_accept_tls_fn },
-    Op { name: "mkdir",       capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::mkdir_fn },
-    Op { name: "remove",      capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::remove_fn },
-    Op { name: "fs_size",     capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::fs_size_fn },
-    Op { name: "utc_offset", capability: Capability::Time,    params: &[SlotType::I64],        result_words: 1, func: crate::tz::utc_offset_fn },
+    Op { capability: Capability::Console, func: crate::native::println_fn },
+    Op { capability: Capability::Console, func: crate::native::print_fn },
+    Op { capability: Capability::Fsys, func: crate::native::read_file_fn },
+    Op { capability: Capability::Fsys, func: crate::native::write_file_fn },
+    Op { capability: Capability::Fsys, func: crate::native::file_exists_fn },
+    Op { capability: Capability::Fsys, func: crate::native::fs_list_fn },
+    Op { capability: Capability::Fsys, func: crate::native::file_size_fn },
+    Op { capability: Capability::Net, func: net::net_connect_fn },
+    Op { capability: Capability::Net, func: net::net_send_fn },
+    Op { capability: Capability::Net, func: net::net_recv_fn },
+    Op { capability: Capability::Net, func: net::net_close_fn },
+    Op { capability: Capability::Net, func: net::http_get_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::open_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::read_raw_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::close_raw_fn },
+    Op { capability: Capability::Time, func: crate::native::time_fn },
+    Op { capability: Capability::Tls, func: crate::tls::https_get_fn },
+    Op { capability: Capability::Console, func: crate::native::read_line_fn },
+    Op { capability: Capability::Console, func: crate::native::eprintln_fn },
+    Op { capability: Capability::Console, func: crate::native::eprint_fn },
+    Op { capability: Capability::Proc, func: crate::proc::args_fn },
+    Op { capability: Capability::Proc, func: crate::proc::env_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_run_fn },
+    Op { capability: Capability::Proc, func: crate::proc::exit_fn },
+    Op { capability: Capability::Time, func: crate::native::mono_fn },
+    Op { capability: Capability::Time, func: crate::native::sleep_fn },
+    Op { capability: Capability::Net, func: net::net_listen_fn },
+    Op { capability: Capability::Net, func: net::net_accept_fn },
+    Op { capability: Capability::Net, func: net::net_listener_close_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_spawn_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_write_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_read_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_wait_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_close_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_close_in_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_read_err_fn },
+    Op { capability: Capability::Proc, func: crate::proc::proc_try_wait_fn },
+    Op { capability: Capability::Net, func: net::net_local_addr_fn },
+    Op { capability: Capability::Tls, func: crate::tls::net_accept_tls_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::mkdir_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::remove_fn },
+    Op { capability: Capability::Fsys, func: crate::fsys::fs_size_fn },
+    Op { capability: Capability::Time, func: crate::tz::utc_offset_fn },
 ];
 
 macro_rules! unserved {
@@ -429,11 +318,11 @@ impl Platform {
 /// platform's name.
 #[must_use]
 pub fn platform_module(platform: &Platform) -> Vec<NativeFunction> {
-    OPS.iter()
+    ds_abi::native::rows(ds_abi::native::NativeModule::Platform)
+        .zip(&OPS)
         .zip(UNSERVED)
-        .enumerate()
-        .map(|(index, (op, unserved))| {
-            let index = u32::try_from(index).expect("op index fits u32");
+        .map(|((row, op), unserved)| {
+            let index = row.index;
             // the tls capability's host-level selection (H5.5's
             // 2026-11-17 ruling): the net face's `http_get` slot carries
             // the https-routing body only where the platform provides
@@ -448,10 +337,10 @@ pub fn platform_module(platform: &Platform) -> Vec<NativeFunction> {
                 unserved
             };
             NativeFunction {
-                name: op.name,
-                params: op.params,
+                name: row.name,
+                params: row.params,
                 variadic: false,
-                result_words: op.result_words,
+                result_words: row.shape.result_words(),
                 control: None,
                 channel: None,
                 timer: None,
@@ -465,88 +354,81 @@ pub fn platform_module(platform: &Platform) -> Vec<NativeFunction> {
 mod tests {
     use super::*;
 
-    /// The fixed table is the contract: every op sits at its reserved
-    /// index with its owning capability and result span width.
+    /// The fixed table is the contract: each op's constant names its abi row, and the row's
+    /// capability and result span width are the VM's own.
     #[test]
     fn the_fixed_op_table_is_contract() {
-        assert_eq!(OPS[OP_PRINTLN as usize].name, "println");
-        assert_eq!(OPS[OP_PRINT as usize].name, "print");
-        assert_eq!(OPS[OP_READ_FILE as usize].name, "read_file");
-        assert_eq!(OPS[OP_WRITE_FILE as usize].name, "write_file");
-        assert_eq!(OPS[OP_FILE_EXISTS as usize].name, "file_exists");
-        assert_eq!(OPS[OP_FS_LIST as usize].name, "fs_list");
-        assert_eq!(OPS[OP_FILE_SIZE as usize].name, "file_size");
-        assert_eq!(OPS[OP_NET_CONNECT as usize].name, "net_connect");
-        assert_eq!(OPS[OP_NET_SEND as usize].name, "net_send");
-        assert_eq!(OPS[OP_NET_RECV as usize].name, "net_recv");
-        assert_eq!(OPS[OP_NET_CLOSE as usize].name, "net_close");
-        assert_eq!(OPS[OP_HTTP_GET as usize].name, "http_get");
-        assert_eq!(OPS[OP_OPEN_FILE as usize].name, "open_file");
-        assert_eq!(OPS[OP_READ_RAW as usize].name, "read_raw");
-        assert_eq!(OPS[OP_CLOSE_RAW as usize].name, "close_raw");
-        assert_eq!(OPS[OP_TIME as usize].name, "time");
+        for (index, name) in [
+            (OP_PRINTLN, "println"),
+            (OP_PRINT, "print"),
+            (OP_READ_FILE, "read_file"),
+            (OP_WRITE_FILE, "write_file"),
+            (OP_FILE_EXISTS, "file_exists"),
+            (OP_FS_LIST, "fs_list"),
+            (OP_FILE_SIZE, "file_size"),
+            (OP_NET_CONNECT, "net_connect"),
+            (OP_NET_SEND, "net_send"),
+            (OP_NET_RECV, "net_recv"),
+            (OP_NET_CLOSE, "net_close"),
+            (OP_HTTP_GET, "http_get"),
+            (OP_OPEN_FILE, "open_file"),
+            (OP_READ_RAW, "read_raw"),
+            (OP_CLOSE_RAW, "close_raw"),
+            (OP_TIME, "time"),
+            (OP_HTTPS_GET, "https_get"),
+            (OP_READ_LINE, "read_line"),
+            (OP_EPRINTLN, "eprintln"),
+            (OP_EPRINT, "eprint"),
+            (OP_ARGS, "args"),
+            (OP_ENV, "env"),
+            (OP_PROC_RUN, "proc_run"),
+            (OP_EXIT, "exit"),
+            (OP_MONO, "mono"),
+            (OP_SLEEP, "sleep"),
+            (OP_NET_LISTEN, "net_listen"),
+            (OP_NET_ACCEPT, "net_accept"),
+            (OP_NET_LISTENER_CLOSE, "net_listener_close"),
+            (OP_PROC_SPAWN, "proc_spawn"),
+            (OP_PROC_WRITE, "proc_write"),
+            (OP_PROC_READ, "proc_read"),
+            (OP_PROC_WAIT, "proc_wait"),
+            (OP_PROC_CLOSE, "proc_close"),
+            (OP_PROC_CLOSE_IN, "proc_close_in"),
+            (OP_PROC_READ_ERR, "proc_read_err"),
+            (OP_PROC_TRY_WAIT, "proc_try_wait"),
+            (OP_NET_LOCAL_ADDR, "net_local_addr"),
+            (OP_NET_ACCEPT_TLS, "net_accept_tls"),
+            (OP_MKDIR, "mkdir"),
+            (OP_REMOVE, "remove"),
+            (OP_FS_SIZE, "fs_size"),
+            (OP_UTC_OFFSET, "utc_offset"),
+        ] {
+            let row =
+                ds_abi::native::lookup(name).unwrap_or_else(|| panic!("`{name}` is a tabled op"));
+            assert_eq!(row.index, index, "op {index} is `{name}`");
+            assert_eq!(
+                row.module,
+                ds_abi::native::NativeModule::Platform,
+                "`{name}` is a world op"
+            );
+        }
+        // every op's owning capability is the VM's, reachable publicly
+        assert_eq!(OPS[OP_PRINTLN as usize].capability, Capability::Console);
         assert_eq!(OPS[OP_TIME as usize].capability, Capability::Time);
-        assert_eq!(OPS[OP_HTTPS_GET as usize].name, "https_get");
         assert_eq!(OPS[OP_HTTPS_GET as usize].capability, Capability::Tls);
-        assert_eq!(OPS[OP_READ_LINE as usize].name, "read_line");
-        assert_eq!(OPS[OP_READ_LINE as usize].capability, Capability::Console);
-        assert_eq!(OPS[OP_EPRINTLN as usize].name, "eprintln");
-        assert_eq!(OPS[OP_EPRINT as usize].name, "eprint");
-        assert_eq!(OPS[OP_ARGS as usize].name, "args");
         assert_eq!(OPS[OP_ARGS as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_ENV as usize].name, "env");
-        assert_eq!(OPS[OP_PROC_RUN as usize].name, "proc_run");
-        assert_eq!(OPS[OP_EXIT as usize].name, "exit");
-        assert_eq!(OPS[OP_MONO as usize].name, "mono");
-        assert_eq!(OPS[OP_MONO as usize].capability, Capability::Time);
-        assert_eq!(OPS[OP_SLEEP as usize].name, "sleep");
-        assert_eq!(OPS[OP_SLEEP as usize].capability, Capability::Time);
-        assert_eq!(OPS[OP_NET_LISTEN as usize].name, "net_listen");
         assert_eq!(OPS[OP_NET_LISTEN as usize].capability, Capability::Net);
-        assert_eq!(OPS[OP_NET_ACCEPT as usize].name, "net_accept");
-        assert_eq!(OPS[OP_NET_ACCEPT as usize].capability, Capability::Net);
-        assert_eq!(
-            OPS[OP_NET_LISTENER_CLOSE as usize].name,
-            "net_listener_close"
-        );
-        assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].name, "net_local_addr");
-        assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].capability, Capability::Net);
-        assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].name, "net_accept_tls");
-        assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].capability, Capability::Tls);
-        assert_eq!(OPS[OP_MKDIR as usize].name, "mkdir");
         assert_eq!(OPS[OP_MKDIR as usize].capability, Capability::Fsys);
-        assert_eq!(OPS[OP_REMOVE as usize].name, "remove");
-        assert_eq!(OPS[OP_REMOVE as usize].capability, Capability::Fsys);
-        assert_eq!(OPS[OP_FS_SIZE as usize].name, "fs_size");
-        assert_eq!(OPS[OP_FS_SIZE as usize].capability, Capability::Fsys);
-        assert_eq!(OPS[OP_UTC_OFFSET as usize].name, "utc_offset");
-        assert_eq!(OPS[OP_UTC_OFFSET as usize].capability, Capability::Time);
-        assert_eq!(
-            OPS[OP_NET_LISTENER_CLOSE as usize].capability,
-            Capability::Net
-        );
-        assert_eq!(OPS[OP_PROC_SPAWN as usize].name, "proc_spawn");
-        assert_eq!(OPS[OP_PROC_SPAWN as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_WRITE as usize].name, "proc_write");
-        assert_eq!(OPS[OP_PROC_WRITE as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_READ as usize].name, "proc_read");
-        assert_eq!(OPS[OP_PROC_READ as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_WAIT as usize].name, "proc_wait");
-        assert_eq!(OPS[OP_PROC_WAIT as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_CLOSE as usize].name, "proc_close");
-        assert_eq!(OPS[OP_PROC_CLOSE as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_CLOSE_IN as usize].name, "proc_close_in");
-        assert_eq!(OPS[OP_PROC_CLOSE_IN as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_READ_ERR as usize].name, "proc_read_err");
-        assert_eq!(OPS[OP_PROC_READ_ERR as usize].capability, Capability::Proc);
-        assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].name, "proc_try_wait");
-        assert_eq!(OPS[OP_PROC_TRY_WAIT as usize].capability, Capability::Proc);
         assert_eq!(OPS.len(), OP_COUNT as usize);
-        for (index, op) in OPS.iter().enumerate() {
-            let index = u32::try_from(index).expect("op index fits u32");
+        assert_eq!(
+            ds_abi::native::rows(ds_abi::native::NativeModule::Platform).count(),
+            OP_COUNT as usize,
+            "the abi's world rows are the platform ABI's whole run"
+        );
+        for index in 0..OP_COUNT {
             assert_eq!(
                 Platform::op_capability(index),
-                Some(op.capability),
+                Some(OPS[index as usize].capability),
                 "op {index}'s capability is public"
             );
         }
@@ -629,8 +511,14 @@ mod tests {
         }
         let table = platform_module(&console);
         assert_eq!(table.len(), OP_COUNT as usize);
-        assert_eq!(table[OP_PRINTLN as usize].name, "println");
-        assert_eq!(table[OP_READ_FILE as usize].result_words, 2);
+        for (at, row) in ds_abi::native::rows(ds_abi::native::NativeModule::Platform).enumerate() {
+            assert_eq!(
+                table[at].name, row.name,
+                "the built table is the abi's rows"
+            );
+            assert_eq!(table[at].params, row.params);
+            assert_eq!(table[at].result_words, row.shape.result_words());
+        }
     }
 
     /// The embed platform serves the console face alone: print/println,

@@ -112,7 +112,7 @@
 /// holds the serving member body's function-table index in the
 /// enclosing module. `$` sits outside the identifier charset, so no
 /// user package can collide.
-pub const EVIDENCE_MODULE: &str = "$evidence";
+pub use ds_abi::native::EVIDENCE_MODULE;
 
 pub mod bound;
 mod claims;

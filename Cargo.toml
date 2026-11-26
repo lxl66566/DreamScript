@@ -20,6 +20,7 @@ blake3         = "1"
 clap           = { version = "4", features = ["derive"] }
 criterion      = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 ds-check       = { path = "crates/ds-check" }
+ds-comptime    = { path = "crates/ds-comptime" }
 ds-corpus-path = { path = "crates/ds-corpus-path" }
 ds-diag        = { path = "crates/ds-diag" }
 ds-dsi         = { path = "crates/ds-dsi" }

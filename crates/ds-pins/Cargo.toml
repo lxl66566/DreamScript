@@ -35,8 +35,9 @@ name    = "arena_bypass"
 ds-abi              = { path = "../ds-abi" }
 ds-check            = { path = "../ds-check" }
 ds-diag             = { path = "../ds-diag" }
+# the comptime evaluator the kernel sources run through before lowering
+ds-comptime         = { workspace = true }
 ds-lower            = { path = "../ds-lower" }
-ds-meta             = { path = "../ds-meta" }
 ds-mod.workspace    = true
 ds-parse            = { path = "../ds-parse" }
 ds-stdlib.workspace = true

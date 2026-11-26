@@ -1,13 +1,12 @@
-//! The comptime evaluator end to end (G1, G2): a comptime call runs as
-//! ordinary code on the same uop VM in a world-fenced context, its
-//! answer embeds at the call site, `fields`/`type_name` answer over the
-//! declared data, and every unimplemented edge refuses with its own
-//! diagnostic — the fence itself for world-touching calls, the evaluator
-//! for the rest.
+//! The comptime evaluator end to end: a comptime call runs as ordinary
+//! code on the same uop VM in a world-fenced context, its answer embeds
+//! at the call site, `fields`/`type_name` answer over the declared data,
+//! and every unimplemented edge refuses with its own diagnostic — the
+//! fence itself for world-touching calls, the evaluator for the rest.
 
 use ds_check::{DeclaredRows, Effect, EffectRow, WorldCaps, analyze, effects};
+use ds_comptime::evaluate;
 use ds_diag::{Diagnostic, Files};
-use ds_meta::evaluate;
 use ds_mod::Hash128;
 use ds_parse::parse;
 use ds_vm::{FrameAnswer, ModuleRegistry, Platform, Value, Vm, loader};

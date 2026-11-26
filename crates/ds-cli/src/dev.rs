@@ -338,7 +338,8 @@ impl DevSession {
         )?
         .rows();
         let hash = Hash128::compute(text.as_bytes());
-        let comptime = match ds_meta::evaluate(name, hash, &analyzed.asts, &analyzed, &effects) {
+        let comptime = match ds_comptime::evaluate(name, hash, &analyzed.asts, &analyzed, &effects)
+        {
             Ok(values) => values,
             Err(diags) => {
                 Self::report(db, &diags);

@@ -251,7 +251,7 @@ fn compiled(name: &str, source: &str) -> Module {
         linear.diags
     );
     let hash = Hash128::compute(source.as_bytes());
-    let values = ds_meta::evaluate(name, hash, &asts, &analyzed, &effects)
+    let values = ds_comptime::evaluate(name, hash, &asts, &analyzed, &effects)
         .unwrap_or_else(|diags| panic!("{name} fails the comptime fence: {diags:?}"));
     lower_with_comptime(name, hash, &asts, &analyzed, Some(&linear), &values)
         .unwrap_or_else(|error| panic!("{name} does not lower: {error}"))

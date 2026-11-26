@@ -925,7 +925,7 @@ fn compile_text(
     // The comptime evaluator (G1): comptime calls run on the fenced VM
     // here, their answers embedding at the call sites below — a package
     // with no comptime call evaluates nothing.
-    let comptime = ds_meta::evaluate(&name, source_hash, asts, &analyzed, &effects)
+    let comptime = ds_comptime::evaluate(&name, source_hash, asts, &analyzed, &effects)
         .map_err(|diags| reject(&files, &diags, "the source fails the comptime fence"))?;
     // The dep-side const evaluation (G4): a linked member's exported
     // computed consts evaluate here, on the producer's own compile, so
@@ -935,7 +935,7 @@ fn compile_text(
     let const_values = if inputs.main_required {
         HashMap::new()
     } else {
-        ds_meta::evaluate_consts(&name, source_hash, asts, &analyzed, &effects, ambient_files)
+        ds_comptime::evaluate_consts(&name, source_hash, asts, &analyzed, &effects, ambient_files)
             .map_err(|diags| reject(&files, &diags, "the exported consts refuse to evaluate"))?
     };
     // The ambient's impl bodies splice in from the checked-in dsmod when

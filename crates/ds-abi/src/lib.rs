@@ -52,16 +52,25 @@
 //! models slot words as `u64`. Bit encodings within a word (i32 placement,
 //! bool, reference representation) belong to the tier-1 VM, not to this
 //! contract.
+//!
+//! ## Native vocabulary
+//!
+//! The [`native`] module holds the native tables both the lowering and the
+//! tier-1 VM read: the builtin core's rows, the platform world-op table, the
+//! comptime reflection module, the generic-call rows, and the reserved
+//! discriminants and module names they share.
 
 mod descriptor;
 mod layout;
 mod meta;
+pub mod native;
 mod tailcall;
 pub mod uop;
 
 pub use descriptor::{EntryDescriptor, Tier, TierFlipError};
 pub use layout::{BoundRet, FrameLayout, LayoutError, SlotType, Staging};
 pub use meta::{CodePc, ElisionRecord, FrameMetadata, FuncId, TailChain};
+pub use native::{FailureClasses, GenericNative, Native, NativeModule, NativeRouting, NativeShape};
 pub use tailcall::{SlideDirection, SlideError, SlidePlan, slide_plan};
 pub use uop::{
     BIAS_J, BuiltinInstance, ConstIdx, DecodeError, EncodeError, Inst, InstDecodeError, Major,

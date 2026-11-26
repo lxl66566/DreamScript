@@ -1,0 +1,23 @@
+[package]
+name                   = "ds-comptime"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+description            = "The DreamScript comptime evaluator: comptime calls and exported computed consts evaluated on the same uop VM in a world-fenced context"
+readme.workspace       = true
+repository.workspace   = true
+license.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
+
+[dependencies]
+ds-check = { workspace = true }
+ds-diag  = { workspace = true }
+ds-lower = { workspace = true }
+# Hash128: the slice carries the runtime module's own identity
+ds-mod   = { workspace = true }
+ds-parse = { workspace = true }
+ds-vm    = { workspace = true }
+
+[lints]
+workspace = true

@@ -167,23 +167,24 @@ fn type_name_fn(
     Ok(NativeResult::Word(heaps.new_str_part(&name)))
 }
 
-/// The comptime native module's table: index 0 `fields`, index 1
-/// `type_name` — the indices the lowerer's native table pins.
+/// The comptime native module's table: the abi's comptime rows with this module's bodies, in index
+/// order.
+#[must_use]
 pub fn comptime_module() -> Vec<NativeFunction> {
-    let native = |name: &'static str, func: NativeFn| NativeFunction {
-        name,
-        params: &[SlotType::Tag],
-        variadic: false,
-        result_words: 1,
-        control: None,
-        channel: None,
-        timer: None,
-        func,
-    };
-    vec![
-        native("fields", fields_fn),
-        native("type_name", type_name_fn),
-    ]
+    let bodies: [NativeFn; 2] = [fields_fn, type_name_fn];
+    ds_abi::native::rows(ds_abi::NativeModule::Comptime)
+        .zip(bodies)
+        .map(|(row, func)| NativeFunction {
+            name: row.name,
+            params: row.params,
+            variadic: row.variadic,
+            result_words: row.shape.result_words(),
+            control: None,
+            channel: None,
+            timer: None,
+            func,
+        })
+        .collect()
 }
 
 /// The builtin core's table as the comptime fence serves it: the

@@ -2706,26 +2706,27 @@ impl<'a> FnLower<'a, '_, '_> {
         if let NativeShape::Fallible {
             payload,
             fail_payload,
-            err_prefix,
-            classes,
+            family,
         } = native.shape
         {
+            let spelling = crate::native::failure_spelling(family);
             return self.fallible_native_result(
                 native,
                 ty,
                 payload,
                 fail_payload,
-                err_prefix,
-                classes,
+                spelling.err_prefix,
+                spelling.classes,
                 staged,
             );
         }
         if let NativeShape::FallibleByResultType {
             fail_payload,
-            classes,
+            family,
         } = native.shape
         {
-            return self.keyed_native_result(native, ty, fail_payload, classes, staged);
+            let spelling = crate::native::failure_spelling(family);
+            return self.keyed_native_result(native, ty, fail_payload, spelling.classes, staged);
         }
         self.checked_native_result(Callee::Builtin(native), ty, staged, staged.len())
     }
