@@ -1,0 +1,18 @@
+// seed: the defer block and the platform declaration — the two keyword
+// grammar rules no checked-in seed carried. The defer body checks clean
+// (it refuses only at lowering); the platform item spells the full
+// provides list and, checked, answers the ambient's own platform
+// declaration as a duplicate.
+
+platform "std" provides <console, fsys, net, time>
+
+fn cleanup (n: int) -> () {
+  println("cleanup ${n}")
+}
+
+fn main () -> () {
+  var n: int = 3
+  defer { cleanup(n) }
+  n += 1
+  println("main ${n}")
+}
