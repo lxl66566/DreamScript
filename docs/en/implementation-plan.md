@@ -1,15 +1,14 @@
 # DreamScript implementation plan
 
-Plans DreamScript from empty repository to 1.0 in Rust (edition 2024), subordinate to `docs/en/design-decisions.md`: the record wins on conflict and design changes land there first. M1 inserts the front end ahead of the checker; M2-M9 follow the recorded staging.
+Plans DreamScript from empty repository to 1.0 in Rust (edition 2024), subordinate to `docs/en/design-decisions.md`.
 
 ## 1. Ground rules
 1. Each staging step lands on the previous one with no language-change rewrites.
 2. The slot-overlay call ABI [H2] and the fixed-width mmap-able dsmod format [BL-7, G3.5] lock first; everything downstream compiles against them.
 3. Compiler-as-query-library: every consumer reads the same memoized queries, invalidated at separator-block and package grain; the two-slot hot-reload runtime exists from day one [H6 item 1, item 5].
 4. Invariants everywhere: no import-time execution [G3, entry-file script-mode statements excepted]; guaranteed self-and-mutual TCO [H2]; dispatch correctness never depends on cache state [H3]; no `any` fallback — inference failure is a compile error [B1].
-5. Explainability budget: any addition must re-fit the short tutorial.
 
-Rust engineering: edition 2024; fmt and clippy clean per commit; nextest; `codegen-units = 1` with `lto = "thin"`; benchmarks under an exclusive `flock`. Unsafe code lives in `ds-rt` and `ds-jit` behind the debug-assertion layer CI enables; stencil builds need clang/LLVM, and CI is windows-msvc plus linux. Fibers are interpreter data: no native stack switching, no async color; fork-join workers receive ownership transfers only, keeping non-atomic RC sound [C4, E3]. dsmod target classes make cross-platform artifacts first-class, and the `ds` binary is the only crate configuring spdlog-rs; libraries log through the `log` facade.
+Rust engineering: edition 2024; fmt and clippy clean per commit; nextest; `codegen-units = 1` with `lto = "thin"`. Unsafe code lives in `ds-rt` and `ds-jit` behind the debug-assertion layer CI enables; stencil builds need clang/LLVM, and CI is windows-msvc plus linux. Fibers are interpreter data: no native stack switching, no async color; fork-join workers receive ownership transfers only, keeping non-atomic RC sound [C4, E3]. The `ds` binary is the only crate configuring spdlog-rs; libraries log through the `log` facade.
 
 ## 2. Workspace layout
 One Cargo workspace at the repository root; a crate appears in the milestone that first fills it (no empty shells).
