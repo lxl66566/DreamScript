@@ -410,6 +410,17 @@ pub(crate) fn manifest_beside(entry: &Path) -> Option<PathBuf> {
     manifest.is_file().then_some(manifest)
 }
 
+/// The package graph behind one root directory: a manifest at the root
+/// resolves exactly like a run beside it, `None` a manifest-free root
+/// (the caller's bare-script shape). The `ds test` walk's entry.
+///
+/// # Errors
+///
+/// Every refusal [`open`] reports.
+pub(crate) fn open_root(root: &Path, no_ambient: bool) -> Result<Option<Graph>> {
+    open(&root.join(MANIFEST_FILE), no_ambient)
+}
+
 /// The default `@std` bundle's source members, in-process: the tree's
 /// own package bytes — the same members the default install serves
 /// into the content-addressed store when package resolution demands
@@ -550,6 +561,54 @@ pub(crate) fn root_members(entry: &Path) -> Result<Vec<Member>> {
     siblings.sort_by(|left, right| left.path.cmp(&right.path));
     members.append(&mut siblings);
     Ok(members)
+}
+
+/// The members one `ds test` entry composes: the test file as the script
+/// entry beside the package's own members — the walk never lists
+/// `tests/` — so the test reads the package's declarations in the one
+/// namespace (G3) while every sibling test stays an independent entry.
+/// A manifest-free root composes the test file alone, the bare-script
+/// shape. The entry rides first; the walked members follow in ascending
+/// bundle-relative path order, the identity fold deterministic.
+///
+/// # Errors
+///
+/// An unreadable test file, root, or member, and a member that is not
+/// UTF-8 text.
+pub(crate) fn test_members(root: &Path, test: &Path) -> Result<Vec<Member>> {
+    let entry_text =
+        fs::read_to_string(test).with_context(|| format!("reading {}", test.display()))?;
+    let mut members = vec![Member {
+        path: relative_path(root, test),
+        text: entry_text,
+    }];
+    if !root.join(MANIFEST_FILE).is_file() {
+        return Ok(members);
+    }
+    let mut walked = Vec::new();
+    for member_file in walk_sources(root)? {
+        let path = relative_path(root, &member_file);
+        let member_text = fs::read_to_string(&member_file)
+            .with_context(|| format!("reading {}", member_file.display()))?;
+        walked.push(Member {
+            path,
+            text: member_text,
+        });
+    }
+    walked.sort_by(|left, right| left.path.cmp(&right.path));
+    members.append(&mut walked);
+    Ok(members)
+}
+
+/// The `/`-separated path below the root, the bundle-relative spelling
+/// the identity fold and the dep-side renderings record.
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Reads and parses one manifest, rendering its DS4014 drift diagnostics
@@ -1225,19 +1284,7 @@ pub(crate) fn compile_root(
     let members = root_members(file)?;
     let name = source::script_module_name(file)?;
     let identity = member_identity(&members);
-    // the entry member keeps the invoked path as its display; every
-    // sibling registers under its bundle-relative path, the spelling a
-    // dep-side compile renders the same member under
-    let sources: Vec<(String, String)> = members
-        .iter()
-        .enumerate()
-        .map(|(at, member)| {
-            (
-                if at == 0 { file.display().to_string() } else { member.path.clone() },
-                member.text.clone(),
-            )
-        })
-        .collect();
+    let sources = entry_sources(file, &members);
     let compiled = source::compile_linked(
         &name,
         &sources,
@@ -1249,6 +1296,54 @@ pub(crate) fn compile_root(
         Some(graph),
         prefix_cache,
         dep_dsi,
+        source::BundleAfter::Keep,
+    )?;
+    validate_links(&name, compiled.lowered.module().deps(), graph.identities())?;
+    Ok(compiled)
+}
+
+/// The entry member keeps the invoked path as its display; every
+/// sibling registers under its bundle-relative path, the spelling a
+/// dep-side compile renders the same member under.
+fn entry_sources(file: &Path, members: &[Member]) -> Vec<(String, String)> {
+    members
+        .iter()
+        .enumerate()
+        .map(|(at, member)| {
+            (
+                if at == 0 { file.display().to_string() } else { member.path.clone() },
+                member.text.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The compile one `ds test` entry rides: the composed members (the
+/// package's own beside the test entry) through the same package
+/// compile a run takes — no script-mode caches, a test run is one-shot
+/// — and the same link validation.
+///
+/// # Errors
+///
+/// Every refusal the package compile and the link validation report.
+pub(crate) fn compile_test(
+    file: &Path,
+    members: &[Member],
+    graph: &Graph,
+) -> Result<CompiledSource> {
+    let name = source::script_module_name(file)?;
+    let identity = member_identity(members);
+    let compiled = source::compile_linked(
+        &name,
+        &entry_sources(file, members),
+        identity,
+        true,
+        true,
+        graph.no_ambient,
+        graph.identities(),
+        Some(graph),
+        None,
+        None,
         source::BundleAfter::Keep,
     )?;
     validate_links(&name, compiled.lowered.module().deps(), graph.identities())?;

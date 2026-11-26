@@ -39,8 +39,8 @@ impl ErrorClass {
     }
 }
 
-/// Generates the enum, the string table, the class table, and `ALL` from one
-/// list, so the three views cannot drift apart.
+/// Generates the enum, the string table, the class table, the description
+/// table, and `ALL` from one list, so the views cannot drift apart.
 macro_rules! error_codes {
     ( $( #[doc = $doc:expr] $variant:ident => $code:literal , $class:ident ),* $(,)? ) => {
         /// Every diagnostic code of the language and toolchain.
@@ -70,6 +70,13 @@ macro_rules! error_codes {
             pub const fn class(self) -> ErrorClass {
                 match self { $( Self::$variant => ErrorClass::$class, )* }
             }
+
+            /// The code's registered description: the variant's own doc
+            /// line, the errors reference renders verbatim.
+            #[must_use]
+            pub const fn doc(self) -> &'static str {
+                match self { $( Self::$variant => $doc, )* }
+            }
         }
 
         impl fmt::Display for ErrorCode {
@@ -80,9 +87,8 @@ macro_rules! error_codes {
     };
 }
 
-// design-decisions.md H6 shows a moved error as DS2001 in one example; the
-// shipped registry pins linearity at 3xxx, so the two-span linear class is
-// DS3xxx. The docs example predates the class partition.
+// Linearity pins at 3xxx (the two-span linear class); the early example
+// naming a moved value DS2001 predates the class partition.
 error_codes! {
     /// Token not valid at this position.
     UnexpectedToken => "DS1001", Parse,

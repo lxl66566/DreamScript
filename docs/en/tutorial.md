@@ -381,6 +381,8 @@ Definitions (the identity and visibility unit) live in files (a namespace spelli
 
 Module bodies are pure compile-time declarations; in script mode only, the entry file's top-level statements compile into a synthesized `main`, and imported files stay pure.
 
+A package's `tests/` directory holds its tests: each `.ds` file is an independent script entry composed beside the package's own members, `ds test` runs them all in ascending order, and a test passes when its run exits clean — a trap or a deliberate nonzero `exit` fails it with its output shown. `ds test --list` prints the discovery; a package root without `tests/` answers `no tests`.
+
 A line-initial `##` at top level separates blocks (the rest of the line is free text); definitions are order-independent, and a file without separators is one block. `///` is a doc comment attaching to the next definition, member or field included; `//` is the ordinary comment.
 
 ```ts

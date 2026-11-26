@@ -9,7 +9,11 @@
 //! once, and the result returns through the read's own windows. The
 //! place must resolve or halt: a list's own store refuses an
 //! out-of-range probe (the plain store's trap), and a map's absent key
-//! halts at the read.
+//! halts at the read. A field-terminated store whose leaf carries a
+//! reference releases the replaced content's count before the store
+//! threads — the mut-window member call answering the receiver's own
+//! word (`self.free = fl.remove(last)`) included — and the loop drain
+//! pins the counts back to baseline.
 
 use ds_check::analyze;
 use ds_diag::{ErrorCode, Files, human};
@@ -71,6 +75,64 @@ fn the_place_chains_store_end_to_end() {
         vm.objects().len(),
         0,
         "the reference-carrying place stores drain the heap, the loop's compound stores included"
+    );
+}
+
+#[test]
+fn a_field_store_of_a_member_call_answer_drains() {
+    // the mut-window member call answering the receiver's own word: the
+    // natural `self.free = fl.remove(last)` spelling inside a struct's
+    // method, its loop riding one rollover store per iteration, and the
+    // discard spelling (`fl.remove(last);`) beside it — the drain leaves
+    // neither the replaced field content nor the answer's own count
+    let (mut vm, _) = build_vm();
+    assert_eq!(
+        vm.run("place_assign_probe", "field_member_answer", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true))),
+        "both spellings kept their list"
+    );
+    assert_eq!(
+        vm.objects().len(),
+        0,
+        "the store spelling drains like the discard spelling"
+    );
+}
+
+#[test]
+fn a_heap_field_store_releases_the_replaced_content() {
+    // two overwrites of a string field: each store's old word releases
+    // its count at the store, so neither the first nor the second
+    // replaced content survives the drain
+    let (mut vm, _) = build_vm();
+    assert_eq!(
+        vm.run("place_assign_probe", "field_overwrite", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true))),
+        "both overwrites landed"
+    );
+    assert_eq!(
+        vm.objects().len(),
+        0,
+        "the replaced field contents die at their stores"
+    );
+}
+
+#[test]
+fn a_compound_store_of_a_member_call_answer_drains() {
+    // the compound operator over a member-call RHS (`xs[i] += xs.len()`
+    // shaped): the scalar answer folds into the leaf's read copy, the
+    // string answer through the concat's own window, and every probe and
+    // answer temp dies at its own store-back — the compound branch never
+    // shares the plain store's replaced-content hole
+    let (mut vm, _) = build_vm();
+    assert_eq!(
+        vm.run("place_assign_probe", "compound_member_answer", &[]),
+        Ok(FrameAnswer::one(Value::Bool(true))),
+        "the compound member-call legs answered"
+    );
+    assert_eq!(
+        vm.objects().len(),
+        0,
+        "the compound member-call stores drain the heap"
     );
 }
 

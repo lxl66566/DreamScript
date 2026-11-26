@@ -108,6 +108,12 @@ pub fn walk_sources(root: &Path) -> Result<Vec<PathBuf>, DirError> {
             // directory symlink is not `is_dir` here, so it never
             // enters the stack and its target never doubles the walk.
             if file_type.is_dir() {
+                // The package's own `tests/` directory is not package
+                // members: each .ds file below it is an independent
+                // `ds test` entry, never a sibling the namespace composes.
+                if dir == root && path.file_name().is_some_and(|name| name == "tests") {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }

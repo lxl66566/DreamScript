@@ -1405,7 +1405,12 @@ mod tests {
         };
         let module = ds_mod::read(&bytes).expect("the module reads back");
         let err = without_proc().install_dsmod(module).unwrap_err();
-        let ds_vm::LoadError::UnprovidedPlatformOp { platform, capability, .. } = err else {
+        let ds_vm::LoadError::UnprovidedPlatformOp {
+            platform,
+            capability,
+            ..
+        } = err
+        else {
             panic!("the install names the platform op: {err:?}");
         };
         assert_eq!(platform, "std", "the refusal names the platform");

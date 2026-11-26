@@ -69,11 +69,11 @@ pub struct RunArgs {
 
 /// Runs one module: the dsmod path mmaps and installs; the source path
 /// compiles in-process first. Both then resolve one entry and run it.
-/// The host owns the exit code (the CLI process surface, ruled
-/// 2026-11-21): a clean completion exits 0, a trap or an unhandled
+/// The host owns the exit code (the CLI process surface): a clean
+/// completion exits 0, a trap or an unhandled
 /// failure 1, and an `exit(code)` call answers its deliberate status.
 pub fn run(args: &RunArgs) -> Result<ExitCode> {
-    // The host's shutdown door (the 2026-11-24 signal ruling), armed
+    // The host's shutdown door, armed
     // before any other thread can spawn: the signals block on this
     // thread first — mask inheritance carries the block to every
     // thread the run later spawns (the fork-join workers, the
@@ -88,7 +88,7 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     // the process arguments stage on the VM once, the `args()` op
     // reading them verbatim whatever the entry
     prepared.vm.set_argv(args.args.clone());
-    // The 2026-11-21 scheduler ruling's CLI half: `ds run` installs the
+    // The scheduler's CLI half: `ds run` installs the
     // platform's reactor, so the std platform's net face parks on a
     // would-block instead of blocking the drive — the single-thread
     // executor runs the next ready fiber and the reactor bridges the
@@ -105,6 +105,43 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     // blocking drive's stop flag
     signals.arm(&mut prepared.vm)?;
     resolve_and_run(&mut prepared, &args.entry, &signals)
+}
+
+/// The `ds test` re-entry's drive: one compiled test script — the
+/// package's members composed beside it — installs through the same
+/// deps-first walk as a package run, no script-mode caches (a test run
+/// is one-shot), then the run tail as ever: empty argv, the platform
+/// reactor, the shutdown door, the `main` entry.
+///
+/// # Errors
+///
+/// Every refusal the install walk and the drive report.
+pub(crate) fn run_test_entry(
+    compiled: source::CompiledSource,
+    graph: &package::Graph,
+) -> Result<ExitCode> {
+    let signals = ShutdownWatch::install()?;
+    let name = compiled.name.clone();
+    let functions = compiled.lowered.functions().to_vec();
+    let cache = RunCache::discover(false, false);
+    let vm = install_package_root(
+        compiled.lowered.into_module(),
+        graph,
+        &cache,
+        &name,
+        functions.len(),
+    )?;
+    let mut prepared = PreparedRun {
+        vm,
+        name,
+        functions,
+    };
+    prepared.vm.set_argv(Vec::new());
+    if let Some(reactor) = ds_vm::reactor::platform_default() {
+        prepared.vm.install_reactor(reactor);
+    }
+    signals.arm(&mut prepared.vm)?;
+    resolve_and_run(&mut prepared, "main", &signals)
 }
 
 /// The extension as UTF-8, when it is.
@@ -383,8 +420,8 @@ fn compile_source(compiled: source::CompiledSource) -> Result<PreparedRun> {
 }
 
 /// Resolves the entry, runs it, and answers the run's outcome — with
-/// the host's shutdown event observed (the 2026-11-24 signal ruling),
-/// the exit code the host's own per the die split: Unix answers
+/// the host's shutdown event observed, the exit code the host's own
+/// per the die split: Unix answers
 /// 128+signum, whatever the drive's last outcome was, the event
 /// having cut it or raced it.
 fn resolve_and_run(
@@ -393,7 +430,7 @@ fn resolve_and_run(
     signals: &ShutdownWatch,
 ) -> Result<ExitCode> {
     let outcome = resolve_and_drive(prepared, entry);
-    // the host's shutdown event (the 2026-11-24 signal ruling): the
+    // the host's shutdown event: the
     // exit code is the host's own per the die split — Unix answers
     // 128+signum — whatever the drive's last outcome was, the event
     // having cut it or raced it
@@ -714,7 +751,7 @@ fn describe_trap(trap: &Trap) -> String {
         Trap::DivideByZero => "division by zero".to_owned(),
         Trap::OversizedShift => "oversized shift".to_owned(),
         Trap::CvtOutOfRange => "float-to-int conversion out of range".to_owned(),
-        // the die row of the CLI's halt policy (the 2026-11-17 split):
+        // the die row of the CLI's halt policy:
         // the message prints through the trap report and the run exits
         // failed, exactly the io|net|utf8 halt rows' contract
         Trap::Die { message } => format!("die: {message}"),

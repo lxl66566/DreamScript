@@ -1,15 +1,16 @@
 //! The `.dsi` signature spellings (G4): a package's reviewable API
 //! surface — every `pub` item of a parse tree rendered as its
-//! re-parsable declaration line, never a body. Two consumers share the
-//! renderer: `ds info` prints a whole package's surface, and the LSP
-//! hover answers one declaration's line — the signature spelling alone
-//! wherever the consumer wants less text than the surface prints.
+//! re-parsable declaration line, never a body. Three consumers share the
+//! renderer: `ds info` prints a whole package's surface, the LSP hover
+//! answers one declaration's line, and the `ds doc` dumper additionally
+//! renders impl faces — the signature spelling alone wherever the
+//! consumer wants less text than the surface prints.
 
 use std::fmt::Write as _;
 
 use ds_parse::{
-    Ast, EnumCase, EnumPayload, FieldDecl, FnDecl, Item, ItemKind, Pattern, StructMember,
-    TraitMember, Type,
+    Ast, Delim, EnumCase, EnumPayload, FieldDecl, FnDecl, ImplDecl, Item, ItemKind, Pattern,
+    StructMember, TraitMember, Type,
 };
 
 use crate::{ctx::Ctx, expr, ty};
@@ -227,6 +228,10 @@ fn case_line(ctx: &Ctx, case: &EnumCase) -> String {
 /// A brace body over member lines: one line when it holds at most two
 /// members, one indented line per member otherwise.
 fn render_body(out: &mut String, lines: &[String]) {
+    if lines.is_empty() {
+        let _ = writeln!(out, " {{ }}");
+        return;
+    }
     if lines.len() <= 2 {
         let joined = lines
             .iter()
@@ -241,6 +246,37 @@ fn render_body(out: &mut String, lines: &[String]) {
         let _ = writeln!(out, "{line}");
     }
     out.push_str("}\n");
+}
+
+/// One impl block's face: `impl[g]? Trait? for? Target` over its member
+/// signatures, never bodies — the doc dumper's spelling (`ds info`'s
+/// `.dsi` carries no impl rows; the dumper documents them). The trait
+/// head rides the generic-application spelling, the members exactly the
+/// trait face's lines.
+pub fn impl_face(out: &mut String, src: &str, decl: &ImplDecl) {
+    let ctx = Ctx::new(src);
+    let mut head = String::from("impl");
+    ty::write_generics(&ctx, &mut head, &decl.generics);
+    if let Some(trait_ref) = &decl.trait_ref {
+        head.push(' ');
+        ty::write_ty(&ctx, &mut head, &Type::Path {
+            span: trait_ref.span,
+            path: trait_ref.path.clone(),
+            args: trait_ref.args.clone(),
+            delim: Delim::Bracket,
+        });
+        head.push_str(" for ");
+    } else {
+        head.push(' ');
+    }
+    ty::write_ty(&ctx, &mut head, &decl.target);
+    out.push_str(&head);
+    let members = decl
+        .fns
+        .iter()
+        .map(|f| fn_line(&ctx, f))
+        .collect::<Vec<_>>();
+    render_body(out, &members);
 }
 
 /// A comma-joined type list: supers, tuple payloads.

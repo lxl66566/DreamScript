@@ -278,7 +278,7 @@ fn main() -> int {
 
 /// Lowers the affine probe through the full pipeline, asserting the
 /// check is clean so failures are the lowerer's.
-fn lower_affine() -> (String, ds_lower::Lowered) {
+fn lower_affine() -> (String, Lowered) {
     let mut files = Files::new();
     let id = files.add_source("affine_closure.ds", AFFINE_SOURCE);
     let asts = [parse(&files, id).expect("the probe parses")];
@@ -309,7 +309,7 @@ fn lower_affine() -> (String, ds_lower::Lowered) {
 /// balances.
 #[test]
 fn a_closure_mutates_its_captured_var_across_calls() {
-    let (source, lowered) = lower_affine();
+    let (_source, lowered) = lower_affine();
     let bytes = write(lowered.module());
     let module = read(&bytes).expect("the module round-trips");
     let mut registry = ModuleRegistry::new();

@@ -1,0 +1,6 @@
+fn main() -> () {
+  if one() != 1 {
+    die("one drifted")
+    println("unreached")
+  }
+}

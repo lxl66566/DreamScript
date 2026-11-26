@@ -3995,7 +3995,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 // result: the same word moves the binary path emits.
                 self.compound_value(
                     *op,
-                    TypedPlace {
+                    &TypedPlace {
                         place: place.clone(),
                         ty: declared,
                     },
@@ -4070,15 +4070,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     fn compound_value(
         &mut self,
         op: ds_parse::AssignOp,
-        current: TypedPlace,
+        current: &TypedPlace,
         right: &Expr,
         span: Span,
     ) -> Result<TypedPlace, LowerError> {
         let declared = current.ty;
         match op {
-            ds_parse::AssignOp::Rem => self.reject_float_rem(&current, span)?,
+            ds_parse::AssignOp::Rem => self.reject_float_rem(current, span)?,
             ds_parse::AssignOp::Shl | ds_parse::AssignOp::Shr => {
-                self.reject_float_shift_bitwise(&current, span)?;
+                self.reject_float_shift_bitwise(current, span)?;
             },
             _ => {},
         }
@@ -4108,15 +4108,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         let result = if str_add {
             // string `+=` desugars like the binary arm: the compound
             // store re-stores the concat result, a fresh Ref word
-            self.concat_value(&current, &rhs, declared, span)?
+            self.concat_value(current, &rhs, declared, span)?
         } else if let PlaceShape::Word(SlotType::I64 | SlotType::F64) = current.place.shape {
             // a scalar compound store writes the leaf word itself: the VM
             // reads both operands before writing dst, so the word safely
             // aliases its own read, and the re-store below degenerates to
             // the in-place no-op (a scalar word carries no count)
-            self.arith_at(int_op, float_op, &current, &rhs, current.place.base, span)?
+            self.arith_at(int_op, float_op, current, &rhs, current.place.base, span)?
         } else {
-            self.arith(int_op, float_op, &current, &rhs, span)?
+            self.arith(int_op, float_op, current, &rhs, span)?
         };
         Ok(TypedPlace {
             place: result,

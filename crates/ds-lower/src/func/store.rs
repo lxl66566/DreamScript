@@ -103,7 +103,7 @@ impl FnLower<'_, '_, '_> {
         if let Some(step) = element {
             // `xs[i] op= e`: the read copy is the old value, the result
             // is written back through the read's own probe and receiver
-            let result = self.compound_value(*op, place, right, left.span())?;
+            let result = self.compound_value(*op, &place, right, left.span())?;
             self.stage_index_store(step.native, &step.recv, &step.probe, &result)?;
             self.release_place(&step.elem)?;
             self.release_place(&result)?;
@@ -117,13 +117,20 @@ impl FnLower<'_, '_, '_> {
             // store tail degenerates to the in-place no-op there
             let leaf_ty = place.ty;
             let assigned = if compound {
-                let result = self.compound_value(*op, place.clone(), right, left.span())?;
+                let result = self.compound_value(*op, &place, right, left.span())?;
                 for word in self.count_words(place.place.base, leaf_ty)? {
                     self.rc.store_over(&mut self.code, &[word]);
                 }
                 result
             } else {
-                self.value(right)?
+                let value = self.value(right)?;
+                // the replaced leaf's counts die before the store threads:
+                // the value's words widen in over the released sub-span
+                // (the whole-binding assignment's own store tail)
+                for word in self.count_words(place.place.base, leaf_ty)? {
+                    self.rc.store_over(&mut self.code, &[word]);
+                }
+                value
             };
             self.refuse_closure_widen(&assigned, leaf_ty, *span)?;
             self.guard_deinit_union_member(assigned.ty, leaf_ty, *span)?;

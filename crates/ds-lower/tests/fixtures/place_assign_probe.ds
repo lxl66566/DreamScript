@@ -18,12 +18,14 @@ struct map[k, v]
 struct point { x: int, y: int }
 struct outer { p: point, n: int, xs: list[int] }
 struct named { name: string, n: int }
+struct slab { free: list[int] }
 
 extern fn println (s: string) -> ()
 extern fn concat (a: string, b: string) -> string
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_push[t] (xs: mut list[t], x: t) -> ()
 extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
+extern fn list_remove[t] (xs: mut list[t], i: int) -> ()
 extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
 extern fn len[t] (xs: t) -> int
@@ -33,6 +35,7 @@ impl[t] list[t] {
   fn get (self, i: int) -> t | none
   fn push (mut self, x: t) -> list[t]
   fn set (mut self, i: int, x: t) -> list[t]
+  fn remove (mut self, i: int) -> list[t]
 }
 
 impl[k, v] map[k, v] {
@@ -208,6 +211,76 @@ fn compound_loop() -> bool {
     ss.get(1).unwrap_or("").len() == 50
 }
 
+// the field store whose answer is the receiver's own word: the mut-window
+// member call's dup rides into the store, the replaced field content
+// releasing its own count first — the loop drain pinning every
+// iteration's rollover back to baseline. The discard spelling (the
+// answer dropped at the use) walks the same member beside it
+impl slab {
+  fn churn(mut self, n: int) -> () {
+    var i = 0
+    while i < n {
+      var fl = self.free
+      const last = fl.len() - 1
+      self.free = fl.remove(last)
+      self.free.push(last)
+      i += 1
+    }
+    ()
+  }
+
+  fn churn_discard(mut self, n: int) -> () {
+    var i = 0
+    while i < n {
+      var fl = self.free
+      const last = fl.len() - 1
+      fl.remove(last)
+      fl.push(last)
+      i += 1
+    }
+    ()
+  }
+}
+
+fn field_member_answer() -> bool {
+  var s = slab { free: [7] }
+  s.churn(50)
+  const kept = s.free.len()
+  var d = slab { free: [9] }
+  d.churn_discard(50)
+  const kept2 = d.free.len()
+  kept == 1 && kept2 == 1
+}
+
+// a heap field's replaced content dies at the plain store: two
+// overwrites, each old word's count releasing at its own store
+fn field_overwrite() -> bool {
+  var o = named { name: "a", n: 0 }
+  o.name = "bb"
+  o.name = "ccc"
+  o.name == "ccc" && o.n == 0
+}
+
+impl named {
+  fn badge(self) -> string { "T" }
+}
+
+// the compound operator whose RHS is a member call: the scalar answer
+// folds into the element's read copy, the string answer through the
+// concat's window and the field leaf, every probe and answer temp dying
+// at its own store-back
+fn compound_member_answer() -> bool {
+  var xs = [10, 20]
+  xs[0] += xs.len()
+  var o = named { name: "n", n: 0 }
+  o.name += o.badge()
+  var ss = ["a", "b"]
+  ss[1] += o.badge()
+  xs.get(0).unwrap_or(-1) == 12 &&
+    o.name == "nT" &&
+    ss.get(1).unwrap_or("") == "bT"
+}
+
 fn main() -> bool {
   field_paths() &&
     subscripts() &&
@@ -219,7 +292,10 @@ fn main() -> bool {
     compound_nested() &&
     compound_strings() &&
     compound_once() &&
-    compound_loop()
+    compound_loop() &&
+    compound_member_answer() &&
+    field_member_answer() &&
+    field_overwrite()
 }
 
 // the out-of-range store: the place must resolve or halt (the trap test's
