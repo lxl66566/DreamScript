@@ -696,6 +696,12 @@ pub(crate) struct Plan {
     /// Every generic fn's recorded types, in a fixed order: the signature
     /// and every type the checker recorded inside the body's span.
     body_types: HashMap<DefId, Rc<[Ty]>>,
+    /// The instances whose evidence words this module bakes statically:
+    /// a dispatch site's solved instance word or an evidence-chain route
+    /// naming the impl's body. The link layering reads the set as the
+    /// internal-exercise fact — an artifact carrying one cannot have the
+    /// impl shadowed under a later winner.
+    exercised: HashSet<u32>,
 }
 
 /// One minted record's plan row: the facts keyed by the site's span.
@@ -739,7 +745,20 @@ impl Plan {
             instances: HashMap::new(),
             instance_args: HashMap::new(),
             body_types: HashMap::new(),
+            exercised: HashSet::new(),
         }
+    }
+
+    /// Records one instance's evidence word as statically baked: the
+    /// internal-exercise fact a consuming link reads before shadowing.
+    pub(crate) fn mark_exercised(&mut self, instance: u32) {
+        self.exercised.insert(instance);
+    }
+
+    /// The statically baked instances, in no order.
+    #[must_use]
+    pub fn exercised(&self) -> &HashSet<u32> {
+        &self.exercised
     }
 
     /// Installs the package's propagated demand table before any body

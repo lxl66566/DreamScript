@@ -143,7 +143,7 @@ fn resolve_members(
     }
     let mut serving = Vec::new();
     let mut miss = None;
-    for &id in env.of_trait(trait_id) {
+    for id in env.of_trait(trait_id) {
         if serves(universe, env, assumptions, id, members, MAX_DEPTH) {
             serving.push(id);
         } else if miss.is_none()
@@ -192,7 +192,7 @@ fn covered_branches(
     // carries its per-member coverage.
     let mut heads: Vec<Ty> = Vec::new();
     let mut groups: Vec<Vec<(InstanceId, Vec<bool>)>> = Vec::new();
-    for &id in env.of_trait(trait_id) {
+    for id in env.of_trait(trait_id) {
         let Ok(written) = env.written(id) else {
             continue;
         };
@@ -740,7 +740,7 @@ fn trait_holds(
     {
         return true;
     }
-    for &id in env.of_trait(trait_id) {
+    for id in env.of_trait(trait_id) {
         if serves(universe, env, assumptions, id, target, depth - 1) {
             return true;
         }
@@ -1023,7 +1023,7 @@ fn trait_holds_ground(
     if depth == 0 || target.is_empty() {
         return false;
     }
-    for &id in env.of_trait(trait_id) {
+    for id in env.of_trait(trait_id) {
         if serves_ground(universe, env, id, target, depth - 1) {
             return true;
         }

@@ -488,6 +488,8 @@ fn build_trait_vm() -> (Vm, Lowered) {
             }],
             span: at,
             link: 0,
+            pkg: String::new(),
+            exercised: false,
         }],
         entries: vec![
             ty_entry("pair", ds_check::TypeFact::Struct {
@@ -713,6 +715,8 @@ fn build_default_vm() -> (Vm, Lowered) {
                 members: Vec::new(),
                 span: at,
                 link: 0,
+                pkg: String::new(),
+                exercised: false,
             },
             ds_check::import::ImplFact {
                 trait_name: "answering".to_owned(),
@@ -723,6 +727,8 @@ fn build_default_vm() -> (Vm, Lowered) {
                 }],
                 span: at,
                 link: 0,
+                pkg: String::new(),
+                exercised: false,
             },
         ],
         entries: vec![ty_entry(
@@ -990,6 +996,8 @@ fn build_union_vm() -> (Vm, Lowered) {
             ],
             span: at,
             link: 0,
+            pkg: String::new(),
+            exercised: false,
         }],
         entries: vec![
             ty_entry("pack", ds_check::TypeFact::Struct {
@@ -1235,6 +1243,8 @@ fn build_union_default_vm() -> (Vm, Lowered) {
             members: Vec::new(),
             span: at,
             link: 0,
+            pkg: String::new(),
+            exercised: false,
         }],
         entries: vec![ty_entry(
             "wording",

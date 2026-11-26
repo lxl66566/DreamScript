@@ -20,7 +20,7 @@
 //! alone cannot determine.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::LazyLock,
 };
@@ -245,10 +245,18 @@ fn impl_facts_of(
     ambient_files: usize,
     functions: &[String],
     carried: &HashMap<String, u32>,
+    exercised: &HashSet<u32>,
 ) -> Vec<ds_check::import::ImplFact> {
     let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files, carried);
-    let eligible: std::collections::HashSet<ds_check::DefId> = facts.keys().copied().collect();
-    ds_check::import::ImplFact::member_facts(analyzed, ambient_files, functions, &eligible, &facts)
+    let eligible: HashSet<ds_check::DefId> = facts.keys().copied().collect();
+    ds_check::import::ImplFact::member_facts(
+        analyzed,
+        ambient_files,
+        functions,
+        &eligible,
+        &facts,
+        exercised,
+    )
 }
 
 /// The producer's default-body gate (G4): an exported trait member
@@ -759,12 +767,30 @@ fn compile_text(
         (None, Some(imports)) => ds_meta::analyze_owned_linked(&files, asts, &preexpanded, imports),
         (None, None) => ds_meta::analyze_owned(&files, asts, &preexpanded),
     };
-    if !analyzed.checked.diags.is_empty() {
-        return Err(reject(
-            &files,
-            &analyzed.checked.diags,
-            "the source does not check clean",
-        ));
+    let has_errors = analyzed
+        .checked
+        .diags
+        .iter()
+        .any(|diag| diag.severity == ds_diag::Severity::Error);
+    if has_errors {
+        let errors: Vec<Diagnostic> = analyzed
+            .checked
+            .diags
+            .iter()
+            .filter(|diag| diag.severity == ds_diag::Severity::Error)
+            .cloned()
+            .collect();
+        return Err(reject(&files, &errors, "the source does not check clean"));
+    }
+    // A link-time warning reports and the compile stands: the shadowing
+    // it names resolved by the link layering, never silently.
+    for warning in analyzed
+        .checked
+        .diags
+        .iter()
+        .filter(|diag| diag.severity == ds_diag::Severity::Warning)
+    {
+        eprint!("{}", render::human(warning, &files));
     }
     // The affine walk (C1, C5): the same pass `ds check` and `ds repl`
     // consult before committing, refusing here before anything lowers
@@ -967,6 +993,7 @@ fn compile_text(
         ambient_files,
         lowered.functions(),
         lowered.carried_default_bodies(),
+        lowered.exercised(),
     );
     match after {
         BundleAfter::Keep => {

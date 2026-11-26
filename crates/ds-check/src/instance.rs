@@ -346,6 +346,11 @@ pub struct InstanceEnv {
     /// rebuilds). The solve-side scans walk only their own trait's rows
     /// through [`InstanceEnv::of_trait`].
     by_trait: IdTable<TraitId, Vec<InstanceId>>,
+    /// The rows a link merge shadowed (B6's link layering): the losing
+    /// impl's branches stay stored (their ids stay stable for the
+    /// declaration tables) but every resolution scan skips them — the
+    /// winner is the only instance the solved tables carry for the head.
+    shadowed: FxHashSet<u32>,
 }
 
 impl InstanceEnv {
@@ -377,10 +382,76 @@ impl InstanceEnv {
 
     /// Every stored instance of `trait_id`, in id order: the solve-side
     /// scan's index, so a resolve touches only its own trait's rows. A
-    /// trait no instance implements reads as no rows.
+    /// trait no instance implements reads as no rows. Rows a link merge
+    /// shadowed stay out: the winner is the only instance the solved
+    /// tables carry for the overlapped head.
+    pub fn of_trait(&self, trait_id: TraitId) -> Vec<InstanceId> {
+        self.by_trait
+            .get(&trait_id)
+            .map(|rows| {
+                rows.iter()
+                    .copied()
+                    .filter(|id| !self.shadowed.contains(&id.index()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Marks a row shadowed: every resolution scan and coherence probe
+    /// drops it from here on. The row's storage stays (ids are stable),
+    /// and the mark is one-way — a shadowed impl never returns to the
+    /// solved tables.
+    pub fn shadow(&mut self, id: InstanceId) {
+        self.shadowed.insert(id.index());
+    }
+
+    /// Whether a row is currently shadowed.
     #[must_use]
-    pub fn of_trait(&self, trait_id: TraitId) -> &[InstanceId] {
-        self.by_trait.get(&trait_id).map_or(&[], Vec::as_slice)
+    pub fn is_shadowed(&self, id: InstanceId) -> bool {
+        self.shadowed.contains(&id.index())
+    }
+
+    /// The stored, unshadowed instances of `trait_id` whose heads
+    /// intersect `head` (B6): the rows a link merge resolves its
+    /// shadowing against. The probe is the declaration probe's own —
+    /// set algebra first, the instantiation probe over the pairs it
+    /// cannot decide — and the error path's witness materialization
+    /// interns into the universe exactly as a declaration's probe does.
+    pub fn overlapping(
+        &self,
+        universe: &mut Universe,
+        trait_id: TraitId,
+        head: Ty,
+    ) -> Vec<InstanceId> {
+        let mut rows = Vec::new();
+        for id in self.of_trait(trait_id) {
+            let Ok(inst_head) = self.head(id) else {
+                continue;
+            };
+            let conditions = self
+                .conditions(id)
+                .map(<[Condition<Ty>]>::to_vec)
+                .unwrap_or_default();
+            let outcome = overlap_error(
+                universe,
+                self,
+                ProbedHead {
+                    head: inst_head,
+                    conditions: &conditions,
+                },
+                ProbedHead {
+                    head,
+                    conditions: &[],
+                },
+                trait_id,
+                id,
+                true,
+            );
+            if outcome.is_err() {
+                rows.push(id);
+            }
+        }
+        rows
     }
 
     /// Appends ids to the trait's index list. The ids come from one
@@ -500,7 +571,8 @@ impl InstanceEnv {
                 conditions: &per_branch[i].0,
             };
             for (index, inst) in self.instances.iter().enumerate() {
-                if inst.trait_id == decl.trait_id
+                if !self.shadowed.contains(&(index as u32))
+                    && inst.trait_id == decl.trait_id
                     && let Some(outcome) = overlap_error(
                         universe,
                         self,
@@ -690,7 +762,10 @@ impl InstanceEnv {
         };
         for i in 0..self.instances.len() {
             for j in (i + 1)..self.instances.len() {
-                if i < served && j < served {
+                if i < served && j < served
+                    || self.shadowed.contains(&(i as u32))
+                    || self.shadowed.contains(&(j as u32))
+                {
                     continue;
                 }
                 let (a, b) = (&self.instances[i], &self.instances[j]);

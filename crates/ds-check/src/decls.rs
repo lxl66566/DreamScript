@@ -376,6 +376,14 @@ pub struct ForeignImplLink {
     pub position: u32,
     /// The impl's member rows, one per bodied member.
     pub members: Vec<crate::import::ImplMemberFact>,
+    /// The declaring package's identity (`name@version`): the link
+    /// layering's package identity, the loser's name a shadowing
+    /// warning or refusal spells.
+    pub pkg: String,
+    /// The declaring package's own artifact statically dispatches to
+    /// this impl (a baked instance word names it), so the link cannot
+    /// shadow it — the internal-exercise refusal's fact.
+    pub exercised: bool,
 }
 
 impl ForeignImplLink {
@@ -583,7 +591,14 @@ where
     // trait through the minted trait id, so the instance the row
     // declares covers exactly the head the producer's impl did. A row
     // whose trait this compile never selected stays out — its dispatch
-    // is unobservable here.
+    // is unobservable here. An overlap with a stored instance resolves
+    // by package identity in fixed layers: the root package's own impl
+    // over every dependency's, an origin impl over a third party's, two
+    // impls no layer separates refusing with both packages named. The
+    // losing rows leave the solved tables and every shadowing warns,
+    // but a loser whose own artifact statically exercises the head
+    // refuses — its baked instance words would keep its behavior under
+    // the winner.
     for fact in package.linked_impl_facts() {
         let Some(&trait_def) = decls.foreign_type_names.get(&fact.trait_name) else {
             continue;
@@ -602,20 +617,155 @@ where
         ) else {
             continue;
         };
-        let decl = InstanceDecl::new(trait_id, head);
-        match decls.instances.declare(&mut decls.universe, &decl) {
-            Ok(ids) => {
-                for id in ids {
-                    decls.linked_impls.insert(
-                        id,
-                        Arc::new(ForeignImplLink {
-                            position: fact.link,
-                            members: fact.members.clone(),
-                        }),
+        let Some(solved) = decls.universe.solve(&head).ok() else {
+            continue;
+        };
+        let origin_positions = origin_positions_of(package, &decls, trait_def, solved);
+        let layer = |position: u32| {
+            if origin_positions.contains(&position) {
+                ImplLayer::Origin
+            } else {
+                ImplLayer::ThirdParty
+            }
+        };
+        let fact_layer = layer(fact.link);
+        let mut sides: Vec<LinkSide> = Vec::new();
+        for id in decls
+            .instances
+            .overlapping(&mut decls.universe, trait_id, solved)
+        {
+            if let Some(&span) = decls.instance_impls.get(&id) {
+                match sides.iter_mut().find(|side| side.span == Some(span)) {
+                    Some(side) => side.rows.push(id),
+                    None => sides.push(LinkSide {
+                        layer: ImplLayer::Root,
+                        pkg: None,
+                        exercised: false,
+                        span: Some(span),
+                        ptr: None,
+                        rows: vec![id],
+                    }),
+                }
+            } else if let Some(link) = decls.linked_impls.get(&id) {
+                let ptr = Arc::as_ptr(link) as usize;
+                match sides.iter_mut().find(|side| side.ptr == Some(ptr)) {
+                    Some(side) => side.rows.push(id),
+                    None => sides.push(LinkSide {
+                        layer: layer(link.position),
+                        pkg: Some(link.pkg.clone()),
+                        exercised: link.exercised,
+                        span: None,
+                        ptr: Some(ptr),
+                        rows: vec![id],
+                    }),
+                }
+            }
+        }
+        let outcome = if sides.is_empty() {
+            LinkOutcome::Declare
+        } else if sides.iter().any(|side| side.layer == ImplLayer::Root) {
+            LinkOutcome::Loses(impl_side_spell(None))
+        } else if let Some(rival) = sides.iter().find(|side| side.layer == ImplLayer::Origin) {
+            if fact_layer == ImplLayer::Origin {
+                LinkOutcome::Refuses(vec![rival.clone()])
+            } else {
+                LinkOutcome::Loses(impl_side_spell(rival.pkg.as_deref()))
+            }
+        } else if fact_layer == ImplLayer::ThirdParty {
+            LinkOutcome::Refuses(sides.iter().cloned().collect())
+        } else {
+            LinkOutcome::Wins(sides.iter().cloned().collect())
+        };
+        match outcome {
+            LinkOutcome::Declare => {
+                let decl = InstanceDecl::new(trait_id, head);
+                match decls.instances.declare(&mut decls.universe, &decl) {
+                    Ok(ids) => {
+                        for id in ids {
+                            decls.linked_impls.insert(
+                                id,
+                                Arc::new(ForeignImplLink {
+                                    position: fact.link,
+                                    members: fact.members.clone(),
+                                    pkg: fact.pkg.clone(),
+                                    exercised: fact.exercised,
+                                }),
+                            );
+                        }
+                    },
+                    Err(err) => diags.push(linked_instance_diag(&decls.universe, &err, fact)),
+                }
+            },
+            LinkOutcome::Wins(losers) => {
+                for loser in &losers {
+                    for id in &loser.rows {
+                        decls.instances.shadow(*id);
+                    }
+                    let Some(loser_pkg) = &loser.pkg else {
+                        continue;
+                    };
+                    if loser.exercised {
+                        diags.push(shadowed_exercised_diag(loser_pkg, fact));
+                    } else {
+                        diags.push(
+                            Diagnostic::warning(
+                                ErrorCode::LinkShadowedImpl,
+                                format!(
+                                    "{} shadows {}'s impl of `{}` for `{}`; drop {}'s impl to \
+                                     adopt it, or keep the current selection",
+                                    impl_side_spell(Some(&fact.pkg)),
+                                    loser_pkg,
+                                    fact.trait_name,
+                                    crate::import::render_word(&fact.head),
+                                    loser_pkg,
+                                ),
+                            )
+                            .with_primary(fact.span, "the shadowing impl"),
+                        );
+                    }
+                }
+            },
+            LinkOutcome::Loses(winner) => {
+                if fact.exercised {
+                    diags.push(shadowed_exercised_diag(&fact.pkg, fact));
+                } else {
+                    diags.push(
+                        Diagnostic::warning(
+                            ErrorCode::LinkShadowedImpl,
+                            format!(
+                                "{} is shadowed: {} takes the head; drop {}'s impl to adopt it, \
+                                 or keep the current selection",
+                                impl_side_spell(Some(&fact.pkg)),
+                                winner,
+                                fact.pkg,
+                            ),
+                        )
+                        .with_primary(fact.span, "the shadowed impl"),
                     );
                 }
             },
-            Err(err) => diags.push(linked_instance_diag(&decls.universe, &err, fact)),
+            LinkOutcome::Refuses(rivals) => {
+                let rivals = rivals
+                    .iter()
+                    .filter_map(|side| side.pkg.as_deref())
+                    .collect::<Vec<&str>>()
+                    .join("`, `");
+                diags.push(
+                    Diagnostic::error(
+                        ErrorCode::LinkLayerConflict,
+                        format!(
+                            "{} and {} both declare impls of `{}` for `{}` in the same layer: no \
+                             package-identity layer separates them, so the link takes neither and \
+                             refuses naming both packages",
+                            fact.pkg,
+                            rivals,
+                            fact.trait_name,
+                            crate::import::render_word(&fact.head),
+                        ),
+                    )
+                    .with_primary(fact.span, "the refused impl"),
+                );
+            },
         }
     }
     package_coherence(&mut decls, &mut diags);
@@ -724,6 +874,10 @@ fn install_foreign_trait(
             Arc::new(ForeignImplLink {
                 position: link,
                 members: defaults,
+                // the trait's own default rows: no impl identity rides
+                // them, so the layering's fields stay neutral
+                pkg: String::new(),
+                exercised: false,
             }),
         );
     }
@@ -762,6 +916,113 @@ fn linked_instance_diag(
         )
         .with_primary(fact.span, "rejected linked impl"),
     }
+}
+
+/// One impl's fixed layer in the link resolution (B6's link layering):
+/// the root package's own impls, an origin impl (the package declaring
+/// the type or the trait), and every other dependency's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImplLayer {
+    Root,
+    Origin,
+    ThirdParty,
+}
+
+/// One stored impl's side of an overlap the link resolves: its layer,
+/// the declaring package's identity the diagnostics spell, whether the
+/// declaring package's own artifact statically exercises the head, and
+/// the solved-table rows its declaration carries. `span` groups sibling
+/// branch rows of one local impl item; `ptr` groups one linked fact's
+/// (one `ForeignImplLink` allocation).
+#[derive(Clone)]
+struct LinkSide {
+    layer: ImplLayer,
+    pkg: Option<String>,
+    exercised: bool,
+    span: Option<Span>,
+    ptr: Option<usize>,
+    rows: Vec<InstanceId>,
+}
+
+/// How a linked impl row's overlap with the stored instances resolved.
+enum LinkOutcome {
+    /// No overlap: the row declares.
+    Declare,
+    /// The row wins; every stored side it overlaps leaves the tables.
+    Wins(Vec<LinkSide>),
+    /// The row loses to a stronger stored side; the spelling names it.
+    Loses(String),
+    /// No layer separates the row from the stored sides; the link
+    /// refuses naming both packages.
+    Refuses(Vec<LinkSide>),
+}
+
+/// The diagnostics' spelling of one impl's declaring side.
+fn impl_side_spell(pkg: Option<&str>) -> String {
+    match pkg {
+        Some(pkg) => format!("`{pkg}`'s impl"),
+        None => "the root package's own impl".to_owned(),
+    }
+}
+
+/// The internal-exercise refusal: the shadowed impl's declaring package
+/// statically dispatches its own head (its linked artifact baked a
+/// statically-resolved instance word naming it), so the shadowed body
+/// would keep its behavior while the rest of the program follows the
+/// winner — one value two behaviors. The link refuses naming the loser.
+fn shadowed_exercised_diag(loser_pkg: &str, fact: &crate::import::ImplFact) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::ShadowedImplExercised,
+        format!(
+            "`{loser_pkg}`'s impl of `{}` for `{}` cannot be shadowed: its own artifact \
+             statically dispatches the head, so the shadowed body would keep its behavior under \
+             the winner",
+            fact.trait_name,
+            crate::import::render_word(&fact.head),
+        ),
+    )
+    .with_primary(fact.span, "the shadowed impl's declaring row")
+}
+
+/// The positions of the packages whose declarations make a linked impl
+/// an origin: the declaring package of the trait and of every named
+/// type the solved head carries. A fact whose own link position sits in
+/// the set is an origin impl; every other dependency's is a third
+/// party's. The root package's positions never enter — its impls are
+/// the top layer on their own.
+fn origin_positions_of(
+    package: &Package,
+    decls: &Decls,
+    trait_def: DefId,
+    solved_head: Ty,
+) -> rustc_hash::FxHashSet<u32> {
+    let mut positions = rustc_hash::FxHashSet::default();
+    if let Some(entry) = package.foreign().get(&trait_def) {
+        positions.insert(entry.link);
+    }
+    let mut atoms: Vec<TypeId> = decls.universe.members(solved_head).to_vec();
+    let mut seen = 0;
+    while seen < atoms.len() {
+        let atom = atoms[seen];
+        seen += 1;
+        if let Some(&def) = decls.defs_of_atoms.get(&atom)
+            && let Some(entry) = package.foreign().get(&def)
+        {
+            positions.insert(entry.link);
+        }
+        if let Ok(decl) = decls.universe.atom_decl(atom) {
+            match &decl.kind {
+                crate::atom::AtomKind::Apply(_, args) => {
+                    for arg in args {
+                        atoms.extend(decls.universe.members(*arg));
+                    }
+                },
+                crate::atom::AtomKind::Tuple(elements) => atoms.extend(elements.iter().copied()),
+                _ => {},
+            }
+        }
+    }
+    positions
 }
 
 /// The linked mint's resolution context: the consuming package's link
@@ -2230,6 +2491,13 @@ fn enum_case_union(
 /// atoms only (aliases and traits are sets, not constructors).
 fn atom_of_path(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeId> {
     let def = type_def_for_use(package, decls, &name.name)?;
+    if decls.atoms.get(&def).is_none() && package.foreign().contains_key(&def) {
+        // A written type naming a linked declaration shapes ahead of the
+        // link install (an impl head, an annotation the local namespace
+        // cannot answer): the same pull a written field and a trait
+        // reference take, and the install replays idempotently.
+        force_linked(package, decls, def)?;
+    }
     decls.atoms.get(&def).copied()
 }
 

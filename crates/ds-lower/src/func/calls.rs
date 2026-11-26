@@ -1923,6 +1923,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 )?;
             }
             self.guard_staged_count(staged.len() + 1)?;
+            self.plan.mark_exercised(call.instance.index());
             trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
             staged.push(SlotType::I64);
             if !tail_transfer {
@@ -1971,6 +1972,7 @@ impl<'a> FnLower<'a, '_, '_> {
             // group, whose written head names the one impl item the word
             // stands for (the inline-cache story keys on the written
             // head, never on this branch id).
+            self.plan.mark_exercised(call.instance.index());
             trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
             for _ in 0..=pairs.len() {
                 staged.push(SlotType::I64);
@@ -3169,6 +3171,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 )
             })?;
         let func = self.serving_body(impl_site, method, what, span)?;
+        // the chain is a baked route to the serving body under this
+        // instance: the internal-exercise fact the link layering reads
+        self.plan.mark_exercised(instance.index());
         // reserve the entry before the recursion so a cyclic demand
         // graph closes over it
         let index = u32::try_from(self.plan.chains.len()).expect("chain table fits u32");

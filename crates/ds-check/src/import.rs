@@ -324,20 +324,31 @@ pub struct ImplFact {
     /// recorded list, assigned at the surface build: the module whose
     /// table holds the member bodies.
     pub link: u32,
+    /// The declaring package's identity (`name@version`), stamped at
+    /// the surface build: the link layering's package identity. Empty
+    /// when no graph served the row.
+    pub pkg: String,
+    /// The declaring package's own artifact statically dispatches to
+    /// this impl (a baked instance word names it), so a link cannot
+    /// shadow it without the loser's body keeping its own behavior.
+    pub exercised: bool,
 }
 
 // PartialEq ignores the span: equality is the linked impl's identity
 // (the trait, the head, the member rows, the owning module's link
-// position), which one producer source determines; the span rides to
-// the coherence diagnostic alone, and two surface builds of one package
-// rebase it differently — the link pass's dedup keys on this equality,
-// never the span.
+// position, and the stamped package identity and exercise fact — all
+// functions of one producer source), which one producer source
+// determines; the span rides to the coherence diagnostic alone, and two
+// surface builds of one package rebase it differently — the link pass's
+// dedup keys on this equality, never the span.
 impl PartialEq for ImplFact {
     fn eq(&self, other: &Self) -> bool {
         self.trait_name == other.trait_name
             && self.head == other.head
             && self.members == other.members
             && self.link == other.link
+            && self.pkg == other.pkg
+            && self.exercised == other.exercised
     }
 }
 
@@ -932,10 +943,14 @@ impl ImplFact {
     /// compile declares: one row per impl item, the head one word of
     /// the vocabulary and each bodied member's index in the linked
     /// module's own table. A generic impl, a conditional impl, an impl
-    /// of a trait this member did not itself declare (whose fact then
-    /// refused), and an impl whose members did not all plan (a member
-    /// body over the impl's own variables) carry no row and keep the
-    /// consumer's dispatch refused.
+    /// whose members did not all plan (a member body over the impl's
+    /// own variables) carry no row and keep the consumer's dispatch
+    /// refused. The implemented trait may be this member's own
+    /// declaration (its fact rode beside the row, the member rows a
+    /// consumer checks against) or a linked one this member itself
+    /// imports — a third party's impl of another package's trait over
+    /// another package's type crosses the same row, the link layering
+    /// resolving it against the origin's own.
     #[must_use]
     pub fn member_facts(
         analyzed: &crate::type_of::Analyzed,
@@ -943,6 +958,7 @@ impl ImplFact {
         functions: &[String],
         eligible: &std::collections::HashSet<crate::DefId>,
         traits: &FxHashMap<crate::DefId, Arc<TypeFact>>,
+        exercised: &std::collections::HashSet<u32>,
     ) -> Vec<Self> {
         let package = &analyzed.package;
         let decls = &analyzed.decls;
@@ -963,21 +979,38 @@ impl ImplFact {
                     if !imp.generics.is_empty() {
                         continue;
                     }
+                    // the trait reference resolves through the local
+                    // namespace first, then the link table — the same
+                    // pull the impl item's own declaration took (the
+                    // link pass's registrations ride no type_names row)
                     let Some(def) = package
                         .lookup_type(&only.name)
-                        .filter(|&def| {
-                            package.foreign().get(&def).is_none()
-                                && (package.def(def).span.file.as_u32() as usize) >= ambient_files
-                        })
-                        .filter(|&def| traits.contains_key(&def))
+                        .or_else(|| package.foreign_type_def(&only.name))
                     else {
                         continue;
                     };
-                    // the implemented trait must have crossed itself:
-                    // its member rows are the rows a consumer checks
-                    // against, so an impl of a refused trait rides no
-                    // fact
-                    if !matches!(&*traits[&def], TypeFact::Trait(_)) {
+                    let own_trait = package.foreign().get(&def).is_none();
+                    if own_trait {
+                        // the producer's own trait must have crossed
+                        // itself: its member rows are the rows a consumer
+                        // checks against, so an impl of a refused trait
+                        // rides no fact
+                        if (package.def(def).span.file.as_u32() as usize) < ambient_files
+                            || !traits.contains_key(&def)
+                            || !matches!(&*traits[&def], TypeFact::Trait(_))
+                        {
+                            continue;
+                        }
+                    } else if !matches!(
+                        package
+                            .foreign()
+                            .get(&def)
+                            .and_then(|entry| entry.ty.as_deref()),
+                        Some(TypeFact::Trait(_))
+                    ) {
+                        // a linked trait the surface never carried
+                        // member rows for: the impl checked against no
+                        // registration, so no row rides
                         continue;
                     }
                     // one instance per impl item, its written head one
@@ -1042,6 +1075,8 @@ impl ImplFact {
                             members: members.clone(),
                             span: item.span,
                             link: 0,
+                            pkg: String::new(),
+                            exercised: impl_exercised(decls, item.span, exercised),
                         });
                     }
                 }
@@ -1049,6 +1084,22 @@ impl ImplFact {
         }
         out
     }
+}
+
+/// Whether the package's own lowering statically resolved an instance
+/// of the impl item: any of the item's instances among the statically
+/// exercised set marks the row.
+fn impl_exercised(
+    decls: &crate::Decls,
+    item_span: Span,
+    exercised: &std::collections::HashSet<u32>,
+) -> bool {
+    exercised.iter().any(|index| {
+        decls
+            .instance_impls
+            .get(&crate::InstanceId::from_raw(*index))
+            .is_some_and(|site| *site == item_span)
+    })
 }
 
 /// One exported trait member whose declared default body the
@@ -3431,7 +3482,14 @@ mod tests {
             "sizing#int#label".to_owned(),
             "defaulted#pair#answer".to_owned(),
         ];
-        let rows = super::ImplFact::member_facts(&analyzed, 0, &functions, &eligible, &facts);
+        let rows = super::ImplFact::member_facts(
+            &analyzed,
+            0,
+            &functions,
+            &eligible,
+            &facts,
+            &std::collections::HashSet::new(),
+        );
         let row = |trait_name: &str, rendered: &str| {
             rows.iter()
                 .find(|row| {
@@ -3459,7 +3517,14 @@ mod tests {
         // a member the plan never tabled (the mangle misses) refuses
         // the whole impl
         let short = ["sizing#pair#size".to_owned()];
-        let none = super::ImplFact::member_facts(&analyzed, 0, &short, &eligible, &facts);
+        let none = super::ImplFact::member_facts(
+            &analyzed,
+            0,
+            &short,
+            &eligible,
+            &facts,
+            &std::collections::HashSet::new(),
+        );
         assert!(
             none.iter()
                 .all(|row| super::render_word(&row.head) != "pair"),

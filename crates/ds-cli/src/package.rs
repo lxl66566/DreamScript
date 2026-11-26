@@ -94,6 +94,9 @@ type BoundLoads = (Vec<(String, ds_vm::BoundModule)>, Vec<(String, String)>);
 pub(crate) struct Graph {
     members: BTreeMap<String, Rc<[Member]>>,
     identities: BTreeMap<String, Hash128>,
+    /// Each resolved dep's version by link name: the `name@version`
+    /// strings the impl rows' identity stamps carry.
+    versions: BTreeMap<String, String>,
     artifacts: BTreeMap<String, ds_pkg::ArtifactBound>,
     /// Every directory a resolved path dep read from (the transitive
     /// closure, ascending): the extra watch roots a dev loop grows over
@@ -255,6 +258,16 @@ fn identities_of(resolved: &ds_pkg::Resolved) -> Identities {
         .collect()
 }
 
+/// The resolved graph's dep versions, keyed by link name: the identity
+/// strings (`name@version`) the link layering's diagnostics spell.
+fn versions_of(resolved: &ds_pkg::Resolved) -> BTreeMap<String, String> {
+    resolved
+        .deps()
+        .iter()
+        .map(|(name, package)| (name.clone(), package.version.to_string()))
+        .collect()
+}
+
 /// The resolved graph's cache-key inputs, the light entry: the same
 /// manifest read and resolution `open` runs, the deps' identities read
 /// off the seam (the provider folded them where it decoded each
@@ -374,11 +387,13 @@ pub(crate) fn open(entry: &Path, no_ambient: bool) -> Result<Option<Graph>> {
     }
     let members = dep_members(&front.store, &front.resolved)?;
     let identities = identities_of(&front.resolved);
+    let versions = versions_of(&front.resolved);
     let artifacts = front.resolved.artifacts().clone();
     let path_dirs = front.resolved.path_dirs();
     Ok(Some(Graph {
         members,
         identities,
+        versions,
         artifacts,
         path_dirs,
         store: front.store,
@@ -458,9 +473,15 @@ pub(crate) fn implicit_std_identities() -> BTreeMap<String, Hash128> {
 pub(crate) fn implicit_std_graph() -> Graph {
     let members = default_std_members();
     let identity = member_identity(&members);
+    let std_version = ds_stdlib::std_package()
+        .manifest(FileId::new(0))
+        .expect("the std package's manifest parses")
+        .version
+        .to_string();
     Graph {
         members: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), members.into())]),
         identities: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), identity)]),
+        versions: BTreeMap::from([(ds_stdlib::STD_PACKAGE_NAME.to_owned(), std_version)]),
         artifacts: BTreeMap::new(),
         path_dirs: Vec::new(),
         // The implicit graph never lands an artifact install (its
@@ -1229,6 +1250,10 @@ impl Graph {
         // member body's index addresses THIS package's module, so the
         // row's link position is the imported package's own — the
         // spans rebased like the entries'
+        let pkg = self
+            .versions
+            .get(&name)
+            .map_or_else(|| name.clone(), |version| format!("{name}@{version}"));
         let impls = package
             .impls
             .iter()
@@ -1238,6 +1263,8 @@ impl Graph {
                 members: fact.members.clone(),
                 span: rebase_span(fact.span, &rebase),
                 link: position,
+                pkg: pkg.clone(),
+                exercised: fact.exercised,
             })
             .collect();
         let tags = package.module.tags().to_vec();

@@ -219,6 +219,12 @@ error_codes! {
     UnknownTagMember => "DS2045", Type,
     /// A bare tag label matches several members of one expected union (F9.5): two declarations sharing a label both sit in the expected set, and the qualified spelling `type::label` is the escape hatch.
     AmbiguousTagMember => "DS2046", Type,
+    /// A linked impl shadows another impl of one trait over one head, or is shadowed: the link resolved the pair by package identity (the root package's own impls over every dependency's, an origin impl over a third party's), and the warning names the winner, the loser, and the action.
+    LinkShadowedImpl => "DS2047", Type,
+    /// Two linked impls of one trait over one head sit in the same resolution layer (two third parties, or two origins), so no layer of the link identity separates them; the link refuses naming both packages.
+    LinkLayerConflict => "DS2048", Type,
+    /// A shadowed impl's declaring package statically exercises its own head (its linked artifact baked a statically-resolved instance word naming it), so the link cannot shadow it without one value answering two behaviors; the link refuses naming the loser.
+    ShadowedImplExercised => "DS2049", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -359,6 +365,9 @@ mod tests {
             ("LinkedDefaultBodyRefusal", "DS2044", ErrorClass::Type),
             ("UnknownTagMember", "DS2045", ErrorClass::Type),
             ("AmbiguousTagMember", "DS2046", ErrorClass::Type),
+            ("LinkShadowedImpl", "DS2047", ErrorClass::Type),
+            ("LinkLayerConflict", "DS2048", ErrorClass::Type),
+            ("ShadowedImplExercised", "DS2049", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

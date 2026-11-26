@@ -5154,3 +5154,327 @@ fn a_transitive_path_dep_cycle_refuses() {
     );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
+
+// ---- the B6 link layering (the four layers over one trait's head) ----
+
+/// The layering fixture's trait and type: one trait, one struct, one
+/// head every impl of the face declares over.
+const LAYER_CELL: &str = concat!(
+    "pub trait greet {\n",
+    "  fn greet(self) -> string\n",
+    "}\n",
+    "\n",
+    "pub struct cell {\n",
+    "  n: int\n",
+    "}\n",
+    "\n",
+);
+
+/// The layering root's manifest beside its entry: every layer face's
+/// deps are sibling directories the resolution reads from source.
+fn layer_root_manifest(deps: &[&str]) -> String {
+    let mut manifest = "name = \"app\"\nversion = \"0.1.0\"\n".to_owned();
+    for dep in deps {
+        manifest.push_str(&format!(
+            "\n[deps.{dep}]\npath = \"../{}\"\n",
+            dep.trim_start_matches('@')
+        ));
+    }
+    manifest
+}
+
+/// Writes one layering fixture package and answers its member text.
+fn write_layer_pkg(work: &Path, name: &str, deps: &[&str], member: &str) {
+    let mut manifest = format!("name = \"{name}\"\nversion = \"1.0.0\"\n");
+    for dep in deps {
+        manifest.push_str(&format!(
+            "\n[deps.{dep}]\npath = \"../{}\"\n",
+            dep.trim_start_matches('@')
+        ));
+    }
+    let dir = work.join(name.trim_start_matches('@'));
+    write_pkg(&dir, &manifest, &[(
+        format!("{}.ds", name.trim_start_matches('@')).as_str(),
+        member,
+    )]);
+}
+
+/// The root package's own impl wins over every dependency's: the
+/// linked impl of the dependency's own head shadowing is the warning
+/// that names the winner, the loser, and the action, and the run's
+/// dispatch answers the root's body.
+#[test]
+fn the_root_package_impl_shadows_a_dependency_impl_with_a_warning() {
+    let work = temp_dir("layer-root");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    write_layer_pkg(
+        &work,
+        "@lib",
+        &[],
+        &format!(
+            "{LAYER_CELL}impl greet for cell {{\n  fn greet(self) -> string {{\n    \"lib \
+             ${{self.n}}\"\n  }}\n}}\n"
+        ),
+    );
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@lib"]), &[(
+        "app.ds",
+        concat!(
+            "import @lib (cell, greet)\n",
+            "import @std/io (println)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"root ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 3 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        ok,
+        "the shadowing resolves and the run stands (stderr: {err})"
+    );
+    assert_eq!(out, "root 3\n0\n", "the root's own impl takes the head");
+    assert!(
+        err.contains("DS2047"),
+        "the shadowing warns, never silent (stderr: {err})"
+    );
+    assert!(
+        err.contains("`@lib@1.0.0`'s impl is shadowed: the root package's own impl takes the head"),
+        "the warning names the winner and the loser: {err}"
+    );
+    assert!(
+        err.contains("drop @lib@1.0.0's impl to adopt it, or keep the current selection"),
+        "the warning names the action: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// An origin impl (the package declaring the type or the trait) wins
+/// over a third party's: the third party impls the origin's trait over
+/// the origin's type through its own `pub import`, the link resolves
+/// the overlap to the origin's row, and the warning names both
+/// packages while the run answers the origin's body.
+#[test]
+fn an_origin_impl_shadows_a_third_party_impl() {
+    let work = temp_dir("layer-origin");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    write_layer_pkg(
+        &work,
+        "@base",
+        &[],
+        &format!(
+            "{LAYER_CELL}impl greet for cell {{\n  fn greet(self) -> string {{\n    \"base \
+             ${{self.n}}\"\n  }}\n}}\n"
+        ),
+    );
+    write_layer_pkg(
+        &work,
+        "@ext",
+        &["@base"],
+        concat!(
+            "pub import @base (cell, greet)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"ext ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@base", "@ext"]), &[(
+        "app.ds",
+        concat!(
+            "import @base (cell, greet)\n",
+            "import @ext\n",
+            "import @std/io (println)\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 3 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        ok,
+        "the origin's row wins and the run stands (stderr: {err})"
+    );
+    assert_eq!(
+        out, "base 3\n0\n",
+        "the origin impl takes the head over the third party's"
+    );
+    assert!(
+        err.contains("`@ext@1.0.0`'s impl is shadowed: `@base@1.0.0`'s impl takes the head"),
+        "the warning names the origin as the winner and the third party as the loser: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// Two third-party impls of one trait over one head refuse the link
+/// naming both `name@version`: no package-identity layer separates
+/// them, so the link takes neither and the run refuses.
+#[test]
+fn two_third_party_impls_refuse_the_link_naming_both() {
+    let work = temp_dir("layer-tie");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    // the origin declares the trait and the type but impls neither:
+    // both extending packages are third parties
+    write_layer_pkg(&work, "@base", &[], LAYER_CELL);
+    for ext in ["@exta", "@extb"] {
+        let body = format!(
+            "pub import @base (cell, greet)\n\nimpl greet for cell {{\n  fn greet(self) -> string \
+             {{\n    \"{ext} ${{self.n}}\"\n  }}\n}}\n"
+        );
+        write_layer_pkg(&work, ext, &["@base"], &body);
+    }
+    let root = work.join("root");
+    write_pkg(
+        &root,
+        &layer_root_manifest(&["@base", "@exta", "@extb"]),
+        &[(
+            "app.ds",
+            concat!(
+                "import @base (cell, greet)\n",
+                "import @exta\n",
+                "import @extb\n",
+                "import @std/io (println)\n",
+                "\n",
+                "fn main() -> () {\n",
+                "  println(cell { n: 3 }.greet())\n",
+                "}\n",
+            ),
+        )],
+    );
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(!ok, "two third-party impls refuse the link (stderr: {err})");
+    assert!(
+        err.contains("DS2048"),
+        "the refusal is the layer conflict's own code: {err}"
+    );
+    assert!(
+        err.contains("@exta@1.0.0") && err.contains("@extb@1.0.0"),
+        "the refusal names both packages' name@version: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The internal-exercise check: a shadowed impl whose declaring
+/// package statically dispatches its own head (its linked artifact
+/// baked a statically-resolved instance word naming it) refuses the
+/// link naming the loser — the shadowed body would keep its own
+/// behavior under the winner.
+#[test]
+fn an_exercised_impl_refuses_its_shadowing_naming_the_loser() {
+    let work = temp_dir("layer-exercised");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let member = format!(
+        "{LAYER_CELL}impl greet for cell {{\n  fn greet(self) -> string {{\n    \"lib \
+         ${{self.n}}\"\n  }}\n}}\n\npub fn banner(c: cell) -> string {{\n  c.greet()\n}}\n"
+    );
+    write_layer_pkg(&work, "@lib", &[], &member);
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@lib"]), &[(
+        "app.ds",
+        concat!(
+            "import @lib (banner, cell, greet)\n",
+            "import @std/io (println)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"root ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(banner(cell { n: 3 }))\n",
+            "  println(cell { n: 4 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, _, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        !ok,
+        "the exercised impl refuses its shadowing (stderr: {err})"
+    );
+    assert!(
+        err.contains("DS2049"),
+        "the refusal is the internal-exercise check's own code: {err}"
+    );
+    assert!(
+        err.contains("`@lib@1.0.0`'s impl of `greet` for `cell` cannot be shadowed"),
+        "the refusal names the loser: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The internal-exercise exemption: the declaring package's only
+/// dispatch is runtime-resolved (a generic body's evidence slot, never
+/// entered at a static site), so no instance word is baked and the
+/// shadowing stands as the warning it is — the link's solved tables
+/// carry the winner alone.
+#[test]
+fn a_runtime_resolved_impl_shadows_with_a_warning() {
+    let work = temp_dir("layer-runtime");
+    let cache = work.join("cache");
+    fs::create_dir_all(&cache).expect("the private cache creates");
+    let member = format!(
+        "{LAYER_CELL}impl greet for cell {{\n  fn greet(self) -> string {{\n    \"lib \
+         ${{self.n}}\"\n  }}\n}}\n\npub fn shout[t: greet](v: t) -> string {{\n  v.greet()\n}}\n"
+    );
+    write_layer_pkg(&work, "@lib", &[], &member);
+    let root = work.join("root");
+    write_pkg(&root, &layer_root_manifest(&["@lib"]), &[(
+        "app.ds",
+        concat!(
+            "import @lib (cell, greet)\n",
+            "import @std/io (println)\n",
+            "\n",
+            "impl greet for cell {\n",
+            "  fn greet(self) -> string {\n",
+            "    \"root ${self.n}\"\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> () {\n",
+            "  println(cell { n: 4 }.greet())\n",
+            "}\n",
+        ),
+    )]);
+    let (ok, out, err) = ds_env(&cache, None, &[
+        "run",
+        root.join("app.ds").to_str().expect("UTF-8"),
+    ]);
+    assert!(
+        ok,
+        "the runtime-resolved impl shadows with a warning (stderr: {err})"
+    );
+    assert_eq!(out, "root 4\n0\n", "the winner serves every dispatch");
+    assert!(err.contains("DS2047"), "the shadowing warns: {err}");
+    assert!(
+        !err.contains("DS2049"),
+        "no static instance word is baked: {err}"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}

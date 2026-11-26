@@ -112,6 +112,10 @@ pub struct Lowered {
     module: Module,
     functions: Vec<String>,
     carried_defaults: HashMap<String, u32>,
+    /// The instances whose evidence words the module bakes statically:
+    /// the internal-exercise fact a consuming link reads before it
+    /// shadows the declaring impl under a link winner.
+    exercised: HashSet<u32>,
     tags: Vec<ds_mod::MemberTag>,
     placed: Vec<Vec<PlacedOp>>,
     facts: Vec<FnFacts>,
@@ -164,6 +168,16 @@ impl Lowered {
     #[must_use]
     pub fn carried_default_bodies(&self) -> &HashMap<String, u32> {
         &self.carried_defaults
+    }
+
+    /// The instances whose evidence words the module bakes statically:
+    /// a dispatch site's solved instance word or a chain route naming
+    /// the impl's body. A consuming link cannot shadow such an impl —
+    /// the baked words would keep the loser's behavior under the
+    /// winner — so the surface stamps the fact on its impl rows.
+    #[must_use]
+    pub fn exercised(&self) -> &HashSet<u32> {
+        &self.exercised
     }
 
     /// The function-table index of a lowered function name.
@@ -345,10 +359,17 @@ where
     T: std::borrow::Borrow<Ast>,
 {
     let slice = matches!(comptime, func::ComptimeRun::Slice);
-    if !analyzed.checked.diags.is_empty() {
-        return Err(LowerError::NotChecked {
-            count: analyzed.checked.diags.len(),
-        });
+    // a warning reports and the package lowers: the link layering's
+    // shadowing warnings ride the diagnostic list beside errors, and
+    // only an error leaves the tables unlowerable
+    let errors = analyzed
+        .checked
+        .diags
+        .iter()
+        .filter(|diag| diag.severity == ds_diag::Severity::Error)
+        .count();
+    if errors > 0 {
+        return Err(LowerError::NotChecked { count: errors });
     }
     let mut plan = Plan::new();
     plan.set_demands(collect_demands(asts, analyzed));
@@ -484,6 +505,7 @@ where
         module,
         functions: plan.names(),
         carried_defaults: plan.carried_defaults().clone(),
+        exercised: plan.exercised().clone(),
         tags,
         placed,
         facts,
