@@ -37,6 +37,8 @@
 //! normally after the flag keeps its value — the boundary reports which
 //! children failed, which were cancelled, and which landed.
 
+use std::time::Instant;
+
 use crate::{
     fiber::FiberId,
     vm::{FrameAnswer, Trap},
@@ -108,6 +110,11 @@ pub(crate) struct Race {
     /// keeping its own `NurseryCancelled` member, and nothing is
     /// delivered.
     pub(crate) expired: bool,
+    /// The deadline the owner parked under: the interpreter's back-edge
+    /// poll compares it against the clock at the racer's taken backward
+    /// branches, so a racer that never parks answers the deadline where
+    /// the wheel (which fires only between drives) cannot reach it.
+    pub(crate) deadline: Instant,
 }
 
 /// A pool slot that is no nursery child.

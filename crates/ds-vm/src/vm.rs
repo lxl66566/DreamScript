@@ -91,6 +91,13 @@ use crate::{
     value::{ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word},
 };
 
+/// The deadline poll's quanta in taken backward branches: one poll per
+/// this many back edges. The poll's idle body is an Option check, the
+/// clock read only where a race stands, so the amortized cost is noise
+/// against the pin band; one quanta of tight-loop edges is tens of
+/// microseconds, far under any real deadline's granularity.
+const FUEL_QUANTA: u32 = 16_384;
+
 /// Default value-stack limit: 1 Mi words (8 MiB on 64-bit targets).
 const DEFAULT_STACK_LIMIT: usize = 1 << 20;
 
@@ -3143,6 +3150,10 @@ pub struct Vm {
     /// position into the histogram.
     sample_every: u32,
     sample_tick: u32,
+    /// The deadline poll's countdown in taken backward branches: at zero
+    /// the running fiber's own race compares its deadline against the
+    /// clock, a racer that never parks answering the wheel at its edge.
+    fuel_tick: u32,
     /// The sampler's histogram: (version, function, pc) hits.
     samples: BTreeMap<(u32, u32, u32), u64>,
     /// The budgeted drive's remaining steps ([`Vm::run_with_budget`]):
@@ -3319,6 +3330,7 @@ impl Vm {
             debug_stops: false,
             sample_every: 0,
             sample_tick: 0,
+            fuel_tick: FUEL_QUANTA,
             samples: BTreeMap::new(),
             fuel: 0,
             fork_pool: false,
@@ -6053,13 +6065,45 @@ impl Vm {
     /// cut is the same sentinel death either way. Only nurseries with
     /// live children are ever cancelled, so a stale id cannot fire
     /// here. A timeout racer's own nursery is its race's: the wheel's
-    /// deadline door raises the same flag, so the racer observes its
-    /// deadline exactly a user cancel's flag — never the clock here.
+    /// deadline door and the back-edge deadline poll raise the same
+    /// flag, so the racer observes its deadline exactly a user cancel's
+    /// flag.
     fn cancel_requested(&self) -> bool {
         self.shutdown
             || self.pool[self.current.index()]
                 .nursery
                 .is_some_and(|n| self.nurseries[n.index()].cancelled)
+    }
+
+    /// The back-edge deadline poll: the running fiber's own race
+    /// compares its deadline against the clock. Past it, the expiry is
+    /// recorded — the wheel's deadline door's own marks — and the
+    /// nursery's cancel flag rises, so the cut at this same edge answers
+    /// the failure span through the racer's ordinary cancel death. No
+    /// scheduler state moves here: a parked owner's delivery stays the
+    /// racer-death resolution's, and the pool slots hold every other
+    /// fiber's true store while this drive runs, so the flag write
+    /// never meets a checked-out context.
+    fn poll_race_deadline(&mut self) {
+        let Some(n) = self.pool[self.current.index()].nursery else {
+            return;
+        };
+        let slot = n.index();
+        let nursery = &self.nurseries[slot];
+        if nursery.state != NurseryState::Open
+            || nursery.cancelled
+            || nursery
+                .race
+                .as_ref()
+                .is_none_or(|race| race.deadline > Instant::now())
+        {
+            return;
+        }
+        let nursery = &mut self.nurseries[slot];
+        nursery.cancelled = true;
+        if let Some(race) = nursery.race.as_mut() {
+            race.expired = true;
+        }
     }
 
     /// Resolves and checks a run/spawn entry: unknown function, arity,
@@ -9562,6 +9606,13 @@ impl Vm {
                                     .or_insert(0) += 1;
                             }
                         }
+                        if t <= pc.0 {
+                            self.fuel_tick = self.fuel_tick.wrapping_sub(1);
+                            if self.fuel_tick == 0 {
+                                self.fuel_tick = FUEL_QUANTA;
+                                self.poll_race_deadline();
+                            }
+                        }
                         if t <= pc.0 && self.cancel_requested() {
                             if self.teardown_drive {
                                 return Err((Trap::ReentrancyRefused, pc));
@@ -12660,7 +12711,10 @@ impl Vm {
             self.tear_down_nursery(nursery.index());
             return Err(trap);
         }
-        self.nurseries[nursery.index()].race = Some(Race { expired: false });
+        self.nurseries[nursery.index()].race = Some(Race {
+            expired: false,
+            deadline,
+        });
         self.pool[self.current.index()].race = Some(nursery);
         let wait = WorldWait::Timeout { deadline };
         match self
@@ -12712,10 +12766,10 @@ impl Vm {
     /// backward branch — and a racer the scheduler meets parked is cut
     /// inline here; its cancel death resolves the race and the owner
     /// takes the failure span at the parked call. The wait finishes
-    /// here only when no racer stood to resolve it. The wheel fires only
-    /// between the racer's yields, so a racer that never parks cannot
-    /// be cut by the deadline — the same cooperative limit the
-    /// shutdown flag has.
+    /// here only when no racer stood to resolve it. The wheel fires
+    /// only between the racer's yields; a racer that never parks
+    /// answers the deadline through the interpreter's back-edge
+    /// deadline poll, which raises the same marks at the edge.
     fn expire_race(&mut self, token: u64, owner: FiberId) {
         if let Some(nursery) = self.race_of(owner) {
             let slot = nursery.index();

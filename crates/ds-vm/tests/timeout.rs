@@ -10,12 +10,14 @@
 //! - the wheel's deadline door over a parked racer: the racer is cut at its park (the long sleep
 //!   never runs out) and the call answers the failure span.
 //! - a looping racer whose body parks each iteration is cut at the same park door.
+//! - a racer that never parks is cut at its back-edge by the interpreter's deadline poll — the
+//!   wheel fires only between drives, so the poll is the never-parking racer's door.
 //! - a deadline already past answers the failure span at once, no racer spawning, no park.
 //! - a trapping racer's trap re-raises on the caller.
 //! - the wheel alone drives the race: with no reactor installed the identical program answers the
 //!   same.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ds_vm::{
     Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
@@ -65,6 +67,7 @@ const NAPPER: u32 = 1;
 const SLEEPER: u32 = 2;
 const PARKED_LOOPER: u32 = 3;
 const TRAPPER: u32 = 4;
+const SPIN_LOOPER: u32 = 5;
 /// The napper's park: far inside every generous deadline the tests arm.
 const NAP: i64 = 20_000_000;
 /// The sleeper's park: far past every deadline, and the bound a runaway
@@ -109,6 +112,14 @@ fn racer_defs() -> Vec<FunctionDef> {
                 Uop::Ret { src: 2 },
             ],
         ),
+        // the spinner: a backward branch per iteration and no park
+        // anywhere, so no wheel door ever meets it — the back-edge
+        // deadline poll is the cut it answers
+        def("spin_looper", &[I64, Raw], 0, 1, vec![Const::I64(42)], &[
+            Uop::Funcf { frame_slots: 2 },
+            Uop::Kimm { dst: 1, kidx: k(0) },
+            Uop::Jmp { target: 1 },
+        ]),
     ]
 }
 
@@ -178,6 +189,7 @@ fn defs() -> Vec<FunctionDef> {
         ("race_sleeper", SLEEPER),
         ("race_parked_looper", PARKED_LOOPER),
         ("race_trapper", TRAPPER),
+        ("race_spin_looper", SPIN_LOOPER),
     ] {
         defs.push(race_disc_def(name, racer));
     }
@@ -310,6 +322,30 @@ fn the_deadline_cuts_a_parking_looper_at_its_park() {
 }
 
 #[test]
+#[test]
+fn the_deadline_cuts_a_spinning_racer_at_its_back_edge() {
+    // a racer that never parks: the wheel fires only between drives,
+    // so the deadline answers through the back-edge poll — the same
+    // failure span, the racer a cancelled death, the drive never hung
+    let mut vm = Vm::new(registry());
+    let started = Instant::now();
+    assert_eq!(
+        answer(&mut vm, "race_spin_looper", SOON),
+        Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_TIMED_OUT))),
+        "the deadline answers the failure span over the never-parking racer"
+    );
+    let elapsed = started.elapsed().as_nanos();
+    assert!(
+        elapsed >= u128::try_from(SOON).expect("test span fits") * 3 / 4,
+        "the deadline was waited out"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5).as_nanos(),
+        "the racer was cut at its back-edge, the loop never run out"
+    );
+    assert_eq!(vm.fiber_state(FiberId(1)), Some(FiberState::Dead));
+}
+
 fn a_deadline_already_past_answers_the_failure_at_once() {
     // no reactor installed, and the failure answers in place: the drive
     // never parks, no racer ever spawns

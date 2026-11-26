@@ -7,8 +7,8 @@
 //! - the real deadline: a parked racer cut at its deadline, the `.err` fallback answering, the
 //!   racer's own line absent.
 //! - the past deadline: `timeout(0, ...)` answers the failure at once, no racer line.
-//! - a looping racer that parks each iteration is cut at its deadline (a never-parking looper is
-//!   the shutdown limit the docs record, not the race's).
+//! - a looping racer that parks each iteration is cut at its deadline, and so is a never-parking
+//!   one: the interpreter's back-edge deadline poll answers where no wheel door reaches.
 //! - the cut racer's kept deinits fire at the teardown drain in the scope-exit order.
 //! - the answer shapes: a string answer adopted whole off the overlay word; a `?`-propagating
 //!   helper whose tail rides the operand's own union.
@@ -119,6 +119,32 @@ fn the_deadline_cuts_a_parking_looper() {
     assert!(
         stdout.contains("cut -1"),
         "the parking looper was cut: {stdout}"
+    );
+}
+
+#[test]
+fn the_deadline_cuts_a_never_parking_looper() {
+    // a body that never parks: the wheel fires only when no fiber is
+    // runnable, so the cut answers through the interpreter's back-edge
+    // deadline poll — before this round the drive spun past its own
+    // deadline forever
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> () {
+  const held = timeout(20000000) {
+    var j = 0
+    while j >= 0 {
+      j += 1
+    }
+    j
+  }.err((e) => -1)
+  println("cut ${held}")
+}
+"#,
+    );
+    assert!(status.success(), "the spinner's cut exits clean: {stderr}");
+    assert!(
+        stdout.contains("cut -1"),
+        "the never-parking looper was cut: {stdout}"
     );
 }
 

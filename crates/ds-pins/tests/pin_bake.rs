@@ -135,27 +135,35 @@ const KERNELS: &[Kernel] = &[
 // moved the whole-process counts by up to 1.4% (mostly down, a
 // widened wake enum flipping an inlining decision), the loop kernels
 // by under 0.005%.
+// Re-baselined 2026-11-26 again at the racer fuel-quanta landing (item
+// 153): the back-edge deadline poll's countdown adds 2 Ir per taken
+// backward branch (3 where a kernel takes two back-edges per
+// iteration), +0.06% to +0.21% whole-process, six pins past the ±0.1%
+// band — the ruled cost of the never-parking racer's deadline cut. The
+// same recording absorbed a toolchain roll that had moved this host
+// +2.0% to +5.2% off the prior table, measured on the pristine tree
+// before this round's edit.
 const PINS: &[(&str, u64)] = &[
-    ("scalar_loop::scalar_loop::scalar_dispatch", 6_193_645_039),
-    ("strcat_temp::strcat_temp::serving_cats", 8_696_137_543),
-    ("strcat_temp::strcat_temp::claiming_cats", 15_221_138_237),
-    ("string_temp::string_temp::borrowing_loads", 4_596_132_583),
-    ("string_temp::string_temp::claiming_loads", 16_566_130_797),
+    ("scalar_loop::scalar_loop::scalar_dispatch", 6_485_912_913),
+    ("strcat_temp::strcat_temp::serving_cats", 9_000_901_854),
+    ("strcat_temp::strcat_temp::claiming_cats", 15_850_902_295),
+    ("string_temp::string_temp::borrowing_loads", 4_800_897_010),
+    ("string_temp::string_temp::claiming_loads", 16_910_895_225),
     (
         "loop_claims::loop_claims::reset_held_to_overwrite",
-        4_531_130_996,
+        4_775_895_466,
     ),
     (
         "loop_claims::loop_claims::reset_released_at_use",
-        9_061_131_072,
+        9_305_895_439,
     ),
     (
         "loop_claims::loop_claims::rebuild_held_to_overwrite",
-        11_161_138_944,
+        11_435_903_446,
     ),
     (
         "loop_claims::loop_claims::rebuild_released_at_use",
-        11_161_138_748,
+        11_435_902_368,
     ),
 ];
 
