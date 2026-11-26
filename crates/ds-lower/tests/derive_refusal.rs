@@ -1034,6 +1034,89 @@ fn a_decode_walk_past_the_frame_cap_refuses_at_lowering() {
     assert_eq!(need, 259, "the measured walk's slot count");
 }
 
+/// The encode walk's own frame ceiling, the decode pin's mirror: a
+/// wide target (forty int fields and one nested-derive field) synthesizes
+/// a `to_json` body whose frame needs 259 slots — three past the uop
+/// format's 256-slot cap — so lowering refuses with the standard
+/// frame-cap diagnostic while the checker stays clean. The rows stage
+/// through the map's `set` member (the collection face's native seam)
+/// and the nested member dispatch stages the quad field's whole
+/// four-word span, the crossing alloc that pins the count; the json
+/// face rides the episode-local vocabulary (signature stubs over the
+/// object-map seam), so the probe measures the walk's width
+/// hermetically.
+#[test]
+fn an_encode_walk_past_the_frame_cap_refuses_at_lowering() {
+    let fields = (0..40)
+        .map(|i| format!("f{i}: int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct map[k, v]\n",
+        "enum json {\n",
+        "  json_null\n",
+        "  json_int { value: int }\n",
+        "  json_object { fields: map[string, json] }\n",
+        "}\n",
+        "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+        "impl[k, v] map[k, v] {\n",
+        "  fn set (mut self, key: k, value: v) -> map[k, v]\n",
+        "}\n",
+        "trait encoder {\n",
+        "  fn enc_int (self, value: int) -> Self\n",
+        "  fn enc_object (self, fields: map[string, Self]) -> Self\n",
+        "}\n",
+        "impl json {\n",
+        "  fn default() -> json { json_null }\n",
+        "}\n",
+        "impl encoder for json {\n",
+        "  fn enc_int (self, value: int) -> json { json_int(value: value) }\n",
+        "  fn enc_object (self, fields: map[string, json]) -> json { json_object(fields: fields) \
+         }\n",
+        "}\n",
+        "#[derive(to_json)]\n",
+        "struct quad { a: int, b: int, c: int, d: int }\n",
+        "#[derive(to_json)]\n",
+    )
+    .to_owned()
+        + "struct wide {"
+        + &fields
+        + ", g: quad }\n"
+        + "fn main() -> int { 0 }\n";
+    let mut files = Files::new();
+    let id = files.add_source("wide_encode.ds", &source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the wide walk checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let Err(err) = lower(
+        "wide_encode",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    ) else {
+        panic!("the encode walk past the frame cap must refuse at lowering")
+    };
+    let LowerError::FrameTooWide { name, need } = err else {
+        panic!("the standard frame-cap diagnostic owns the refusal: {err}")
+    };
+    assert!(
+        name.contains("to_json"),
+        "the refusing frame is the synthesized encode member: {name}"
+    );
+    assert_eq!(need, 259, "the measured walk's slot count");
+}
+
 /// The to_json family refuses from_json's mirror classes at the
 /// attribute, each naming the family and the refusing shape: a
 /// function-typed or `~Copyable` part (the shared part refusal), a

@@ -7,12 +7,11 @@
 //! the libraries: one content-addressed file per installed artifact, and
 //! the caller hands that path to the loader.
 //!
-//! The marshaling faces: the scalar slice, and the widened encoding
-//! face beside it — a `string`/`bytes` parameter as its call-scoped
+//! The marshaling face: a `string`/`bytes` parameter as its call-scoped
 //! (pointer, length) word pair, a unit return as the absent word — the
-//! widened face the language side consumes today, the lowering seam
-//! admitting the pair and unit-return shapes and the VM stage
-//! marshaling each staged word per its own kind onto it. Its H5
+//! face the language side consumes, the lowering seam admitting the
+//! pair and unit-return shapes and the VM stage marshaling each staged
+//! word per its own kind onto it. Its H5
 //! contract clauses, holding from the first bound library: a bound
 //! extern means panic=abort (a foreign panic cannot unwind through the
 //! interpreter), and a blocking foreign call pins its fiber
@@ -22,13 +21,11 @@
 
 mod exports;
 mod marshal;
-mod scalar;
 mod sys;
 mod word;
 
 pub use exports::{ExportError, enumerate};
-pub use marshal::{Answer, Arg, MarshalError, Param, Ret, Sig};
-pub use scalar::{MAX_PARAMS, Scalar, ScalarError, ScalarKind, ScalarSig};
+pub use marshal::{Answer, Arg, MAX_PARAMS, MarshalError, Param, Ret, Sig};
 pub use sys::LoadError;
 
 /// A symbol over a raw address, the unit tests' construction seam (a

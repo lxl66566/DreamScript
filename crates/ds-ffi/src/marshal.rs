@@ -1,8 +1,8 @@
 //! The marshaling round's widened C-ABI encoding (H5): the signature
-//! vocabulary that carries what the scalar slice refuses — a `string`
-//! or `bytes` parameter rides a call-scoped (pointer, length) pair of
+//! vocabulary — the scalar words, a `string` or `bytes` parameter
+//! riding a call-scoped (pointer, length) pair of
 //! GP words, the borrow valid for the call's duration alone (the type
-//! layer forbids the pointer from escaping), and a unit return rides
+//! layer forbids the pointer from escaping), and a unit return riding
 //! the absent word. The arity cap counts C words, not parameters: a
 //! pair parameter occupies two, so two pair parameters fill the
 //! enumerated transmute's envelope exactly.
@@ -16,9 +16,14 @@
 //! deinit-carrying handles stay queued with the ownership round.
 
 use crate::{
-    MAX_PARAMS, Symbol,
+    Symbol,
     word::{ArgWord, dispatch},
 };
+
+/// The marshaling face's word cap: the enumerated transmute covers
+/// every GP/FP placement up to this many C words, a string/bytes pair
+/// parameter occupying two.
+pub const MAX_PARAMS: usize = 4;
 
 /// One extern parameter's marshaling encoding (H5): the scalar words
 /// plus the borrowed string/bytes pair.
@@ -143,9 +148,9 @@ impl Symbol {
     /// arguments stage per their encodings — scalar words singly, a
     /// `string`/`bytes` borrow as its call-scoped (pointer, length)
     /// pair — and the answer marshals back, the unit return answering
-    /// [`Answer::Unit`]. The call is blocking and synchronous like the
-    /// scalar face's: it pins the calling fiber for its whole duration,
-    /// and a foreign abort kills the process.
+    /// [`Answer::Unit`]. The call is blocking and synchronous: it pins
+    /// the calling fiber for its whole duration, and a foreign abort
+    /// kills the process.
     ///
     /// # Errors
     ///

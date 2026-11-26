@@ -1323,6 +1323,23 @@ impl<'a> FnLower<'a, '_, '_> {
             }
             let deinit = self.deinit_claim(arg_val.ty, arg.span())?;
             if deinit.is_some() {
+                // A channel payload names its own refusal seam: the buffer's
+                // edge retention owns counts, never claims, so the payload's
+                // hook has no door at either wait-ending edge — a buffered
+                // element the channel never delivers dies at the send with
+                // the sender's claim spent, and a parked sender cut with
+                // its span queued fires no hook either way
+                if let Some((slot, _)) = element_slot
+                    && slot == index
+                    && matches!(target, Callee::Builtin(native) if native.name == "chan_send")
+                {
+                    return Err(LowerError::unsupported(
+                        arg.span(),
+                        "a deinit-carrying channel payload",
+                        "the payload's hook has no claim inside the channel's edge retention; \
+                         per-span deinit claims own the seam",
+                    ));
+                }
                 if matches!(
                     target,
                     Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }

@@ -12,7 +12,7 @@ use std::{
     process::Command,
 };
 
-use ds_ffi::{Answer, Arg, Library, Param, Ret, Scalar, ScalarKind, ScalarSig, Sig};
+use ds_ffi::{Answer, Arg, Library, Param, Ret, Sig};
 
 mod support;
 
@@ -100,69 +100,11 @@ fn a_compiled_cdylib_binds_and_enumerates() {
     );
 }
 
-/// The scalar marshaling answers real calls: every register-class shape
-/// the slice rules — the i64 GP pair, the f64 FP pair, the empty call,
-/// the u8 GP word, and the mixed GP+FP sequence — calls the bound
-/// symbol and marshals the answer back.
-#[test]
-fn scalar_calls_answer_over_every_register_class() {
-    let dir = temp_dir("scalar");
-    let dylib = build_fixture(&dir);
-    let library = Library::open(&dylib).unwrap_or_else(|error| panic!("{error}"));
-    let sig = |params: &[ScalarKind], ret: ScalarKind| ScalarSig {
-        params: params.to_vec(),
-        ret,
-    };
-    let call = |name: &str, sig: &ScalarSig, args: &[Scalar]| {
-        let symbol = library.symbol(name).expect("the fixture exports the name");
-        symbol
-            .call_scalar(sig, args)
-            .unwrap_or_else(|error| panic!("the scalar call answers: {error}"))
-    };
-    let int = ScalarKind::Int;
-    let boolean = ScalarKind::Bool;
-    let float = ScalarKind::Float;
-    assert_eq!(
-        call("ds_add", &sig(&[int, int], int), &[
-            Scalar::Int(20),
-            Scalar::Int(22)
-        ]),
-        Scalar::Int(42),
-        "the GP pair marshals"
-    );
-    assert_eq!(
-        call("ds_scale", &sig(&[float, float], float), &[
-            Scalar::Float(1.5),
-            Scalar::Float(4.0)
-        ]),
-        Scalar::Float(6.0),
-        "the FP pair marshals"
-    );
-    assert_eq!(
-        call("ds_answer", &sig(&[], int), &[]),
-        Scalar::Int(42),
-        "the empty call marshals"
-    );
-    assert_eq!(
-        call("ds_not", &sig(&[boolean], boolean), &[Scalar::Bool(false)]),
-        Scalar::Bool(true),
-        "the u8 word marshals"
-    );
-    assert_eq!(
-        call("ds_gated", &sig(&[boolean, float], float), &[
-            Scalar::Bool(true),
-            Scalar::Float(3.5)
-        ]),
-        Scalar::Float(3.5),
-        "the mixed GP+FP sequence marshals"
-    );
-}
-
 /// The marshaling face answers real calls over its widened encodings:
 /// the call-scoped string/bytes pair (alone, mixed with an FP word, and
 /// two pairs filling the word envelope) and the unit return (over a
-/// pair and over no words), the unit call's effect read back through
-/// the scalar face.
+/// pair and over no words), the unit call's effect read back through a
+/// word-returning call.
 #[test]
 fn marshaled_calls_carry_pairs_and_unit_returns() {
     let dir = temp_dir("marshal");
@@ -205,25 +147,17 @@ fn marshaled_calls_carry_pairs_and_unit_returns() {
         Ok(Answer::Int(198)),
         "two pairs fill the word envelope"
     );
-    // the unit return over a pair, its effect read back through the
-    // scalar face
+    // the unit return over a pair, its effect read back through a
+    // word-returning call
     assert_eq!(
         symbol("ds_record").call(&sig(&[Param::Str], Ret::Unit), &[Arg::Str("hello")]),
         Ok(Answer::Unit),
         "the unit return answers the absent word"
     );
     assert_eq!(
-        symbol("ds_recorded")
-            .call_scalar(
-                &ScalarSig {
-                    params: Vec::new(),
-                    ret: ScalarKind::Int,
-                },
-                &[],
-            )
-            .ok(),
-        Some(Scalar::Int(5)),
-        "the unit call ran: the recorded length answers through the scalar face"
+        symbol("ds_recorded").call(&sig(&[], Ret::Int), &[]),
+        Ok(Answer::Int(5)),
+        "the unit call ran: the recorded length answers back"
     );
     // the unit return over no words at all
     assert_eq!(
@@ -232,16 +166,8 @@ fn marshaled_calls_carry_pairs_and_unit_returns() {
         "the empty unit call marshals"
     );
     assert_eq!(
-        symbol("ds_recorded")
-            .call_scalar(
-                &ScalarSig {
-                    params: Vec::new(),
-                    ret: ScalarKind::Int,
-                },
-                &[],
-            )
-            .ok(),
-        Some(Scalar::Int(0)),
+        symbol("ds_recorded").call(&sig(&[], Ret::Int), &[]),
+        Ok(Answer::Int(0)),
         "the empty unit call ran: the record cleared"
     );
 }
