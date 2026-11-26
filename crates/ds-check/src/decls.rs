@@ -107,7 +107,7 @@ pub struct FnSig {
 }
 
 impl FnSig {
-    fn of(f: &FnDecl) -> Self {
+    pub(crate) fn of(f: &FnDecl) -> Self {
         Self {
             generics: f.generics.iter().map(GenericParam::from).collect(),
             params: f.params.iter().map(ParamSig::from).collect(),
@@ -303,6 +303,12 @@ pub struct Decls {
     /// index serves the linked signatures' rebased spellings, which no
     /// resolution pass covers.
     pub foreign_type_names: FxHashMap<String, DefId>,
+    /// The member links of every linked trait impl (G4), keyed by the
+    /// instance the declaration pass declared over the minted head: the
+    /// dep-list position and each member body's module-table index a
+    /// solved dispatch site addresses through its CALLG — the linked
+    /// mirror of `instance_impls`, whose span tie no linked impl owns.
+    pub linked_impls: IdTable<InstanceId, Arc<ForeignImplLink>>,
 }
 
 impl Decls {
@@ -324,6 +330,29 @@ pub struct ForeignLink {
     pub position: u32,
     /// The function's index inside the linked module's table.
     pub func: u32,
+}
+
+/// Where one linked trait impl's dispatch sites point (G4): the linked
+/// dep entry's position and each member body's index inside the linked
+/// module's table, keyed by the instance the consumer declared.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ForeignImplLink {
+    /// The linked dep entry's position in the consuming module's
+    /// recorded dep list.
+    pub position: u32,
+    /// The impl's member rows, one per bodied member.
+    pub members: Vec<crate::import::ImplMemberFact>,
+}
+
+impl ForeignImplLink {
+    /// One member's module-table index, when the impl owns the member.
+    #[must_use]
+    pub fn member(&self, name: &str) -> Option<u32> {
+        self.members
+            .iter()
+            .find(|member| member.name == name)
+            .map(|member| member.func)
+    }
 }
 
 /// Why a checked prefix's name-keyed rows refused to resolve over the
@@ -509,6 +538,46 @@ where
             );
         }
     }
+    // The linked trait impls declare after every foreign type and trait
+    // minted: each row's head resolves through the minted atoms and its
+    // trait through the minted trait id, so the instance the row
+    // declares covers exactly the head the producer's impl did. A row
+    // whose trait this compile never selected stays out — its dispatch
+    // is unobservable here.
+    for fact in package.linked_impl_facts() {
+        let Some(&trait_def) = decls.foreign_type_names.get(&fact.trait_name) else {
+            continue;
+        };
+        let Some(&trait_id) = decls.traits.get(&trait_def) else {
+            continue;
+        };
+        let Some((head, _)) = foreign_field_type(
+            &mut MintCtx {
+                package,
+                forcing: Vec::new(),
+            },
+            fact.head.clone(),
+            fact.span,
+            &mut decls,
+        ) else {
+            continue;
+        };
+        let decl = InstanceDecl::new(trait_id, head);
+        match decls.instances.declare(&mut decls.universe, &decl) {
+            Ok(ids) => {
+                for id in ids {
+                    decls.linked_impls.insert(
+                        id,
+                        Arc::new(ForeignImplLink {
+                            position: fact.link,
+                            members: fact.members.clone(),
+                        }),
+                    );
+                }
+            },
+            Err(err) => diags.push(linked_instance_diag(&decls.universe, &err, fact)),
+        }
+    }
     package_coherence(&mut decls, &mut diags);
     Ok((decls, diags))
 }
@@ -554,6 +623,72 @@ fn install_foreign_type(
         crate::import::TypeFact::Tag => {
             install_foreign_tag(def, name, span, decls);
         },
+        crate::import::TypeFact::Trait(fact) => {
+            install_foreign_trait(ctx, def, name, fact, decls);
+        },
+    }
+}
+
+/// The trait fact's mint: the trait id, the member rows keyed by their
+/// registered method ids, and the member-name table an impl checks
+/// against — exactly the products a local trait declaration carries,
+/// save that no member owns a default body (the walk refuses those
+/// traits whole). A mint whose member row names no registered method
+/// skips the row silently — its uses then fail at their own sites.
+fn install_foreign_trait(
+    ctx: &mut MintCtx,
+    def: DefId,
+    name: &str,
+    fact: &crate::import::TraitFact,
+    decls: &mut Decls,
+) {
+    let Ok(trait_id) = decls.universe.declare_trait(name) else {
+        return;
+    };
+    decls.traits.insert(def, trait_id);
+    decls.foreign_type_names.insert(name.to_owned(), def);
+    for member in &fact.members {
+        if let Some(method) = member_id(ctx.package, def, &member.name) {
+            decls.members.insert(method, member.sig.clone());
+        }
+    }
+    decls
+        .trait_members
+        .insert(def, fact.members.iter().map(|m| m.name.clone()).collect());
+    decls.trait_generics.insert(def, Vec::new());
+}
+
+/// Renders a linked impl's refused instance declaration: the same
+/// sentences the local shape pass renders, the impl row's own span the
+/// primary site.
+fn linked_instance_diag(
+    universe: &Universe,
+    err: &crate::Error,
+    fact: &crate::import::ImplFact,
+) -> Diagnostic {
+    match err {
+        crate::Error::InstanceOverlap {
+            head_a, witness, ..
+        } => Diagnostic::error(
+            ErrorCode::InstanceOverlap,
+            format!(
+                "linked instance head `{}` intersects the `{}` instance; witness value type `{}`",
+                crate::import::render_word(&fact.head),
+                universe.render(*head_a),
+                universe.render_witness(witness)
+            ),
+        )
+        .with_primary(fact.span, "overlapping linked head")
+        .with_note(
+            "the earlier instance's head covers this value type; two instances of one trait must \
+             be pairwise disjoint [B6]"
+                .to_owned(),
+        ),
+        other => Diagnostic::error(
+            ErrorCode::AmbiguousInstance,
+            format!("linked instance declaration rejected: {other}"),
+        )
+        .with_primary(fact.span, "rejected linked impl"),
     }
 }
 

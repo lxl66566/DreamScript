@@ -53,6 +53,7 @@ fn pooled_linked_of(
                 import.span,
                 ds_check::ImportSurface::Linked(ds_check::MemberSurface {
                     tags: Vec::new(),
+                    impls: Vec::new(),
                     entries: entries.clone(),
                 }),
             );

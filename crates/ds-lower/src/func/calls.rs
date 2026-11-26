@@ -1144,6 +1144,11 @@ impl<'a> FnLower<'a, '_, '_> {
             Some(TraitDispatch::Static { index, .. } | TraitDispatch::Inherent { index, .. }) => {
                 Callee::Local(*index)
             },
+            Some(TraitDispatch::Foreign { position, func, .. }) => Callee::Foreign {
+                def: None,
+                position: *position,
+                func: *func,
+            },
             Some(TraitDispatch::Runtime { slot, .. }) => Callee::Evidence(*slot),
             None => {
                 self.resolve_callee(def.expect("a named callee resolves to a def"), callee_span)?
@@ -1157,7 +1162,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let member_defaults: Vec<Expr>;
         let arg_exprs = match (def, &trait_dispatch) {
             (Some(def), _) => self.defaulted_args(def, target, arg_exprs),
-            (_, Some(TraitDispatch::Static { call, .. })) => {
+            (_, Some(TraitDispatch::Static { call, .. } | TraitDispatch::Foreign { call, .. })) => {
                 member_defaults = self.trait_default_exprs(call.method, arg_exprs.len());
                 let mut staged = arg_exprs;
                 staged.extend(member_defaults.iter());
@@ -1239,7 +1244,7 @@ impl<'a> FnLower<'a, '_, '_> {
         // here (the widening family)
         let param_types = match target {
             Callee::Local(index) => self.callee_param_types(index),
-            Callee::Foreign { def, .. } => self
+            Callee::Foreign { def: Some(def), .. } => self
                 .analyzed
                 .checked
                 .def_types
@@ -1693,6 +1698,18 @@ impl<'a> FnLower<'a, '_, '_> {
         // overlay window would clobber words staged before it)
         let mut trait_evidence: Vec<EvidenceSrc> = Vec::new();
         let trait_evidence_at = staged.len();
+        if let Some(TraitDispatch::Foreign { call, .. }) = &trait_dispatch {
+            // a linked impl body rides no evidence pairs (the walk
+            // refuses the generic and conditional impls that demand
+            // them), so the solved instance word rides alone — the same
+            // trailing word a local monomorphic body's site stages
+            self.guard_staged_count(staged.len() + 1)?;
+            trait_evidence.push(EvidenceSrc::Const(call.instance.index()));
+            staged.push(SlotType::I64);
+            if !tail_transfer {
+                self.stage_member_evidence(&trait_evidence, trait_evidence_at);
+            }
+        }
         if let Some(TraitDispatch::Static { index, call }) = &trait_dispatch {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
             self.guard_staged_count(staged.len() + pairs.len() + 1)?;
@@ -1882,7 +1899,11 @@ impl<'a> FnLower<'a, '_, '_> {
         let dispatch_tail = generic_target.is_some()
             || matches!(
                 trait_dispatch,
-                Some(TraitDispatch::Static { .. } | TraitDispatch::Runtime { .. })
+                Some(
+                    TraitDispatch::Static { .. }
+                        | TraitDispatch::Runtime { .. }
+                        | TraitDispatch::Foreign { .. }
+                )
             );
         if tail_transfer {
             // control transfers to the callee; the stack never grows [H2].
@@ -1914,6 +1935,8 @@ impl<'a> FnLower<'a, '_, '_> {
                     staged.len() - usize::from(generic.evidence)
                 } else if let Some(TraitDispatch::Static { index, .. }) = &trait_dispatch {
                     staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len()
+                } else if matches!(trait_dispatch, Some(TraitDispatch::Foreign { .. })) {
+                    staged.len() - 1
                 } else {
                     staged.len() - runtime_riders
                 };
@@ -1952,6 +1975,14 @@ impl<'a> FnLower<'a, '_, '_> {
             // the rest as its trailing evidence parameters
             let real_args =
                 staged.len() - 1 - self.plan.functions()[*index as usize].evidence.len();
+            self.emit(Op::Callg {
+                callee: kidx,
+                nargs: u8::try_from(real_args).expect("argument count fits u8"),
+            });
+        } else if matches!(trait_dispatch, Some(TraitDispatch::Foreign { .. })) {
+            // the linked body claims no evidence pairs this round, so
+            // only the solved instance word trails the real arguments
+            let real_args = staged.len() - 1;
             self.emit(Op::Callg {
                 callee: kidx,
                 nargs: u8::try_from(real_args).expect("argument count fits u8"),
@@ -2623,6 +2654,30 @@ impl<'a> FnLower<'a, '_, '_> {
                 },
             ));
         };
+        let member = self.analyzed.package.method(tc.method).name.clone();
+        // a linked impl owns no impl item in this compile: the solved
+        // instance's member links address the linked module directly,
+        // the same transfer a linked free fn's call takes
+        if let Some(link) = self.analyzed.decls.linked_impls.get(&tc.instance)
+            && let Some(func) = link.member(&member)
+        {
+            // the comptime slice plans nothing outside its own module,
+            // so a member call from a comptime body keeps the local
+            // member call's own refusal
+            if matches!(self.comptime, ComptimeRun::Slice) {
+                return Err(LowerError::unsupported(
+                    what,
+                    "a call from a comptime function",
+                    "a comptime function may call the pure builtins and other comptime functions \
+                     this round; a runtime helper is the slice seam",
+                ));
+            }
+            return Ok(TraitDispatch::Foreign {
+                position: link.position,
+                func,
+                call: tc,
+            });
+        }
         let Some(impl_site) = tc.impl_site else {
             return Err(LowerError::unsupported(
                 what,
@@ -2630,7 +2685,6 @@ impl<'a> FnLower<'a, '_, '_> {
                 "the solving impl item's span is missing from the declaration tables",
             ));
         };
-        let member = self.analyzed.package.method(tc.method).name.clone();
         if let Some(index) = self.plan.impl_body(impl_site, &member) {
             return Ok(TraitDispatch::Static { index, call: tc });
         }
@@ -3319,7 +3373,7 @@ impl<'a> FnLower<'a, '_, '_> {
         // never silently answers as a same-named native
         if let Some(link) = self.analyzed.decls.foreign_links.get(&def) {
             return Ok(Callee::Foreign {
-                def,
+                def: Some(def),
                 position: link.position,
                 func: link.func,
             });
@@ -3681,14 +3735,20 @@ impl<'a> FnLower<'a, '_, '_> {
     ) -> Vec<bool> {
         let modes: Option<Vec<ds_parse::ParamMode>> = match target {
             Callee::Local(index) => self.planned_param_modes(index),
-            Callee::Foreign { def, .. } => self
+            Callee::Foreign { def: Some(def), .. } => self
                 .analyzed
                 .decls
                 .fns
                 .get(&def)
                 .map(|sig| sig.params.iter().map(|param| param.mode).collect()),
-            Callee::Evidence(_) => match dispatch {
-                Some(TraitDispatch::Runtime { method, .. }) => self
+            Callee::Foreign { def: None, .. } | Callee::Evidence(_) => match dispatch {
+                Some(
+                    TraitDispatch::Runtime { method, .. }
+                    | TraitDispatch::Foreign {
+                        call: TraitCall { method, .. },
+                        ..
+                    },
+                ) => self
                     .analyzed
                     .decls
                     .members

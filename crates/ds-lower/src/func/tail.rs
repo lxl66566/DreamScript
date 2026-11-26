@@ -80,7 +80,8 @@ impl FnLower<'_, '_, '_> {
                     self.resolve_method_dispatch(*call_span, name.span, Some(recv), candidates),
                     Ok(TraitDispatch::Inherent { .. }
                         | TraitDispatch::Static { .. }
-                        | TraitDispatch::Runtime { .. })
+                        | TraitDispatch::Runtime { .. }
+                        | TraitDispatch::Foreign { .. })
                 ),
                 Some(Res::Dot(DotRes::Static { candidates })) => matches!(
                     self.resolve_method_dispatch(*call_span, name.span, None, candidates),

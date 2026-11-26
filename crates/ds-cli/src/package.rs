@@ -77,6 +77,7 @@ struct LinkedPackage {
     module: Module,
     members: Rc<[Member]>,
     exports: Vec<Export>,
+    impls: Vec<ds_check::import::ImplFact>,
 }
 
 /// The graph one package run serves from: each resolved dependency's
@@ -845,6 +846,7 @@ impl Graph {
             module: compiled.lowered.into_module(),
             members: Rc::clone(members),
             exports: compiled.exports,
+            impls: compiled.impls,
         });
         self.linked
             .borrow_mut()
@@ -1138,20 +1140,57 @@ impl Graph {
                 row: export.row,
                 caps: export.caps,
                 value: export.value.clone(),
-                ty: export.ty.clone(),
+                ty: export.ty.as_ref().map(|fact| match &**fact {
+                    // a trait's member rows carry written signatures, so
+                    // the rebase walks them like the fn rows' own
+                    ds_check::TypeFact::Trait(trait_fact) => {
+                        let members = trait_fact
+                            .members
+                            .iter()
+                            .map(|member| ds_check::import::TraitMemberFact {
+                                name: member.name.clone(),
+                                span: rebase_span(member.span, &rebase),
+                                sig: rebase_sig(&member.sig, &rebase),
+                            })
+                            .collect();
+                        std::sync::Arc::new(ds_check::TypeFact::Trait(
+                            ds_check::import::TraitFact { members },
+                        ))
+                    },
+                    _ => std::sync::Arc::clone(fact),
+                }),
                 link,
                 origin,
                 func: export.func,
                 std: std_pkg,
             });
         }
+        // The impl rows ride the surface beside the entries: each
+        // member body's index addresses THIS package's module, so the
+        // row's link position is the imported package's own — the
+        // spans rebased like the entries'
+        let impls = package
+            .impls
+            .iter()
+            .map(|fact| ds_check::import::ImplFact {
+                trait_name: fact.trait_name.clone(),
+                head: fact.head.clone(),
+                members: fact.members.clone(),
+                span: rebase_span(fact.span, &rebase),
+                link: position,
+            })
+            .collect();
         let tags = package
             .module
             .tags()
             .iter()
             .map(|row| (row.name.clone(), row.id))
             .collect();
-        Ok(ImportSurface::Linked(MemberSurface { entries, tags }))
+        Ok(ImportSurface::Linked(MemberSurface {
+            entries,
+            tags,
+            impls,
+        }))
     }
 }
 

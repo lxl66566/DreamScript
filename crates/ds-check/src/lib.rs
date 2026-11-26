@@ -162,7 +162,9 @@ pub mod witness;
 
 pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
-pub use decls::{Decls, FnSig, GenericParam, ServedDecls, ServedDrift, render_type};
+pub use decls::{
+    Decls, FnSig, ForeignImplLink, GenericParam, ParamSig, ServedDecls, ServedDrift, render_type,
+};
 pub use effects::{
     DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedEffectNames, ServedMethodRow,
     effects_of,

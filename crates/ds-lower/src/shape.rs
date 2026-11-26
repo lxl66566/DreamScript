@@ -1635,6 +1635,7 @@ mod tests {
         let unit = || ds_check::import::CasePayload::Unit;
         let surface = ds_check::MemberSurface {
             tags: Vec::new(),
+            impls: Vec::new(),
             entries: vec![
                 entry(
                     "tone",

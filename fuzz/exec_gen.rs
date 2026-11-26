@@ -2236,7 +2236,11 @@ fn linked_surface(
         .iter()
         .map(|row| (row.name.clone(), row.id))
         .collect();
-    MemberSurface { entries, tags }
+    MemberSurface {
+        entries,
+        tags,
+        impls: Vec::new(),
+    }
 }
 
 /// The `pub import` chain's origin surface: each exported definition's
@@ -2313,7 +2317,11 @@ fn origin_surface(
         .iter()
         .map(|row| (row.name.clone(), row.id))
         .collect();
-    MemberSurface { entries, tags }
+    MemberSurface {
+        entries,
+        tags,
+        impls: Vec::new(),
+    }
 }
 
 /// The `pub import` chain's middle surface: the pub row's re-exported
@@ -2386,7 +2394,11 @@ fn middle_surface(
         .iter()
         .map(|row| (row.name.clone(), row.id))
         .collect();
-    MemberSurface { entries, tags }
+    MemberSurface {
+        entries,
+        tags,
+        impls: Vec::new(),
+    }
 }
 
 /// The reserved @std package's surface over the episode's own two-member
@@ -2461,6 +2473,7 @@ fn std_surface(pkg: &ds_check::Analyzed, map: &HashMap<FileId, FileId>) -> Membe
     MemberSurface {
         entries,
         tags: Vec::new(),
+        impls: Vec::new(),
     }
 }
 

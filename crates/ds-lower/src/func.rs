@@ -553,6 +553,18 @@ pub(crate) enum TraitDispatch {
     /// instance id rides as the final staged word, the per-bound evidence
     /// words the body's runtime pairs demand stage ahead of it).
     Static { index: u32, call: TraitCall },
+    /// The linked impl body the checker's solved instance names (G4):
+    /// the body lives in a linked package's module, so the FuncRef
+    /// addresses the dep position and the linked module's own table —
+    /// the same transfer a linked free fn's call takes, with the solved
+    /// instance id riding as the final staged word exactly like the
+    /// local body's (a linked impl rides no evidence pairs: the walk
+    /// refuses the generic and conditional impls that carry them).
+    Foreign {
+        position: u32,
+        func: u32,
+        call: TraitCall,
+    },
     /// A bound-variable receiver inside a generic impl body: dispatch
     /// resolves at runtime from the frame's evidence slot the call site
     /// entering the body staged. The trait member the evidence pair
@@ -2300,10 +2312,14 @@ enum Callee {
     /// linked dep position and the linked module's function index. The
     /// call stages like a local's and a tail site takes the same CALLT
     /// frame-reuse transfer (H2: the module boundary rides the pool
-    /// constant alone, the slide a pure fact of the two layouts).
+    /// constant alone, the slide a pure fact of the two layouts). The
+    /// def sits absent for a linked trait impl's member body — a method
+    /// owns no package def, so the member's own declared signature
+    /// serves the mode reads the Evidence arm mirrors.
     Foreign {
-        /// The import-bound def: the signature's checker facts.
-        def: DefId,
+        /// The import-bound def: the signature's checker facts; `None`
+        /// for a linked impl member (no def names it).
+        def: Option<DefId>,
         /// The linked dep entry's position in the recorded dep list.
         position: u32,
         /// The function's index inside the linked module's table.
@@ -5501,12 +5517,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// words are unknown keeps the closure-argument refusal.
     fn expected_param_words(&mut self, target: Callee) -> Option<Vec<SlotType>> {
         match target {
-            Callee::Builtin(_) | Callee::Evidence(_) => None,
+            // a linked impl member's parameter words ride its declared
+            // signature in the decls table, which this read does not
+            // reach; the closure-argument refusal keeps the site honest
+            Callee::Builtin(_) | Callee::Evidence(_) | Callee::Foreign { def: None, .. } => None,
             Callee::Generic(generic) => Some(generic.params.to_vec()),
             // a bound extern's staged words are its written signature's
             // (H5): the scalar slice validated at resolution, the same
             // derivation the linked arm takes
-            Callee::Bound { def, .. } | Callee::Foreign { def, .. } => self
+            Callee::Bound { def, .. } | Callee::Foreign { def: Some(def), .. } => self
                 .analyzed
                 .checked
                 .def_types

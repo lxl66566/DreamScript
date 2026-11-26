@@ -1607,6 +1607,21 @@ version = \"1.0.0\"
         "pub trait shapey {\n",
         "  fn size(self) -> int\n",
         "}\n",
+        "impl shapey for pair {\n",
+        "  fn size(self) -> int {\n",
+        "    self.a + self.b\n",
+        "  }\n",
+        "}\n",
+        "impl shapey for cell {\n",
+        "  fn size(self) -> int {\n",
+        "    self.n\n",
+        "  }\n",
+        "}\n",
+        "pub trait defaulted {\n",
+        "  fn answer(self) -> int {\n",
+        "    7\n",
+        "  }\n",
+        "}\n",
     );
     let members = [("shapes.ds", member)];
     write_pkg(&pkg, &manifest, &members);
@@ -1990,6 +2005,46 @@ fn the_tuple_fields_cross_and_run() {
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
+/// A producer's trait impls cross the link seam (G4): the trait's
+/// member rows bind as foreign method-registry rows, the impl's
+/// owner-keyed member links declare the instance over the minted head,
+/// and the consumer's dot-call dispatches through CALLG to the linked
+/// member body — a plain site, a tail site, and a second head all
+/// answering, over both a consumer-built value and the producer's own.
+#[test]
+fn the_trait_impls_cross_and_run() {
+    let (work, pkg_id) = shapes_fixtures("shapes-traits");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (pair, cell, shapey, make)\n",
+            "\n",
+            "fn weigh(p: pair) -> int {\n",
+            "  p.size()\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = pair { a: 30, b: 12 }\n",
+            "  const once = made.size()\n",
+            "  const c = make(4)\n",
+            "  println(\"${once + weigh(made) + c.size()}\")\n",
+            "  once + weigh(made) + c.size()\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the trait-impl run exits 0 (stderr: {err})");
+    // the plain site 42, the tail site 42, and the second head's
+    // producer-made value 4 — 88 in all, the run echoing the return
+    assert_eq!(out, "88\n88\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
 /// A linked fn's signature binds over its own type without the type's
 /// selection (G4): the fact registers from the member's surface alone,
 /// so values of the type flow between linked calls — the consumer never
@@ -2243,7 +2298,7 @@ fn an_empty_linked_enum_binds_its_name() {
 /// The type shapes the vocabulary cannot spell and the names a local
 /// declaration or the consumer itself owns keep their refusals at the
 /// same walk (G4): a deinit-carrying struct, a generic enum, a generic
-/// struct, a trait, and a struct with a field outside the word
+/// struct, a defaulted-member trait, and a struct with a field outside the word
 /// vocabulary each carry no fact; a generic alias — a declaration
 /// resolving through use-site arguments — carries none the same way;
 /// a locally declared spelling of a linked type name refuses both at
@@ -2300,9 +2355,9 @@ fn the_uncarried_type_shapes_refuse() {
             "layout and tag rows are the artifact round",
         ),
         (
-            "trait",
+            "defaulted-trait",
             concat!(
-                "import @shapes (shapey)\n",
+                "import @shapes (defaulted)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",

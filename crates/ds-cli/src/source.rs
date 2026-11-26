@@ -249,6 +249,23 @@ fn exports_of(
     exports
 }
 
+/// The member files' trait-impl link rows (G4): one per plain trait
+/// impl whose trait crossed as a fact, the head and member bodies
+/// addressed over the same word vocabulary and module table the export
+/// rows serve. Everything the walk refuses (a generic or conditional
+/// impl, an unplanned member) simply rides no row, exactly like a type
+/// shape the vocabulary cannot spell.
+#[must_use]
+fn impl_facts_of(
+    analyzed: &Analyzed,
+    ambient_files: usize,
+    functions: &[String],
+) -> Vec<ds_check::import::ImplFact> {
+    let facts = ds_check::TypeFact::member_facts(analyzed, ambient_files);
+    let eligible: std::collections::HashSet<ds_check::DefId> = facts.keys().copied().collect();
+    ds_check::import::ImplFact::member_facts(analyzed, ambient_files, functions, &eligible, &facts)
+}
+
 /// Rebases one signature's span set across file registries (G4): every
 /// span and written type names the consuming compile's own registry, so
 /// the diagnostics a link pass mints render there. A signature whose
@@ -359,6 +376,11 @@ pub struct CompiledSource {
     /// the dependent's own checks read. Empty for a script compile's
     /// own view of itself.
     pub exports: Vec<Export>,
+    /// The member files' declared trait impls (G4): the owner-keyed
+    /// member link rows a dependent's trait call sites dispatch
+    /// through, each member body's index addressing this module's own
+    /// table. Empty for a script compile's own view of itself.
+    pub impls: Vec<ds_check::import::ImplFact>,
 }
 
 /// One member file's exported definition: the import surface's facts
@@ -903,6 +925,7 @@ fn compile_text(
         &deps,
         &const_values,
     );
+    let impls = impl_facts_of(&analyzed, ambient_files, lowered.functions());
     match after {
         BundleAfter::Keep => {
             // The bundle's teardown is pure overhead on the one-shot
@@ -917,6 +940,7 @@ fn compile_text(
         lowered: lowered.with_deps(deps),
         name,
         exports,
+        impls,
     })
 }
 

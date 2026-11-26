@@ -609,6 +609,11 @@ pub struct Package {
     /// positional guess. Duplicate rows (two imports of one package)
     /// ride twice; the seed is idempotent per name and id.
     linked_tags: Vec<(String, u8)>,
+    /// The linked members' trait-impl facts the link pass collected
+    /// (G4): the owner-keyed member links a consuming trait call site
+    /// dispatches through, deduplicated per linked impl — two imports
+    /// of one package share the row the first registered.
+    linked_impls: Vec<crate::import::ImplFact>,
 }
 
 /// The collected namespace tables a checked-ambient serve parks per
@@ -755,6 +760,14 @@ impl Package {
     #[must_use]
     pub fn linked_tag_rows(&self) -> &[(String, u8)] {
         &self.linked_tags
+    }
+
+    /// The linked members' trait-impl facts, deduplicated per linked
+    /// impl: the declaration pass declares each row's instance and the
+    /// lowering reads the member links a solved dispatch addresses.
+    #[must_use]
+    pub fn linked_impl_facts(&self) -> &[crate::import::ImplFact] {
+        &self.linked_impls
     }
 }
 
@@ -1003,6 +1016,16 @@ impl Package {
                             // duplicate rows (two imports of one package)
                             // ride twice and the seed stays idempotent
                             self.linked_tags.extend(member_surface.tags.iter().cloned());
+                            // the trait-impl facts collect deduplicated:
+                            // the declaration pass declares one instance
+                            // per row, so a second registration of the
+                            // same linked impl would trip coherence
+                            // against itself
+                            for fact in &member_surface.impls {
+                                if !self.linked_impls.contains(fact) {
+                                    self.linked_impls.push(fact.clone());
+                                }
+                            }
                         },
                     }
                 }
@@ -1123,6 +1146,7 @@ impl Package {
                             .then_some(DefKind::Case),
                         Some(crate::import::TypeFact::Alias(..)) => Some(DefKind::TypeAlias),
                         Some(crate::import::TypeFact::Tag) => Some(DefKind::Tag),
+                        Some(crate::import::TypeFact::Trait(..)) => Some(DefKind::Trait),
                         None => None,
                     };
                     // A case may carry the reserved spellings `none`
@@ -1150,6 +1174,22 @@ impl Package {
                         });
                         self.foreign.insert(def, entry.clone());
                         self.foreign_type_defs.insert(entry.name.clone(), def);
+                        // a trait's members join the method registry as
+                        // its own foreign rows: the candidates a
+                        // consuming dot-call selects over, owner-keyed
+                        // by the trait def the registration just minted
+                        if let Some(crate::import::TypeFact::Trait(fact)) = entry.ty.as_deref() {
+                            for member in &fact.members {
+                                self.register_method(
+                                    &Ident {
+                                        span: member.span,
+                                        name: member.name.clone(),
+                                    },
+                                    MethodOwner::Trait(def),
+                                    diags,
+                                );
+                            }
+                        }
                     }
                 },
                 ForeignKind::Binding | ForeignKind::Type => {},

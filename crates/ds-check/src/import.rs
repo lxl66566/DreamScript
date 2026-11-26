@@ -188,10 +188,10 @@ fn parse_int(text: &str) -> Option<i64> {
 /// declaration product. The vocabulary carries a flat struct's named
 /// fields (a linear declaration's move-discipline bit riding beside
 /// them), an enum's tag rows (the same bit), a lone tag's unit atom, a
-/// non-generic alias's resolved word, and a bodiless struct's opaque
-/// identity; every other type-namespace shape (a trait, a generic
-/// declaration) and every field outside the vocabulary carries no fact
-/// and keeps its selection refused.
+/// non-generic alias's resolved word, a bodiless struct's opaque
+/// identity, and a plain trait's member rows; every other
+/// type-namespace shape (a generic declaration) and every field outside
+/// the vocabulary carries no fact and keeps its selection refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeFact {
     /// A flat, non-generic struct: named fields over the word
@@ -246,6 +246,102 @@ pub enum TypeFact {
     /// value use keeps the local spelling's own refusals (no
     /// construction lowers, no witness exists).
     Opaque,
+    /// A plain trait: its member rows, one per declared `fn`, each
+    /// carrying the written signature a call checks against — the rows
+    /// the consuming compile's mint registers exactly like a local
+    /// declaration's, so the trait's members join the method registry
+    /// and a linked impl's dispatch resolves through them. A generic
+    /// trait, a supertrait, an associated type, and a member carrying a
+    /// default body (a linked body the consumer cannot replay) keep
+    /// their selection refusals.
+    Trait(TraitFact),
+}
+
+/// One linked trait's declaration fact: its member rows in declaration
+/// order, each carrying the written signature. The signatures ride to
+/// the decls table and are never compared — one source text determines
+/// the fact, exactly like a linked fn's own signature.
+#[derive(Clone, Debug)]
+pub struct TraitFact {
+    /// The trait's member rows, in declaration order.
+    pub members: Vec<TraitMemberFact>,
+}
+
+/// One member row of a linked trait.
+#[derive(Clone, Debug)]
+pub struct TraitMemberFact {
+    /// The declared member name.
+    pub name: String,
+    /// The member's name occurrence, rebased into the consuming
+    /// compile's file space so method diagnostics render.
+    pub span: Span,
+    /// The written signature, as the declaring trait spells it.
+    pub sig: Arc<FnSig>,
+}
+
+impl PartialEq for TraitFact {
+    fn eq(&self, other: &Self) -> bool {
+        self.members == other.members
+    }
+}
+
+impl Eq for TraitFact {}
+
+impl PartialEq for TraitMemberFact {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.span == other.span
+    }
+}
+
+impl Eq for TraitMemberFact {}
+
+/// One linked trait impl's member link fact: the impl that owns the
+/// members, the one word its head implements them over, and each bodied
+/// member's index in the linked module's table — the CALLG target a
+/// consuming dispatch site addresses. A generic impl, a conditional
+/// impl, and an impl whose members did not all plan keep their
+/// refusals.
+#[derive(Clone, Debug)]
+pub struct ImplFact {
+    /// The implemented trait's declared name.
+    pub trait_name: String,
+    /// The implemented head, one word of the vocabulary.
+    pub head: TypeWord,
+    /// The impl's bodied members, one row per member fn.
+    pub members: Vec<ImplMemberFact>,
+    /// The impl item's span, rebased into the consuming compile's file
+    /// space so coherence diagnostics render.
+    pub span: Span,
+    /// The linked dep entry's position in the consuming module's
+    /// recorded list, assigned at the surface build: the module whose
+    /// table holds the member bodies.
+    pub link: u32,
+}
+
+// PartialEq ignores the span: equality is the linked impl's identity
+// (the trait, the head, the member rows, the owning module's link
+// position), which one producer source determines; the span rides to
+// the coherence diagnostic alone, and two surface builds of one package
+// rebase it differently — the link pass's dedup keys on this equality,
+// never the span.
+impl PartialEq for ImplFact {
+    fn eq(&self, other: &Self) -> bool {
+        self.trait_name == other.trait_name
+            && self.head == other.head
+            && self.members == other.members
+            && self.link == other.link
+    }
+}
+
+impl Eq for ImplFact {}
+
+/// One member row of a linked trait impl.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ImplMemberFact {
+    /// The member's name, matching the trait's own row.
+    pub name: String,
+    /// The member body's index in the linked module's table.
+    pub func: u32,
 }
 
 /// One case of a linked enum: its name and payload shape.
@@ -403,6 +499,31 @@ impl ScalarWord {
     }
 }
 
+/// One word's diagnostic spelling, the producer's own vocabulary
+/// rendered back for a consuming compile's coherence refusals.
+#[must_use]
+pub fn render_word(word: &TypeWord) -> String {
+    match word {
+        TypeWord::Scalar(word) => word.atom_name().to_owned(),
+        TypeWord::Bytes => "bytes".to_owned(),
+        TypeWord::List(inner) => format!("list[{}]", render_word(inner)),
+        TypeWord::Map(key, value) => {
+            format!("map[{}, {}]", render_word(key), render_word(value))
+        },
+        TypeWord::Optional(inner) => format!("{}?", render_word(inner)),
+        TypeWord::Named(name) => name.clone(),
+        TypeWord::Union(words) => words
+            .iter()
+            .map(render_word)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        TypeWord::Tuple(words) => format!(
+            "({})",
+            words.iter().map(render_word).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
 impl TypeFact {
     /// The link facts for every type declaration one package compile
     /// exports, as one co-derivation fixpoint: a field may name another
@@ -447,6 +568,24 @@ impl TypeFact {
                 }
             }
         }
+        // The trait items keyed by their def: a trait's fact reads the
+        // declaration itself (its written member rows), which no decls
+        // table carries whole.
+        let mut traits: FxHashMap<crate::DefId, &ds_parse::TraitDecl> = FxHashMap::default();
+        for ast in analyzed.asts.iter().skip(ambient_files) {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ds_parse::ItemKind::Trait(t) = &item.kind else {
+                        continue;
+                    };
+                    if let Some(def) = package.lookup_type(&t.name.name)
+                        && package.def(def).span == t.name.span
+                    {
+                        traits.insert(def, t);
+                    }
+                }
+            }
+        }
         let mut candidates = Vec::new();
         for (index, def) in package.defs().enumerate() {
             if (def.span.file.as_u32() as usize) < ambient_files {
@@ -459,6 +598,7 @@ impl TypeFact {
                     | crate::DefKind::Case
                     | crate::DefKind::TypeAlias
                     | crate::DefKind::Tag
+                    | crate::DefKind::Trait
             ) {
                 continue;
             }
@@ -473,7 +613,14 @@ impl TypeFact {
             let mut facts = FxHashMap::default();
             let mut next = FxHashSet::default();
             for &def in &candidates {
-                if let Some(fact) = Self::of_def(package, decls, &deinit, &eligible, def) {
+                if let Some(fact) = Self::of_def(
+                    package,
+                    decls,
+                    &deinit,
+                    &eligible,
+                    traits.get(&def).copied(),
+                    def,
+                ) {
                     next.insert(def);
                     facts.insert(def, Arc::new(fact));
                 }
@@ -493,6 +640,7 @@ impl TypeFact {
         decls: &crate::Decls,
         deinit: &std::collections::HashSet<u32>,
         eligible: &FxHashSet<crate::DefId>,
+        trait_decl: Option<&ds_parse::TraitDecl>,
         def: crate::DefId,
     ) -> Option<Self> {
         match package.def(def).kind {
@@ -515,8 +663,36 @@ impl TypeFact {
                 Self::alias_fact(package, decls, eligible, package.def(def).span.file, def)
             },
             crate::DefKind::Tag => Self::tag_fact(decls, def),
+            crate::DefKind::Trait => Self::trait_fact(trait_decl?),
             _ => None,
         }
+    }
+
+    /// The fact one declared trait carries, when it stays plain: no
+    /// generic parameters, no supertraits, no associated types, and no
+    /// member carrying a default body — a default is a linked body the
+    /// consuming compile cannot replay, so one such member refuses the
+    /// whole crossing. Every row carries the written signature the
+    /// member's registered method id already holds.
+    fn trait_fact(t: &ds_parse::TraitDecl) -> Option<Self> {
+        if !t.generics.is_empty() || !t.supers.is_empty() {
+            return None;
+        }
+        let mut members = Vec::with_capacity(t.members.len());
+        for member in &t.members {
+            let ds_parse::TraitMember::Fn(f) = member else {
+                return None; // an associated type is member machinery of its own
+            };
+            if f.body.is_some() {
+                return None;
+            }
+            members.push(TraitMemberFact {
+                name: f.name.name.clone(),
+                span: f.name.span,
+                sig: Arc::new(FnSig::of(f)),
+            });
+        }
+        Some(Self::Trait(TraitFact { members }))
     }
 
     /// The fact one declared struct carries, when its whole shape
@@ -642,6 +818,130 @@ impl TypeFact {
             crate::AtomKind::Unit if atom != crate::TypeId::NONE => Some(Self::Tag),
             _ => None,
         }
+    }
+}
+
+impl ImplFact {
+    /// The member link facts for every plain trait impl one package
+    /// compile declares: one row per impl item, the head one word of
+    /// the vocabulary and each bodied member's index in the linked
+    /// module's own table. A generic impl, a conditional impl, an impl
+    /// of a trait this member did not itself declare (whose fact then
+    /// refused), and an impl whose members did not all plan (a member
+    /// body over the impl's own variables) carry no row and keep the
+    /// consumer's dispatch refused.
+    #[must_use]
+    pub fn member_facts(
+        analyzed: &crate::type_of::Analyzed,
+        ambient_files: usize,
+        functions: &[String],
+        eligible: &std::collections::HashSet<crate::DefId>,
+        traits: &FxHashMap<crate::DefId, Arc<TypeFact>>,
+    ) -> Vec<Self> {
+        let package = &analyzed.package;
+        let decls = &analyzed.decls;
+        let eligible: &FxHashSet<crate::DefId> = &eligible.iter().copied().collect();
+        let mut out = Vec::new();
+        for ast in analyzed.asts.iter().skip(ambient_files) {
+            for block in &ast.blocks {
+                for item in &block.items {
+                    let ds_parse::ItemKind::Impl(imp) = &item.kind else {
+                        continue;
+                    };
+                    let Some(trait_ref) = &imp.trait_ref else {
+                        continue; // an inherent impl is the type-keyed seam's own round
+                    };
+                    let [only] = trait_ref.path.segments.as_slice() else {
+                        continue;
+                    };
+                    if !imp.generics.is_empty() {
+                        continue;
+                    }
+                    let Some(def) = package
+                        .lookup_type(&only.name)
+                        .filter(|&def| {
+                            package.foreign().get(&def).is_none()
+                                && (package.def(def).span.file.as_u32() as usize) >= ambient_files
+                        })
+                        .filter(|&def| traits.contains_key(&def))
+                    else {
+                        continue;
+                    };
+                    // the implemented trait must have crossed itself:
+                    // its member rows are the rows a consumer checks
+                    // against, so an impl of a refused trait rides no
+                    // fact
+                    if !matches!(&*traits[&def], TypeFact::Trait(_)) {
+                        continue;
+                    }
+                    // one instance per impl item, its written head one
+                    // word over the eligible vocabulary — a conditional
+                    // impl dispatches through condition evidence the
+                    // consumer cannot stage
+                    let mut heads = Vec::new();
+                    for (instance, site) in &decls.instance_impls {
+                        if *site != item.span {
+                            continue;
+                        }
+                        if decls
+                            .instances
+                            .conditions(*instance)
+                            .is_ok_and(|conditions| !conditions.is_empty())
+                        {
+                            heads.clear();
+                            break;
+                        }
+                        let Ok(written) = decls.instances.written(*instance) else {
+                            continue;
+                        };
+                        let Some(word) = WordSolver {
+                            package,
+                            decls,
+                            eligible,
+                            file: item.span.file,
+                        }
+                        .word_of_ty(written) else {
+                            continue;
+                        };
+                        heads.push(word);
+                    }
+                    if heads.is_empty() {
+                        continue;
+                    }
+                    let mut members = Vec::with_capacity(imp.fns.len());
+                    let mut planned = true;
+                    for f in &imp.fns {
+                        let name = format!(
+                            "{}#{}#{}",
+                            only.name,
+                            crate::decls::render_type(&imp.target),
+                            f.name.name
+                        );
+                        let Some(func) = functions.iter().position(|row| *row == name) else {
+                            planned = false;
+                            break;
+                        };
+                        members.push(ImplMemberFact {
+                            name: f.name.name.clone(),
+                            func: u32::try_from(func).expect("function index fits u32"),
+                        });
+                    }
+                    if !planned {
+                        continue;
+                    }
+                    for head in heads {
+                        out.push(Self {
+                            trait_name: only.name.clone(),
+                            head,
+                            members: members.clone(),
+                            span: item.span,
+                            link: 0,
+                        });
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1120,6 +1420,11 @@ pub enum ImportSurface {
 pub struct MemberSurface {
     /// The member's top-level definitions, declaration order.
     pub entries: Vec<ForeignEntry>,
+    /// The member's declared trait impls, one row per impl item: the
+    /// owner-keyed member link facts a consuming trait call site
+    /// dispatches through, each member body's index addressing this
+    /// member's own module table at the surface's link position.
+    pub impls: Vec<ImplFact>,
     /// The linked module's tag-table rows, name and id: the shared tag
     /// mapping's identity. A union-typed word crossing the module
     /// boundary carries the producing module's tag ids as immediates,
@@ -1885,6 +2190,7 @@ mod tests {
         };
         let surface = crate::MemberSurface {
             tags: Vec::new(),
+            impls: Vec::new(),
             entries: vec![entry("cell"), entry("seed")],
         };
         let mut imports = crate::ImportGraph::new();
@@ -2443,6 +2749,7 @@ mod tests {
         };
         let surface = crate::MemberSurface {
             tags: Vec::new(),
+            impls: Vec::new(),
             entries: vec![
                 ty_entry("cell", super::TypeFact::Struct {
                     fields: vec![super::TypeField {
@@ -2653,6 +2960,7 @@ mod tests {
         };
         let surface = crate::MemberSurface {
             tags: Vec::new(),
+            impls: Vec::new(),
             entries: vec![
                 ty_entry("twin", super::TypeFact::Struct {
                     fields: vec![super::TypeField {
@@ -2790,6 +3098,139 @@ mod tests {
             elements,
             vec!["int".to_owned(), "int".to_owned()],
             "the element set holds the one structural tuple atom"
+        );
+    }
+
+    /// The trait vocabulary carries: a plain trait's member rows in
+    /// declaration order, each with its written signature; a member
+    /// carrying a default body, a generic trait, and a supertrait
+    /// refuse the crossing whole. The impl walk keys each plain impl's
+    /// member rows by the mangled table names the plan owns — the head
+    /// one word of the same vocabulary a struct field spells — refusing
+    /// an impl of a trait that refused and an impl whose members did
+    /// not all plan.
+    #[test]
+    fn the_fact_is_the_trait_s_member_rows() {
+        let source = concat!(
+            "pub tag int\n",
+            "pub struct pair {\n",
+            "  a: int,\n",
+            "  b: int,\n",
+            "}\n",
+            "pub struct hidden {\n",
+            "  v: int,\n",
+            "}\n",
+            "pub trait sizing {\n",
+            "  fn size(self) -> int\n",
+            "  fn label(self) -> int\n",
+            "}\n",
+            "pub trait defaulted {\n",
+            "  fn answer(self) -> int {\n",
+            "    7\n",
+            "  }\n",
+            "}\n",
+            "pub trait wide[t] {\n",
+            "  fn pick(self) -> t\n",
+            "}\n",
+            "pub trait sub: sizing {\n",
+            "}\n",
+            "impl sizing for pair {\n",
+            "  fn size(self) -> int {\n",
+            "    self.a + self.b\n",
+            "  }\n",
+            "  fn label(self) -> int {\n",
+            "    1\n",
+            "  }\n",
+            "}\n",
+            "impl sizing for int {\n",
+            "  fn size(self) -> int {\n",
+            "    2\n",
+            "  }\n",
+            "  fn label(self) -> int {\n",
+            "    3\n",
+            "  }\n",
+            "}\n",
+            "impl defaulted for pair {\n",
+            "  fn answer(self) -> int {\n",
+            "    9\n",
+            "  }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "7\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("trait_fact.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let analyzed = crate::type_of::analyze(&files, &[ast]);
+        let facts = super::TypeFact::member_facts(&analyzed, 0);
+        let fact = |name: &str| {
+            analyzed
+                .package
+                .lookup_type(name)
+                .and_then(|def| facts.get(&def).map(|fact| (**fact).clone()))
+        };
+        // a plain trait's rows carry, names in declaration order
+        let Some(super::TypeFact::Trait(trait_fact)) = fact("sizing") else {
+            panic!("sizing carries its rows");
+        };
+        assert_eq!(
+            trait_fact
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["size", "label"]
+        );
+        assert_eq!(
+            trait_fact.members[0].sig.params.len(),
+            1,
+            "the written signature rides the row"
+        );
+        for refused in ["defaulted", "wide", "sub"] {
+            assert_eq!(fact(refused), None, "{refused} carries no fact");
+        }
+        // the impl rows key over the plan's mangled table names: both
+        // heads cross (a Named word, a scalar word), members in order
+        let eligible: std::collections::HashSet<crate::DefId> = facts.keys().copied().collect();
+        let functions = vec![
+            "sizing#pair#size".to_owned(),
+            "sizing#pair#label".to_owned(),
+            "sizing#int#size".to_owned(),
+            "sizing#int#label".to_owned(),
+            "defaulted#pair#answer".to_owned(),
+        ];
+        let rows = super::ImplFact::member_facts(&analyzed, 0, &functions, &eligible, &facts);
+        let row = |trait_name: &str, rendered: &str| {
+            rows.iter()
+                .find(|row| {
+                    row.trait_name == trait_name && super::render_word(&row.head) == rendered
+                })
+                .cloned()
+        };
+        let pair_row = row("sizing", "pair").expect("the pair impl carries its row");
+        assert_eq!(
+            pair_row
+                .members
+                .iter()
+                .map(|member| (member.name.as_str(), member.func))
+                .collect::<Vec<_>>(),
+            vec![("size", 0), ("label", 1)]
+        );
+        let int_row = row("sizing", "int").expect("the scalar-headed impl carries its row");
+        assert_eq!(int_row.members[0].func, 2);
+        assert!(
+            row("defaulted", "pair").is_none(),
+            "an impl of a refused trait rides no row"
+        );
+        // a member the plan never tabled (the mangle misses) refuses
+        // the whole impl
+        let short = ["sizing#pair#size".to_owned()];
+        let none = super::ImplFact::member_facts(&analyzed, 0, &short, &eligible, &facts);
+        assert!(
+            none.iter()
+                .all(|row| super::render_word(&row.head) != "pair"),
+            "an unplanned member refuses the impl"
         );
     }
 }
