@@ -1,0 +1,11 @@
+// The variable-element refusal: inside a generic body the bound
+// answers through the frame's own in-scope assumption, carrying no
+// instance, so no compare body exists to stage at the call site —
+// the per-instantiation seam the JIT specialization tier owns.
+
+fn sort_any[t: ord](xs: list[t]) -> list[t] { sort(xs) }
+
+fn main() -> int {
+  const ys = sort_any([3, 1])
+  0
+}

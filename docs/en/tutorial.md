@@ -17,7 +17,16 @@ fn count_up() -> int {
 }
 ```
 
-`int` is 64-bit signed and `float` 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`), and a width suffix (`42u32`) names a declared type, so an undeclared width refuses and a suffixed literal itself refuses at lowering. Overflow and division by zero trap (`1 / 0` panics), while floats never trap (`1.0 / 0.0` is `+inf`). Wrapping is explicit (`+%`, `*%`, `-%a`); narrowing is a width-type call (`i32(u)`, `i64(f)`) with `u32.of(x)` the trapping conversion and `u32_of` the checked `u32 | none` (bare `u32(x)` refuses under the F9 namespace priority). `<<`, `>>` shift arithmetically, `&`, `^`, `|` are total, and a shift amount at or past 64 or below zero traps.
+`int` is 64-bit signed and `float` 64-bit IEEE, both raw in slots; literals take separators and radix prefixes (`1_000_000`, `0xff`, `0b1010`, `0o777`), and a width suffix (`42u32`) names a declared type, so an undeclared width refuses and a suffixed literal itself refuses at lowering. Overflow and division by zero trap (`1 / 0` panics), while floats never trap (`1.0 / 0.0` is `+inf`). Wrapping is explicit (`+%`, `*%`, `-%a`); the declared widths `byte` and `u32` cross through the checked bridges `byte_of`/`u32_of` (the word or none, `int_of_byte`/`int_of_u32` reading back), with `u32.of(x)` the trapping conversion (bare `u32(x)` refuses under the F9 namespace priority). `<<`, `>>` shift arithmetically, `&`, `^`, `|` are total, and a shift amount at or past 64 or below zero traps.
+
+The seeded PRNG is an @std member set over the wrapping ops: the stream state is one int the caller threads — `rand(seed)` the draw following a seed, `rand_next(seed)` the pure state step, `rand_seed()` a fresh state stepped from the wall clock.
+
+```ts
+var s = rand_seed()               // a fresh stream state from the wall clock
+const first = rand(s)             // the draw following a seed
+s = rand_next(s)                  // the state step the caller threads
+println("draws differ ${rand(s) != first}")
+```
 
 Strings are immutable UTF-8 with escapes `\n \t \r \\ \" \' \$ \0 \u{...}`; raw `r"..."` and nestable `r#"..."#` take no escapes and cover multiline needs. `'x'` is a Unicode scalar char and `b'x'` a byte (`\u{..}` spelling 0-255, while a raw non-ASCII byte char refuses); `code_of(c)` reads the char's scalar, and checked `char_of(code)` answers `string | none` (one scalar, a codepoint's UTF-8 bytes not being expressible in ds source). Interpolation is string-only: `"$x"` and `"${e}"` desugar to `str(e)` for a printable primitive (`int`, `float`, `bool`, `char`, `byte`, `string`) or a `show` carrier staged at its own span, a union receiver through its covering impls; a union or optional operand without covering `show` is an error.
 
@@ -92,9 +101,11 @@ fn inc(x: int) -> int { x + 1 }
 
 const k = 10
 const g = inc                            // a named fn binds like any value
-const double = (x: int) => x * 2         // a lambda named by a block binding
 const a = apply(g, 4)
-const b = apply(double, 4)
+const b = {
+  const double = (x: int) => x * 2       // a lambda named by a binding inside a block
+  apply(double, 4)
+}
 const c = apply((x: int) => x * k, 4)    // a capturing closure fills the same slot
 const raised = [1, 2].map(inc)           // one combinator parameter, every callable
 ```
@@ -195,13 +206,13 @@ fn require_name(m: map[string, string]) -> string | parse_error {
 println("${cfg.host} ${port} ${p2} ${require_name(map[string, string]()).err((e) => "?")}")
 ```
 
-The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses. The process face rides the `proc` capability of `platform "std"`: `args()` answers the process arguments `ds run --args` stages, `env(name)` reads one variable into the checked none member, `read_line()` answers stdin's next line, `eprint`/`eprintln` write stderr, `proc_run(cmd, args)` answers a spawned child's exit status, and piped `proc_spawn(cmd, args)` answers the linear `proc_handle` — `write` feeds the child's stdin, `read_out`/`read_err` take the captured output and diagnostics (the empty string a pipe's orderly end), `close_in` is the idempotent end-of-input while the handle stays live, `wait` answers the exit status idempotently, `try_wait` the non-blocking `int | none` poll, and the closing deinit kills and reaps a still-running child. The host member `exit(code)` ends the process with a deliberate status, the CLI owning the code: 0 clean, 1 trapped; a negative code traps — the run answers 1 with the standard trap note, a deliberate failure never reading as clean success — and a code above 255 wraps to its low byte, POSIX process semantics.
+The @std extraction family (`unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`) plus `.err`/`.ok` are UFCS-callable generic functions with fully local typing. Bugs panic unhandleably: the fiber aborts, linear deinits run during the frame walk, and the trap surfaces at the nursery or supervisor boundary. Deliberate abort is `die(msg)`, a host provision the `ds` CLI installs for `run`/`dev`/`repl` and withholds from tests, embedders, and `--no-ambient`; a block-tail `die` against an annotated return refuses. The same provision owns the fsys path trio, each failure landing on its io_err class: `mkdir(path)` creates one directory a single level deep with `already_exists` the branchable outcome, `remove(path)` deletes one entry whatever it is (a directory only once empty, the non-empty directory answering the `io_other` floor), and `fs_size(path)` answers the entry's byte count as `int | io_err`. The process face rides the `proc` capability of `platform "std"`: `args()` answers the process arguments `ds run --args` stages, `env(name)` reads one variable into the checked none member, `read_line()` answers stdin's next line, `eprint`/`eprintln` write stderr, `proc_run(cmd, args)` answers a spawned child's exit status, and piped `proc_spawn(cmd, args)` answers the linear `proc_handle` — `write` feeds the child's stdin, `read_out`/`read_err` take the captured output and diagnostics (the empty string a pipe's orderly end), `close_in` is the idempotent end-of-input while the handle stays live, `wait` answers the exit status idempotently, `try_wait` the non-blocking `int | none` poll, and the closing deinit kills and reaps a still-running child. The host member `exit(code)` ends the process with a deliberate status, the CLI owning the code: 0 clean, 1 trapped; a negative code traps — the run answers 1 with the standard trap note, a deliberate failure never reading as clean success — and a code above 255 wraps to its low byte, POSIX process semantics.
 
 ## Linearity
 
 Every value is affine: moving it into a new binding, a consume-mode call, or a return kills the old binding, and use-after-move is a compile error rendered as a two-span linear diagnostic. Checking is one intraprocedural forward pass over last uses, with no lifetime annotations and no mode syntax at call sites.
 
-`~Copyable` is a negated set constraint marking real resources (file descriptors, locks, foreign memory): such values cannot be copied or lost, `deinit` running exactly once at the unique instance's death, on every path including early return, panic, and cancellation teardown. The ambient's resources carry the pattern: `open_file` answers the deinit-carrying `file_handle` (fallible reads `read_raw`/`read_exact` answering `bytes | io_err`) and `net_connect` a `net_handle` served by `send`/`recv`/`close_conn` (fallible reads answering `() | net_err` and `string | net_err`), and `net_listen` a `net_listener` served by `accept` (answering the accepted connection's own `net_handle`) and `close_listener`. A deinit-carrying value refuses as a union member, and a deinit closes what an explicit close already closed. Phantom-state unions (`file[open] | file[closed]`) typestate on the same marker; explicit `drop` is a debug and FFI tool.
+`~Copyable` is a negated set constraint marking real resources (file descriptors, locks, foreign memory): such values cannot be copied or lost, `deinit` running exactly once at the unique instance's death, on every path including early return, panic, and cancellation teardown. The ambient's resources carry the pattern: `open_file` answers the deinit-carrying `file_handle` (fallible reads `read_raw`/`read_exact` answering `bytes | io_err`) and `net_connect` a `net_handle` served by `send`/`recv`/`close_conn` (fallible reads answering `() | net_err` and `string | net_err`), and `net_listen` a `net_listener` served by `accept` (answering the accepted connection's own `net_handle`), `close_listener`, and `local_addr` (the bound `host:port`, a port-0 bind's report). A deinit-carrying value refuses as a union member, and a deinit closes what an explicit close already closed. Phantom-state unions (`file[open] | file[closed]`) typestate on the same marker; explicit `drop` is a debug and FFI tool.
 
 Mutation has one channel, a named call on an owned receiver with a `mut` mode, lexically visible at the call. Parameter modes are fixed at the definition site: default borrow (immutable), `mut` (an exclusive re-storable window, where the callee may re-seat its parameter and the caller never observes it), and `move` (a consuming hand-off, the deinit claim riding the move). Call sites carry zero mode syntax; inside a window are zero runtime checks, alias-freeness being proven, and outside it everything is shared-immutable.
 
@@ -246,7 +257,7 @@ for r in rows.map(parse_user) {
 const total = users.filter((u) => u.age >= 18).map((u) => u.age * 2).reduce(0, (a, b) => a + b)
 ```
 
-`list[record]` and `list[(int, string)]` carry whole word spans across each read, close (`cons`, `tail`, `collect`, `xs.concat(ys)`), and combinator; union elements refuse at every read, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
+`list[record]` and `list[(int, string)]` carry whole word spans across each read, close (`cons`, `tail`, `collect`, `xs.concat(ys)`), and combinator; a union element rides its whole span through each of those, with `cons` over a union-element list and content `==` refusing at lowering, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
 
 ## Traits and generics
 
@@ -399,7 +410,7 @@ for row in rows {
 }
 ```
 
-`ds run` folds an entry file's top-level statements into a synthesized `main`; `ds build` records the declared imports into the link table; an `@std` import's selections validate against the exported surface. A linked import binds callables, plain-literal consts, flat struct types (scalar, `bytes`, list-of-one-scalar, map-of-two-scalars, optional-scalar fields), non-generic enums and aliases, and bodiless structs, seeding the consumer's tag table; a computed or mutable const, a deeper foreign type, a trait member, an impl body, and a generic or defaulted function refuse as the unbindable shape (DS4021). `@std` is itself a package split between the shrunk core and the members moved into its own ds source (the string and json faces, the `max`/`min` pair, the `enumerate`/`zip`/`take`/`drop`/`flatten` combinators among them): a graph declaring the dep compiles over the core and binds the linked extern face (`to_upper`, `concat`), while a graph without the dep keeps the merged-ambient reading that `ds check`, the REPL, `ds dev`, and the LSP ride. A manifest-free script takes the declaring-graph discipline implicitly over the run path: `ds run`/`ds build` resolve the default bundle ahead of the compile, so a bare `config` — the extraction example above included — refuses as unknown over the core, and the bare stem form `import @std (...)` is the spelling that runs; the csv row above parses under the merged sessions with its `reader` use unresolved, while a run refuses at the import itself, naming the member the bundle does not carry.
+`ds run` folds an entry file's top-level statements into a synthesized `main`; `ds build` records the declared imports into the link table; an `@std` import's selections validate against the exported surface. A linked import binds callables, plain-literal consts, flat struct types (scalar, `bytes`, list-of-one-scalar, map-of-two-scalars, optional-scalar fields), non-generic enums and aliases, and bodiless structs, seeding the consumer's tag table; a computed or mutable const, a deeper foreign type, a trait member, an impl body, and a generic or defaulted function refuse as the unbindable shape (DS4021). `@std` is itself a package split between the shrunk core and the members moved into its own ds source (the string and json faces, the `max`/`min` pair, the `sum` fold, the `enumerate`/`zip`/`take`/`drop`/`flatten` combinators, and the seeded PRNG among them): a graph declaring the dep compiles over the core and binds the linked extern face (`to_upper`, `concat`), while a graph without the dep keeps the merged-ambient reading that `ds check`, the REPL, `ds dev`, and the LSP ride. A manifest-free script takes the declaring-graph discipline implicitly over the run path: `ds run`/`ds build` resolve the default bundle ahead of the compile, so a bare `config` — the extraction example above included — refuses as unknown over the core, and the bare stem form `import @std (...)` is the spelling that runs; the csv row above parses under the merged sessions with its `reader` use unresolved, while a run refuses at the import itself, naming the member the bundle does not carry.
 
 `ds repl` appends declarations as their own blocks and folds statements into a REPL-owned `main`, each submission printing the value, its inferred type, and its effect row. The frame parks between submissions and resumes at the new statement, so prior statements run once; a trapping line rolls back without committing, its deinit-carrying bindings firing once on the drain. `:drop <name>` fires one live binding's deinit, `:reset` clears the session, `:quit` leaves.
 
@@ -413,17 +424,19 @@ A bound extern calls the installed library: `extern "math" fn ds_add(left: int, 
 
 ## Concurrency
 
-Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. The block's value is the children's answers collected in spawn order — one list element per `spawn`, the body's own answer the element — and a spawned body may not hold a `mut` window over a binding that outlives the block. Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
+Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. The block's value is the children's answers collected in spawn order — one list element per `spawn`, each the spawned body's own answer — and a spawned body may not hold a `mut` window over a binding that outlives the block. Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
 
 ```ts
-fn fetch_all(urls: list[string]) -> list[page] | net_err {
+type fetch_err = timeout | refused
+fn fetch_body(url: string) -> string | fetch_err { refused }
+fn fetch_all(urls: list[string]) -> list[string] | fetch_err {
   nursery {
     for url in urls {
       spawn {
         match fetch_body(url) {
           timeout => cancel(timeout),
           refused => cancel(refused),
-          p       => p,
+          body    => body,
         }
       }
     }

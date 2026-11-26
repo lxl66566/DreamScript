@@ -30,6 +30,13 @@ pub(super) enum AmbientExtern {
     /// one-parameter extern the host provision serves — routing to the
     /// proc capability's deliberate-status seam.
     Exit,
+    /// The ambient `sort[t: ord]` extern (todo item 101): the generic
+    /// one-parameter declaration whose declared ord bound routes the
+    /// comparator — the call site stages the solved instance's compare
+    /// callable beside the list and dispatches the native's stable
+    /// merge-sort body through CALLG, the spelling carrying no
+    /// comparator of its own.
+    Sort,
 }
 
 impl AmbientExtern {
@@ -40,6 +47,7 @@ impl AmbientExtern {
             Self::Cancel => "cancel",
             Self::Die => "die",
             Self::Exit => "exit",
+            Self::Sort => "sort",
         }
     }
 }

@@ -484,6 +484,13 @@ pub extern fn first[t] (xs: list[t]) -> t?
 pub extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
 pub extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
 pub extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+// The list sort over the `ord` trait: the declared bound is the
+// routing — the call site's solved element type names its serving ord
+// instance, and the lowering stages that instance's `compare` body as
+// the callable word beside the list, so the native's stable merge sort
+// reenters through it per comparison (the reduce seam's CALLG
+// discipline).
+pub extern fn sort[t: ord] (xs: list[t]) -> list[t]
 pub extern fn str[t] (v: t) -> string
 pub extern fn total_compare (a: float, b: float) -> int
 pub extern fn str_compare (a: string, b: string) -> int

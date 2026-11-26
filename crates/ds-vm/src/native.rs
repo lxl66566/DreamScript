@@ -768,6 +768,12 @@ pub const BUILTIN_CHAN_SEND: u32 = 88;
 /// buffer head, parking on empty. Intercepted; the body never runs from
 /// a `CALL` site.
 pub const BUILTIN_CHAN_RECV: u32 = 89;
+/// `sort[t: ord](xs: list[t]) -> list[t]` — the stable merge sort over the
+/// `ord` trait's compare callable, staged by the call site's lowering
+/// from the solved element type's serving instance. The ONE body lives
+/// in [`GENERIC_FUNCTIONS`], CALLG-addressed; the native slot stays a
+/// reserved trap.
+pub const BUILTIN_SORT: u32 = 90;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -2538,6 +2544,18 @@ pub const GENERIC_FUNCTIONS: &[(&str, u32, GenericFunction)] = &[
         result_words: 1,
         func: par_reduce_generic_fn,
     }),
+    (BUILTIN_MODULE, BUILTIN_SORT, GenericFunction {
+        // the list `Ref` leads, the compare callable word follows, and
+        // the receiver's list-instance evidence word trails the real
+        // arguments like filter's; the result floor is the one fresh
+        // list `Ref`
+        name: "sort",
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        evidence: 1,
+        result_words: 1,
+        func: sort_generic_fn,
+    }),
 ];
 
 /// Resolves the generic builtin a CALLG FuncRef addresses, if any.
@@ -2903,6 +2921,102 @@ fn reduce_generic_fn(
     Ok(NativeResult::Total { words: acc })
 }
 
+/// One comparison's ordering answer: the callable's one-word `int`
+/// result names the first span the earlier element when negative, and
+/// an equal answer keeps the left run's element (stability). A wider
+/// or non-int answer refuses like a mismatched slot — the declared
+/// comparison's word is the contract, the predicate-bool discipline.
+fn compare_orders_first(
+    vm: &mut Vm,
+    cmp: Value,
+    first: &[Value],
+    second: &[Value],
+) -> Result<bool, Trap> {
+    let mut args = Vec::with_capacity(first.len() + second.len());
+    args.extend_from_slice(first);
+    args.extend_from_slice(second);
+    let answer = vm.call_hosted(cmp, &args)?;
+    match answer.as_slice() {
+        [Value::I64(ordering)] => Ok(*ordering <= 0),
+        wider => Err(Trap::SlotTypeMismatch {
+            slot: 0,
+            expected: SlotType::I64,
+            actual: wider.first().map_or(SlotType::I64, Value::slot_type),
+        }),
+    }
+}
+
+/// `sort`'s one body: the stable merge sort over the staged compare
+/// callable. The walk is bottom-up over element indices, so no element
+/// span moves before the final pushes and no Rust recursion rides the
+/// depth. Each kept element's whole span pushes onto the fresh result
+/// list (the push acquiring the list's own count per `Ref` word, the
+/// source list keeping its own — filter's discipline), so no
+/// element-side count moves at all; a mid-sort trap leaks the fresh
+/// empty list alone, the same single-leak class the other combinators'
+/// traps leave.
+fn sort_generic_fn(vm: &mut Vm, _evidence: &[Value], args: &[Value]) -> Result<NativeResult, Trap> {
+    let cmp = fn_arg(args, 1)?;
+    let list = ref_arg(args, 0)?;
+    let (elems, stride) = {
+        let (mut heaps, _) = vm.split();
+        let (elems, stride) = heaps.list_at(list)?;
+        (elems.to_vec(), stride.max(1))
+    };
+    let res = {
+        let (mut heaps, _) = vm.split();
+        heaps.new_list_id(Vec::new())
+    };
+    let count = elems.len() / stride;
+    let mut order: Vec<usize> = (0..count).collect();
+    let mut scratch: Vec<usize> = vec![0; count];
+    let mut width = 1;
+    while width < count {
+        let mut at = 0;
+        while at < count {
+            let mid = (at + width).min(count);
+            let end = (at + 2 * width).min(count);
+            let (mut left, mut right, mut out) = (at, mid, at);
+            while left < mid && right < end {
+                let first = order[left] * stride;
+                let second = order[right] * stride;
+                if compare_orders_first(
+                    vm,
+                    cmp,
+                    &elems[first..first + stride],
+                    &elems[second..second + stride],
+                )? {
+                    scratch[out] = order[left];
+                    left += 1;
+                } else {
+                    scratch[out] = order[right];
+                    right += 1;
+                }
+                out += 1;
+            }
+            while left < mid {
+                scratch[out] = order[left];
+                left += 1;
+                out += 1;
+            }
+            while right < end {
+                scratch[out] = order[right];
+                right += 1;
+                out += 1;
+            }
+            at = end;
+        }
+        std::mem::swap(&mut order, &mut scratch);
+        width *= 2;
+    }
+    for &element in &order {
+        let start = element * stride;
+        let (mut heaps, _) = vm.split();
+        heaps.push_list(res, &elems[start..start + stride])?;
+    }
+    Ok(NativeResult::Word(Value::Ref(res)))
+}
+
 /// The fork-join callable word, forked per element: the scalar `Fn`
 /// names the callable's own function, a closure object's `Ref` its body
 /// (the capture block staged per spawn into the child's entry frame,
@@ -3201,6 +3315,7 @@ reserved!(builtin_reserved_46 in BUILTIN_MODULE at 46); // partition; the reentr
 reserved!(builtin_reserved_47 in BUILTIN_MODULE at 47); // par_map; the fork-join generic body lives in GENERIC_FUNCTIONS
 reserved!(builtin_reserved_57 in BUILTIN_MODULE at 57); // was parse_json; the reader lives in @std ds source now
 reserved!(builtin_reserved_59 in BUILTIN_MODULE at 59); // map_keys; the generic body lives in GENERIC_FUNCTIONS
+reserved!(builtin_reserved_90 in BUILTIN_MODULE at 90); // sort; the reentrant generic body lives in GENERIC_FUNCTIONS
 
 /// The one reserved gap entry shape: no parameters, a one-word result
 /// contract (the trap fires before any overlay write matters).
@@ -3245,7 +3360,9 @@ fn reserved_entry(func: NativeFn) -> NativeFunction {
 /// ([`BUILTIN_BYTE_OF`]..[`BUILTIN_INT_OF_U32`], the json face's scalar
 /// readers) past the pair, and the float math family and the string
 /// search triple ([`BUILTIN_SQRT`]..[`BUILTIN_REPLACE`], the 2026-11-21
-/// pure-builtin round) past the bridges.
+/// pure-builtin round) past the bridges, and the ord-routed list sort's
+/// reserved slot ([`BUILTIN_SORT`], its reentrant ONE body in
+/// [`GENERIC_FUNCTIONS`]) past the channel triple.
 // one flat registration table whose entry order is contract (the
 // reserved head and the compare natives' tail positions); splitting it
 // would only relocate entries between functions
@@ -3857,10 +3974,11 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             channel: Some(ChannelNative::Recv),
             func: chan_refuse_fn,
         },
+        reserved_entry(builtin_reserved_90),
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_CHAN_RECV, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_CHAN_RECV as usize + 1);
+    // BUILTIN_SORT, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_SORT as usize + 1);
     fns
 }
 
@@ -4674,12 +4792,12 @@ mod tests {
         assert_eq!(fns[BUILTIN_CHAN_NEW as usize].name, "chan_new");
         assert_eq!(fns[BUILTIN_CHAN_SEND as usize].name, "chan_send");
         assert_eq!(fns[BUILTIN_CHAN_RECV as usize].name, "chan_recv");
-        assert_eq!(fns.len(), BUILTIN_CHAN_RECV as usize + 1);
+        assert_eq!(fns.len(), BUILTIN_SORT as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [
             0u32, 1, 5, 6, 7, 8, 9, 10, 21, 22, 23, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 46,
-            47, 48, 57, 59,
+            47, 48, 57, 59, 90,
         ] {
             assert_eq!(fns[index as usize].name, "reserved", "index {index}");
         }

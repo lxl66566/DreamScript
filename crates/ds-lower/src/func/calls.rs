@@ -1130,6 +1130,9 @@ impl<'a> FnLower<'a, '_, '_> {
             if self.ambient_extern(def, AmbientExtern::Exit) {
                 return self.exit_call(&arg_exprs, ty, callee_span);
             }
+            if self.ambient_extern(def, AmbientExtern::Sort) {
+                return self.sort_call(&arg_exprs, ty, call_span, callee_span);
+            }
         }
         // a trait-method dispatch names its impl body directly: the call
         // stages and transfers like a local callee, with the solved
@@ -3344,6 +3347,23 @@ impl<'a> FnLower<'a, '_, '_> {
             && !sig.generics.is_empty()
         {
             if let Some(generic) = crate::native::lookup_generic(&name) {
+                // a fixed-staged descriptor stages exactly one word per
+                // declared parameter, so a signature carrying fewer
+                // parameters than the contract stages names a seam the
+                // free-generic path cannot lower: the ord-routed sort's
+                // spelling carries no comparator, its callable staged
+                // from the solved ord instance at the ambient's own call
+                // sites alone
+                if generic.staging == Staging::Fixed && generic.params.len() != sig.params.len() {
+                    return Err(LowerError::unsupported(
+                        span,
+                        "a generic callee",
+                        "the builtin's fixed staging covers more words than the spelling's \
+                         parameters carry; the comparator-routed sort lowers at the ambient's own \
+                         call sites alone, and a module-local declaration of the name has no \
+                         lowering",
+                    ));
+                }
                 return Ok(Callee::Generic(generic));
             }
             return Err(LowerError::unsupported(

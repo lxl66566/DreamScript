@@ -1412,6 +1412,24 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
         shape: NativeShape::TotalByResultType,
         instances: &[BuiltinInstance::List],
     },
+    GenericNative {
+        // the ord-routed list sort's engine seam: the source spelling
+        // carries the list alone (the `ord` bound supplies the
+        // comparator), so the free-generic dispatch never routes here —
+        // the sort call site's recognition reads this entry for the
+        // CALLG addressing and stages the solved instance's compare
+        // callable into the `Fn` word beside the list `Ref`, the
+        // receiver's list-instance evidence word trailing them like
+        // filter's
+        name: "sort",
+        module: NativeModule::Builtin,
+        index: 90,
+        evidence: 1,
+        params: &[SlotType::Ref, SlotType::Fn],
+        staging: Staging::Fixed,
+        shape: NativeShape::Total(SlotType::Ref),
+        instances: &[BuiltinInstance::List],
+    },
 ];
 
 /// Finds the generic builtin a call name addresses, if the contract

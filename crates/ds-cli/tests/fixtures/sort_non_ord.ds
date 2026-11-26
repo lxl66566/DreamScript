@@ -1,0 +1,10 @@
+// The non-ord element refusal: a struct carrying no ord impl leaves
+// the declared bound unsatisfied, so the call refuses at the
+// checker's own bound seam before any lowering runs.
+
+struct plain { n: int }
+
+fn main() -> int {
+  const ys = sort([plain { n: 1 }, plain { n: 0 }])
+  0
+}

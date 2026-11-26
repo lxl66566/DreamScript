@@ -382,6 +382,226 @@ fn the_clone_family_refuses_its_carve_outs() {
     );
 }
 
+/// The generic-enum cause, per family: each of the seven refuses a
+/// declaration carrying its own type parameters at the attribute, the
+/// enum shape identically to the struct shape (the guard fires at each
+/// family head before any part walk, so no trait or json face needs to
+/// resolve). One refusal per family names its own family.
+#[test]
+fn the_generic_enum_cause_refuses_per_family() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "#[derive(show, ord, hash, clone, default, from_json, to_json)]\n",
+        "enum keyed[t] {\n",
+        "  tiny,\n",
+        "  big(t),\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 7, "one refusal per family: {rendered:?}");
+    for family in [
+        "show",
+        "ord",
+        "hash",
+        "clone",
+        "default",
+        "from_json",
+        "to_json",
+    ] {
+        assert!(
+            rendered.iter().any(|r| r.contains("DS2029")
+                && r.contains(&format!("derive `{family}` refuses a generic declaration"))),
+            "the {family} family names its own refusal: {rendered:?}"
+        );
+    }
+}
+
+/// A written bound on the declaration's own parameter does not lift the
+/// refusal: the blocker is the runtime receiver frame a concrete
+/// instantiation would need, never a missing bound — the synthesis
+/// already adds the family's trait to whatever bound the declaration
+/// wrote, so spelling it by hand changes nothing.
+#[test]
+fn a_written_bound_does_not_lift_the_generic_refusal() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "#[derive(show)]\n",
+        "struct box[t: show] { v: t }\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert!(
+        rendered[0].contains("DS2029")
+            && rendered[0].contains("derive `show` refuses a generic declaration"),
+        "{}",
+        rendered[0]
+    );
+}
+
+/// One lift probe through the whole pipeline: the source checks clean
+/// and lowering refuses, asserting the refusal text names the M3
+/// contract — the boundary the lifted families' products meet.
+fn lift_mirror_refuses_at_lowering(source: &str) {
+    let mut files = Files::new();
+    let id = files.add_source("mirror.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the mirror checks clean: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
+    let Err(err) = lower(
+        "mirror",
+        Hash128::compute(source.as_bytes()),
+        &analyzed.asts,
+        &analyzed,
+    ) else {
+        panic!("the mirror's product must refuse under the M3 contract")
+    };
+    assert!(
+        err.to_string().contains("outside the M3 runtime contract"),
+        "the refusal names the runtime value seam, never the derive: {err}"
+    );
+}
+
+/// The `show` family's lift door, pinned as the hand-written mirror of
+/// exactly what a lifted derive would synthesize (the bounded generic
+/// impl `impl_item` already builds): a fields-carrying generic struct's
+/// impl checks clean — the receiver `self: pair[t]` is a solved head and
+/// the parts dispatch through the bound's runtime evidence — while
+/// lowering refuses at the member's receiver frame, because a concrete
+/// application of a user generic struct has no runtime value: the shape
+/// pass admits only heap-reference applications (one Ref word), so the
+/// ONE body the seam lowers per impl would need the receiver laid out
+/// per instantiation at the entering site — the JIT specialization
+/// tier's frame, not the interpreter's.
+#[test]
+fn the_lifted_show_product_refuses_at_the_receiver_frame() {
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "struct pair[t] { a: t, b: t }\n",
+        "impl[t: show] show for pair[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    \"pair { a: ${self.a.show()}, b: ${self.b.show()} }\"\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    // the enum shape meets the same receiver frame: the member's
+    // `self: flag[t]` spans the application's words whatever the body
+    // reads (the arms here touch no part)
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "enum flag[t] {\n",
+        "  on,\n",
+        "  off,\n",
+        "}\n",
+        "impl[t: show] show for flag[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    match self {\n",
+        "      on => \"on\"\n",
+        "      off => \"off\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
+}
+
+/// The `default` and `clone` families' lift door, the receiverless
+/// mirror: a member constructing the application value from concrete
+/// parts — no type variable anywhere in the body — still refuses at
+/// lowering's shape pass, at the construction itself. A concrete
+/// application of a user generic struct has no runtime representation
+/// whatever the body reads, so even the families whose synthesized
+/// bodies never dispatch through the variable wait on the same
+/// per-instantiation frame seam. The checker's own construction door
+/// rides beside it: a concretely annotated literal still refuses, since
+/// the struct-literal arm reads in-scope type parameters alone and the
+/// expected type never reaches it.
+#[test]
+fn the_lifted_default_product_refuses_at_the_construction() {
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "struct box[t] { n: int }\n",
+        "impl[t] box[t] {\n",
+        "  fn default() -> box[t] {\n",
+        "    box { n: 0 }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "struct pair[t] { a: t, b: t }\n",
+        "fn main() -> int {\n",
+        "  const p: pair[int] = pair { a: 1, b: 2 }\n",
+        "  0\n",
+        "}\n",
+    ));
+    assert!(
+        rendered.iter().any(|r| r
+            .contains("constructing generic `pair` needs an expected type or in-scope parameters")),
+        "the annotated literal names the checker's own construction door: {rendered:?}"
+    );
+}
+
+/// The enum families' second door, ahead of any runtime question: a
+/// payloaded case pattern over a generic head resolves no atom in any
+/// spelling (the hand-written impl here, a generic free fn the same),
+/// while the unit-case arms above resolve — so a lifted derive over a
+/// generic enum whose cases carry parts would synthesize arms the
+/// checker refuses before the receiver frame is ever reached. The
+/// enum-body walk (`arm` in the derive engine) needs this resolution
+/// seam named and fixed first.
+#[test]
+fn a_payloaded_case_pattern_over_a_generic_head_refuses_at_checking() {
+    let rendered = refusals(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "enum keyed[t] {\n",
+        "  tiny,\n",
+        "  big(t),\n",
+        "}\n",
+        "impl[t: show] show for keyed[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    match self {\n",
+        "      tiny => \"tiny\"\n",
+        "      big(p0) => \"big(${p0.show()})\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2004") && r.contains("unknown pattern `big`")),
+        "the payloaded case resolves no atom over the generic head: {rendered:?}"
+    );
+}
+
 /// A derive attribute that somehow survives into the trees lowering
 /// walks is the misuse guard: the checker's expansion owns consumption.
 #[test]

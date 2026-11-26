@@ -8,6 +8,7 @@
 - The grammar's stack segment belongs to the caller thread, so a thread-local worker serves one job per parse and each job carries its own source copy; an inline fast path for small nesting breaks that contract.
 - Never join the grammar worker from a thread-local destructor: joining there aborts the process at exit (status 127).
 - An attribute class the derive expansion owns must be named by the per-tree expansion gate (`has_expansion`), or a tree carrying only that attribute passes unexpanded and drops the refusal. The case-attribute vocabulary is `#[default]` alone; any other attribute on a case is a syntax error.
+- An analyzer probe over derive-bearing sources runs the expansion first (`ds_meta::analyze` over the parsed trees): `ds_check::analyze` leaves the attribute unconsumed and checks a different program — no synthesized impls, no derive refusals — so a hand-rolled probe answers the wrong question while passing.
 - Keep inline `.ds` sources inside Rust string literals on one line: a backslash continuation strips the next line's indentation, so a split signature parses as a two-slot param list.
 - `ds_mod::Function` stores the wire words and `code()` is the on-disk form, so a decode is validation and never storage, and the reader's decode pass owns the load path's jump-bound check.
 - `loader::install` consumes the module, so a caller retrying after a refusal rebuilds it; the writer and the corpus tests keep the borrowing `code()`/`functions()` accessors.

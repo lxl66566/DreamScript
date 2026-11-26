@@ -1,4 +1,5 @@
-// The tutorial's concurrency block, end to end: `fetch_all` fans the
+// The tutorial's concurrency block realized over the ambient's full
+// net_err taxonomy: `fetch_all` fans the
 // fetches out over `spawn` inside a `nursery`, each child's answer
 // riding the join channel (the block's value is the collected answers
 // in spawn order), the first failure cancels the in-flight sibling at

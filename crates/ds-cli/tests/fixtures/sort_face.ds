@@ -1,0 +1,55 @@
+// The ord-routed sort's acceptance program: the free and UFCS
+// spellings over int and string elements, the derive-ord struct run
+// over multi-word element spans, and the custom partial compare
+// pinning stability (equal keys keeping their input order through
+// the member's own compare).
+
+#[derive(ord, show)]
+struct pt { x: int, y: int }
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = xs.get(i)
+  cell.ok((x: int) => x).unwrap_or(-1)
+}
+
+fn at_word(xs: list[string], i: int) -> string {
+  const cell = xs.get(i)
+  cell.ok((w: string) => w).unwrap_or("?")
+}
+
+fn at_show(xs: list[pt], i: int) -> string {
+  const cell = xs.get(i)
+  cell.ok((p: pt) => p.show()).unwrap_or("?")
+}
+
+struct keyed { key: int, label: string }
+
+impl ord for keyed {
+  fn compare(self, other: Self) -> int { self.key.compare(other.key) }
+}
+
+impl show for keyed {
+  fn show(self) -> string { "${self.key}:${self.label}" }
+}
+
+fn at_keyed(xs: list[keyed], i: int) -> string {
+  const cell = xs.get(i)
+  cell.ok((k: keyed) => k.show()).unwrap_or("?")
+}
+
+fn main() -> int {
+  const xs = [3, 1, 2, 1]
+  println("ints ${at(sort(xs), 0)} ${at(sort(xs), 3)}")
+  println("ufcs ${at(xs.sort(), 0)} ${at(xs.sort(), 3)}")
+  const words = ["pear", "apple", "fig"]
+  const sorted_words = words.sort()
+  println("words ${at_word(sorted_words, 0)} ${at_word(sorted_words, 2)}")
+  const pts = [pt { x: 2, y: 1 }, pt { x: 1, y: 5 }, pt { x: 2, y: 0 }, pt { x: 1, y: 9 }]
+  const sp = pts.sort()
+  println("pts ${at_show(sp, 0)} ${at_show(sp, 3)}")
+  const items = [keyed { key: 2, label: "a" }, keyed { key: 1, label: "x" }, keyed { key: 2, label: "b" }, keyed { key: 1, label: "y" }]
+  const sk = items.sort()
+  println("stable ${at_keyed(sk, 0)} ${at_keyed(sk, 1)} ${at_keyed(sk, 2)} ${at_keyed(sk, 3)}")
+  println("empty ${len(sort(list[int]()))}")
+  0
+}

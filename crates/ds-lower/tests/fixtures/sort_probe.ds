@@ -1,0 +1,54 @@
+// purpose: the ord-routed list sort (todo item 101) over a no-ambient
+// universe — the extern carries the `ord` bound and no comparator, the
+// solved element type's serving instance supplies the `compare`
+// callable the call site stages beside the list (the reduce seam's
+// CALLG discipline, the list-instance evidence word trailing), and the
+// native's stable merge sort reenters per comparison. Equal elements
+// keep their input order through the partial compare.
+
+tag int
+tag string
+tag bool
+
+struct list[t]
+
+pub trait ord {
+  fn compare(self, other: Self) -> int
+}
+
+impl ord for int {
+  fn compare(self, other: Self) -> int {
+    if self < other { -1 } else if self > other { 1 } else { 0 }
+  }
+}
+
+impl ord for string {
+  fn compare(self, other: Self) -> int { 0 }
+}
+
+extern fn println (s: string) -> ()
+extern fn len[t] (xs: t) -> int
+extern fn list_get[t] (xs: list[t], i: int) -> t | none
+extern fn sort[t: ord] (xs: list[t]) -> list[t]
+
+fn at(xs: list[int], i: int) -> int {
+  const cell = list_get(xs, i)
+  cell.ok((x: int) => x).err((_: none) => -1)
+}
+
+fn empty_ints() -> list[int] {
+  []
+}
+
+fn main() -> int {
+  const xs = [3, 1, 2, 1]
+  const ys = sort(xs)
+  println("free ${at(ys, 0)} ${at(ys, 1)} ${at(ys, 2)} ${at(ys, 3)}")
+  const zs = xs.sort()
+  println("ufcs ${at(zs, 0)} ${at(zs, 3)}")
+  const words = ["pear", "apple", "fig"]
+  const sorted_words = words.sort()
+  println("words ${len(sorted_words)}")
+  println("empty ${len(sort(empty_ints()))}")
+  0
+}

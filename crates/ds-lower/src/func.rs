@@ -44,6 +44,7 @@ use crate::{
 mod calls;
 mod extraction;
 mod pattern;
+mod sort;
 mod tail;
 
 use extraction::AmbientExtern;

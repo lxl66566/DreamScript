@@ -43,7 +43,7 @@ use ds_vm::{
         BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_SET, BUILTIN_MAX,
         BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
         BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
-        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE,
+        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_SORT, BUILTIN_STR_BOOL, BUILTIN_STR_COMPARE,
         BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL, BUILTIN_TOTAL_COMPARE,
         BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE, BUILTIN_UTF8_ENCODE,
     },
@@ -1118,9 +1118,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     for index in BUILTIN_CHAN_NEW..=BUILTIN_CHAN_RECV {
         assert!(reg.resolve_native("builtin", index).is_some());
     }
+    // the ord-routed list sort's reserved slot (90): its reentrant ONE
+    // body lives in the generic table, CALLG-addressed
+    assert!(reg.resolve_native("builtin", BUILTIN_SORT).is_some());
     assert!(
-        reg.resolve_native("builtin", 90).is_none(),
-        "90 table entries: the core's, the list block, the fiber pair, the push, the map block,
+        reg.resolve_native("builtin", 91).is_none(),
+        "91 table entries: the core's, the list block, the fiber pair, the push, the map block,
          the generic container closes, the reentrant combinators, the nursery seams, the join,
          the partition, the fork-join combinator, the fork-join fold, the float sort key, the
          string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1128,8 +1131,9 @@ fn both_native_modules_are_installed_and_resolvable() {
          reserved slot, the map key face, the bytes collection's face with its content
          compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
          bare trap primitive, the list and map collections' content compares, the
-         byte/u32 width bridges, the float math family, the string search triple, and the
-         bounded channel's intercepted send/recv/construct triple"
+         byte/u32 width bridges, the float math family, the string search triple, the
+         bounded channel's intercepted send/recv/construct triple, and the ord-routed list
+         sort's reserved slot"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform
