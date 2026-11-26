@@ -93,7 +93,7 @@ Lists and tuples: `[1, 2, 3]` is a `list[int]` literal and `list[page]()` the em
 
 `fn` is the only named-function declaration, at top level and as trait/impl members, the name in scope inside its own body, so recursion is direct. Parameters are `name: t`, returns `-> t`, and union returns parse as `-> a | b`. The body's final expression is the return value, `return e` exits early, `()` is the unit type, and a function returning nothing may omit the annotation. Signatures are required on top-level and public definitions; locals, lambdas, and match arms are inferred. Anonymous functions are const-arrow lambdas, the only other function spelling, named by a binding inside any block; top level names functions with `fn` only.
 
-Functions are values end to end: a named fn binds and passes like any value, `fn(t) -> r` names a fn type in either position, and any callable (named fn, lambda, capturing closure) inhabits the slot with one call spelling. A fn-typed return builds factories: `(k: int) => (x: int) => x + k`.
+Functions are values end to end: a named fn binds and passes like any value, `fn(t) -> r` names a fn type in either position, and any callable (named fn, lambda, capturing closure) inhabits the slot with one call spelling. The capture is affine: a lambda capturing a `var` binding moves the binding into the closure, so a later use in the enclosing scope refuses with the two-span move error (DS3001), while read-only captures keep the copy spellings. A fn-typed return builds factories: `(k: int) => (x: int) => x + k`.
 
 ```ts
 fn apply(f: fn(int) -> int, v: int) -> int { f(v) }
@@ -108,6 +108,14 @@ const b = {
 }
 const c = apply((x: int) => x * k, 4)    // a capturing closure fills the same slot
 const raised = [1, 2].map(inc)           // one combinator parameter, every callable
+```
+
+```ts
+var hits = 0
+const bump = () => { hits = hits + 1 }   // capturing the var moves it into the closure
+bump()
+bump()
+// a later hits use in this scope now refuses (DS3001): the closure owns the binding
 ```
 
 UFCS is universal: `x.f(a)` desugars to `f(x, a)` for any first-argument function — free functions first, then trait methods, `trait::f(x)` the escape hatch, true ambiguity a compile error. A free function whose first parameter cannot take the receiver's type never takes the call, so a same-named free function and a member coexist over disjoint receivers. Capability parameters are named and excluded from the dot position: `println(io, msg)` is never `msg.println()`.
@@ -245,6 +253,8 @@ const roster = collect(grown)                                   // the whole-lis
 for u in roster { println("user ${u.name}") }
 ```
 
+The mutation and membership members share the same exclusive window: `xs.insert(i, x)` splices, `xs.remove(i)` and `m.remove(k)` delete one element or row (a missing map key a no-op), `xs.clear()` empties, `m.contains(k)` reads membership, and `m.entries()` answers the entry-order `list[(k, v)]`; assignment sugar writes places in place over a `var` root — `p.x = v`, `xs[i] = v`, and nestings of both (`xs[i].x.y = v`) — with an out-of-range store trapping rather than answering a miss, a `const` receiver refusing (DS3006), and a compound operator over a place chain keeping the plain-binding refusal this round (DS2002).
+
 Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
 
 ```ts
@@ -258,6 +268,7 @@ const total = users.filter((u) => u.age >= 18).map((u) => u.age * 2).reduce(0, (
 ```
 
 `list[record]` and `list[(int, string)]` carry whole word spans across each read, close (`cons`, `tail`, `collect`, `xs.concat(ys)`), and combinator; a union element rides its whole span through each of those, with `cons` over a union-element list and content `==` refusing at lowering, and a tuple arm resolves no member. `bytes` is one immutable byte string per value: `bytes_of`/`byte_list` bridge to `list[byte]`, `len`, the checked `byte_at` (`byte | none`), payload `==`, `show` as a byte list, lexicographic `ord`/`hash`, and the `utf8_encode`/`utf8_decode` bridges.
+Zero-copy reads are library types, not language: the @std `arena[t]` owns its elements in place and hands out copyable one-word handles — `a.insert(x)`, `a.remove(h)`, and `a.at(h)` over the mut window, the free `a.len()`, a dangling handle a deterministic trap at `at`/`remove` — the id-plus-table shape that builds cyclic graphs owned structures cannot spell; and `string_view` reads a slice without `substring` allocation (`view(s, start, end)` the bounds-checked construction answering `string_view | none`, `view_len`, the checked `view_char_at`, the composing `view_slice`, `view_eq`, and `view_text` the one materializing door).
 
 ## Traits and generics
 
