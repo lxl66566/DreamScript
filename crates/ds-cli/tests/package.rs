@@ -1021,6 +1021,8 @@ version = \"1.0.0\"
 ",
         "pub const computed = 6 * 7
 ",
+        "pub const shout = concat(\"dr\", \"eam\")
+",
         "pub var counter = 0
 ",
         "pub tag point
@@ -1040,11 +1042,13 @@ version = \"1.0.0\"
     (work, pkg_id)
 }
 
-/// A linked package's plain-literal consts bind and run (G4): the value
-/// is the per-target link fact, so every root use embeds the literal —
-/// the same word each spelling lowers to in the owning module — over
-/// every scalar shape (int with a negation, string, float, bool, char,
-/// byte).
+/// A linked package's plain-literal and computed consts bind and run
+/// (G4): the value is the per-target link fact — a plain initializer's
+/// literal, a computed initializer's dep-side evaluation answer — so
+/// every root use embeds it exactly as the literal a user would have
+/// written, over every scalar shape (int with a negation, string,
+/// float, bool, char, byte) and the computed int and string beside
+/// them.
 #[test]
 fn linked_const_facts_bind_and_run() {
     let (work, pkg_id) = facts_fixtures("consts");
@@ -1062,7 +1066,7 @@ version = \"0.1.0\"
         concat!(
             "import @std/io
 ",
-            "import @facts (limit, step, greeting, ratio, ready, initial, code)
+            "import @facts (limit, step, greeting, ratio, ready, initial, code, computed, shout)
 ",
             "
 ",
@@ -1074,7 +1078,9 @@ version = \"0.1.0\"
 ",
             "  println(\"ratio = ${ratio}\")
 ",
-            "  limit + step + (if ready { 1 } else { 0 }) + len(bytes_of([code, code]))
+            "  println(\"computed = ${computed} shout = ${shout}\")
+",
+            "  limit + step + computed + (if ready { 1 } else { 0 }) + len(bytes_of([code, code]))
 ",
             "}
 ",
@@ -1089,17 +1095,19 @@ version = \"0.1.0\"
         "hi
 adb
 ratio = 0.5
-100
+computed = 42 shout = dream
+142
 "
     );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
 /// A linked package's alias-qualified const reads in value position
-/// (G4): the qualified spelling binds through the same literal fact the
-/// selection embeds — over every scalar shape and the nested contexts
-/// (an argument, a list element, an interpolation hole, an `if`
-/// condition) — so the run answers exactly what the selection's does.
+/// (G4): the qualified spelling binds through the same value fact the
+/// selection embeds — plain and computed alike, over every scalar shape
+/// and the nested contexts (an argument, a list element, an
+/// interpolation hole, an `if` condition) — so the run answers exactly
+/// what the selection's does.
 #[test]
 fn linked_const_alias_value_reads_bind_and_run() {
     let (work, pkg_id) = facts_fixtures("alias-value");
@@ -1129,7 +1137,10 @@ version = \"0.1.0\"
 ",
             "  println(\"ratio = ${w.ratio}\")
 ",
-            "  w.limit + w.step + (if w.ready { 1 } else { 0 }) + len(bytes_of([w.code, w.code]))
+            "  println(\"computed = ${w.computed} shout = ${w.shout}\")
+",
+            "  w.limit + w.step + w.computed + (if w.ready { 1 } else { 0 }) + \
+             len(bytes_of([w.code, w.code]))
 ",
             "}
 ",
@@ -1144,16 +1155,16 @@ version = \"0.1.0\"
         "hi
 adb
 ratio = 0.5
-100
+computed = 42 shout = dream
+142
 "
     );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 
-/// The const shapes with no literal fact keep their refusals at the
-/// same walk (G4): a computed const, a mutable binding, and the
-/// alias-qualified spellings — the const's call form, a computed
-/// const's value read, a private const, a missing name, a function
+/// The const shapes with no value fact keep their refusals at the same
+/// walk (G4): a mutable binding and the alias-qualified spellings — the
+/// const's call form, a private const, a missing name, a function
 /// value, and a type name in value position.
 #[test]
 fn the_non_literal_const_tiers_refuse() {
@@ -1168,22 +1179,6 @@ version = \"0.1.0\"
     );
     for (tag, source, refused) in [
         (
-            "computed",
-            concat!(
-                "import @facts (computed)
-",
-                "
-",
-                "fn main() -> int {
-",
-                "7
-",
-                "}
-",
-            ),
-            "its value is no literal fact",
-        ),
-        (
             "mutable",
             concat!(
                 "import @facts (counter)
@@ -1197,7 +1192,7 @@ version = \"0.1.0\"
                 "}
 ",
             ),
-            "its value is no literal fact",
+            "its value is no const fact",
         ),
         (
             "alias-const",
@@ -1214,22 +1209,6 @@ version = \"0.1.0\"
 ",
             ),
             "serves callables at call sites",
-        ),
-        (
-            "alias-computed",
-            concat!(
-                "import @facts as w
-",
-                "
-",
-                "fn main() -> int {
-",
-                "  w.computed
-",
-                "}
-",
-            ),
-            "its value is no literal fact",
         ),
         (
             "alias-private",
@@ -1308,6 +1287,130 @@ version = \"0.1.0\"
         );
         fs::remove_dir_all(&root).expect("the temp tree removes");
     }
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// Saves one single-member fixture package under `@probe` and answers
+/// its bundle identity: the dep-side const evaluation's refusal tests'
+/// producer, its member the caller's own text.
+fn probe_fixtures(tag: &str, member: &str) -> (PathBuf, String) {
+    let work = temp_dir(tag);
+    let pkg = work.join("probe");
+    let manifest = "name = \"@probe\"
+version = \"1.0.0\"
+"
+    .to_owned();
+    let members = [("probe.ds", member)];
+    write_pkg(&pkg, &manifest, &members);
+    let (ok, _, err) = ds(&["save", pkg.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the probe fixture installs (stderr: {err})");
+    let pkg_id = bundle_identity(&manifest, &members).to_string();
+    (work, pkg_id)
+}
+
+/// One probe fixture's consumer root: a manifest depending on `@probe`
+/// and a main importing `safe` alone — the refusals under test fire on
+/// the producer's own compile, whatever the consumer selects.
+fn probe_root(work: &Path, pkg_id: &str) -> PathBuf {
+    let root_manifest = format!(
+        "name = \"app\"
+version = \"0.1.0\"
+
+[deps]
+@probe = {{ ver = \"1.0.0\", hash = \"blake3:{pkg_id}\" }}
+"
+    );
+    write_root(
+        work,
+        &root_manifest,
+        concat!(
+            "import @probe (safe)
+",
+            "
+",
+            "fn main() -> int {
+",
+            "  safe()
+",
+            "}
+",
+        ),
+    )
+}
+
+/// A linked package's exported const whose initializer traps refuses
+/// the producer's own artifact build (G4): the dep-side evaluation runs
+/// on the producer's compile, and a trapping initializer means the
+/// value a dependent would read does not exist — the refusal names the
+/// const and its initializer with the const's own code, never a silent
+/// drop or a consumer-side mystery.
+#[test]
+fn a_trapping_exported_const_refuses_the_producer_build() {
+    let (work, pkg_id) = probe_fixtures(
+        "const-trap",
+        concat!(
+            "pub const bad = 1 / 0
+",
+            "
+",
+            "pub fn safe() -> int {
+",
+            "  1
+",
+            "}
+",
+        ),
+    );
+    let root = probe_root(&work, &pkg_id);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the trapping const refuses the producer build");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("DS2043") && err.contains("pub const bad") && err.contains("trapped"),
+        "the refusal names the const and the trap (stderr: {err})"
+    );
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A linked package's exported const whose initializer touches the
+/// world surface refuses at the same producer-side build (G4): the
+/// evaluation fence admits only pure and trap-only reaches, so a world
+/// call inside an initializer is a compile error naming the capability.
+#[test]
+fn a_world_reaching_exported_const_refuses_the_producer_build() {
+    let (work, pkg_id) = probe_fixtures(
+        "const-world",
+        concat!(
+            "import @std/io
+",
+            "
+",
+            "pub fn safe() -> int {
+",
+            "  1
+",
+            "}
+",
+            "
+",
+            "pub const noise = { println(\"side\")
+",
+            "5 }
+",
+        ),
+    );
+    let root = probe_root(&work, &pkg_id);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(!ok, "the world-reaching const refuses the producer build");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("DS2043") && err.contains("world surface") && err.contains("pub const noise"),
+        "the refusal names the const and the capability (stderr: {err})"
+    );
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 

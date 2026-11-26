@@ -394,7 +394,10 @@ impl Bodies<'_> {
 
     /// One case-pattern's coverage: the named atom must be a scrutinee
     /// member; enum cases cover their whole enum atom (case-level
-    /// exhaustiveness is value-level, out of the set core's reach).
+    /// exhaustiveness is value-level, out of the set core's reach). A
+    /// unit case over an applied enum head is a member too — the head is
+    /// opaque to the set algebra, so the membership reads the head's
+    /// minted case atoms.
     fn case_cover(
         &mut self,
         span: Span,
@@ -407,7 +410,8 @@ impl Bodies<'_> {
             .decls
             .universe
             .atom_ty(atom)
-            .is_ok_and(|ty| self.decls.universe.contains(scrut, ty));
+            .is_ok_and(|ty| self.decls.universe.contains(scrut, ty))
+            || self.case_of_applied_head(atom, scrut);
         if is_member {
             covered.push(atom);
         } else {
@@ -423,6 +427,14 @@ impl Bodies<'_> {
                 "not a member",
             );
         }
+    }
+
+    /// Whether the case atom belongs to the scrutinee's applied enum
+    /// head: a unit case's atom carries no substitution, so it tests over
+    /// every application of its enum. Applied heads stay opaque to the
+    /// set algebra, so the membership reads the head's case atoms.
+    fn case_of_applied_head(&mut self, atom: TypeId, scrut: Ty) -> bool {
+        matches!(self.applied_enum_head(scrut), Some((_, atoms, _)) if atoms.contains(&atom))
     }
 
     fn pattern_path_atom(&mut self, path: &Path) -> Option<TypeId> {

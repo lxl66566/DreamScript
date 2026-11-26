@@ -1262,8 +1262,10 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             let generic = !e.generics.is_empty();
             // A non-generic enum mints one atom per case into the tag
             // namespace [B3] (the enum name then names their union); a
-            // generic enum keeps the opaque nominal atom until
-            // substitution over minted case shapes lands.
+            // generic enum keeps the opaque nominal atom with its case
+            // signature, its unit cases minting below (a unit word
+            // carries no substitution) while payloaded case shapes stay
+            // per-instantiation facts.
             let declared = if generic {
                 decls.universe.declare_enum(&e.name.name).map(|id| {
                     decls.atoms.insert(def, id);
@@ -1283,28 +1285,37 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     linear: e.supers.iter().any(linear_marker),
                 });
             }
-            if !generic {
-                let linear = e.supers.iter().any(linear_marker);
-                for case in &e.cases {
-                    // A duplicate case name keeps the first def; the
-                    // collection pass already reported both spans. The
-                    // def's name span proves this item owns the def.
-                    let Some(case_def) = package
-                        .lookup_type(&case.name.name)
-                        .filter(|&d| package.def(d).span == case.name.span)
-                    else {
-                        continue;
-                    };
-                    let atom = match &case.payload {
-                        EnumPayload::None => declare_unit_name(decls, &case.name.name),
-                        EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
-                            decls.universe.declare_struct(&case.name.name).ok()
-                        },
-                    };
-                    if let Some(id) = atom {
-                        decls.atoms.insert(case_def, id);
-                        decls.defs_of_atoms.insert(id, case_def);
-                    }
+            // A generic enum's unit cases mint beside the non-generic
+            // walk: a unit word carries no substitution, so its atom
+            // tests and covers over every application of the head. A
+            // payloaded case keeps no atom — its shape is a
+            // per-instantiation fact (the pattern seam the derive gate
+            // names).
+            for case in &e.cases {
+                if generic && !matches!(case.payload, EnumPayload::None) {
+                    continue;
+                }
+                // A duplicate case name keeps the first def; the
+                // collection pass already reported both spans. The
+                // def's name span proves this item owns the def.
+                let Some(case_def) = package
+                    .lookup_type(&case.name.name)
+                    .filter(|&d| package.def(d).span == case.name.span)
+                else {
+                    continue;
+                };
+                let atom = match &case.payload {
+                    EnumPayload::None => declare_unit_name(decls, &case.name.name),
+                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
+                        decls.universe.declare_struct(&case.name.name).ok()
+                    },
+                };
+                if let Some(id) = atom {
+                    decls.atoms.insert(case_def, id);
+                    decls.defs_of_atoms.insert(id, case_def);
+                }
+                if !generic {
+                    let linear = e.supers.iter().any(linear_marker);
                     if let EnumPayload::Struct(fields) = &case.payload
                         && !is_served(decls, case_def)
                     {
@@ -1316,12 +1327,12 @@ fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                             linear,
                         });
                     }
-                    if !is_served(decls, case_def) {
-                        decls.cases.insert(case_def, CaseDecl {
-                            enum_def: def,
-                            payload: case.payload.clone(),
-                        });
-                    }
+                }
+                if !is_served(decls, case_def) {
+                    decls.cases.insert(case_def, CaseDecl {
+                        enum_def: def,
+                        payload: case.payload.clone(),
+                    });
                 }
             }
         },

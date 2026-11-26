@@ -373,16 +373,16 @@ fn the_clone_family_refuses_its_carve_outs() {
     );
 }
 
-/// The generic-enum cause, per family: each of the seven refuses a
-/// generic enum at the attribute — the synthesized member's match arms
-/// and constructions read the cases over the declaration's own type
-/// variables, and a case over a generic head resolves no atom in any
-/// spelling (the synthesized unit-case arms fail too, where a
-/// hand-written impl passes), so the pattern seam is the door, ahead
-/// of any runtime question and before any trait or json face needs to
-/// resolve. One refusal per family names its own family.
+/// The generic-enum causes, per family: the matching families (show,
+/// ord, hash, to_json) refuse the payloaded case at the attribute — no
+/// spelling resolves its atom over the generic head, ahead of any
+/// runtime question and before any trait or json face needs to resolve
+/// — while the constructing families (clone, default, from_json)
+/// refuse the generic enum itself, their synthesized bodies building a
+/// case that types as its own atom, never the applied head. One
+/// refusal per family names its own family and its own seam.
 #[test]
-fn the_generic_enum_cause_refuses_per_family() {
+fn the_generic_enum_causes_refuse_per_family() {
     let rendered = refusals(concat!(
         "tag int\n",
         "#[derive(show, ord, hash, clone, default, from_json, to_json)]\n",
@@ -393,21 +393,46 @@ fn the_generic_enum_cause_refuses_per_family() {
         "fn main() -> int { 0 }\n",
     ));
     assert_eq!(rendered.len(), 7, "one refusal per family: {rendered:?}");
-    for family in [
-        "show",
-        "ord",
-        "hash",
-        "clone",
-        "default",
-        "from_json",
-        "to_json",
-    ] {
+    for family in ["show", "ord", "hash", "to_json"] {
         assert!(
             rendered.iter().any(|r| r.contains("DS2029")
-                && r.contains(&format!("derive `{family}` refuses a generic enum"))),
-            "the {family} family names its own refusal: {rendered:?}"
+                && r.contains(&format!(
+                    "derive `{family}` refuses a payloaded case over a generic head"
+                ))),
+            "the {family} family names the payloaded-case seam: {rendered:?}"
         );
     }
+    for family in ["clone", "default", "from_json"] {
+        assert!(
+            rendered.iter().any(|r| r.contains("DS2029")
+                && r.contains(&format!("derive `{family}` refuses a generic enum"))
+                && r.contains("the synthesized body constructs a case")),
+            "the {family} family names the construction seam: {rendered:?}"
+        );
+    }
+}
+
+/// The narrowed gate's honest edge, pinned at the checker: a unit-only
+/// generic enum derives `show` (and the same-door families), the
+/// synthesized arms resolving their case atoms over the application of
+/// the head — the source checks clean through the expansion and
+/// lowering refuses at the receiver frame, exactly the struct lift's
+/// door. The hand-written mirror rides the same path beside it.
+#[test]
+fn a_unit_only_generic_enum_derive_meets_the_lowering_door() {
+    lift_mirror_refuses_at_lowering(concat!(
+        "tag int\n",
+        "tag string\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "#[derive(show)]\n",
+        "enum flag[t] {\n",
+        "  on,\n",
+        "  off,\n",
+        "}\n",
+        "fn main() -> int { 0 }\n",
+    ));
 }
 
 /// One lift probe through the whole pipeline: the source checks clean

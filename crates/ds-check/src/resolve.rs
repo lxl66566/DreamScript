@@ -96,8 +96,8 @@ use std::sync::Arc;
 
 use ds_diag::{Diagnostic, ErrorCode, Span, Suggestion};
 use ds_parse::{
-    Ast, Expr, FnDecl, Ident, Item, ItemKind, Param, Path, Pattern, Stmt, StmtKind, StructMember,
-    TraitMember, Type, TypeParam,
+    Ast, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Param, Path, Pattern, Stmt, StmtKind,
+    StructMember, TraitMember, Type, TypeParam,
 };
 use rustc_hash::FxHashMap;
 
@@ -1276,8 +1276,8 @@ impl Package {
                             ErrorCode::ImportUnsupportedShape,
                             format!(
                                 "`{}` cannot bind across packages this round: its value is no \
-                                 literal fact — a computed or mutable binding evaluates in the \
-                                 linked module, the artifact round's per-target fact [G4]",
+                                 const fact — a `var` binding evaluates in the linked module and \
+                                 no per-target value exists for it [G4]",
                                 sel.name.name
                             ),
                         )
@@ -1760,12 +1760,15 @@ impl Package {
             },
             ItemKind::Enum(e) => {
                 self.declare(&e.name, DefKind::Enum, vis, diags);
-                // Generic enums keep the opaque atom: their case names do
-                // not mint yet (substitution over minted case shapes is
-                // future work), so they collect no defs. A case carries
-                // its enum's tier: the case is the enum's own surface.
-                if e.generics.is_empty() {
-                    for case in &e.cases {
+                // A case carries its enum's tier: the case is the enum's
+                // own surface. A generic enum's unit cases collect beside
+                // the others — a unit word carries no substitution, so its
+                // name resolves over every application of the head — while
+                // a payloaded case's shape is a per-instantiation fact,
+                // so its name stays uncollected until case minting grows
+                // substitution.
+                for case in &e.cases {
+                    if e.generics.is_empty() || matches!(case.payload, EnumPayload::None) {
                         self.declare(&case.name, DefKind::Case, vis, diags);
                     }
                 }
@@ -1988,13 +1991,13 @@ impl FileResolver<'_> {
                 }
                 for case in &e.cases {
                     match &case.payload {
-                        ds_parse::EnumPayload::None => {},
-                        ds_parse::EnumPayload::Tuple(types) => {
+                        EnumPayload::None => {},
+                        EnumPayload::Tuple(types) => {
                             for ty in types {
                                 self.type_(ty);
                             }
                         },
-                        ds_parse::EnumPayload::Struct(fields) => {
+                        EnumPayload::Struct(fields) => {
                             for field in fields {
                                 self.type_(&field.ty);
                             }
@@ -2851,10 +2854,9 @@ impl FileResolver<'_> {
             .get(&(entry.link, entry.name.clone()))
         else {
             let what = match entry.kind {
-                ForeignKind::Binding => "its value is no literal fact — a computed or mutable \
-                                         binding evaluates in the linked module, the artifact \
-                                         round's per-target fact; its selection import keeps the \
-                                         same refusal"
+                ForeignKind::Binding => "its value is no const fact — a `var` binding evaluates \
+                                         in the linked module and no per-target value exists for \
+                                         it; its selection import keeps the same refusal"
                     .to_owned(),
                 ForeignKind::Fn => "a linked function serves through the alias at its call sites \
                                     alone; a function value has no callable word this round"

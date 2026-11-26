@@ -29,6 +29,15 @@
 //! runtime trap (`ComptimeFenceRefusal`). The pure builtin core serves
 //! everything else the lowered subset reaches.
 //!
+//! The dep-side const evaluation rides the same fence: a linked
+//! package's exported computed consts (a `pub` data const whose
+//! initializer is no plain literal) plan their initializers into the
+//! evaluation slice as zero-parameter bodies, the fenced run answers
+//! each one's value, and the embedded answer becomes the const's link
+//! fact — the consumer reads the const as its value exactly like a
+//! plain one, and a reach the fence refuses, a trap, or a runaway
+//! refuses the producer's artifact build naming the const.
+//!
 //! Reflection is static over tags-as-data: the evaluator projects the
 //! checker's declaration tables into the VM's reflection store (one
 //! field record per declared field, one case record per declared enum
@@ -218,7 +227,7 @@ where
         return Ok(ComptimeValues::default());
     }
     let fns = comptime_functions(asts, analyzed);
-    let mut admission = Admission::new(asts, analyzed, effects);
+    let mut admission = Admission::new(asts, analyzed, effects, &[]);
     if let Some(diagnostic) = admission.check(&fns) {
         return Err(vec![diagnostic]);
     }
@@ -229,6 +238,7 @@ where
         asts,
         analyzed,
         admission.admitted(),
+        &[],
     )
     .map_err(|error| {
         let diagnostic = Diagnostic::error(
@@ -349,6 +359,268 @@ where
     }
     drop(guard);
     if diags.is_empty() { Ok(values) } else { Err(diags) }
+}
+
+/// Evaluates the package's exported computed consts — the dep-side half
+/// of the const link facts (G4): every `pub` data const of a member file
+/// past the ambient band whose initializer is no plain literal plans its
+/// initializer into the same evaluation slice the comptime path lowers,
+/// the fenced VM answers each site's value, and the embedded answer
+/// becomes the const's [`ConstFact`](ds_check::ConstFact) — the consumer
+/// reads the const as its value exactly like a plain one. The answers
+/// keep the plain fact's own vocabulary (the scalar words and a
+/// homogeneous list over one scalar word); everything else — a tuple, a
+/// nested answer — refuses here, honestly, the same vocabulary line the
+/// literal fact holds. `ambient_files` is the compile's ambient band:
+/// the ambient's own definitions never export.
+///
+/// # Errors
+///
+/// One diagnostic per honest refusal, each naming the const: a reach
+/// the fence refuses (an impure row, a generic or member or unmanageable
+/// callee, a deinit-carrying construction), a slice the initializer does
+/// not lower into, a trap or runaway the fenced run raised, or an answer
+/// outside the vocabulary. The refusals land at the producer's artifact
+/// build, never a silent drop or a consumer-side mystery.
+pub fn evaluate_consts<T>(
+    module_name: &str,
+    source_hash: Hash128,
+    asts: &[T],
+    analyzed: &Analyzed,
+    effects: &ds_check::Effects,
+    ambient_files: usize,
+) -> Result<HashMap<DefId, ds_check::ConstFact>, Vec<Diagnostic>>
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let sites = collect_const_sites(asts, analyzed, ambient_files);
+    if sites.is_empty() {
+        return Ok(HashMap::default());
+    }
+    let mut admission = Admission::new(asts, analyzed, effects, &sites);
+    if let Some(diagnostic) = admission.check(&comptime_functions(asts, analyzed)) {
+        return Err(vec![diagnostic]);
+    }
+    let consts: Vec<DefId> = sites.iter().map(|site| site.def).collect();
+    let slice = ds_lower::lower_comptime_slice(
+        module_name,
+        source_hash,
+        asts,
+        analyzed,
+        admission.admitted(),
+        &consts,
+    )
+    .map_err(|error| vec![slice_refusal(&error, &sites)])?;
+    // the fenced VM the comptime path drives: the platform name serves
+    // nothing (a world call in a slice refuses at its own install) and
+    // the comptime reflection natives ride their reserved module
+    let mut registry = ModuleRegistry::new();
+    registry.install_platform(Platform::new(ds_lower::platform_name(asts), &[]));
+    registry.install_native(COMPTIME_MODULE, ds_vm::comptime::comptime_module());
+    let mut vm = Vm::new(registry);
+    let mut reflection = Reflection::new(analyzed);
+    let guard = ds_vm::comptime::set_reflection(reflection.table_mut());
+    let install = vm.install_dsmod(slice.into_module());
+    if let Err(error) = install {
+        drop(guard);
+        return Err(vec![fence_refusal(&error, &sites)]);
+    }
+    let mut values = HashMap::default();
+    let mut diags = Vec::new();
+    for site in &sites {
+        let ty = analyzed.checked.def_types.get(&site.def).copied();
+        match vm.run_with_budget(module_name, &site.name, &[], COMPTIME_FUEL) {
+            Ok(answer) if answer.as_slice().is_empty() => diags.push(site_refusal(
+                site,
+                "the initializer answers no word: a unit-typed const carries no value fact, so \
+                 nothing embeds here",
+            )),
+            Ok(answer) => match embed(answer.as_slice(), ty, analyzed, &vm) {
+                Ok(constant) => match const_fact(&constant) {
+                    Some(fact) => {
+                        values.insert(site.def, fact);
+                    },
+                    None => diags.push(site_refusal(
+                        site,
+                        "the initializer's answer is outside the const fact's vocabulary: the \
+                         crossing values are int, float, bool, string, and a list over one scalar \
+                         word of those; a tuple or nested answer refuses here",
+                    )),
+                },
+                Err(message) => diags.push(site_refusal(site, &message)),
+            },
+            Err(ds_vm::Trap::OutOfFuel) => diags.push(site_refusal(
+                site,
+                &format!(
+                    "the initializer's evaluation ran past its {COMPTIME_FUEL}-step budget: a \
+                     pure initializer's non-terminating loop or recursion never answers on its own"
+                ),
+            )),
+            Err(trap) => diags.push(site_refusal(
+                site,
+                &format!(
+                    "the initializer trapped: {trap:?} — the value a dependent would read does \
+                     not exist, so the artifact build refuses"
+                ),
+            )),
+        }
+    }
+    drop(guard);
+    if diags.is_empty() { Ok(values) } else { Err(diags) }
+}
+
+/// One dep-side evaluation site: a `pub` data const of a member file
+/// whose initializer is no plain literal and no callable binding.
+struct ConstSite {
+    def: DefId,
+    /// The binding's name — the slice's planned body runs under it.
+    name: String,
+    /// The binding name's span, the refusals' secondary.
+    decl_span: Span,
+    /// The initializer's span, the refusals' primary.
+    span: Span,
+}
+
+/// Every dep-side evaluation site, in declaration order: the exported
+/// (`pub`, G4's dependent-facing tier) immutable data consts defined
+/// past the ambient band whose initializer carries no plain literal
+/// fact. Callable bindings (a lambda or fn-typed initializer) ride the
+/// callable clause; a plain literal's fact stands on its own; private
+/// and `pub(pkg)` consts never cross to a dependent, so nothing
+/// evaluates for them.
+fn collect_const_sites<T>(asts: &[T], analyzed: &Analyzed, ambient_files: usize) -> Vec<ConstSite>
+where
+    T: std::borrow::Borrow<Ast>,
+{
+    let mut sites = Vec::new();
+    for ast in asts.iter().skip(ambient_files) {
+        for item in items_of(std::borrow::Borrow::borrow(ast)) {
+            let ItemKind::Local(local) = &item.kind else {
+                continue;
+            };
+            if local.mutable {
+                continue;
+            }
+            let ds_parse::Pattern::Binding { name, .. } = &local.pat else {
+                continue;
+            };
+            if matches!(local.init, Expr::Lambda { .. }) {
+                continue; // a callable const rides the callable clause
+            }
+            if ds_check::ConstFact::of_expr(&local.init).is_some() {
+                continue; // plain: the literal is the fact
+            }
+            let Some(def) = analyzed.package.lookup(&name.name) else {
+                continue;
+            };
+            if analyzed.package.def(def).vis != ds_check::Vis::Pub {
+                continue; // never dependent-facing, nothing evaluates
+            }
+            if analyzed
+                .checked
+                .def_types
+                .get(&def)
+                .copied()
+                .is_some_and(|ty| fn_typed(ty, analyzed))
+            {
+                continue; // a fn-typed const is a callable binding
+            }
+            sites.push(ConstSite {
+                def,
+                name: name.name.clone(),
+                decl_span: name.span,
+                span: local.init.span(),
+            });
+        }
+    }
+    sites
+}
+
+/// Whether a checked type names exactly one fn-signature atom.
+fn fn_typed(ty: Ty, analyzed: &Analyzed) -> bool {
+    matches!(analyzed.decls.universe.members(ty), [only] if analyzed
+        .decls
+        .universe
+        .atom_decl(*only)
+        .is_ok_and(|decl| matches!(decl.kind, ds_check::AtomKind::FnSig(..))))
+}
+
+/// One embedded answer as the const link fact's own vocabulary: the
+/// scalar words and a non-empty homogeneous list over one scalar word —
+/// the same vocabulary a plain initializer's literal fact carries. A
+/// tuple and an empty list answer `None` (the fact spells no tuple, and
+/// an empty list has no element evidence — the literal spelling's own
+/// line).
+fn const_fact(constant: &ComptimeConst) -> Option<ds_check::ConstFact> {
+    let scalar = |constant: &ComptimeConst| -> Option<ds_check::ConstFact> {
+        match constant {
+            ComptimeConst::Int(value) => Some(ds_check::ConstFact::Int(*value)),
+            ComptimeConst::Float(value) => Some(ds_check::ConstFact::Float(*value)),
+            ComptimeConst::Bool(value) => Some(ds_check::ConstFact::Bool(*value)),
+            ComptimeConst::Str(text) => Some(ds_check::ConstFact::Str(text.clone())),
+            ComptimeConst::List(_) | ComptimeConst::Tuple(_) => None,
+        }
+    };
+    match constant {
+        ComptimeConst::List(items) => {
+            let [first, rest @ ..] = &items[..] else {
+                return None;
+            };
+            let word = std::mem::discriminant(first);
+            let mut facts = Vec::with_capacity(items.len());
+            facts.push(scalar(first)?);
+            for item in rest {
+                if std::mem::discriminant(item) != word {
+                    return None; // a mixed list spells no single element word
+                }
+                facts.push(scalar(item)?);
+            }
+            Some(ds_check::ConstFact::List(facts))
+        },
+        other => scalar(other),
+    }
+}
+
+/// One evaluation site's refusal: the initializer primary, the binding
+/// secondary, the const's own error code.
+fn site_refusal(site: &ConstSite, message: &str) -> Diagnostic {
+    Diagnostic::error(ErrorCode::LinkedConstEvalRefusal, message.to_owned())
+        .with_primary(site.span, "the const's initializer")
+        .with_secondary(site.decl_span, "the exported const")
+}
+
+/// A slice an initializer does not lower into: the lowering's own span
+/// primary when it names one, the first site's initializer otherwise.
+fn slice_refusal(error: &ds_lower::LowerError, sites: &[ConstSite]) -> Diagnostic {
+    let diagnostic = Diagnostic::error(
+        ErrorCode::LinkedConstEvalRefusal,
+        format!(
+            "an exported const's initializer does not lower inside the evaluation fence: {error}"
+        ),
+    );
+    match error.span() {
+        Some(span) => diagnostic.with_primary(span, "outside the evaluation slice's contract"),
+        None => diagnostic.with_primary(sites[0].span, "the const's initializer"),
+    }
+}
+
+/// The evaluation slice's install refusal: a world call names the
+/// capability, anything else the load error.
+fn fence_refusal(error: &LoadError, sites: &[ConstSite]) -> Diagnostic {
+    match error {
+        LoadError::UnprovidedPlatformOp { capability, .. } => site_refusal(
+            &sites[0],
+            &format!(
+                "the initializer calls the world surface (`{capability}`); the evaluation fence \
+                 refuses world-touching calls as compile errors"
+            ),
+        ),
+        other => Diagnostic::error(
+            ErrorCode::LinkedConstEvalRefusal,
+            format!("the evaluation slice does not install: {other:?}"),
+        )
+        .with_primary(sites[0].span, "the const's initializer"),
+    }
 }
 
 /// One comptime call site: the callee's definition, the call's span, and
@@ -502,6 +774,16 @@ fn row_admits(row: EffectRow) -> bool {
 /// for the shapes this walk does not match (a fn-value indirection),
 /// and the install seam keeps the world refusal (DS2033's capability
 /// diagnostic) behind the admission.
+/// One fence refusal's owner: the declaration the diagnostic names — a
+/// comptime function or an exported const — with the error code its own
+/// seam refuses under.
+struct Owner {
+    name: String,
+    span: Span,
+    kind: &'static str,
+    code: ErrorCode,
+}
+
 struct Admission<'a> {
     analyzed: &'a Analyzed,
     effects: &'a ds_check::Effects,
@@ -509,6 +791,9 @@ struct Admission<'a> {
     bodies: HashMap<DefId, (usize, &'a Expr)>,
     /// The comptime declarations the walk starts from: def, file, body.
     roots: Vec<(DefId, usize, &'a Expr)>,
+    /// The dep-side evaluation sites the walk starts from: the const's
+    /// name, its binding span, its file, and its initializer.
+    const_roots: Vec<(String, Span, usize, &'a Expr)>,
     /// The admitted defs, in first-admit order — the slice's plan set.
     admitted: Vec<DefId>,
     /// Per-def admission state: present while a def is walked (a cycle
@@ -522,12 +807,18 @@ struct Admission<'a> {
 }
 
 impl<'a> Admission<'a> {
-    fn new<T>(asts: &'a [T], analyzed: &'a Analyzed, effects: &'a ds_check::Effects) -> Self
+    fn new<T>(
+        asts: &'a [T],
+        analyzed: &'a Analyzed,
+        effects: &'a ds_check::Effects,
+        sites: &[ConstSite],
+    ) -> Self
     where
         T: std::borrow::Borrow<Ast>,
     {
         let mut bodies = HashMap::default();
         let mut roots = Vec::new();
+        let mut const_roots = Vec::new();
         let mut deinits = HashSet::default();
         for ast in asts.iter().map(std::borrow::Borrow::<Ast>::borrow) {
             for item in items_of(ast) {
@@ -558,10 +849,15 @@ impl<'a> Admission<'a> {
                 let ds_parse::Pattern::Binding { name, .. } = &local.pat else {
                     continue;
                 };
-                let Expr::Lambda { params, .. } = &local.init else {
+                let Some(def) = analyzed.package.lookup(&name.name) else {
                     continue;
                 };
-                let Some(def) = analyzed.package.lookup(&name.name) else {
+                let Expr::Lambda { params, .. } = &local.init else {
+                    // a dep-side evaluation site's root: the initializer
+                    // the fence walks the same way a comptime fn's body
+                    if sites.iter().any(|site| site.def == def) {
+                        const_roots.push((name.name.clone(), name.span, index, &local.init));
+                    }
                     continue;
                 };
                 if params
@@ -579,6 +875,7 @@ impl<'a> Admission<'a> {
             effects,
             bodies,
             roots,
+            const_roots,
             admitted: Vec::new(),
             states: HashMap::default(),
             deinits,
@@ -590,45 +887,76 @@ impl<'a> Admission<'a> {
         &self.admitted
     }
 
-    /// Walks every comptime fn's reaches; the first refusal wins.
+    /// Walks every comptime fn's and evaluation site's reaches; the
+    /// first refusal wins.
     fn check(&mut self, fns: &[ComptimeFn]) -> Option<Diagnostic> {
         let analyzed = self.analyzed;
         let roots = self.roots.clone();
         for (def, file, body) in roots {
-            let Some(owner) = fns.iter().find(|f| f.def == def) else {
+            let Some(f) = fns.iter().find(|f| f.def == def) else {
                 continue;
             };
-            let res = &analyzed.resolutions[file];
-            let mut found: Option<Diagnostic> = None;
-            walk_expr(body, &mut |expr: &Expr| {
-                if found.is_some() {
-                    return;
-                }
-                if let Some(diagnostic) = self.deinit_literal(expr, res, owner, None) {
-                    found = Some(diagnostic);
-                    return;
-                }
-                for (span, _, target) in reaches(res, expr) {
-                    if let Target::Fn(callee) = target
-                        && is_runtime_fn(callee, analyzed)
-                        && let Err(diagnostic) = self.admit(owner, callee, span)
-                    {
-                        found = Some(diagnostic);
-                        return;
-                    }
-                }
-            });
-            if let Some(diagnostic) = found {
+            let owner = Owner {
+                name: f.name.clone(),
+                span: f.span,
+                kind: "comptime function",
+                code: ErrorCode::ComptimeCalleeRefusal,
+            };
+            if let Some(diagnostic) = self.walk_root(&owner, file, body, analyzed) {
+                return Some(diagnostic);
+            }
+        }
+        let roots = self.const_roots.clone();
+        for (name, span, file, body) in roots {
+            let owner = Owner {
+                name,
+                span,
+                kind: "exported const",
+                code: ErrorCode::LinkedConstEvalRefusal,
+            };
+            if let Some(diagnostic) = self.walk_root(&owner, file, body, analyzed) {
                 return Some(diagnostic);
             }
         }
         None
     }
 
+    /// One root body's reach walk: the deinit-literal gate plus the
+    /// callee admissions, the first refusal winning.
+    fn walk_root(
+        &mut self,
+        owner: &Owner,
+        file: usize,
+        body: &Expr,
+        analyzed: &Analyzed,
+    ) -> Option<Diagnostic> {
+        let res = &analyzed.resolutions[file];
+        let mut found: Option<Diagnostic> = None;
+        walk_expr(body, &mut |expr: &Expr| {
+            if found.is_some() {
+                return;
+            }
+            if let Some(diagnostic) = self.deinit_literal(expr, res, owner, None) {
+                found = Some(diagnostic);
+                return;
+            }
+            for (span, _, target) in reaches(res, expr) {
+                if let Target::Fn(callee) = target
+                    && is_runtime_fn(callee, analyzed)
+                    && let Err(diagnostic) = self.admit(owner, callee, span)
+                {
+                    found = Some(diagnostic);
+                    return;
+                }
+            }
+        });
+        found
+    }
+
     /// Admits one ordinary callee: row-pure and slice-plannable, its own
     /// reaches admitting the same way (the rows close the loop, so a
     /// cycle only re-enters a def already proven pure).
-    fn admit(&mut self, owner: &ComptimeFn, def: DefId, span: Span) -> Result<(), Diagnostic> {
+    fn admit(&mut self, owner: &Owner, def: DefId, span: Span) -> Result<(), Diagnostic> {
         if self.states.contains_key(&def) {
             return Ok(()); // admitted, or a cycle re-entering a walk in progress
         }
@@ -646,9 +974,9 @@ impl<'a> Admission<'a> {
                 span,
                 def,
                 format!(
-                    "the comptime function `{}` reaches the generic function `{name}`, whose \
-                     one-body evidence seam is the runtime module's this round",
-                    owner.name
+                    "the {} `{}` reaches the generic function `{name}`, whose one-body evidence \
+                     seam is the runtime module's this round",
+                    owner.kind, owner.name
                 ),
             ));
         }
@@ -658,9 +986,9 @@ impl<'a> Admission<'a> {
                 span,
                 def,
                 format!(
-                    "the comptime function `{}` reaches `{name}`, whose effect row the fence \
-                     cannot read; the callee refuses here",
-                    owner.name
+                    "the {} `{}` reaches `{name}`, whose effect row the fence cannot read; the \
+                     callee refuses here",
+                    owner.kind, owner.name
                 ),
             ));
         };
@@ -671,8 +999,9 @@ impl<'a> Admission<'a> {
                 format!(" — the row turns refusing at `{origin_name}` first")
             });
             let message = format!(
-                "the comptime function `{}` reaches `{name}`, whose effect row is `{}`; the \
-                 comptime fence admits only callees with a pure or trap-only row{}",
+                "the {} `{}` reaches `{name}`, whose effect row is `{}`; the evaluation fence \
+                 admits only callees with a pure or trap-only row{}",
+                owner.kind,
                 owner.name,
                 row.render(),
                 origin_clause.as_deref().unwrap_or("")
@@ -692,9 +1021,9 @@ impl<'a> Admission<'a> {
                 span,
                 def,
                 format!(
-                    "the comptime function `{}` reaches `{name}`, whose body the comptime slice \
-                     cannot plan (a `var`-bound callee refuses here)",
-                    owner.name
+                    "the {} `{}` reaches `{name}`, whose body the evaluation slice cannot plan (a \
+                     `var`-bound or import-bound callee refuses here)",
+                    owner.kind, owner.name
                 ),
             ));
         };
@@ -724,10 +1053,9 @@ impl<'a> Admission<'a> {
                             use_span,
                             def,
                             format!(
-                                "the comptime function `{}` reaches the member call `{member}` \
-                                 inside `{name}`, and the comptime slice plans no impl bodies \
-                                 this round",
-                                owner.name
+                                "the {} `{}` reaches the member call `{member}` inside `{name}`, \
+                                 and the evaluation slice plans no impl bodies this round",
+                                owner.kind, owner.name
                             ),
                         ));
                         return;
@@ -751,7 +1079,7 @@ impl<'a> Admission<'a> {
         &self,
         expr: &Expr,
         res: &ds_check::Resolutions,
-        owner: &ComptimeFn,
+        owner: &Owner,
         via: Option<&str>,
     ) -> Option<Diagnostic> {
         let Expr::Struct { path, span, .. } = expr else {
@@ -774,29 +1102,23 @@ impl<'a> Admission<'a> {
             Diagnostic::error(
                 ErrorCode::ComptimeEvalRefusal,
                 format!(
-                    "the comptime function `{}` reaches a deinit-carrying `{name}` \
-                     construction{inside}, and the comptime slice plans no deinit hooks; \
-                     deinit-carrying parts refuse inside the fence",
-                    owner.name
+                    "the {} `{}` reaches a deinit-carrying `{name}` construction{inside}, and the \
+                     evaluation slice plans no deinit hooks; deinit-carrying parts refuse inside \
+                     the fence",
+                    owner.kind, owner.name
                 ),
             )
             .with_primary(*span, "this construction")
-            .with_secondary(owner.span, "the comptime function"),
+            .with_secondary(owner.span, owner.kind),
         )
     }
 
     /// One refusal over the shared code: the call's span primary, the
     /// comptime fn and the callee secondary.
-    fn refusal(
-        &self,
-        owner: &ComptimeFn,
-        span: Span,
-        callee: DefId,
-        message: String,
-    ) -> Diagnostic {
-        Diagnostic::error(ErrorCode::ComptimeCalleeRefusal, message)
+    fn refusal(&self, owner: &Owner, span: Span, callee: DefId, message: String) -> Diagnostic {
+        Diagnostic::error(owner.code, message)
             .with_primary(span, "this call")
-            .with_secondary(owner.span, "the comptime function")
+            .with_secondary(owner.span, owner.kind)
             .with_secondary(self.analyzed.package.def(callee).span, "the callee")
     }
 

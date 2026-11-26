@@ -1119,8 +1119,8 @@ fn a_linked_const_binds_through_its_literal_fact() {
     assert!(
         refused
             .iter()
-            .any(|text| text.contains("its value is no literal")),
-        "the computed consts' refusals name the literal boundary: {refused:?}"
+            .any(|text| text.contains("its value is no const fact")),
+        "the factless bindings' refusals name the value boundary: {refused:?}"
     );
     assert!(
         refused

@@ -290,9 +290,9 @@ impl ComptimeValues {
 /// of their own), `comptime` selects the evaluator's slice or embeds its
 /// recorded answers at the call sites, and `mode` carries the REPL
 /// session's resumed-frame facts.
-// the slice's admitted callee set is a ninth lowering input beside the
-// run's own eight; bundling them would invent a config struct for one
-// call path
+// the slice's admitted callee set and const-evaluation site set are a
+// ninth and tenth lowering input beside the run's own eight; bundling
+// them would invent a config struct for one call path
 #[allow(clippy::too_many_arguments)]
 fn lower_module<T>(
     module_name: &str,
@@ -302,6 +302,7 @@ fn lower_module<T>(
     main_required: bool,
     served: Option<Served>,
     admitted: &[ds_check::DefId],
+    consts: &[ds_check::DefId],
     facts: Option<&ds_check::Linearity>,
     comptime: func::ComptimeRun<'_>,
     mode: LowerMode,
@@ -323,7 +324,7 @@ where
             for item in &block.items {
                 refuse_derive(item)?;
                 let first = plan.functions().len();
-                plan_item(item, &mut plan, analyzed, slice, admitted);
+                plan_item(item, &mut plan, analyzed, slice, admitted, consts);
                 // each struct's deinit plans right after its own item, so
                 // one file's entries stay contiguous and append-stable:
                 // the ambient's records (items, deinits, and their minted
@@ -491,6 +492,7 @@ where
         true,
         None,
         &[],
+        &[],
         facts,
         func::ComptimeRun::Runtime(&empty),
         mode,
@@ -530,6 +532,7 @@ where
         false,
         None,
         &[],
+        &[],
         None,
         func::ComptimeRun::Runtime(&empty),
         LowerMode::Program,
@@ -564,6 +567,7 @@ where
         analyzed,
         true,
         None,
+        &[],
         &[],
         facts,
         func::ComptimeRun::Runtime(values),
@@ -603,6 +607,7 @@ where
         false,
         served,
         &[],
+        &[],
         facts,
         func::ComptimeRun::Runtime(values),
         LowerMode::Program,
@@ -615,10 +620,12 @@ where
 /// lowered as ordinary locals — a comptime function calling another, or
 /// an admitted helper, is a plain intra-module call there, and calls
 /// into runtime functions the set does not name refuse (the slice's
-/// table never holds them). No `main` is required and no deinit hooks
-/// plan (the evaluator's admission refuses a deinit-carrying construction
-/// before the slice lowers, so no value inside the fence ever expects a
-/// hook).
+/// table never holds them). The exported consts whose defs `consts`
+/// names (the dep-side evaluation's sites) plan as zero-parameter
+/// bodies answering their initializers' values. No `main` is required
+/// and no deinit hooks plan (the evaluator's admission refuses a
+/// deinit-carrying construction before the slice lowers, so no value
+/// inside the fence ever expects a hook).
 ///
 /// # Errors
 ///
@@ -631,6 +638,7 @@ pub fn lower_comptime_slice<T>(
     asts: &[T],
     analyzed: &Analyzed,
     admitted: &[ds_check::DefId],
+    consts: &[ds_check::DefId],
 ) -> Result<Lowered, LowerError>
 where
     T: std::borrow::Borrow<Ast>,
@@ -643,6 +651,7 @@ where
         false,
         None,
         admitted,
+        consts,
         None,
         func::ComptimeRun::Slice,
         LowerMode::Program,
@@ -689,6 +698,7 @@ where
         analyzed,
         true,
         Some(served),
+        &[],
         &[],
         facts,
         func::ComptimeRun::Runtime(values),
@@ -787,6 +797,7 @@ fn plan_item(
     analyzed: &Analyzed,
     slice: bool,
     admitted: &[ds_check::DefId],
+    consts: &[ds_check::DefId],
 ) {
     if let ItemKind::Impl(imp) = &item.kind {
         if !slice {
@@ -809,18 +820,27 @@ fn plan_item(
     let Pattern::Binding { name, .. } = &local.pat else {
         return;
     };
-    let Expr::Lambda {
-        generics, params, ..
-    } = &local.init
-    else {
-        return; // a non-function const: no module function for it
-    };
     let Some(def) = analyzed.package.lookup(&name.name) else {
         return;
     };
     if !analyzed.checked.def_types.contains_key(&def) {
         return; // the checker has no typed value for it (extern or later stage)
     }
+    // A dep-side evaluation site (slice alone): the exported const's
+    // initializer plans as its own zero-parameter body, the answer the
+    // fenced run drives for the link fact's value. The runtime module
+    // never plans it — a non-function const stays without a module
+    // function there, exactly as before.
+    if slice && consts.contains(&def) && !matches!(local.init, Expr::Lambda { .. }) {
+        plan.push_const(name.name.clone(), def, local, analyzed);
+        return;
+    }
+    let Expr::Lambda {
+        generics, params, ..
+    } = &local.init
+    else {
+        return; // a non-function const: no module function for it
+    };
     let comptime_fn = params
         .iter()
         .any(|p| matches!(p.mode, ds_parse::ParamMode::Comptime(_)));

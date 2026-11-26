@@ -614,6 +614,11 @@ pub(crate) struct Plan {
     /// site's walk reads instead of minting, so the walk and the plan
     /// hold one mint truth.
     mints: HashMap<Span, Minted>,
+    /// The defs whose initializers planned as the evaluation slice's
+    /// zero-parameter bodies: a value use of one keeps the top-level
+    /// refusal (the planned entry answers the fenced run, it is not a
+    /// callable the runtime half mints a word for).
+    const_defs: HashSet<DefId>,
 }
 
 /// One minted record's plan row: the facts keyed by the site's span.
@@ -651,6 +656,7 @@ impl Plan {
             chains: Vec::new(),
             chain_memo: HashMap::new(),
             mints: HashMap::new(),
+            const_defs: HashSet::new(),
         }
     }
 
@@ -664,6 +670,46 @@ impl Plan {
     /// boundless one) demands nothing.
     pub(crate) fn demand(&self, id: &BodyId) -> Rc<Vec<RuntimePair>> {
         self.demands.rc(id).unwrap_or_else(|| Rc::new(Vec::new()))
+    }
+
+    /// Registers one dep-side evaluation site's initializer as its own
+    /// zero-parameter module function: the declared-body shape the
+    /// fenced run drives for the const's value, the const's checked type
+    /// its solved return (no fn def type names it).
+    pub(crate) fn push_const(
+        &mut self,
+        name: String,
+        def: DefId,
+        local: &LocalDecl,
+        analyzed: &Analyzed,
+    ) {
+        self.index.insert(
+            def,
+            u32::try_from(self.functions.len()).expect("function index fits u32"),
+        );
+        self.const_defs.insert(def);
+        let ret = analyzed
+            .checked
+            .def_types
+            .get(&def)
+            .copied()
+            .expect("the planning gate checked a typed value");
+        self.functions.push(PlannedFn {
+            name,
+            lambda: local.init.clone(),
+            def: Some(def),
+            deinit: None,
+            captures: Rc::new(Vec::new()),
+            decl: Some(Rc::new(DeclFn {
+                params: Rc::new(Vec::new()),
+                body: Rc::new(local.init.clone()),
+            })),
+            ret: Some(ret),
+            evidence: Rc::new(Vec::new()),
+            bounds: Rc::new(HashMap::new()),
+            spawn_child: false,
+            free_generic: false,
+        });
     }
 
     pub(crate) fn push(&mut self, name: String, def: DefId, local: &LocalDecl) {
@@ -5991,6 +6037,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                         // evidence words per call site, so neither has a
                         // callable word.
                         if let Some(index) = self.plan.index_of(*def) {
+                            // an evaluation site's planned body is the
+                            // fenced run's, never a callable word: a
+                            // value use keeps the top-level refusal the
+                            // unplanned spelling always answered
+                            if self.plan.const_defs.contains(def) {
+                                return Err(LowerError::unsupported(
+                                    span,
+                                    "a top-level value",
+                                    "only functions and unit tags are lowerable at top level",
+                                ));
+                            }
                             if self.plan.functions()[index as usize].free_generic {
                                 return Err(LowerError::unsupported(
                                     span,

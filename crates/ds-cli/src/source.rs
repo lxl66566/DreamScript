@@ -103,12 +103,13 @@ pub(crate) fn package_ambient_files(no_ambient: bool, link_name: &str) -> usize 
 /// source — the module's own ambient excluded — carrying the facts an
 /// import surface serves (the written signature of a callable, the
 /// solved row, the function-table index a cross-module call addresses,
-/// the literal value a plain `const` binding carries as its own link
-/// fact, and the word layout a struct, enum, or enum-case declaration
-/// carries as its own). A `const` binding whose value
+/// the value a `const` binding carries as its own link fact — the
+/// literal a plain initializer is, the dep-side evaluation's answer a
+/// computed one — and the word layout a struct, enum, or enum-case
+/// declaration carries as its own). A `const` binding whose value
 /// is a function (F2) exports as callable when its signature registered;
-/// a data const exports as a binding, its fact the literal when the
-/// initializer is one. A `pub import` row's bound selections export too
+/// a data const exports as a binding, its fact its evaluated value. A
+/// `pub import` row's bound selections export too
 /// — the transitive surface closure — under the names the rows bound,
 /// each carrying its origin package's link name (the position fact the
 /// entry rides translates through this module's own dep list) so a
@@ -122,6 +123,7 @@ fn exports_of(
     effects: &ds_check::Effects,
     functions: &[String],
     deps: &[ds_mod::Dep],
+    const_values: &HashMap<ds_check::DefId, ds_check::ConstFact>,
 ) -> Vec<Export> {
     let caps_of = |def: ds_check::DefId| {
         effects
@@ -205,16 +207,20 @@ fn exports_of(
             ),
             None => (false, false, None),
         };
-        // A data const's per-target link fact is the literal itself: an
-        // immutable binding whose initializer is a plain literal carries
-        // it, and everything computed stays shape-refused downstream.
+        // A data const's per-target link fact is its value: a plain
+        // literal initializer carries the literal itself, and a computed
+        // one carries the value the dep-side evaluation answered on this
+        // compile — both embed at a dependent's use sites the same way.
         let value = if kind == ExportKind::Binding {
             analyzed
                 .decls
                 .consts
                 .get(&id)
                 .filter(|local| !local.mutable)
-                .and_then(|local| ds_check::ConstFact::of_expr(&local.init))
+                .and_then(|local| {
+                    ds_check::ConstFact::of_expr(&local.init)
+                        .or_else(|| const_values.get(&id).cloned())
+                })
         } else {
             None
         };
@@ -827,6 +833,17 @@ fn compile_text(
     // with no comptime call evaluates nothing.
     let comptime = ds_meta::evaluate(&name, source_hash, asts, &analyzed, &effects)
         .map_err(|diags| reject(&files, &diags, "the source fails the comptime fence"))?;
+    // The dep-side const evaluation (G4): a linked member's exported
+    // computed consts evaluate here, on the producer's own compile, so
+    // their values ride the export surface as link facts — the run path
+    // never pays for a compile nothing imports (a root or script's own
+    // consts stay shape-refused downstream exactly as before).
+    let const_values = if inputs.main_required {
+        HashMap::new()
+    } else {
+        ds_meta::evaluate_consts(&name, source_hash, asts, &analyzed, &effects, ambient_files)
+            .map_err(|diags| reject(&files, &diags, "the exported consts refuse to evaluate"))?
+    };
     // The ambient's impl bodies splice in from the checked-in dsmod when
     // it verifies against this build; every miss (identity, format,
     // name, source hash, splice boundary, plan disagreement) falls back
@@ -884,6 +901,7 @@ fn compile_text(
         &effects,
         lowered.functions(),
         &deps,
+        &const_values,
     );
     match after {
         BundleAfter::Keep => {

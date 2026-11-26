@@ -5944,8 +5944,24 @@ impl Bodies<'_> {
             }
         }
         // Exhaustiveness by set difference [F4]; guards prove nothing,
-        // conservatively, and neither do literal patterns.
-        let missing = self.missing_ty(scrut_ty, &covered);
+        // conservatively, and neither do literal patterns. An applied
+        // enum head stays opaque to the algebra, so its case atoms
+        // exhaust it case-wise: a catchall that covered the application
+        // itself or every minted case atom empties the remainder, while
+        // a case minting no atom (a payloaded case over a generic head)
+        // keeps the match honestly non-exhaustive.
+        let missing = match self.applied_enum_head(scrut_ty) {
+            Some((head_atom, case_atoms, unminted)) => {
+                if covered.contains(&head_atom)
+                    || (!unminted && case_atoms.iter().all(|atom| covered.contains(atom)))
+                {
+                    self.empty()
+                } else {
+                    scrut_ty
+                }
+            },
+            None => self.missing_ty(scrut_ty, &covered),
+        };
         if !self.decls.universe.members(missing).is_empty() {
             let scrut_text = self.decls.universe.render(scrut_ty);
             let missing_text = format!("`{}`", self.decls.universe.render(missing));
@@ -7089,6 +7105,38 @@ impl Bodies<'_> {
             return None
         };
         self.single_apply_of(*only)
+    }
+
+    /// The applied enum head of a scrutinee type with its minted case
+    /// atoms: `(head atom, case atoms, any unminted case)` — the head
+    /// atom is the application itself, the member a catchall covers.
+    /// Applications stay opaque to the set algebra, so case patterns
+    /// over an enum application cover it case-wise — a unit case's atom
+    /// carries no substitution, while a case minting no atom (a
+    /// payloaded case over a generic head) can never be covered. `None`
+    /// when the scrutinee is not one application of a declared enum
+    /// head.
+    fn applied_enum_head(&mut self, scrut: Ty) -> Option<(TypeId, Vec<TypeId>, bool)> {
+        let [only] = self.decls.universe.members(scrut) else {
+            return None
+        };
+        let (ctor, _) = self.single_apply_of(*only)?;
+        let enum_def = self.decls.defs_of_atoms.get(&ctor).copied()?;
+        let shape = self.decls.enums.get(&enum_def)?.clone();
+        let mut atoms = Vec::with_capacity(shape.cases.len());
+        let mut unminted = false;
+        for (name, ..) in &shape.cases {
+            match self
+                .package
+                .lookup_type(name)
+                .or_else(|| self.decls.foreign_type(name))
+                .and_then(|def| self.decls.atoms.get(&def).copied())
+            {
+                Some(atom) => atoms.push(atom),
+                None => unminted = true,
+            }
+        }
+        Some((*only, atoms, unminted))
     }
 
     fn decompose_fn(&mut self, ty: Ty) -> Option<(Vec<Ty>, Ty)> {

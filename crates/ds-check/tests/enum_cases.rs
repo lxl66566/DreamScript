@@ -171,8 +171,9 @@ fn qualified_case_paths_test_the_case_atom() {
 
 #[test]
 fn generic_enums_keep_the_opaque_atom_until_substitution_lands() {
-    // A generic enum still checks as before (an applied atom); its case
-    // names do not mint, so a use reports the unknown name.
+    // A generic enum still checks as before (an applied atom); a
+    // payloaded case's name stays uncollected — its shape is a
+    // per-instantiation fact — so a use reports the unknown name.
     clean("tag int\nenum opt[t] { some(t) }\nfn f(x: opt[int]) -> int { 0 }\n");
     let found = codes("tag int\nenum opt[t] { some(t) }\nconst v = some\n");
     // The resolver reports the unknown name and the checker's value walk
@@ -182,6 +183,70 @@ fn generic_enums_keep_the_opaque_atom_until_substitution_lands() {
             .iter()
             .any(|(code, msg)| *code == "DS2004" && msg.contains("some")),
         "{found:?}"
+    );
+}
+
+/// A generic enum's unit cases test over the applied head: a unit word
+/// carries no substitution, so its atom is a member of every
+/// application (the set algebra keeps applications opaque, the
+/// membership reading the head's case atoms instead) and the arms
+/// exhaust the head case-wise. A payloaded case can never be covered —
+/// no spelling resolves its atom — so a match missing it stays honestly
+/// non-exhaustive behind a catchall, and another enum's case over the
+/// head refuses as a non-member.
+#[test]
+fn unit_cases_of_a_generic_enum_test_over_the_applied_head() {
+    clean(concat!(
+        "tag int\n",
+        "enum flag[t] { on, off }\n",
+        "fn f(x: flag[int]) -> int {\n",
+        "  match x {\n",
+        "    on => 1,\n",
+        "    off => 2,\n",
+        "  }\n",
+        "}\n",
+    ));
+    let found = codes(concat!(
+        "tag int\n",
+        "enum flag[t] { on, off }\n",
+        "fn f(x: flag[int]) -> int {\n",
+        "  match x {\n",
+        "    on => 1,\n",
+        "  }\n",
+        "}\n",
+    ));
+    assert!(
+        found
+            .iter()
+            .any(|(code, msg)| *code == "DS2003" && msg.contains("not exhaustive")),
+        "a missing unit case stays non-exhaustive: {found:?}"
+    );
+    clean(concat!(
+        "tag int\n",
+        "enum keyed[t] { tiny, big(t) }\n",
+        "fn f(x: keyed[int]) -> int {\n",
+        "  match x {\n",
+        "    tiny => 1,\n",
+        "    _ => 2,\n",
+        "  }\n",
+        "}\n",
+    ));
+    let found = codes(concat!(
+        "tag int\n",
+        "enum flag[t] { on, off }\n",
+        "enum other { alien }\n",
+        "fn f(x: flag[int]) -> int {\n",
+        "  match x {\n",
+        "    alien => 1,\n",
+        "    _ => 2,\n",
+        "  }\n",
+        "}\n",
+    ));
+    assert!(
+        found
+            .iter()
+            .any(|(code, msg)| *code == "DS2001" && msg.contains("is not a member")),
+        "another enum's case refuses as a non-member: {found:?}"
     );
 }
 

@@ -90,9 +90,15 @@
 //! `==` refuses with the B9 diagnostic (equality is universal and never
 //! derived); unknown names refuse naming the ruled set; a
 //! function-typed or `~Copyable` part refuses naming the part; a
-//! declaration carrying its own type parameters refuses (the runtime
-//! seam lowers one member body per impl, so a receiver whose shape
-//! spans those parameters waits on the JIT's per-instantiation frames).
+//! generic declaration passes its check-side doors (a generic struct
+//! through the added bound, a unit-only generic enum through arms that
+//! resolve their case atoms over every application of the head) and the
+//! runtime seam owns the refusal (one member body per impl, so a
+//! receiver whose shape spans those parameters waits on the JIT's
+//! per-instantiation frames); a payloaded case over a generic head
+//! refuses at the attribute (no spelling resolves its atom), and so
+//! does a generic enum under the constructing families (a constructed
+//! case types as its own atom, never the applied head).
 
 use ds_diag::{Diagnostic, ErrorCode, Span};
 use ds_parse::{
@@ -377,12 +383,48 @@ fn eq_refused(span: Span) -> Diagnostic {
     )
 }
 
-/// A generic enum refuses: the synthesized member's body matches or
-/// constructs its cases over the declaration's own type variables, and
-/// a case over a generic head resolves no atom in any spelling — the
-/// pattern layer's seam, ahead of any runtime question. A generic
-/// struct passes: its parts dispatch through the added bound and the
-/// runtime seam owns the refusal.
+/// The first payloaded case of a generic enum: the pattern seam's
+/// refusal site. A unit-only generic enum derives — its synthesized
+/// arms resolve their atoms over every application of the head — while
+/// a payloaded case's shape is a per-instantiation fact, so no spelling
+/// resolves its atom ahead of any runtime question.
+fn payloaded_case_of_generic(item: &Item) -> Option<&EnumCase> {
+    let ItemKind::Enum(decl) = &item.kind else {
+        return None;
+    };
+    (!decl.generics.is_empty())
+        .then(|| {
+            decl.cases
+                .iter()
+                .find(|case| !matches!(case.payload, EnumPayload::None))
+        })
+        .flatten()
+}
+
+/// A payloaded case over a generic head refuses the matching families:
+/// the synthesized arms cannot check, since the case resolves no atom
+/// in any spelling. A unit-only generic enum passes; the runtime seam
+/// owns its refusal.
+fn payloaded_refused(case: &EnumCase, family: &str) -> Diagnostic {
+    Diagnostic::error(
+        ErrorCode::DeriveGenericRefused,
+        format!("derive `{family}` refuses a payloaded case over a generic head [G1]"),
+    )
+    .with_primary(
+        case.span,
+        "this case's pattern resolves no atom over the generic head",
+    )
+    .with_note(
+        "the payload's shape is a per-instantiation fact; a unit-only generic enum derives, the \
+         runtime seam owning its refusal",
+    )
+}
+
+/// A generic enum refuses the constructing families: the synthesized
+/// body constructs a case, and a constructed case types as its own
+/// atom, never the applied head — the checker's seam, ahead of any
+/// runtime question. A generic struct passes: its parts dispatch
+/// through the added bound and the runtime seam owns the refusal.
 fn generic_refused(span: Span, family: &str) -> Diagnostic {
     Diagnostic::error(
         ErrorCode::DeriveGenericRefused,
@@ -390,8 +432,8 @@ fn generic_refused(span: Span, family: &str) -> Diagnostic {
     )
     .with_primary(span, "this enum carries its own type parameters")
     .with_note(
-        "a case over a generic head resolves no atom in any spelling; the pattern seam is the \
-         checker's, ahead of any runtime question",
+        "the synthesized body constructs a case, and a constructed case types as its own atom, \
+         never the applied head",
     )
 }
 
@@ -406,7 +448,8 @@ fn part_refused(span: Span, family: &str, what: &str, part: &str, because: &str)
 
 /// Synthesizes `impl show for <decl> { fn show(self) -> string { ... } }`.
 /// Refuses (returning `None`, diagnostic pushed) when the item is not a
-/// data declaration or a part refuses structural derivation.
+/// data declaration, a payloaded case rides a generic head, or a part
+/// refuses structural derivation.
 fn show_impl(
     item: &Item,
     attr: &Attribute,
@@ -414,10 +457,8 @@ fn show_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
-        diags.push(generic_refused(attr.span, "show"));
+    if let Some(case) = payloaded_case_of_generic(item) {
+        diags.push(payloaded_refused(case, "show"));
         return None;
     }
     match &item.kind {
@@ -647,16 +688,22 @@ fn enum_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
 }
 
 /// One match arm: `circle(r0) => "circle(${r0})"`, `dot => "dot"`, or
-/// `rect { w, h } => "rect { w: ${w}, h: ${h} }"`.
+/// `rect { w, h } => "rect { w: ${w}, h: ${h} }"`. The case path is a
+/// name use, so each arm mints its own span — the written case spans
+/// stay the declaration's uses (resolution records one use per span).
 fn arm(case: &EnumCase, mint: &mut Mint) -> MatchArm {
+    let pat_span = mint.span();
     let path = Path {
-        span: case.name.span,
-        segments: vec![case.name.clone()],
+        span: pat_span,
+        segments: vec![Ident {
+            span: pat_span,
+            name: case.name.name.clone(),
+        }],
     };
     let mut parts = vec![text(case.span, &case.name.name)];
     let pat = match &case.payload {
         EnumPayload::None => Pattern::Path {
-            span: case.name.span,
+            span: pat_span,
             path,
         },
         EnumPayload::Tuple(items) => {
@@ -786,9 +833,9 @@ fn printable(ty: &Type) -> bool {
 /// the standard missing-impl diagnostic over the part's own span: a
 /// float part orders through the ambient's `total_compare`-backed impl,
 /// a string, char, or byte part through its own compare-native-backed
-/// impl. Refuses exactly like `show`: a generic enum at the
-/// attribute, a non-data declaration, a function-typed or `~Copyable`
-/// part.
+/// impl. Refuses exactly like `show`: a payloaded case over a generic
+/// head at the attribute, a non-data declaration, a function-typed or
+/// `~Copyable` part.
 fn ord_impl(
     item: &Item,
     attr: &Attribute,
@@ -796,10 +843,8 @@ fn ord_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
-        diags.push(generic_refused(attr.span, "ord"));
+    if let Some(case) = payloaded_case_of_generic(item) {
+        diags.push(payloaded_refused(case, "ord"));
         return None;
     }
     let (name, generics, body) = match &item.kind {
@@ -1194,7 +1239,7 @@ fn sign_expr(mint: &mut Mint, index: usize, other_index: usize) -> Expr {
 /// `float_hash`-backed impl, a string or char part through its own
 /// content-hash-native-backed impl. An enum folds its case index first,
 /// a tag answers the seed constant. Refuses exactly like `show` and
-/// `ord`: a generic enum at the attribute, a non-data
+/// `ord`: a payloaded case over a generic head at the attribute, a non-data
 /// declaration, a function-typed or `~Copyable` part.
 fn hash_impl(
     item: &Item,
@@ -1203,10 +1248,8 @@ fn hash_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
-        diags.push(generic_refused(attr.span, "hash"));
+    if let Some(case) = payloaded_case_of_generic(item) {
+        diags.push(payloaded_refused(case, "hash"));
         return None;
     }
     let (name, generics, body) = match &item.kind {
@@ -1447,9 +1490,10 @@ fn trait_call(part: Expr, member: &str, mint: &mut Mint) -> Expr {
 /// struct answers the empty construction — its `Self` spans the one
 /// reserved unit word, so the construction carries zero dispatches and
 /// the member's return keeps the ABI's one-word minimum. Refuses
-/// otherwise exactly like `hash`: a generic enum at the
-/// attribute, a non-data declaration, a function-typed or `~Copyable`
-/// part.
+/// otherwise exactly like `hash` save the enum gate: a generic enum
+/// at the attribute (the synthesized body constructs a case, which
+/// types as its own atom, never the applied head), a non-data
+/// declaration, a function-typed or `~Copyable` part.
 fn clone_impl(
     item: &Item,
     attr: &Attribute,
@@ -1457,9 +1501,7 @@ fn clone_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
+    if matches!(&item.kind, ItemKind::Enum(decl) if !decl.generics.is_empty()) {
         diags.push(generic_refused(attr.span, "clone"));
         return None;
     }
@@ -1828,8 +1870,8 @@ fn unread_annotation(span: Span, union: &str, case: &str) -> Diagnostic {
 /// one-argument head that is not the empty-construction shape) fails at
 /// the synthesized call with the standard diagnostic, the family
 /// precedent. Refuses otherwise exactly like `clone`: a generic
-/// enum at the attribute, a non-data declaration, a
-/// function-typed or `~Copyable` part.
+/// enum at the attribute (the body constructs a case), a non-data
+/// declaration, a function-typed or `~Copyable` part.
 fn default_impl(
     item: &Item,
     attr: &Attribute,
@@ -1838,9 +1880,7 @@ fn default_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
+    if matches!(&item.kind, ItemKind::Enum(decl) if !decl.generics.is_empty()) {
         diags.push(generic_refused(attr.span, "default"));
         return None;
     }
@@ -2605,9 +2645,10 @@ fn enum_clone_body(decl: &EnumDecl, mint: &mut Mint) -> Expr {
 /// carrying none fails at the synthesized call with the standard
 /// missing-member diagnostic, the bare-name precedent); a shape the
 /// walk cannot spell refuses at the attribute. Refuses otherwise like
-/// the other families: a generic enum, a non-data declaration, a
-/// function-typed or `~Copyable` part; a tag carries no members to
-/// walk, so it refuses naming itself.
+/// the constructing families: a generic enum (the body constructs a
+/// case), a non-data declaration, a function-typed or `~Copyable`
+/// part; a tag carries no members to walk, so it refuses naming
+/// itself.
 fn from_json_impl(
     item: &Item,
     attr: &Attribute,
@@ -2615,9 +2656,7 @@ fn from_json_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
+    if matches!(&item.kind, ItemKind::Enum(decl) if !decl.generics.is_empty()) {
         diags.push(generic_refused(attr.span, "from_json"));
         return None;
     }
@@ -3600,9 +3639,10 @@ fn narrow_test(mint: &mut Mint, name: &str, member: &str, fail: &str) -> Stmt {
 /// an optional payload field) narrows at its consumer: the presence
 /// narrow over the element or payload binder, absence contributing
 /// nothing (the decode mirror). Refuses
-/// otherwise like from_json: a generic enum, a non-data
-/// declaration, a function-typed or `~Copyable` part; a tag
-/// carries no members to walk, so it refuses naming itself.
+/// otherwise like the matching families: a payloaded case over a
+/// generic head, a non-data declaration, a function-typed or
+/// `~Copyable` part; a tag carries no members to walk, so it refuses
+/// naming itself.
 fn to_json_impl(
     item: &Item,
     attr: &Attribute,
@@ -3610,10 +3650,8 @@ fn to_json_impl(
     linear: &[String],
     diags: &mut Vec<Diagnostic>,
 ) -> Option<Item> {
-    if let ItemKind::Enum(decl) = &item.kind
-        && !decl.generics.is_empty()
-    {
-        diags.push(generic_refused(attr.span, "to_json"));
+    if let Some(case) = payloaded_case_of_generic(item) {
+        diags.push(payloaded_refused(case, "to_json"));
         return None;
     }
     match &item.kind {

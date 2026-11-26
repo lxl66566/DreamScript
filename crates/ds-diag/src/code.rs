@@ -205,6 +205,8 @@ error_codes! {
     TagPayloadTuple => "DS2041", Type,
     /// A struct field whose type solves to `none` alone; `none` is the optional's absent member (B4), a member of `t?` spellings, never a standalone field type.
     NoneTypedField => "DS2042", Type,
+    /// A linked package's exported `const` whose initializer the producer-side evaluation cannot answer: a reach the fence refuses, a trap or runaway the fenced run raised, or an answer outside the const fact's vocabulary.
+    LinkedConstEvalRefusal => "DS2043", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -341,6 +343,7 @@ mod tests {
             ("TypeApplicationMismatch", "DS2040", ErrorClass::Type),
             ("TagPayloadTuple", "DS2041", ErrorClass::Type),
             ("NoneTypedField", "DS2042", ErrorClass::Type),
+            ("LinkedConstEvalRefusal", "DS2043", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),
