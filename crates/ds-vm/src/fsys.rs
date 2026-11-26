@@ -1,10 +1,11 @@
-//! The file-handle natives: the fsys half of the platform ABI's fixed
-//! op table (`open_file`, `read_raw`, `close_raw`) — the raw seams the
-//! stdlib's ds-source file face wraps (`open_file` answers the package-owned
-//! `file_handle` struct's one inline word directly; `read_raw`/
-//! `close_raw` take the handle word, because a native call cannot
-//! borrow a deinit-carrying struct argument). The handle's word is the
-//! table key, never the OS's own descriptor.
+//! The fsys natives: the fsys half of the platform ABI's fixed op
+//! table — the handle face (`open_file`, `read_raw`, `close_raw`) and
+//! the path round (`mkdir`, `remove`, `fs_size`), the raw seams the
+//! stdlib's ds-source file face wraps (`open_file` answers the
+//! package-owned `file_handle` struct's one inline word directly;
+//! `read_raw`/`close_raw` take the handle word, because a native call
+//! cannot borrow a deinit-carrying struct argument). The handle's word
+//! is the table key, never the OS's own descriptor.
 //!
 //! # Handle lifetime
 //!
@@ -30,6 +31,18 @@
 //! 1 MiB per call like the net reads — a larger request streams across
 //! calls, and a cap-sized refusal is the honest answer over a silent
 //! clamp (the name promises exactness).
+//!
+//! # The path round
+//!
+//! `mkdir` creates one directory, a single level (a missing parent is
+//! `not_found`, an existing entry `already_exists` — the branchable
+//! outcome); `remove` removes one entry, whatever it is — a file or a
+//! link over `remove_file`, a directory over the empty-only
+//! `remove_dir` (a non-empty directory refuses on the `io_other` floor,
+//! the walk over `fs_list` emptying it first); `fs_size` answers the
+//! entry's byte count (`file_size`'s fallible form — the caller branches
+//! on the missing path instead of halting). Each failure lands on its
+//! `io_err` class like every fsys native.
 
 use std::{fs::File, io};
 
@@ -176,10 +189,74 @@ fn io_err_text(heaps: &mut Heaps, op: &str, path: &str, detail: &str) -> NativeR
     }
 }
 
+/// `mkdir(path: string) -> () | io_err`: creates one directory, a
+/// single level (a missing parent is `not_found`, an existing entry
+/// `already_exists`).
+pub(crate) fn mkdir_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    Ok(match std::fs::create_dir(&path) {
+        // the payload word is the inert unit word
+        Ok(()) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(0),
+        },
+        Err(err) => io_err(heaps, "mkdir", &path, &err),
+    })
+}
+
+/// `remove(path: string) -> () | io_err`: removes one entry, whatever
+/// it is — the entry itself decides the pair (never a followed link:
+/// a link goes over `remove_file` whatever it names), a directory over
+/// the empty-only `remove_dir`.
+pub(crate) fn remove_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    let removed = match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir(&path),
+        Ok(_) => std::fs::remove_file(&path),
+        Err(err) => Err(err),
+    };
+    Ok(match removed {
+        Ok(()) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(0),
+        },
+        Err(err) => io_err(heaps, "remove", &path, &err),
+    })
+}
+
+/// `fs_size(path: string) -> int | io_err`: the entry's byte count,
+/// `file_size`'s fallible form — the caller branches on the missing
+/// path instead of halting.
+pub(crate) fn fs_size_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    Ok(match std::fs::metadata(&path) {
+        // no filesystem carries a length past i64::MAX
+        Ok(meta) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::I64(i64::try_from(meta.len()).expect("file size fits i64")),
+        },
+        Err(err) => io_err(heaps, "fs_size", &path, &err),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::PLATFORM_IO_UNEXPECTED_EOF;
+    use crate::native::{
+        PLATFORM_IO_ALREADY_EXISTS, PLATFORM_IO_NOT_FOUND, PLATFORM_IO_UNEXPECTED_EOF,
+    };
 
     /// Runs `body` over a bare store on the root fiber and a captured
     /// sink: the natives under test never reach the split.
@@ -286,6 +363,90 @@ mod tests {
             };
             assert_eq!(tag, PLATFORM_IO_OTHER);
             let _ = std::fs::remove_file(&path);
+        });
+    }
+
+    /// The path round: mkdir creates one level and answers
+    /// already_exists over an existing entry, remove takes a file then
+    /// the emptied directory (the entry itself deciding the pair) and
+    /// answers not_found over a missing path, and fs_size answers the
+    /// written byte count.
+    #[test]
+    fn the_path_round_creates_removes_and_sizes() {
+        with_store(|heaps, out| {
+            let dir = probe_path("ds_vm_fsys_dirs").with_extension("");
+            let _ = std::fs::remove_dir_all(&dir);
+            let dir_word = heaps.new_str(dir.to_str().expect("a UTF-8 temp path").to_owned());
+
+            let NativeResult::Tag { tag, .. } =
+                mkdir_fn(heaps, out, &[dir_word]).expect("the call traps nothing")
+            else {
+                unreachable!("mkdir answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_OK);
+            let NativeResult::Tag { tag, .. } =
+                mkdir_fn(heaps, out, &[dir_word]).expect("the call traps nothing")
+            else {
+                unreachable!("mkdir answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_ALREADY_EXISTS);
+
+            let file = dir.join("probe.bin");
+            std::fs::write(&file, b"abcde").expect("the fixture writes");
+            let file_word = heaps.new_str(file.to_str().expect("a UTF-8 temp path").to_owned());
+            let NativeResult::Tag {
+                tag,
+                payload: Value::I64(size),
+            } = fs_size_fn(heaps, out, &[file_word]).expect("the call traps nothing")
+            else {
+                unreachable!("fs_size answers a span");
+            };
+            assert_eq!((tag, size), (PLATFORM_IO_OK, 5));
+
+            let NativeResult::Tag { tag, .. } =
+                remove_fn(heaps, out, &[file_word]).expect("the call traps nothing")
+            else {
+                unreachable!("remove answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_OK);
+            let NativeResult::Tag { tag, .. } =
+                remove_fn(heaps, out, &[dir_word]).expect("the call traps nothing")
+            else {
+                unreachable!("remove answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_OK);
+            let NativeResult::Tag { tag, .. } =
+                remove_fn(heaps, out, &[dir_word]).expect("the call traps nothing")
+            else {
+                unreachable!("remove answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_NOT_FOUND);
+            let NativeResult::Tag { tag, .. } =
+                fs_size_fn(heaps, out, &[dir_word]).expect("the call traps nothing")
+            else {
+                unreachable!("fs_size answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_NOT_FOUND);
+        });
+    }
+
+    /// A non-empty directory refuses over the empty-only remove_dir:
+    /// the platform's not-empty kind carries no io_err class, so it
+    /// folds into the `io_other` floor.
+    #[test]
+    fn a_non_empty_directory_folds_into_the_other_floor() {
+        with_store(|heaps, out| {
+            let dir = probe_path("ds_vm_fsys_full").with_extension("");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("inner")).expect("the fixture writes");
+            let word = heaps.new_str(dir.to_str().expect("a UTF-8 temp path").to_owned());
+            let NativeResult::Tag { tag, .. } =
+                remove_fn(heaps, out, &[word]).expect("the call traps nothing")
+            else {
+                unreachable!("remove answers a span");
+            };
+            assert_eq!(tag, PLATFORM_IO_OTHER);
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 }

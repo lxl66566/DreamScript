@@ -200,7 +200,10 @@ pub(crate) struct Native {
 /// string), the list and
 /// map construction and mutation surfaces (one heap-object `Ref` per
 /// value, element and pair words opaque to the natives), the file-IO
-/// surface including `fs_list`, and the TCP surface. The ambient's
+/// surface including `fs_list` and the path round (`mkdir`'s
+/// single-level create, `remove`'s one-entry removal, `fs_size`'s byte
+/// count — the CLI host's provision declares the spellings beside the
+/// ambient's face), and the TCP surface. The ambient's
 /// generic reads and counts (`len`, `list_len`, `list_get`,
 /// `list_concat`, `map_len`, `map_get`) stay out of the monomorphic
 /// table on purpose: their ambient spellings are generic, so a
@@ -1065,6 +1068,49 @@ pub(crate) const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: 69,
         shape: NativeShape::Total(SlotType::I64),
+    },
+    Native {
+        // the fsys path round (the CLI host's provision declares the
+        // spellings beside the ambient's face): `mkdir` creates one
+        // directory, a single level — `already_exists` the branchable
+        // outcome — and answers the unit word over the ok member
+        name: "mkdir",
+        module: NativeModule::Platform,
+        index: 39,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,      // the inert unit word
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        // `remove` removes one entry — a file or link over remove_file,
+        // a directory over the empty-only remove_dir (the platform's
+        // not-empty kind folding into the io_other floor)
+        name: "remove",
+        module: NativeModule::Platform,
+        index: 40,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,      // the inert unit word
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
+    },
+    Native {
+        // `fs_size` answers the entry's byte count — `file_size`'s
+        // fallible form, the caller branching on the missing path
+        // instead of halting
+        name: "fs_size",
+        module: NativeModule::Platform,
+        index: 41,
+        shape: NativeShape::Fallible {
+            payload: SlotType::I64,      // the entry's byte count
+            fail_payload: SlotType::Ref, // the OS error message of an io class
+            err_prefix: "io error: ",
+            classes: IO_CLASSES,
+        },
     },
 ];
 

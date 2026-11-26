@@ -3,6 +3,7 @@
 - Visibility is file-grain (G4): every multi-file fixture and ambient stub needs `pub` on what another file uses, or the items it serves fail with DS4017.
 - An impl's trait reference resolves through the type namespace, never the value-first bare-use walk: a free `fn` sharing the trait's name can otherwise claim the impl head and mislead the visibility check.
 - Client positions convert through `ds-lsp`'s `convert::offset`, never by hand: a hand conversion overflows and `Files::line_span`'s assert kills the session.
+- ds-lsp's file walks (completion's type positions, semantic tokens) share one traversal mirroring the resolver's own scope pushes (`walk.rs`): a new item or expression shape threads through the driver's match alone, the walks answering through `Visit` hooks. A hand-mirrored copy drifts silently — the old completion walk had stopped entering match-arm annotations and patterns while the resolver and the token walk entered them.
 - An LSP test document URI must spell a host-real path (`Url::from_file_path` over a temp path), or `Url::to_file_path`'s refusal on Windows leaves the harness waiting out its budget as if the server deadlocked.
 - The grammar's stack segment belongs to the caller thread, so a thread-local worker serves one job per parse and each job carries its own source copy; an inline fast path for small nesting breaks that contract.
 - Never join the grammar worker from a thread-local destructor: joining there aborts the process at exit (status 127).

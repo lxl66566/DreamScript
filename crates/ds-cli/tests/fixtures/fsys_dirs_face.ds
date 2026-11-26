@@ -1,0 +1,32 @@
+// purpose: the fsys path round's user face through the real ambient and
+// the CLI host's $host.ds provision — mkdir's single-level create
+// (already_exists the branchable outcome), remove's one-entry removal
+// (a file, then the emptied directory, the non-empty directory folding
+// into the io_other floor, the missing path answering not_found), and
+// fs_size's byte count (the annotated .err handler extracting the
+// missing path's answer). Each failure answers the io_err union the
+// ambient owns, the is-narrowing reading its class, so a handled
+// failure neither prints nor halts. The script runs with the fixture's
+// directory as the working directory.
+
+write_file("fsys_dirs_probe.txt", "abcde")
+println("size ${fs_size("fsys_dirs_probe.txt").err((_: io_err) => -1)}")
+const made = mkdir("fsys_dirs_probe.d")
+if made is io_err { println("dir failed") } else { println("dir made") }
+const again = mkdir("fsys_dirs_probe.d")
+if again is already_exists { println("again exists") } else { println("again unexpected") }
+const inner = mkdir("fsys_dirs_probe.d/inner")
+if inner is io_err { println("inner failed") } else { println("inner made") }
+const full = remove("fsys_dirs_probe.d")
+if full is io_other { println("full other") } else { println("full unexpected") }
+const dropped = remove("fsys_dirs_probe.txt")
+if dropped is io_err { println("file failed") } else { println("file removed") }
+const missing = remove("fsys_dirs_probe.txt")
+if missing is not_found { println("missing gone") } else { println("missing unexpected") }
+const back = fs_size("fsys_dirs_probe.txt")
+if back is not_found { println("back gone") } else { println("back unexpected") }
+const inner_gone = remove("fsys_dirs_probe.d/inner")
+if inner_gone is io_err { println("inner still") } else { println("inner removed") }
+const swept = remove("fsys_dirs_probe.d")
+if swept is io_err { println("sweep failed") } else { println("swept") }
+println("clean ${file_exists("fsys_dirs_probe.d")}")

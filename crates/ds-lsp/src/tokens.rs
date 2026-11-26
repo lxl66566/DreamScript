@@ -9,7 +9,7 @@
 //! definition's kind, a local by its binder's frame kind, a dot-call's
 //! member by its tier (the free-function tier a function, the method and
 //! type-keyed tiers a method, the handler forms keywords), and a type
-//! position by the walk's own variable scopes ahead of the type
+//! position by the shared walk's variable scopes ahead of the type
 //! namespace. Declaration names answer from the tree. `self` answers as a
 //! keyword wherever it binds (a receiver parameter or a use resolving to
 //! one); `Self` answers as a type parameter inside impl and trait
@@ -27,14 +27,18 @@
 use ds_check::{DefId, DefKind, DotRes, Package, Res, Resolutions, ScopeFrame, ScopeKind};
 use ds_diag::{FileId, Files, Span};
 use ds_parse::{
-    AssignOp, Ast, BinaryOp, BlockExpr, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal,
-    Param, ParamMode, Pattern, Stmt, StmtKind, StrPart, StructMember, TraitMember, Trivia, Type,
-    TypeParam, UnaryOp,
+    AssignOp, Ast, BinaryOp, BlockExpr, EnumCase, EnumDecl, Expr, FieldDecl, FnDecl, Ident,
+    ImplDecl, ImportDecl, Item, Literal, LocalDecl, Param, ParamMode, Pattern, PlatformDecl, Stmt,
+    StmtKind, StrPart, StructDecl, TagDecl, TraitDecl, Trivia, Type, TypeAliasDecl, TypeParam,
+    UnaryOp,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use tower_lsp::lsp_types as lsp;
 
-use crate::{completion::is_type_head, convert};
+use crate::{
+    convert,
+    walk::{TypeScopes, Visit, Walk},
+};
 
 /// The token classes this slice answers, in legend order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -175,15 +179,9 @@ pub(crate) fn stream(
         package: inputs.package,
         fn_defs: inputs.fn_defs,
         locals: &locals,
-        type_vars: Vec::new(),
-        self_depth: 0,
         out: Vec::new(),
     };
-    for block in &ast.blocks {
-        for item in &block.items {
-            walker.item(item);
-        }
-    }
+    Walk::new(&mut walker).root(ast);
     let mut raw = walker.out;
     raw.sort_by_key(|token| (token.start, token.len));
     // Doc runs ride twice (the attachment slot and the leading trivia), so
@@ -234,8 +232,8 @@ fn encode(files: &Files, file: FileId, source: &str, raw: &[Raw]) -> Vec<lsp::Se
     out
 }
 
-/// The token walk: one pass over the parse tree emitting spans, tracking
-/// the type-variable scopes the resolver's type positions see.
+/// The token walk's visitor over the shared walk: each hook emits the
+/// token classes one covered node owns.
 struct Walker<'a> {
     file: FileId,
     source: &'a str,
@@ -244,10 +242,6 @@ struct Walker<'a> {
     fn_defs: &'a FxHashSet<DefId>,
     /// Binder span to its frame kind (parameter versus local).
     locals: &'a FxHashMap<Span, ScopeKind>,
-    /// In-scope type variables, outermost first.
-    type_vars: Vec<String>,
-    /// Depth of active `Self` bindings (trait and impl regions).
-    self_depth: usize,
     out: Vec<Raw>,
 }
 
@@ -406,10 +400,8 @@ impl Walker<'_> {
     /// One identifier use in type position: the in-scope type variables
     /// (and a bound `Self`) answer as type parameters ahead of the type
     /// namespace; the universe builtins (`none`) answer nothing.
-    fn type_use(&mut self, ident: &Ident) {
-        let tok = if (ident.name == "Self" && self.self_depth > 0)
-            || self.type_vars.iter().any(|name| name == &ident.name)
-        {
+    fn type_use(&mut self, ident: &Ident, scopes: &TypeScopes) {
+        let tok = if scopes.binds(&ident.name) {
             Tok::TypeParam
         } else if let Some(id) = self.package.lookup_type(&ident.name) {
             self.def_tok(id, false).0
@@ -429,77 +421,18 @@ impl Walker<'_> {
         };
         self.push(span, tok, 0);
     }
+}
 
-    /// Emits one string literal: a literal without holes is one token
-    /// over its whole span (quotes included); a holed one colors its text
-    /// runs and walks the holes' own expressions and names.
-    fn string_parts(&mut self, span: Span, parts: &[StrPart]) {
-        let holed = parts
-            .iter()
-            .any(|part| !matches!(part, StrPart::Text { .. }));
-        if !holed {
-            self.push(span, Tok::Str, 0);
-            return;
-        }
-        for part in parts {
-            match part {
-                StrPart::Text { span, .. } => self.push(*span, Tok::Str, 0),
-                StrPart::Expr { expr, .. } => self.expr(expr),
-                StrPart::Ident { name, .. } => self.value_use(name),
-            }
-        }
+impl Visit for Walker<'_> {
+    fn package(&self) -> &Package {
+        self.package
     }
 
-    /// Binds one declaration's generic parameters, answering the
-    /// type-variable mark to restore (the bounds resolve before the
-    /// names bind, exactly as the resolver walks them).
-    fn generics(&mut self, params: &[TypeParam]) -> usize {
-        for param in params {
-            if let Some(bound) = &param.bound {
-                self.ty(bound);
-            }
-        }
-        let mark = self.type_vars.len();
-        for param in params {
-            self.push(param.name.span, Tok::TypeParam, DECLARATION);
-            self.type_vars.push(param.name.name.clone());
-        }
-        mark
-    }
-
-    /// One parameter: its mode keyword, its name (a receiver `self` the
-    /// keyword class), its annotation, and its literal default.
-    fn param(&mut self, param: &Param) {
-        match param.mode {
-            ParamMode::Borrow => {},
-            ParamMode::Mut(span) | ParamMode::Consume(span) | ParamMode::Comptime(span) => {
-                self.push(span, Tok::Keyword, 0);
-            },
-        }
-        let (tok, mods) = if param.name.name == "self" {
-            (Tok::Keyword, DECLARATION)
-        } else {
-            (Tok::Parameter, DECLARATION)
-        };
-        self.push(param.name.span, tok, mods);
-        if let Some(ty) = &param.ty {
-            self.ty(ty);
-        }
-        if let Some(default) = &param.default {
-            let from = param
-                .ty
-                .as_ref()
-                .map_or(param.name.span.end, |ty| ty.span().end);
-            self.op_in_gap(from, default.span().start, "=");
-            self.expr(default);
-        }
-    }
-
-    /// One declaration item. Attributes emit nothing; the walk reads the
-    /// raw parse tree, so derive-synthesized trees never appear in it.
-    fn item(&mut self, item: &Item) {
+    fn enter_item(&mut self, item: &Item) -> bool {
+        // Derive-synthesized trees (whose spans lie inside the
+        // attributed declaration) never emit.
         if item.synthesized {
-            return;
+            return false;
         }
         for trivia in item
             .leading_trivia
@@ -512,234 +445,167 @@ impl Walker<'_> {
         if let Some(vis) = item.vis {
             self.push(vis.span(), Tok::Keyword, 0);
         }
-        match &item.kind {
-            ItemKind::Import(decl) => {
-                self.keyword(decl.span.start, "import");
-                if let Some(cond) = &decl.cond {
-                    self.expr(cond);
-                }
+        true
+    }
+
+    fn at_local_item(&mut self, local: &LocalDecl) {
+        // A fn-converted binding names one function; every other binder
+        // is a package const/var of the pattern's spelling.
+        let fn_form = matches!(local.init, Expr::Lambda { .. });
+        self.keyword(
+            local.span.start,
+            if fn_form {
+                "fn"
+            } else if local.mutable {
+                "var"
+            } else {
+                "const"
             },
-            ItemKind::Local(local) => {
-                let fn_form = matches!(local.init, Expr::Lambda { .. });
-                self.keyword(
-                    local.span.start,
-                    if fn_form {
-                        "fn"
-                    } else if local.mutable {
-                        "var"
-                    } else {
-                        "const"
-                    },
-                );
-                self.expr(&local.init);
-                if let Some(ty) = &local.ty {
-                    self.ty(ty);
-                }
-                let from = local
-                    .ty
-                    .as_ref()
-                    .map_or(pattern_span(&local.pat).end, |ty| ty.span().end);
-                self.op_in_gap(from, local.init.span().start, "=");
-                // A fn-converted binding names one function; every other
-                // binder is a package const/var of the pattern's spelling.
-                let (tok, mods) = if fn_form {
-                    (Tok::Function, DECLARATION)
-                } else if local.mutable {
-                    (Tok::Variable, DECLARATION)
-                } else {
-                    (Tok::Variable, DECLARATION | READONLY)
-                };
-                for span in binder_spans(&local.pat) {
-                    self.push(span, tok, mods);
-                }
-            },
-            ItemKind::Fn(f) => {
-                self.keyword(f.span.start, "fn");
-                self.push(f.name.span, Tok::Function, DECLARATION);
-                let mark = self.generics(&f.generics);
-                for param in &f.params {
-                    self.param(param);
-                }
-                let after = f.params.last().map_or(f.name.span.end, |p| p.span.end);
-                self.ret_arrow(after, f.ret.as_ref());
-                if let Some(body) = &f.body {
-                    self.block(body);
-                }
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::ExternFn(f) => {
-                self.keyword(f.span.start, "extern");
-                // the bind target's literal (H5) sits between the
-                // keywords; `fn` highlights past it when present
-                let fn_at = f.bind.as_ref().map_or(
-                    f.span.start + u32::try_from("extern".len()).expect("an offset fits u32"),
-                    |bind| bind.span.end,
-                );
-                self.keyword_after(fn_at, "fn");
-                self.push(f.name.span, Tok::Function, DECLARATION);
-                let mark = self.generics(&f.generics);
-                for param in &f.params {
-                    self.param(param);
-                }
-                let after = f.params.last().map_or(f.name.span.end, |p| p.span.end);
-                self.ret_arrow(after, f.ret.as_ref());
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Struct(s) => {
-                self.keyword(s.span.start, "struct");
-                self.push(s.name.span, Tok::Struct, DECLARATION);
-                let mark = self.generics(&s.generics);
-                for ty in &s.supers {
-                    self.ty(ty);
-                }
-                for member in &s.members {
-                    match member {
-                        StructMember::Field(field) => {
-                            for trivia in &field.doc {
-                                self.trivia(trivia);
-                            }
-                            self.push(field.name.span, Tok::Property, DECLARATION);
-                            self.ty(&field.ty);
-                        },
-                        StructMember::Deinit { span, body } => {
-                            self.keyword(span.start, "deinit");
-                            self.block(body);
-                        },
-                    }
-                }
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Enum(e) => {
-                self.keyword(e.span.start, "enum");
-                self.push(e.name.span, Tok::Enum, DECLARATION);
-                let mark = self.generics(&e.generics);
-                for ty in &e.supers {
-                    self.ty(ty);
-                }
-                for case in &e.cases {
-                    self.push(case.name.span, Tok::EnumMember, DECLARATION);
-                    match &case.payload {
-                        EnumPayload::None => {},
-                        EnumPayload::Tuple(types) => {
-                            for ty in types {
-                                self.ty(ty);
-                            }
-                        },
-                        EnumPayload::Struct(fields) => {
-                            for field in fields {
-                                for trivia in &field.doc {
-                                    self.trivia(trivia);
-                                }
-                                self.push(field.name.span, Tok::Property, DECLARATION);
-                                self.ty(&field.ty);
-                            }
-                        },
-                    }
-                }
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Tag(t) => {
-                self.keyword(t.span.start, "tag");
-                self.push(t.name.span, Tok::EnumMember, DECLARATION);
-            },
-            ItemKind::TypeAlias(a) => {
-                self.keyword(a.span.start, "type");
-                self.push(a.name.span, Tok::Type, DECLARATION);
-                let mark = self.generics(&a.generics);
-                self.op_in_gap(a.name.span.end, a.ty.span().start, "=");
-                self.ty(&a.ty);
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Trait(t) => {
-                self.keyword(t.span.start, "trait");
-                self.push(t.name.span, Tok::Interface, DECLARATION);
-                let mark = self.generics(&t.generics);
-                for ty in &t.supers {
-                    self.ty(ty);
-                }
-                self.self_depth += 1;
-                for member in &t.members {
-                    match member {
-                        TraitMember::AssocType { name, .. } => {
-                            self.push(name.span, Tok::Type, DECLARATION);
-                        },
-                        TraitMember::Fn(f) => self.member_fn(f),
-                    }
-                }
-                self.self_depth -= 1;
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Impl(imp) => {
-                self.keyword(imp.span.start, "impl");
-                let mark = self.generics(&imp.generics);
-                if let Some(trait_ref) = &imp.trait_ref {
-                    for segment in &trait_ref.path.segments {
-                        self.type_use(segment);
-                    }
-                    for arg in &trait_ref.args {
-                        self.ty(arg);
-                    }
-                    self.between(
-                        trait_ref.span.end,
-                        imp.target.span().start,
-                        "for",
-                        Tok::Keyword,
-                    );
-                }
-                self.self_depth += 1;
-                self.ty(&imp.target);
-                for f in &imp.fns {
-                    self.member_fn(f);
-                }
-                self.self_depth -= 1;
-                self.type_vars.truncate(mark);
-            },
-            ItemKind::Platform(p) => {
-                self.keyword(p.span.start, "platform");
-                self.push(p.name.span, Tok::Str, 0);
-            },
+        );
+        let from = local
+            .ty
+            .as_ref()
+            .map_or(pattern_span(&local.pat).end, |ty| ty.span().end);
+        self.op_in_gap(from, local.init.span().start, "=");
+        let (tok, mods) = if fn_form {
+            (Tok::Function, DECLARATION)
+        } else if local.mutable {
+            (Tok::Variable, DECLARATION)
+        } else {
+            (Tok::Variable, DECLARATION | READONLY)
+        };
+        for span in binder_spans(&local.pat) {
+            self.push(span, tok, mods);
         }
     }
 
-    /// The `->` of one return annotation (the only arrow inside the gap
-    /// after the last parameter) and the return type itself.
-    fn ret_arrow(&mut self, from: u32, ret: Option<&Type>) {
-        if let Some(ret) = ret {
-            self.op_in_gap(from, ret.span().start, "->");
-            self.ty(ret);
-        }
-    }
-
-    /// One trait or impl member function.
-    fn member_fn(&mut self, f: &FnDecl) {
-        for trivia in &f.doc {
-            self.trivia(trivia);
+    fn at_fn(&mut self, f: &FnDecl, member: bool) {
+        if member {
+            for trivia in &f.doc {
+                self.trivia(trivia);
+            }
         }
         self.keyword(f.span.start, "fn");
-        self.push(f.name.span, Tok::Method, DECLARATION);
-        let mark = self.generics(&f.generics);
-        for param in &f.params {
-            self.param(param);
-        }
-        let after = f.params.last().map_or(f.name.span.end, |p| p.span.end);
-        self.ret_arrow(after, f.ret.as_ref());
-        if let Some(body) = &f.body {
-            self.block(body);
-        }
-        self.type_vars.truncate(mark);
+        let (tok, mods) =
+            if member { (Tok::Method, DECLARATION) } else { (Tok::Function, DECLARATION) };
+        self.push(f.name.span, tok, mods);
     }
 
-    /// One block: its statements, then its trailing comments.
-    fn block(&mut self, block: &BlockExpr) {
-        for stmt in &block.stmts {
-            self.stmt(stmt);
+    fn at_extern_fn(&mut self, f: &FnDecl) {
+        self.keyword(f.span.start, "extern");
+        // The bind target's literal sits between the keywords; `fn`
+        // highlights past it when present.
+        let fn_at = f.bind.as_ref().map_or(
+            f.span.start + u32::try_from("extern".len()).expect("an offset fits u32"),
+            |bind| bind.span.end,
+        );
+        self.keyword_after(fn_at, "fn");
+        self.push(f.name.span, Tok::Function, DECLARATION);
+    }
+
+    fn at_struct(&mut self, s: &StructDecl) {
+        self.keyword(s.span.start, "struct");
+        self.push(s.name.span, Tok::Struct, DECLARATION);
+    }
+
+    fn at_field(&mut self, field: &FieldDecl) {
+        for trivia in &field.doc {
+            self.trivia(trivia);
         }
+        self.push(field.name.span, Tok::Property, DECLARATION);
+    }
+
+    fn at_deinit(&mut self, span: Span) {
+        self.keyword(span.start, "deinit");
+    }
+
+    fn at_enum(&mut self, e: &EnumDecl) {
+        self.keyword(e.span.start, "enum");
+        self.push(e.name.span, Tok::Enum, DECLARATION);
+    }
+
+    fn at_case(&mut self, case: &EnumCase) {
+        self.push(case.name.span, Tok::EnumMember, DECLARATION);
+    }
+
+    fn at_alias(&mut self, a: &TypeAliasDecl) {
+        self.keyword(a.span.start, "type");
+        self.push(a.name.span, Tok::Type, DECLARATION);
+        self.op_in_gap(a.name.span.end, a.ty.span().start, "=");
+    }
+
+    fn at_trait(&mut self, t: &TraitDecl) {
+        self.keyword(t.span.start, "trait");
+        self.push(t.name.span, Tok::Interface, DECLARATION);
+    }
+
+    fn at_assoc_type(&mut self, name: &Ident) {
+        self.push(name.span, Tok::Type, DECLARATION);
+    }
+
+    fn at_impl(&mut self, imp: &ImplDecl) {
+        self.keyword(imp.span.start, "impl");
+        if let Some(trait_ref) = &imp.trait_ref {
+            self.between(
+                trait_ref.span.end,
+                imp.target.span().start,
+                "for",
+                Tok::Keyword,
+            );
+        }
+    }
+
+    fn at_import(&mut self, decl: &ImportDecl) {
+        self.keyword(decl.span.start, "import");
+    }
+
+    fn at_tag(&mut self, t: &TagDecl) {
+        self.keyword(t.span.start, "tag");
+        self.push(t.name.span, Tok::EnumMember, DECLARATION);
+    }
+
+    fn at_platform(&mut self, p: &PlatformDecl) {
+        self.keyword(p.span.start, "platform");
+        self.push(p.name.span, Tok::Str, 0);
+    }
+
+    fn at_type_param(&mut self, param: &TypeParam) {
+        self.push(param.name.span, Tok::TypeParam, DECLARATION);
+    }
+
+    fn at_param(&mut self, param: &Param) {
+        match param.mode {
+            ParamMode::Borrow => {},
+            ParamMode::Mut(span) | ParamMode::Consume(span) | ParamMode::Comptime(span) => {
+                self.push(span, Tok::Keyword, 0);
+            },
+        }
+        let (tok, mods) = if param.name.name == "self" {
+            (Tok::Keyword, DECLARATION)
+        } else {
+            (Tok::Parameter, DECLARATION)
+        };
+        self.push(param.name.span, tok, mods);
+        if let Some(default) = &param.default {
+            let from = param
+                .ty
+                .as_ref()
+                .map_or(param.name.span.end, |ty| ty.span().end);
+            self.op_in_gap(from, default.span().start, "=");
+        }
+    }
+
+    fn at_ret_arrow(&mut self, from: u32, ret: &Type) {
+        self.op_in_gap(from, ret.span().start, "->");
+    }
+
+    fn at_block(&mut self, block: &BlockExpr) {
         for trivia in &block.trailing_trivia {
             self.trivia(trivia);
         }
     }
 
-    fn stmt(&mut self, stmt: &Stmt) {
+    fn at_stmt(&mut self, stmt: &Stmt) {
         for trivia in stmt
             .leading_trivia
             .iter()
@@ -747,193 +613,26 @@ impl Walker<'_> {
         {
             self.trivia(trivia);
         }
-        match &stmt.kind {
-            StmtKind::Local(local) => {
-                self.keyword(
-                    local.span.start,
-                    if local.mutable { "var" } else { "const" },
-                );
-                self.expr(&local.init);
-                if let Some(ty) = &local.ty {
-                    self.ty(ty);
-                }
-                let from = local
-                    .ty
-                    .as_ref()
-                    .map_or(pattern_span(&local.pat).end, |ty| ty.span().end);
-                self.op_in_gap(from, local.init.span().start, "=");
-                for span in binder_spans(&local.pat) {
-                    self.push(span, Tok::Variable, DECLARATION);
-                }
-            },
-            StmtKind::Expr(expr) => self.expr(expr),
+        if let StmtKind::Local(local) = &stmt.kind {
+            self.keyword(
+                local.span.start,
+                if local.mutable { "var" } else { "const" },
+            );
+            let from = local
+                .ty
+                .as_ref()
+                .map_or(pattern_span(&local.pat).end, |ty| ty.span().end);
+            self.op_in_gap(from, local.init.span().start, "=");
+            for span in binder_spans(&local.pat) {
+                self.push(span, Tok::Variable, DECLARATION);
+            }
         }
     }
 
-    /// One pattern: its binders are declarations (a punned struct-pattern
-    /// field binds), its literals color, and its constructor paths answer
-    /// through the side table like any value use.
-    fn pattern(&mut self, pat: &Pattern) {
-        match pat {
-            Pattern::Wildcard(_) => {},
-            Pattern::Binding { name, .. } => {
-                self.push(name.span, Tok::Variable, DECLARATION);
-            },
-            Pattern::Literal { span, lit } => self.literal(*span, lit),
-            Pattern::Str { span, parts } => self.string_parts(*span, parts),
-            Pattern::RawStr { span, .. } => self.push(*span, Tok::Str, 0),
-            Pattern::Path { path, .. } => {
-                for segment in &path.segments {
-                    self.value_use(segment);
-                }
-            },
-            Pattern::Call { path, args, .. } => {
-                for segment in &path.segments {
-                    self.value_use(segment);
-                }
-                for arg in args {
-                    self.pattern(arg);
-                }
-            },
-            Pattern::Struct { path, fields, .. } => {
-                for segment in &path.segments {
-                    self.value_use(segment);
-                }
-                for (field, pat) in fields {
-                    match pat {
-                        // Punning: the field name binds.
-                        None => self.push(field.span, Tok::Variable, DECLARATION),
-                        Some(pat) => {
-                            self.push(field.span, Tok::Property, 0);
-                            self.pattern(pat);
-                        },
-                    }
-                }
-            },
-            Pattern::Tuple { pats, .. } | Pattern::Or { pats, .. } => {
-                for pat in pats {
-                    self.pattern(pat);
-                }
-            },
-        }
-    }
-
-    /// One type expression.
-    fn ty(&mut self, ty: &Type) {
-        match ty {
-            Type::Path { path, args, .. } => {
-                // Multi-segment type paths are module paths the resolver
-                // refuses; only the single form resolves.
-                if path.segments.len() == 1 {
-                    self.type_use(&path.segments[0]);
-                }
-                for arg in args {
-                    self.ty(arg);
-                }
-            },
-            Type::Optional { span, inner, .. } => {
-                self.ty(inner);
-                self.between(inner.span().end, span.end, "?", Tok::Operator);
-            },
-            Type::Negation { span, inner, .. } => {
-                self.between(span.start, inner.span().start, "~", Tok::Operator);
-                self.ty(inner);
-            },
-            Type::Union { left, right, .. } => {
-                self.ty(left);
-                self.ty(right);
-                self.between(left.span().end, right.span().start, "|", Tok::Operator);
-            },
-            Type::Intersect { left, right, .. } => {
-                self.ty(left);
-                self.ty(right);
-                self.between(left.span().end, right.span().start, "&", Tok::Operator);
-            },
-            Type::Difference { left, right, .. } => {
-                self.ty(left);
-                self.ty(right);
-                self.between(left.span().end, right.span().start, "-", Tok::Operator);
-            },
-            Type::Paren { inner, .. } => self.ty(inner),
-            Type::Ptr {
-                span,
-                mutable,
-                inner,
-            } => {
-                self.between(
-                    span.start,
-                    inner.span().start,
-                    if *mutable { "*mut" } else { "*const" },
-                    Tok::Operator,
-                );
-                self.ty(inner);
-            },
-            Type::Tuple { items, .. } => {
-                for item in items {
-                    self.ty(item);
-                }
-            },
-            Type::Fn { span, params, ret } => {
-                self.keyword(span.start, "fn");
-                for param in params {
-                    if let Some(ty) = &param.ty {
-                        self.ty(ty);
-                    }
-                }
-                let after = params.last().map_or(span.start, |p| p.span.end);
-                self.ret_arrow(after, ret.as_deref());
-            },
-            // The unit type is punctuation and the opaque foreign form's
-            // name is a string argument; neither answers.
-            Type::Unit(_) | Type::Foreign { .. } => {},
-            Type::TypeKw(span) => self.keyword(span.start, "type"),
-        }
-    }
-
-    /// One bracketed constructor argument: a type spelled in expression
-    /// position, the resolver's own shapes.
-    fn ctor_type_arg(&mut self, arg: &Expr) {
-        match arg {
-            Expr::Path { path, .. } if path.segments.len() == 1 => {
-                self.type_use(&path.segments[0]);
-            },
-            Expr::Paren { inner, .. } => self.ctor_type_arg(inner),
-            Expr::Tuple { items, .. } => {
-                for item in items {
-                    self.ctor_type_arg(item);
-                }
-            },
-            Expr::FnType { ty, .. } => self.ty(ty),
-            other => self.expr(other),
-        }
-    }
-
-    fn expr(&mut self, expr: &Expr) {
+    fn at_expr(&mut self, expr: &Expr) {
         match expr {
             Expr::Literal { span, lit } => self.literal(*span, lit),
             Expr::RawStr { span, .. } => self.push(*span, Tok::Str, 0),
-            Expr::Str { span, parts } => self.string_parts(*span, parts),
-            Expr::Lambda {
-                span,
-                generics,
-                params,
-                ret,
-                body,
-                ..
-            } => {
-                let mark = self.generics(generics);
-                for param in params {
-                    self.param(param);
-                }
-                let after = params
-                    .last()
-                    .map_or(generics.last().map_or(span.start, |g| g.span.end), |p| {
-                        p.span.end
-                    });
-                self.ret_arrow(after, ret.as_ref());
-                self.expr(body);
-                self.type_vars.truncate(mark);
-            },
             Expr::Path { path, .. } => {
                 for segment in &path.segments {
                     self.value_use(segment);
@@ -947,84 +646,33 @@ impl Walker<'_> {
                     match value {
                         // Punning: the field name is a value use.
                         None => self.value_use(field),
-                        Some(expr) => {
-                            self.push(field.span, Tok::Property, 0);
-                            self.expr(expr);
-                        },
+                        Some(_) => self.push(field.span, Tok::Property, 0),
                     }
                 }
             },
-            Expr::List { items, .. } | Expr::Tuple { items, .. } => {
-                for item in items {
-                    self.expr(item);
-                }
-            },
-            Expr::Paren { inner, .. } => self.expr(inner),
-            Expr::Call {
-                callee,
-                args,
-                trailing,
-                ..
-            } => {
-                self.expr(callee);
+            Expr::Call { args, .. } => {
                 for arg in args {
                     if let Some(name) = &arg.name {
                         self.push(name.span, Tok::Parameter, 0);
                     }
-                    self.expr(&arg.value);
-                }
-                if let Some(tail) = trailing {
-                    self.expr(tail);
                 }
             },
             // Bare field access records no resolution (the checker's
             // type-directed work), so the member name stays plain.
-            Expr::Field { recv, name, .. } => {
-                self.expr(recv);
-                self.value_use(name);
-            },
-            Expr::Index { recv, index, .. } => {
-                if is_type_head(self.package, recv) {
-                    if let Expr::Path { path, .. } = recv.as_ref() {
-                        self.type_use(&path.segments[0]);
-                    }
-                    self.ctor_type_arg(index);
-                } else {
-                    self.expr(recv);
-                    self.expr(index);
-                }
-            },
-            Expr::MapApply {
-                head, key, value, ..
-            } => {
-                self.type_use(head);
-                self.ctor_type_arg(key);
-                self.ctor_type_arg(value);
-            },
-            Expr::FnType { ty, .. } => self.ty(ty),
-            Expr::Try { span, expr } => {
-                self.expr(expr);
-                self.between(expr.span().end, span.end, "?", Tok::Operator);
-            },
-            Expr::Unary { span, op, expr } => {
-                self.between(
-                    span.start,
-                    expr.span().start,
-                    unary_spelling(*op),
-                    Tok::Operator,
-                );
-                self.expr(expr);
-            },
+            Expr::Field { name, .. } => self.value_use(name),
+            Expr::Try { span, expr } => self.between(expr.span().end, span.end, "?", Tok::Operator),
+            Expr::Unary { span, op, expr } => self.between(
+                span.start,
+                expr.span().start,
+                unary_spelling(*op),
+                Tok::Operator,
+            ),
             Expr::Is { expr, ty, .. } => {
-                self.expr(expr);
                 self.between(expr.span().end, ty.span().start, "is", Tok::Keyword);
-                self.ty(ty);
             },
             Expr::Binary {
                 op, left, right, ..
             } => {
-                self.expr(left);
-                self.expr(right);
                 let (text, tok) = binary_spelling(*op);
                 self.between(left.span().end, right.span().start, text, tok);
             },
@@ -1033,103 +681,159 @@ impl Walker<'_> {
                 start,
                 end,
                 ..
-            } => {
-                self.expr(start);
-                self.expr(end);
-                self.between(
-                    start.span().end,
-                    end.span().start,
-                    if *inclusive { "..=" } else { ".." },
-                    Tok::Operator,
-                );
-            },
+            } => self.between(
+                start.span().end,
+                end.span().start,
+                if *inclusive { "..=" } else { ".." },
+                Tok::Operator,
+            ),
             Expr::Assign {
                 op, left, right, ..
-            } => {
-                self.expr(left);
-                self.expr(right);
-                self.between(
-                    left.span().end,
-                    right.span().start,
-                    assign_spelling(*op),
-                    Tok::Operator,
-                );
-            },
+            } => self.between(
+                left.span().end,
+                right.span().start,
+                assign_spelling(*op),
+                Tok::Operator,
+            ),
             Expr::If {
-                span,
-                cond,
-                then,
-                else_,
-                ..
+                span, then, else_, ..
             } => {
                 self.keyword(span.start, "if");
-                self.expr(cond);
-                self.block(then);
                 if let Some(else_expr) = else_ {
                     self.between(then.span.end, else_expr.span().start, "else", Tok::Keyword);
-                    self.expr(else_expr);
                 }
             },
-            Expr::Match {
-                span,
-                scrutinee,
-                arms,
-                ..
-            } => {
-                self.keyword(span.start, "match");
-                self.expr(scrutinee);
-                for arm in arms {
-                    self.pattern(&arm.pat);
-                    if let Some(ann) = &arm.ann {
-                        self.ty(ann);
-                    }
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard);
-                    }
-                    self.expr(&arm.body);
-                }
-            },
-            Expr::While {
-                span, cond, body, ..
-            } => {
-                self.keyword(span.start, "while");
-                self.expr(cond);
-                self.block(body);
-            },
+            Expr::Match { span, .. } => self.keyword(span.start, "match"),
+            Expr::While { span, .. } => self.keyword(span.start, "while"),
             Expr::For {
-                span,
-                pat,
-                iter,
-                body,
-                ..
+                span, pat, iter, ..
             } => {
                 self.keyword(span.start, "for");
-                self.expr(iter);
                 self.between(pattern_span(pat).end, iter.span().start, "in", Tok::Keyword);
-                self.pattern(pat);
-                self.expr(body);
             },
-            Expr::Return { span, expr } => {
-                self.keyword(span.start, "return");
-                if let Some(expr) = expr {
-                    self.expr(expr);
+            Expr::Return { span, .. } => self.keyword(span.start, "return"),
+            Expr::Break(span) | Expr::Continue(span) => self.push(*span, Tok::Keyword, 0),
+            Expr::Nursery { span, .. } => self.keyword(span.start, "nursery"),
+            Expr::Spawn { span, .. } => self.keyword(span.start, "spawn"),
+            Expr::Defer { span, .. } => self.keyword(span.start, "defer"),
+            Expr::Lambda { .. }
+            | Expr::Index { .. }
+            | Expr::MapApply { .. }
+            | Expr::List { .. }
+            | Expr::Tuple { .. }
+            | Expr::Paren { .. }
+            | Expr::Str { .. }
+            | Expr::FnType { .. }
+            | Expr::Block(_) => {},
+        }
+    }
+
+    /// One pattern: its binders are declarations (a punned struct-pattern
+    /// field binds), its literals color, and its constructor paths answer
+    /// through the side table like any value use.
+    /// One pattern: its binders are declarations (a punned struct-pattern
+    /// field binds), its literals color, and its constructor paths answer
+    /// through the side table like any value use.
+    fn at_pattern(&mut self, pat: &Pattern) {
+        match pat {
+            Pattern::Binding { name, .. } => self.push(name.span, Tok::Variable, DECLARATION),
+            Pattern::Literal { span, lit } => self.literal(*span, lit),
+            Pattern::RawStr { span, .. } => self.push(*span, Tok::Str, 0),
+            Pattern::Path { path, .. } | Pattern::Call { path, .. } => {
+                for segment in &path.segments {
+                    self.value_use(segment);
                 }
             },
-            Expr::Break(span) | Expr::Continue(span) => self.push(*span, Tok::Keyword, 0),
-            Expr::Nursery { span, body, .. } => {
-                self.keyword(span.start, "nursery");
-                self.block(body);
+            Pattern::Struct { path, fields, .. } => {
+                for segment in &path.segments {
+                    self.value_use(segment);
+                }
+                for (field, pat) in fields {
+                    match pat {
+                        // Punning: the field name binds.
+                        None => self.push(field.span, Tok::Variable, DECLARATION),
+                        Some(_) => self.push(field.span, Tok::Property, 0),
+                    }
+                }
             },
-            Expr::Spawn { span, body, .. } => {
-                self.keyword(span.start, "spawn");
-                self.block(body);
-            },
-            Expr::Defer { span, body, .. } => {
-                self.keyword(span.start, "defer");
-                self.block(body);
-            },
-            Expr::Block(block) => self.block(block),
+            Pattern::Wildcard(_)
+            | Pattern::Str { .. }
+            | Pattern::Tuple { .. }
+            | Pattern::Or { .. } => {},
         }
+    }
+
+    fn at_str(&mut self, span: Span, _parts: &[StrPart], holed: bool) {
+        // A literal without holes is one token over its whole span
+        // (quotes included).
+        if !holed {
+            self.push(span, Tok::Str, 0);
+        }
+    }
+
+    fn at_str_text(&mut self, span: Span, holed: bool) {
+        if holed {
+            self.push(span, Tok::Str, 0);
+        }
+    }
+
+    fn at_str_ident(&mut self, name: &Ident, holed: bool) {
+        if holed {
+            self.value_use(name);
+        }
+    }
+
+    /// One type expression's own surface.
+    fn at_type(&mut self, ty: &Type, scopes: &TypeScopes) {
+        match ty {
+            Type::Path { path, .. } => {
+                // Multi-segment type paths are module paths the resolver
+                // refuses; only the single form resolves.
+                if path.segments.len() == 1 {
+                    self.type_use(&path.segments[0], scopes);
+                }
+            },
+            Type::Optional { span, inner, .. } => {
+                self.between(inner.span().end, span.end, "?", Tok::Operator);
+            },
+            Type::Negation { span, inner, .. } => {
+                self.between(span.start, inner.span().start, "~", Tok::Operator);
+            },
+            Type::Union { left, right, .. } => {
+                self.between(left.span().end, right.span().start, "|", Tok::Operator);
+            },
+            Type::Intersect { left, right, .. } => {
+                self.between(left.span().end, right.span().start, "&", Tok::Operator);
+            },
+            Type::Difference { left, right, .. } => {
+                self.between(left.span().end, right.span().start, "-", Tok::Operator);
+            },
+            Type::Fn { span, params, ret } => {
+                self.keyword(span.start, "fn");
+                let after = params.last().map_or(span.start, |p| p.span.end);
+                if let Some(ret) = ret {
+                    self.op_in_gap(after, ret.span().start, "->");
+                }
+            },
+            Type::Ptr {
+                span,
+                mutable,
+                inner,
+            } => self.between(
+                span.start,
+                inner.span().start,
+                if *mutable { "*mut" } else { "*const" },
+                Tok::Operator,
+            ),
+            Type::TypeKw(span) => self.keyword(span.start, "type"),
+            // The unit type is punctuation and the opaque foreign form's
+            // name is a string argument; neither answers.
+            Type::Unit(_) | Type::Paren { .. } | Type::Tuple { .. } | Type::Foreign { .. } => {},
+        }
+    }
+
+    fn at_type_name(&mut self, ident: &Ident, scopes: &TypeScopes) {
+        self.type_use(ident, scopes);
     }
 }
 

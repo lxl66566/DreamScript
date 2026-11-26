@@ -1,0 +1,80 @@
+// purpose: the fsys path round's lowering end to end — the three path
+// natives over the io_err union the ambient owns (the fixture declaring
+// the taxonomy's tags itself, the no-ambient discipline), each failure
+// discriminant landing on the io_err member the error class names, so
+// match, ?, and the .err handler extract real members: mkdir's
+// single-level create (already_exists the branchable outcome), remove's
+// one-entry removal (a file, then the emptied directory, the missing
+// path answering not_found), and fs_size's byte count. A handled
+// failure neither prints nor halts.
+
+tag int
+tag string
+tag bool
+
+tag not_found
+tag permission_denied
+tag already_exists
+tag timed_out
+tag unexpected_eof
+tag io_other { msg: string }
+type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+
+extern fn mkdir (dir: string) -> () | io_err
+extern fn remove (path: string) -> () | io_err
+extern fn fs_size (path: string) -> int | io_err
+extern fn write_file (path: string, contents: string) -> ()
+
+// The mkdir state: 0 over the fresh path (the created unit member), 1
+// over an existing entry, the other classes naming their own arms.
+fn mkdir_state (dir: string) -> int {
+  const cell = mkdir(dir)
+  match cell {
+    already_exists => 1,
+    not_found => 2,
+    permission_denied => 3,
+    timed_out => 4,
+    unexpected_eof => 5,
+    io_other { msg } => 6,
+    made => 0,
+  }
+}
+
+// The remove state: 0 over the removed entry, 1 over a missing path.
+fn remove_state (path: string) -> int {
+  const cell = remove(path)
+  match cell {
+    not_found => 1,
+    permission_denied => 2,
+    already_exists => 3,
+    timed_out => 4,
+    unexpected_eof => 5,
+    io_other { msg } => 6,
+    gone => 0,
+  }
+}
+
+// The full cycle over one directory: the create, the file inside it,
+// the byte count, the file's removal, the emptied directory's, and the
+// missing path's not_found read back through fs_size.
+fn cycle (dir: string, file: string) -> bool | io_err {
+  const made = mkdir(dir)?
+  write_file(file, "abcde")
+  const size = fs_size(file)?
+  const dropped = remove(file)?
+  const gone = remove(dir)?
+  const back = fs_size(file)
+  match back {
+    not_found => size == 5,
+    permission_denied => false,
+    already_exists => false,
+    timed_out => false,
+    unexpected_eof => false,
+    io_other { msg } => false,
+    stale => false,
+  }
+}
+
+fn main (dir: string, file: string) -> bool {
+  cycle(dir, file).err((_: io_err) => false)
+}

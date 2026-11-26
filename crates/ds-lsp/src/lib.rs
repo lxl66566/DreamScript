@@ -133,6 +133,7 @@ mod completion;
 mod convert;
 mod server;
 mod tokens;
+mod walk;
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},

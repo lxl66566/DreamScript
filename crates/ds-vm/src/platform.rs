@@ -40,7 +40,8 @@ pub enum Capability {
     /// The printing surface: `println`, `print`, the stderr twins
     /// `eprintln`/`eprint`, and the stdin read `read_line`.
     Console,
-    /// The file surface: the readers, writers, and `fs_list`.
+    /// The file surface: the readers, writers, `fs_list`, and the path
+    /// round (`mkdir`, `remove`, `fs_size`) beside the handle face.
     Fsys,
     /// The TCP surface: connect/send/recv/close, the listener face
     /// (listen/accept/listener-close), `http_get`.
@@ -198,9 +199,18 @@ pub const OP_NET_LOCAL_ADDR: u32 = 37;
 /// answers the accepted connection's handle word — the raw seam
 /// behind the ambient's total `accept_tls`).
 pub const OP_NET_ACCEPT_TLS: u32 = 38;
+/// `mkdir`: fsys (creates one directory, a single level; the io error
+/// class answers the fallible span's failure side).
+pub const OP_MKDIR: u32 = 39;
+/// `remove`: fsys (removes one entry — a file or link over
+/// `remove_file`, a directory over the empty-only `remove_dir`).
+pub const OP_REMOVE: u32 = 40;
+/// `fs_size`: fsys (the entry's byte count, `file_size`'s fallible
+/// form).
+pub const OP_FS_SIZE: u32 = 41;
 
 /// The world-call ABI's width: the fixed op table's length.
-pub const OP_COUNT: u32 = 39;
+pub const OP_COUNT: u32 = 42;
 
 /// One op of the fixed table: its call name, owning capability,
 /// signature, result span, and body.
@@ -215,7 +225,7 @@ struct Op {
 /// The fixed op table, densely indexed: the platform ABI both the
 /// lowering's world natives and the installed platform serve. The
 /// indices are contract (pool FuncRefs address them positionally); the
-/// fsys five and net five each answer the two-word platform span.
+/// fallible fsys and net ops each answer the two-word platform span.
 #[rustfmt::skip]
 const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "println",     capability: Capability::Console, params: &[SlotType::Ref],        result_words: 1, func: crate::native::println_fn },
@@ -257,6 +267,9 @@ const OPS: [Op; OP_COUNT as usize] = [
     Op { name: "proc_try_wait", capability: Capability::Proc, params: &[SlotType::I64], result_words: 2, func: crate::proc::proc_try_wait_fn },
     Op { name: "net_local_addr", capability: Capability::Net, params: &[SlotType::I64], result_words: 1, func: net::net_local_addr_fn },
     Op { name: "net_accept_tls", capability: Capability::Tls, params: &[SlotType::I64], result_words: 2, func: crate::tls::net_accept_tls_fn },
+    Op { name: "mkdir",       capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::mkdir_fn },
+    Op { name: "remove",      capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::remove_fn },
+    Op { name: "fs_size",     capability: Capability::Fsys,    params: &[SlotType::Ref],        result_words: 2, func: crate::fsys::fs_size_fn },
 ];
 
 macro_rules! unserved {
@@ -310,6 +323,9 @@ unserved!(unserved_op_35 at 35);
 unserved!(unserved_op_36 at 36);
 unserved!(unserved_op_37 at 37);
 unserved!(unserved_op_38 at 38);
+unserved!(unserved_op_39 at 39);
+unserved!(unserved_op_40 at 40);
+unserved!(unserved_op_41 at 41);
 
 /// The reserved trap bodies, index-parallel to [`OPS`].
 #[rustfmt::skip]
@@ -323,7 +339,8 @@ const UNSERVED: [NativeFn; OP_COUNT as usize] = [
     unserved_op_24, unserved_op_25, unserved_op_26, unserved_op_27,
     unserved_op_28, unserved_op_29, unserved_op_30, unserved_op_31,
     unserved_op_32, unserved_op_33, unserved_op_34, unserved_op_35,
-    unserved_op_36, unserved_op_37, unserved_op_38,
+    unserved_op_36, unserved_op_37, unserved_op_38, unserved_op_39,
+    unserved_op_40, unserved_op_41,
 ];
 
 /// An installed platform handler: the world surface one named platform
@@ -487,6 +504,12 @@ mod tests {
         assert_eq!(OPS[OP_NET_LOCAL_ADDR as usize].capability, Capability::Net);
         assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].name, "net_accept_tls");
         assert_eq!(OPS[OP_NET_ACCEPT_TLS as usize].capability, Capability::Tls);
+        assert_eq!(OPS[OP_MKDIR as usize].name, "mkdir");
+        assert_eq!(OPS[OP_MKDIR as usize].capability, Capability::Fsys);
+        assert_eq!(OPS[OP_REMOVE as usize].name, "remove");
+        assert_eq!(OPS[OP_REMOVE as usize].capability, Capability::Fsys);
+        assert_eq!(OPS[OP_FS_SIZE as usize].name, "fs_size");
+        assert_eq!(OPS[OP_FS_SIZE as usize].capability, Capability::Fsys);
         assert_eq!(
             OPS[OP_NET_LISTENER_CLOSE as usize].capability,
             Capability::Net
@@ -544,6 +567,9 @@ mod tests {
             OP_OPEN_FILE,
             OP_READ_RAW,
             OP_CLOSE_RAW,
+            OP_MKDIR,
+            OP_REMOVE,
+            OP_FS_SIZE,
         ] {
             assert!(!console.serves(index), "a console platform refuses fsys");
         }
@@ -638,6 +664,9 @@ mod tests {
             OP_PROC_CLOSE_IN,
             OP_PROC_READ_ERR,
             OP_PROC_TRY_WAIT,
+            OP_MKDIR,
+            OP_REMOVE,
+            OP_FS_SIZE,
         ] {
             assert!(
                 !embed.serves(index),

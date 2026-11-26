@@ -45,28 +45,44 @@ const RESERVED_MODULES: [&str; 2] = ["builtin", "std"];
 pub(crate) const HOST_FILE: &str = "$host.ds";
 
 /// The host provision's text: the `die` and `exit` spellings'
-/// declarations, `pub` like every ambient face `[G4]` because the
-/// member's names are the host's surface to the entry files, not a
-/// private one. `die` routes to the builtin core's bare trap primitive
-/// (the 2026-11-17 split); `exit` routes to the proc capability's
-/// deliberate-status seam (the CLI process surface, 2026-11-21) — what
-/// either prints and which exit code follows is this host's own policy.
+/// declarations plus the fsys path round's — `mkdir` (one directory,
+/// a single level), `remove` (one entry, whatever it is), and
+/// `fs_size` (the entry's byte count, `file_size`'s fallible form) —
+/// `pub` like every ambient face `[G4]` because the member's names are
+/// the host's surface to the entry files, not a private one. `die`
+/// routes to the builtin core's bare trap primitive (the 2026-11-17
+/// split); `exit` routes to the proc capability's deliberate-status
+/// seam (the CLI process surface, 2026-11-21) — what either prints and
+/// which exit code follows is this host's own policy. The path round's
+/// members answer the io_err union the ambient owns (the file face's
+/// own failure taxonomy), each platform failure landing on its class,
+/// so `?`, the `.err` handler, and match extract a real member;
+/// un-provisioned compiles keep the names unknown, the die split's
+/// discipline.
 pub(crate) const HOST_SOURCE: &str =
-    "pub extern fn die[t](msg: string) -> t\npub extern fn exit[t](code: int) -> t\n";
+    "pub extern fn die[t](msg: string) -> t\npub extern fn exit[t](code: int) -> t\npub extern fn \
+     mkdir(path: string) -> () | io_err\npub extern fn remove(path: string) -> () | io_err\npub \
+     extern fn fs_size(path: string) -> int | io_err\n";
 
 /// The entry session's declared rows: the ambient's table plus the die
-/// and exit spellings' `trap` rows — the host's own declarations, so
-/// the rows ride with them (a declared row is a lower bound; trap alone
-/// never fences or refuses the pooled bodies).
+/// and exit spellings' trap rows and the fsys path round's error|world
+/// rows — the host's own declarations, so the rows ride with them (a
+/// declared row is a lower bound; trap alone never fences or refuses
+/// the pooled bodies).
 static SESSION_ROWS: LazyLock<DeclaredRows> = LazyLock::new(|| {
+    let world = EffectRow::of(Effect::World);
+    let error = EffectRow::of(Effect::Error);
     ds_stdlib::declared_rows()
         .clone()
         .with("die", EffectRow::of(Effect::Trap))
         .with("exit", EffectRow::of(Effect::Trap))
+        .with("mkdir", error | world)
+        .with("remove", error | world)
+        .with("fs_size", error | world)
 });
 
 /// The entry session's rows when the ambient serves: the host member's
-/// die row beside the ambient's table.
+/// rows beside the ambient's table.
 pub(crate) fn session_rows() -> &'static DeclaredRows {
     &SESSION_ROWS
 }

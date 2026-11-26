@@ -13,13 +13,12 @@
 //! empty type — the ordinary scope completion serves the position and
 //! nothing member-specific is guessed.
 //!
-//! Type positions are a walk over the file's parse tree mirroring the
-//! resolver's type-scope pushes: every [`ds_parse::Type`] node is a type
-//! position, the generic-argument brackets of a constructor application
-//! in expression position (`list[t]`) included, and the answer lists the
-//! enclosing declarations' type variables (innermost first, `Self` inside
-//! impl and trait member regions) ahead of the type-namespace names the
-//! scope-index reports visible.
+//! Type positions answer through the shared scope walk: every type
+//! node is one, the generic-argument brackets of a constructor
+//! application in expression position (`list[t]`) included, and the
+//! answer lists the enclosing declarations' type variables (innermost
+//! first, `Self` inside impl and trait member regions) ahead of the
+//! type-namespace names the scope-index reports visible.
 //!
 //! The skeletons are the fixed shapes the grammar's own spellings make
 //! unambiguous, and the grammar decides where each one parses, by probe:
@@ -33,14 +32,14 @@
 
 use ds_check::{Analyzed, DefKind, MethodOwner, Package, ScopeEntry, ScopeKind, Val};
 use ds_diag::{FileId, Span};
-use ds_parse::{
-    Ast, BlockExpr, EnumPayload, Expr, FnDecl, Item, ItemKind, Stmt, StmtKind, StructMember,
-    TraitMember, Type, TypeParam,
-};
+use ds_parse::{Ast, Expr, Type};
 use rustc_hash::FxHashSet;
 use tower_lsp::lsp_types as lsp;
 
-use crate::convert;
+use crate::{
+    convert,
+    walk::{TypeScopes, Visit, Walk},
+};
 
 /// Whether one byte is an identifier character of the scan-back (ASCII
 /// letters, digits, underscore, and every non-ASCII byte, so a multibyte
@@ -223,381 +222,61 @@ pub(crate) struct TypeVars {
     pub self_in_scope: bool,
 }
 
-/// Walks the file's parse tree mirroring the resolver's type-scope pushes
-/// and answers the type variables in scope at one offset, `None` when the
-/// offset sits in no type position.
+/// Walks the file's parse tree over the shared scope walk and answers
+/// the type variables in scope at one offset, `None` when the offset
+/// sits in no type position.
 pub(crate) fn type_vars(ast: &Ast, package: &Package, file: FileId, at: u32) -> Option<TypeVars> {
-    let mut walker = Walker {
+    let mut visitor = TypePos {
         package,
         file,
         at,
         found: None,
-        vars: Vec::new(),
-        self_depth: 0,
     };
-    for block in &ast.blocks {
-        for item in &block.items {
-            walker.item(item);
-        }
-    }
-    walker.found
+    Walk::new(&mut visitor).root(ast);
+    visitor.found
 }
 
-/// The type-position walk. Scopes push and pop exactly where the
-/// resolver's do, so the variables in scope at a covered type node are
-/// the ones its resolution would see.
-struct Walker<'a> {
+/// The completion visitor over the shared walk: a type position is the
+/// first covering node the walk enters, carrying the scope snapshot it
+/// entered with.
+struct TypePos<'a> {
     package: &'a Package,
     file: FileId,
     at: u32,
     found: Option<TypeVars>,
-    /// In-scope type variables, outermost declaration first (the snapshot
-    /// reverses into innermost-first).
-    vars: Vec<(String, Span)>,
-    /// Depth of active `Self` bindings.
-    self_depth: usize,
 }
 
-impl Walker<'_> {
-    /// Whether the walked position sits inside `span` (inclusive at both
-    /// ends: a cursor right after a typed prefix still names it).
-    fn covers(&self, span: Span) -> bool {
-        span.file == self.file && span.start <= self.at && self.at <= span.end
-    }
-
+impl TypePos<'_> {
     /// Marks one span as a type position when it covers the offset.
-    fn mark(&mut self, span: Span) {
-        if self.found.is_none() && self.covers(span) {
-            let names = self.vars.iter().rev().cloned().collect();
+    fn mark(&mut self, span: Span, scopes: &TypeScopes) {
+        if self.found.is_none()
+            && span.file == self.file
+            && span.start <= self.at
+            && self.at <= span.end
+        {
             self.found = Some(TypeVars {
-                names,
-                self_in_scope: self.self_depth > 0,
+                names: scopes.vars.iter().rev().cloned().collect(),
+                self_in_scope: scopes.self_bound,
             });
         }
     }
-
-    /// Visits one type node: a covered span marks, then the node's nested
-    /// types walk (their scope stack is the same, so marking at the
-    /// outermost covering node is exact).
-    fn ty(&mut self, ty: &Type) {
-        self.mark(ty.span());
-        match ty {
-            Type::Path { args, .. } => {
-                for arg in args {
-                    self.ty(arg);
-                }
-            },
-            Type::Optional { inner, .. }
-            | Type::Negation { inner, .. }
-            | Type::Paren { inner, .. }
-            | Type::Ptr { inner, .. } => self.ty(inner),
-            Type::Union { left, right, .. }
-            | Type::Intersect { left, right, .. }
-            | Type::Difference { left, right, .. } => {
-                self.ty(left);
-                self.ty(right);
-            },
-            Type::Tuple { items, .. } => {
-                for item in items {
-                    self.ty(item);
-                }
-            },
-            Type::Fn { params, ret, .. } => {
-                for param in params {
-                    if let Some(ty) = &param.ty {
-                        self.ty(ty);
-                    }
-                }
-                if let Some(ret) = ret {
-                    self.ty(ret);
-                }
-            },
-            Type::Unit(_) | Type::TypeKw(_) | Type::Foreign { .. } => {},
-        }
-    }
-
-    /// Binds one declaration's generic parameters, answering how many
-    /// entries to pop. The bounds resolve before the names bind, exactly
-    /// as the resolver walks them.
-    fn generics(&mut self, params: &[TypeParam]) -> usize {
-        for param in params {
-            if let Some(bound) = &param.bound {
-                self.ty(bound);
-            }
-        }
-        for param in params {
-            self.vars.push((param.name.name.clone(), param.name.span));
-        }
-        params.len()
-    }
-
-    fn pop(&mut self, count: usize) {
-        self.vars.truncate(self.vars.len() - count);
-    }
-
-    fn item(&mut self, item: &Item) {
-        match &item.kind {
-            ItemKind::Local(local) => {
-                self.expr(&local.init);
-                if let Some(ty) = &local.ty {
-                    self.ty(ty);
-                }
-            },
-            ItemKind::Fn(f) | ItemKind::ExternFn(f) => self.fn_decl(f),
-            ItemKind::Struct(s) => {
-                let n = self.generics(&s.generics);
-                for ty in &s.supers {
-                    self.ty(ty);
-                }
-                for member in &s.members {
-                    match member {
-                        StructMember::Field(field) => self.ty(&field.ty),
-                        StructMember::Deinit { body, .. } => self.block(body),
-                    }
-                }
-                self.pop(n);
-            },
-            ItemKind::Enum(e) => {
-                let n = self.generics(&e.generics);
-                for ty in &e.supers {
-                    self.ty(ty);
-                }
-                for case in &e.cases {
-                    match &case.payload {
-                        EnumPayload::None => {},
-                        EnumPayload::Tuple(types) => {
-                            for ty in types {
-                                self.ty(ty);
-                            }
-                        },
-                        EnumPayload::Struct(fields) => {
-                            for field in fields {
-                                self.ty(&field.ty);
-                            }
-                        },
-                    }
-                }
-                self.pop(n);
-            },
-            ItemKind::TypeAlias(a) => {
-                let n = self.generics(&a.generics);
-                self.ty(&a.ty);
-                self.pop(n);
-            },
-            ItemKind::Trait(t) => {
-                let n = self.generics(&t.generics);
-                for ty in &t.supers {
-                    self.ty(ty);
-                }
-                // `Self` binds over the trait's members (F2).
-                self.self_depth += 1;
-                for member in &t.members {
-                    if let TraitMember::Fn(f) = member {
-                        self.fn_decl(f);
-                    }
-                }
-                self.self_depth -= 1;
-                self.pop(n);
-            },
-            ItemKind::Impl(imp) => {
-                let n = self.generics(&imp.generics);
-                if let Some(trait_ref) = &imp.trait_ref {
-                    for arg in &trait_ref.args {
-                        self.ty(arg);
-                    }
-                }
-                // `Self` binds over the target and the members (F2).
-                self.self_depth += 1;
-                self.ty(&imp.target);
-                for f in &imp.fns {
-                    self.fn_decl(f);
-                }
-                self.self_depth -= 1;
-                self.pop(n);
-            },
-            ItemKind::Import(_) | ItemKind::Tag(_) | ItemKind::Platform(_) => {},
-        }
-    }
-
-    fn fn_decl(&mut self, f: &FnDecl) {
-        let n = self.generics(&f.generics);
-        for param in &f.params {
-            if let Some(ty) = &param.ty {
-                self.ty(ty);
-            }
-            if let Some(default) = &param.default {
-                self.expr(default);
-            }
-        }
-        if let Some(ret) = &f.ret {
-            self.ty(ret);
-        }
-        if let Some(body) = &f.body {
-            self.block(body);
-        }
-        self.pop(n);
-    }
-
-    fn block(&mut self, block: &BlockExpr) {
-        for stmt in &block.stmts {
-            self.stmt(stmt);
-        }
-    }
-
-    fn stmt(&mut self, stmt: &Stmt) {
-        match &stmt.kind {
-            StmtKind::Local(local) => {
-                self.expr(&local.init);
-                if let Some(ty) = &local.ty {
-                    self.ty(ty);
-                }
-            },
-            StmtKind::Expr(expr) => self.expr(expr),
-        }
-    }
-
-    fn expr(&mut self, expr: &Expr) {
-        match expr {
-            Expr::Literal { .. }
-            | Expr::RawStr { .. }
-            | Expr::Path { .. }
-            | Expr::Break(_)
-            | Expr::Continue(_) => {},
-            Expr::Str { parts, .. } => {
-                for part in parts {
-                    if let ds_parse::StrPart::Expr { expr, .. } = part {
-                        self.expr(expr);
-                    }
-                }
-            },
-            Expr::Lambda {
-                generics,
-                params,
-                ret,
-                body,
-                ..
-            } => {
-                let n = self.generics(generics);
-                for param in params {
-                    if let Some(ty) = &param.ty {
-                        self.ty(ty);
-                    }
-                    if let Some(default) = &param.default {
-                        self.expr(default);
-                    }
-                }
-                if let Some(ret) = ret {
-                    self.ty(ret);
-                }
-                self.expr(body);
-                self.pop(n);
-            },
-            // A fn type spelled in expression position is a type node.
-            Expr::FnType { ty, .. } => self.ty(ty),
-            Expr::Is { expr, ty, .. } => {
-                self.expr(expr);
-                self.ty(ty);
-            },
-            // A constructor application's argument brackets are a type
-            // position when the head names a package type (the resolver's
-            // ctor-apply rule, F9); the map constructor is pinned to the
-            // `map` head by the grammar.
-            Expr::Index { recv, index, .. } => {
-                self.expr(recv);
-                if is_type_head(self.package, recv) {
-                    self.mark(index.span());
-                }
-            },
-            Expr::MapApply { key, value, .. } => {
-                self.mark(key.span());
-                self.mark(value.span());
-            },
-            Expr::Struct { fields, .. } => {
-                for (_, value) in fields {
-                    if let Some(expr) = value {
-                        self.expr(expr);
-                    }
-                }
-            },
-            Expr::List { items, .. } | Expr::Tuple { items, .. } => {
-                for item in items {
-                    self.expr(item);
-                }
-            },
-            Expr::Paren { inner, .. }
-            | Expr::Try { expr: inner, .. }
-            | Expr::Unary { expr: inner, .. } => self.expr(inner),
-            Expr::Call {
-                callee,
-                args,
-                trailing,
-                ..
-            } => {
-                self.expr(callee);
-                for arg in args {
-                    self.expr(&arg.value);
-                }
-                if let Some(tail) = trailing {
-                    self.expr(tail);
-                }
-            },
-            Expr::Field { recv, .. } => self.expr(recv),
-            Expr::Binary { left, right, .. }
-            | Expr::Range {
-                start: left,
-                end: right,
-                ..
-            }
-            | Expr::Assign { left, right, .. } => {
-                self.expr(left);
-                self.expr(right);
-            },
-            Expr::If {
-                cond, then, else_, ..
-            } => {
-                self.expr(cond);
-                self.block(then);
-                if let Some(else_expr) = else_ {
-                    self.expr(else_expr);
-                }
-            },
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.expr(scrutinee);
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard);
-                    }
-                    self.expr(&arm.body);
-                }
-            },
-            Expr::While { cond, body, .. } => {
-                self.expr(cond);
-                self.block(body);
-            },
-            Expr::For { iter, body, .. } => {
-                self.expr(iter);
-                self.expr(body);
-            },
-            Expr::Return { expr, .. } => {
-                if let Some(expr) = expr {
-                    self.expr(expr);
-                }
-            },
-            Expr::Nursery { body, .. } | Expr::Spawn { body, .. } | Expr::Defer { body, .. } => {
-                self.block(body);
-            },
-            Expr::Block(block) => self.block(block),
-        }
-    }
 }
 
-/// Whether one expression is a bare path naming a package type — the
-/// head a constructor application resolves through (F9).
-pub(crate) fn is_type_head(package: &Package, recv: &Expr) -> bool {
-    matches!(recv, Expr::Path { path, .. } if path.segments.len() == 1
-        && package.lookup_type(&path.segments[0].name).is_some())
+impl Visit for TypePos<'_> {
+    fn package(&self) -> &Package {
+        self.package
+    }
+
+    /// Every type node is a type position.
+    fn at_type(&mut self, ty: &Type, scopes: &TypeScopes) {
+        self.mark(ty.span(), scopes);
+    }
+
+    /// A bracketed constructor argument is a type position, whatever its
+    /// inner shape.
+    fn at_ctor_arg(&mut self, arg: &Expr, scopes: &TypeScopes) {
+        self.mark(arg.span(), scopes);
+    }
 }
 
 /// Whether one scope kind declares into the type namespace (F9): the
@@ -872,6 +551,22 @@ mod tests {
             type_vars(&ast, &package, file, at).is_none(),
             "an undeclared head's brackets stay an expression position"
         );
+    }
+
+    /// A match arm's binding annotation is a type position (the shared
+    /// walk carries the resolver's own arm shape): the cursor inside one
+    /// answers the enclosing declaration's type variable.
+    #[test]
+    fn match_arm_annotations_answer_type_variables() {
+        let source = "fn pick[t](v: t) -> t {\n  match v {\n    b: t? => b,\n  }\n}\n";
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("probe.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the probe parses");
+        let (package, ..) = ds_check::resolve_package(std::slice::from_ref(&ast));
+        let at = u32::try_from(source.find("t?").expect("the annotation is placed") + 1)
+            .expect("an offset fits u32");
+        let vars = type_vars(&ast, &package, file, at).expect("the annotation is a type position");
+        assert_eq!(vars.names.first().map(|(name, _)| name.as_str()), Some("t"));
     }
 
     /// Resolves one snippet's syntax to plain surface: every placeholder
