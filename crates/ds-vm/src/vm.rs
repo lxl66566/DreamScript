@@ -63,7 +63,7 @@ use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use ds_abi::{
@@ -1108,6 +1108,29 @@ pub(crate) enum ExecutorStep {
     /// 2026-11-24 signal ruling): nothing live remains, the drive
     /// ends, and the host owns the outcome.
     Shutdown,
+    /// The bounded wait spent its budget: nothing is runnable and the
+    /// parked waits still stand, so a pumping host keeps its own
+    /// waits and pumps again — a blocking drive never answers this
+    /// (its wait loops until a wake).
+    Idle,
+}
+
+/// How one bounded executor-seam drive ended for its host: the host
+/// fiber's own answer (it completed, or parked with the host as its
+/// resumer — the answer span the drive ends with), or a world park the
+/// bounded wait could not resolve inside its budget — the wait stands
+/// registered, and the host keeps its own waits until its next pump.
+#[derive(Debug)]
+pub enum IoDrive {
+    /// The drive ended the way [`Vm::resume_fiber`] ends one: the whole
+    /// answer span rides here (a suspended fiber's the bounce tag
+    /// alone).
+    Answer(FrameAnswer),
+    /// A world park stands and the budget spent: the host fiber (or a
+    /// fiber under it) waits on the world, and the seam needs the
+    /// host's next pump to advance — a WorldParked fiber is the
+    /// scheduler's alone, never entered by an ordinary resume.
+    Parked,
 }
 
 /// The eager pass's outcome over one started child.
@@ -3042,7 +3065,7 @@ impl Vm {
     /// Bounds every blocking net native's wait (connect, read, write):
     /// the default is 3 seconds; a hostile host yields `net_err`, never a
     /// hung interpreter.
-    pub fn set_net_timeout(&mut self, timeout: std::time::Duration) {
+    pub fn set_net_timeout(&mut self, timeout: Duration) {
         self.out.set_net_timeout(timeout);
     }
 
@@ -3052,7 +3075,7 @@ impl Vm {
     /// holding only the wake guarantee. A host wanting the net face's
     /// tight bounded discipline sets its own bound, the deadline then
     /// answering the timeout span.
-    pub fn set_proc_timeout(&mut self, timeout: std::time::Duration) {
+    pub fn set_proc_timeout(&mut self, timeout: Duration) {
         self.out.set_proc_timeout(timeout);
     }
 
@@ -3912,7 +3935,7 @@ impl Vm {
                     if let ParkKind::World(wait) = req.kind {
                         self.register_wait(req.fiber, wait);
                     }
-                    match self.executor_continue(fiber) {
+                    match self.executor_continue(fiber, None) {
                         Ok(ExecutorStep::Continue((a, p))) => {
                             active = a;
                             pc = p;
@@ -3927,6 +3950,11 @@ impl Vm {
                         Ok(ExecutorStep::Shutdown) => {
                             self.host_release();
                             break Err((Trap::Shutdown, pc));
+                        },
+                        // the blocking drive never idles: its wait loops
+                        // until a wake
+                        Ok(ExecutorStep::Idle) => {
+                            unreachable!("the blocking executor wait never idles")
                         },
                         Err(trap) => break Err((trap, pc)),
                     }
@@ -3978,6 +4006,150 @@ impl Vm {
                 self.trap_delivery(&trap);
                 Err(trap)
             },
+        }
+    }
+
+    /// [`Vm::resume_fiber`] under the executor seam: identical while no
+    /// world op parks, but a park registers its wait and — when the
+    /// wait does not resolve inside `budget` — answers
+    /// [`IoDrive::Parked`] instead of blocking the host on the reactor,
+    /// so a host with its own waits (a watch window, a prompt read)
+    /// keeps them. `None` keeps the blocking wait exactly. The parked
+    /// drive's continuation is [`Vm::pump_io`]; nothing else may enter
+    /// the parked fiber (the wait owns its wake).
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownCallee`] with module `fiber` when `fiber` is absent
+    /// or not parked at a switch point; the execution traps otherwise.
+    pub fn resume_fiber_io(
+        &mut self,
+        fiber: FiberId,
+        payload: Value,
+        budget: Option<Duration>,
+    ) -> Result<IoDrive, Trap> {
+        if !self.pool.get(fiber.index()).is_some_and(Fiber::resumable) {
+            return Err(Trap::UnknownCallee {
+                module: "fiber".into(),
+                func: fiber.0,
+            });
+        }
+        self.pool[fiber.index()].resumer = None; // the host resumes
+        // the entry switch enters the fiber directly, so its wake's
+        // run-queue entry — a woken fiber is queued AND delivered — goes
+        // with it, or the executor's wait would answer the stale entry
+        // ready forever
+        self.sched.take_ready(fiber);
+        let (active, pc) = self.switch_in(fiber, payload);
+        self.io_pump(fiber, Some((active, pc)), budget)
+    }
+
+    /// One bounded pump of the executor/wait seam for a world-parked host
+    /// drive: no entry switch (the parked fiber's wait stands — a
+    /// WorldParked fiber is the scheduler's alone), the executor drives
+    /// every woken fiber, the host's included, and `budget` bounds the
+    /// reactor wait. [`IoDrive::Answer`] lands when the host fiber ends
+    /// its drive the way [`Vm::resume_fiber`] ends one; [`IoDrive::Parked`]
+    /// answers a spent budget with the wait still standing — and, for an
+    /// idle seam (nothing runnable, nothing able to wake), at once: the
+    /// blocking drives' stall guard is the honest deadlock, a pumping
+    /// host idles instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::Shutdown`] when the host's shutdown door cut the parked
+    /// drive; the execution traps otherwise.
+    pub fn pump_io(&mut self, host: FiberId, budget: Option<Duration>) -> Result<IoDrive, Trap> {
+        if !self.sched.has_ready() && !self.sched.can_wake() {
+            return Ok(IoDrive::Parked);
+        }
+        self.io_pump(host, None, budget)
+    }
+
+    /// The drive loop behind the two IO host entries: the staged step
+    /// (an entry switch's own) runs first, then the executor until one
+    /// of them answers for the host — the host fiber's completion, its
+    /// park with the host as resumer, a spent budget, or a trap.
+    fn io_pump(
+        &mut self,
+        host: FiberId,
+        entered: Option<(Active, CodePc)>,
+        budget: Option<Duration>,
+    ) -> Result<IoDrive, Trap> {
+        let until = budget.map(|budget| Instant::now() + budget);
+        let mut step = entered;
+        loop {
+            if let Some((active, pc)) = step.take() {
+                match self.execute_host_step::<false>(active, pc, usize::MAX) {
+                    // a world park registers and the executor keeps
+                    // going inside the budget: ready siblings may run
+                    // while the wait stands
+                    Ok(DriveOutcome::WorldPark(req)) => {
+                        if let ParkKind::World(wait) = req.kind {
+                            self.register_wait(req.fiber, wait);
+                        }
+                    },
+                    Ok(DriveOutcome::Died(answer)) => {
+                        self.host_release();
+                        for value in answer.as_slice() {
+                            self.host_delivery(value);
+                        }
+                        if self.current == host {
+                            return Ok(IoDrive::Answer(answer));
+                        }
+                        // another fiber's completion crossed to the
+                        // host ledger; the seam keeps pumping
+                    },
+                    Ok(DriveOutcome::Yielded(word)) => {
+                        // the host fiber parked with the host as its
+                        // resumer: the drive's own end, its park word
+                        // crossing; any other park belongs to its own
+                        // resumer and the seam keeps pumping
+                        if self.current == host && self.pool[host.index()].resumer.is_none() {
+                            self.host_release();
+                            self.host_delivery(&word);
+                            return Ok(IoDrive::Answer(FrameAnswer::one(word)));
+                        }
+                    },
+                    Ok(DriveOutcome::Frame(_)) => {
+                        unreachable!("a host drive answers no reentry frame")
+                    },
+                    Ok(DriveOutcome::Interlock(_)) => {
+                        unreachable!("the step drains every interlock before returning")
+                    },
+                    Err((trap, at)) => {
+                        self.trap_pc = Some(at);
+                        self.host_release();
+                        self.trap_child(self.current, &trap);
+                        self.trap_delivery(&trap);
+                        return Err(trap);
+                    },
+                }
+            }
+            let remaining = until.map(|at| at.saturating_duration_since(Instant::now()));
+            match self.executor_continue(host, remaining) {
+                Ok(ExecutorStep::Continue((active, pc))) => {
+                    step = Some((active, pc));
+                },
+                Ok(ExecutorStep::HostAnswer(answer)) => {
+                    self.host_release();
+                    for value in answer.as_slice() {
+                        self.host_delivery(value);
+                    }
+                    return Ok(IoDrive::Answer(answer));
+                },
+                Ok(ExecutorStep::Shutdown) => {
+                    self.host_release();
+                    return Err(Trap::Shutdown);
+                },
+                Ok(ExecutorStep::Idle) => return Ok(IoDrive::Parked),
+                Err(trap) => {
+                    self.host_release();
+                    self.trap_child(self.current, &trap);
+                    self.trap_delivery(&trap);
+                    return Err(trap);
+                },
+            }
         }
     }
 
@@ -4685,7 +4857,7 @@ impl Vm {
             if !waiting {
                 return None;
             }
-            if !self.nurseries[frame.nursery.index()].cancelled && self.wait_world().is_err() {
+            if !self.nurseries[frame.nursery.index()].cancelled && self.wait_world(None).is_err() {
                 self.nurseries[frame.nursery.index()].cancelled = true;
             }
             frame.cursor = 0;
@@ -5649,11 +5821,19 @@ impl Vm {
         });
     }
 
+    /// Whether the scheduler holds runnable or wakeable work: the pump
+    /// entries' idle guard, so a host pumping a quiet seam idles instead
+    /// of answering the blocking drives' stall guard.
+    pub(crate) fn sched_has_work(&self) -> bool {
+        self.sched.has_ready() || self.sched.can_wake()
+    }
+
     /// Drops every wait one fiber owns (a nursery's cancel cut, a
-    /// release door): the reactor interest deregisters first — the
-    /// ruling's parked-IO cancellation — then the table row and any
-    /// staged delivery go; stale timer entries drop lazily on pop.
-    fn cancel_wait(&mut self, fiber: FiberId) {
+    /// release door, the REPL's rollback and teardown): the reactor
+    /// interest deregisters first — the ruling's parked-IO cancellation
+    /// — then the table row and any staged delivery go; stale timer
+    /// entries drop lazily on pop.
+    pub(crate) fn cancel_wait(&mut self, fiber: FiberId) {
         self.sched.deliveries.remove(&fiber);
         let tokens: Vec<u64> = self
             .sched
@@ -6167,15 +6347,21 @@ impl Vm {
     /// every standing IO wait with its own refusal span, so the program
     /// surfaces the failure through its error channel; the stall guard answers
     /// [`Trap::SchedulerDeadlock`] when nothing is runnable and
-    /// nothing can wake.
-    fn wait_world(&mut self) -> Result<(), Trap> {
+    /// nothing can wake. A `Some` budget bounds the wait: one poll (or
+    /// nap) fires whatever it armed, and a still-quiet seam answers
+    /// `Ok(false)` — the pumping host's idle signal — while `None`
+    /// loops until a wake exactly as ever.
+    fn wait_world(&mut self, budget: Option<Duration>) -> Result<bool, Trap> {
         let mut events = Vec::new();
+        // one bounded wait per call: the loop top fires what it armed
+        // and answers ready, the second quiet pass answering idle
+        let mut waited = false;
         loop {
             // the shutdown stands: nothing here may block again — the
             // callers' next pass cuts every parked fiber and answers
             // the host
             if self.shutdown {
-                return Ok(());
+                return Ok(true);
             }
             self.host_release();
             let now = Instant::now();
@@ -6185,11 +6371,15 @@ impl Vm {
                 }
             }
             if self.sched.has_ready() {
-                return Ok(());
+                return Ok(true);
             }
             if !self.sched.can_wake() {
                 return Err(Trap::SchedulerDeadlock);
             }
+            if waited && budget.is_some() {
+                return Ok(false);
+            }
+            waited = true;
             // no registered IO interest stands: the wheel alone wakes
             // the waits that are left (a sleep parks with none, and a
             // wait the reactor refused never gained one), so the
@@ -6203,7 +6393,9 @@ impl Vm {
             {
                 match self.sched.next_deadline() {
                     Some(at) => {
-                        std::thread::sleep(at.saturating_duration_since(Instant::now()));
+                        let left = at.saturating_duration_since(Instant::now());
+                        let nap = budget.map_or(left, |budget| budget.min(left));
+                        std::thread::sleep(nap);
                     },
                     None => return Err(Trap::SchedulerDeadlock),
                 }
@@ -6212,10 +6404,15 @@ impl Vm {
             let Some(mut installed) = self.reactor.take() else {
                 return Err(Trap::SchedulerDeadlock);
             };
-            let timeout = self
-                .sched
-                .next_deadline()
-                .map(|at| at.saturating_duration_since(now));
+            // the budget bounds the poll even with no deadline standing
+            // (the unbounded accept arms no wheel entry): a pumping host
+            // never blocks past its window
+            let timeout = match (self.sched.next_deadline(), budget) {
+                (Some(at), Some(budget)) => Some(budget.min(at.saturating_duration_since(now))),
+                (Some(at), None) => Some(at.saturating_duration_since(now)),
+                (None, Some(budget)) => Some(budget),
+                (None, None) => None,
+            };
             let polled = installed.driver().poll(timeout, &mut events);
             self.reactor = Some(installed);
             match polled {
@@ -6366,8 +6563,15 @@ impl Vm {
     /// the reactor. `HostAnswer` surfaces `host_fiber`'s own completion
     /// (the root drive's program answer, a resumed fiber's answer); any
     /// other completed orphan crosses to the host here and the executor
-    /// keeps going.
-    pub(crate) fn executor_continue(&mut self, host_fiber: FiberId) -> Result<ExecutorStep, Trap> {
+    /// keeps going. `budget` bounds the reactor wait (`None` keeps the
+    /// blocking wait the synchronous drives hold): a spent budget with
+    /// the waits still standing answers [`ExecutorStep::Idle`], the
+    /// pumping host's idle signal.
+    pub(crate) fn executor_continue(
+        &mut self,
+        host_fiber: FiberId,
+        budget: Option<Duration>,
+    ) -> Result<ExecutorStep, Trap> {
         loop {
             while let Some(fiber) = self.sched.pop_ready() {
                 // the executor's own children drive contained: a child's
@@ -6430,7 +6634,9 @@ impl Vm {
             if self.shutdown {
                 return Ok(ExecutorStep::Shutdown);
             }
-            self.wait_world()?;
+            if !self.wait_world(budget)? {
+                return Ok(ExecutorStep::Idle);
+            }
         }
     }
 
@@ -7140,7 +7346,7 @@ impl Vm {
                     if let ParkKind::World(wait) = req.kind {
                         self.register_wait(req.fiber, wait);
                     }
-                    match self.executor_continue(FIBER_ROOT) {
+                    match self.executor_continue(FIBER_ROOT, None) {
                         Ok(ExecutorStep::Continue((a, p))) => {
                             active = a;
                             pc = p;
@@ -7155,6 +7361,11 @@ impl Vm {
                         Ok(ExecutorStep::Shutdown) => {
                             self.host_release();
                             return Err(Trap::Shutdown);
+                        },
+                        // the blocking drive never idles: its wait loops
+                        // until a wake
+                        Ok(ExecutorStep::Idle) => {
+                            unreachable!("the blocking executor wait never idles")
                         },
                         Err(trap) => {
                             self.trap_pc = Some(pc);

@@ -53,6 +53,8 @@
 //! leaves at a text-relative last use, so a partial run cannot dec a
 //! prior binding under the frame.
 
+use std::time::{Duration, Instant};
+
 use ds_abi::{CodePc, FrameLayout, Inst, SlotType, Uop};
 use ds_mod::{Constant, FuncRefKey, Module};
 
@@ -239,6 +241,15 @@ pub enum ReplOutcome {
     /// here, and the frame is gone so the caller must rebuild before the
     /// next submission.
     Died(FrameAnswer),
+    /// The submission parked on a world op mid-drive: the wait stands
+    /// registered, the frame holds its partial run, and the drive ends
+    /// handing the host its own waits back — no answer rides here. The
+    /// host pumps [`Vm::repl_continue`] between its own waits until the
+    /// submission parks at the seam (its answer reporting then) or ends;
+    /// nothing else may enter the parked frame, and the next splice
+    /// resumes only once the drive lands (the caller's
+    /// [`Vm::repl_resume`] is the splice's own entry, never this park's).
+    WorldParked,
 }
 
 /// The pre-step state a trapped submission's rollback restores to: where
@@ -397,6 +408,10 @@ impl Vm {
     /// resolves it through the current slot).
     pub fn repl_rollback(&mut self, module: &str, func: &str, pc: CodePc) -> Result<(), Trap> {
         let (version, func_id) = self.resolve_repl_entry(module, func)?;
+        // a world-parked continuation's wait dies with the rollback: the
+        // interest deregisters and the row drops, so no later wake
+        // delivers an answer to a frame the rollback re-parked elsewhere
+        self.cancel_wait(FIBER_ROOT);
         let pre = self.repl_pre.take().unwrap_or(ReplPre {
             body: 0,
             extent: 0,
@@ -445,6 +460,9 @@ impl Vm {
     /// parked frame fires (innermost frame, drop-site order — one frame
     /// here), then the claims drain and the root resets. Idempotent.
     pub fn repl_teardown(&mut self) {
+        // an in-flight submission's wait dies with the session: no wake
+        // may deliver past the scope exit
+        self.cancel_wait(FIBER_ROOT);
         self.fire_teardown_hooks(FIBER_ROOT, &[]);
         self.drain_claims(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
@@ -616,41 +634,17 @@ impl Vm {
                     }
                     return Ok(ReplOutcome::Died(answer));
                 },
-                // a world park under the REPL drive: the wait registers
-                // and the executor's continuation answers it (the REPL
-                // installs no reactor by default, so this arm serves a
-                // reactor-installing embedder alone)
+                // a world park under the REPL drive: the wait registers,
+                // the drive's context releases, and the submission stays
+                // in flight — the host keeps its own waits (the prompt
+                // read) and pumps `repl_continue` between them until the
+                // submission parks at the seam or ends
                 Ok(DriveOutcome::WorldPark(req)) => {
                     if let crate::vm::ParkKind::World(wait) = req.kind {
                         self.register_wait(req.fiber, wait);
                     }
-                    match self.executor_continue(FIBER_ROOT) {
-                        Ok(ExecutorStep::Continue((a, p))) => {
-                            active = a;
-                            pc = p;
-                        },
-                        Ok(ExecutorStep::HostAnswer(answer)) => {
-                            self.host_release();
-                            for value in answer.as_slice() {
-                                self.host_delivery(value);
-                            }
-                            return Ok(ReplOutcome::Died(answer));
-                        },
-                        // the host's shutdown cut the parked submission:
-                        // the trap carries no decision — the REPL host
-                        // answers its own policy above
-                        Ok(ExecutorStep::Shutdown) => {
-                            self.host_release();
-                            return Err(Trap::Shutdown);
-                        },
-                        Err(trap) => {
-                            self.trap_pc = Some(pc);
-                            self.host_release();
-                            self.trap_child(self.current, &trap);
-                            self.trap_delivery(&trap);
-                            return Err(trap);
-                        },
-                    }
+                    self.host_release();
+                    return Ok(ReplOutcome::WorldParked);
                 },
                 // a host-level drive passes no boundary and answers no
                 // reentry frame
@@ -659,6 +653,103 @@ impl Vm {
                 },
                 Err((trap, at)) => {
                     self.trap_pc = Some(at);
+                    self.host_release();
+                    self.trap_child(self.current, &trap);
+                    self.trap_delivery(&trap);
+                    return Err(trap);
+                },
+            }
+        }
+    }
+
+    /// The in-flight submission's continuation: one bounded pump of the
+    /// executor/wait seam. The root's wait stands — no entry switch, a
+    /// woken fiber is the executor's to enter — and `budget` bounds the
+    /// reactor wait: [`ReplOutcome::Parked`] answers the submission's
+    /// landing at the seam (the answer reporting and the binders'
+    /// commit are the host's, exactly a drive-time landing's),
+    /// [`ReplOutcome::WorldParked`] a budget spent with the wait still
+    /// standing, [`ReplOutcome::Died`] the frame's defensive completion,
+    /// and a trap rolls back exactly a drive-time trap would (the host
+    /// calls [`Vm::repl_rollback`], which also drops the parked wait).
+    /// An idle seam (nothing runnable, nothing able to wake) answers
+    /// `WorldParked` at once — the blocking drives' stall guard is the
+    /// honest deadlock, a pumping host idles instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::Shutdown`] when the host's shutdown door cut the parked
+    /// submission; the execution traps otherwise (the caller rolls
+    /// back).
+    pub fn repl_continue(&mut self, budget: Option<Duration>) -> Result<ReplOutcome, Trap> {
+        if !self.sched_has_work() {
+            return Ok(ReplOutcome::WorldParked);
+        }
+        let until = budget.map(|budget| Instant::now() + budget);
+        let mut step: Option<(Active, CodePc)> = None;
+        loop {
+            if let Some((active, pc)) = step.take() {
+                match self.execute_host_step::<false>(active, pc, usize::MAX) {
+                    Ok(DriveOutcome::Yielded(_)) => {
+                        if let Some(answer) = self.repl_park.take() {
+                            self.host_release();
+                            return Ok(ReplOutcome::Parked(answer));
+                        }
+                        // an unmarked park left the fiber with the host
+                        // as resumer: the root re-enters at the parked
+                        // call's answer overlay and the drive continues
+                        let (next, at) =
+                            self.switch_in(FIBER_ROOT, Value::Tag(crate::native::PLATFORM_NONE));
+                        step = Some((next, at));
+                        continue;
+                    },
+                    Ok(DriveOutcome::Died(answer)) => {
+                        self.host_release();
+                        for value in answer.as_slice() {
+                            self.host_delivery(value);
+                        }
+                        return Ok(ReplOutcome::Died(answer));
+                    },
+                    Ok(DriveOutcome::WorldPark(req)) => {
+                        if let crate::vm::ParkKind::World(wait) = req.kind {
+                            self.register_wait(req.fiber, wait);
+                        }
+                        // the executor keeps going inside the budget:
+                        // ready siblings may run while the wait stands
+                    },
+                    Ok(DriveOutcome::Frame(_) | DriveOutcome::Interlock(_)) => {
+                        unreachable!("a REPL drive answers no reentry frame or interlock")
+                    },
+                    Err((trap, at)) => {
+                        self.trap_pc = Some(at);
+                        self.host_release();
+                        self.trap_child(self.current, &trap);
+                        self.trap_delivery(&trap);
+                        return Err(trap);
+                    },
+                }
+            }
+            let remaining = until.map(|at| at.saturating_duration_since(Instant::now()));
+            match self.executor_continue(FIBER_ROOT, remaining) {
+                Ok(ExecutorStep::Continue((active, pc))) => {
+                    step = Some((active, pc));
+                },
+                Ok(ExecutorStep::HostAnswer(answer)) => {
+                    self.host_release();
+                    for value in answer.as_slice() {
+                        self.host_delivery(value);
+                    }
+                    return Ok(ReplOutcome::Died(answer));
+                },
+                // the host's shutdown cut the parked submission: the
+                // trap carries no decision — the REPL host answers its
+                // own policy
+                Ok(ExecutorStep::Shutdown) => {
+                    self.host_release();
+                    return Err(Trap::Shutdown);
+                },
+                Ok(ExecutorStep::Idle) => return Ok(ReplOutcome::WorldParked),
+                Err(trap) => {
                     self.host_release();
                     self.trap_child(self.current, &trap);
                     self.trap_delivery(&trap);

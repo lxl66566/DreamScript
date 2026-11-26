@@ -243,7 +243,11 @@ fn library_name() -> &'static str {
 
 /// Compiles the fixture cdylib with the host's rustc into `dir`. Cargo
 /// sets `RUSTC` for the test binary, so a build failure is a test
-/// failure carrying rustc's own stderr — never a silent pass.
+/// failure carrying rustc's own stderr — never a silent pass. The
+/// size-pinching codegen flags keep the image a real rustc cdylib while
+/// shrinking it an order of magnitude: the truncation sweep walks every
+/// byte prefix, so the fixture's byte count is the sweep's cost, and the
+/// dynamic export tables the reader walks survive stripping untouched.
 fn build_fixture(dir: &Path) -> PathBuf {
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture_cdylib.rs");
@@ -252,6 +256,12 @@ fn build_fixture(dir: &Path) -> PathBuf {
         .arg("--edition=2024")
         .arg("--crate-type=cdylib")
         .arg("--crate-name=dsffi_fixture")
+        .arg("-C")
+        .arg("opt-level=z")
+        .arg("-C")
+        .arg("strip=symbols")
+        .arg("-C")
+        .arg("panic=abort")
         .arg(&source)
         .arg("-o")
         .arg(&out)

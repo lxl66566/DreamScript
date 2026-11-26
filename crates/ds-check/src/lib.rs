@@ -164,7 +164,8 @@ pub use atom::{AtomDecl, AtomKind, Case, Field, TraitDecl, TraitId, TypeId};
 pub use corpus::{ItemStage, Stage};
 pub use decls::{Decls, FnSig, GenericParam, ServedDecls, ServedDrift, render_type};
 pub use effects::{
-    DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedMethodRow, effects_of,
+    DeclaredRows, DefEffects, Effect, EffectRow, Effects, ServedEffectNames, ServedMethodRow,
+    effects_of,
 };
 pub use error::Error;
 pub use expr::TypeExpr;

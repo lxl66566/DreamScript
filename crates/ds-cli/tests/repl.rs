@@ -595,3 +595,108 @@ fn a_loop_rollovers_replaced_values_fire_like_a_fresh_run() {
         "the session's fired set matches the fresh run byte for byte"
     );
 }
+
+/// One line event off a piped child's stdout: a detached reader thread
+/// per pipe, so the assertions never block on a quiet pipe.
+fn line_channel(pipe: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(pipe)) {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        return;
+                    }
+                },
+                Err(_) => return,
+            }
+        }
+    });
+    rx
+}
+
+/// A parked submission wakes at the pump between the host's reads: the
+/// submission's sleep parks its frame (the session's VM installs the
+/// platform's reactor, the `ds run` precedent), the prompt returns and
+/// stays silent while the host blocks on stdin — the deadline fires
+/// with nothing pumping — and the next line's pass pumps the seam
+/// first, the expired deadline waking the parked fiber exactly `ds
+/// run`'s executor would: the submission's remaining prints land ahead
+/// of the line just read. The shape is the linux driver's own; a host
+/// without one keeps the blocking sleep twin, the submission never
+/// parking.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_sleep_submission_wakes_at_the_next_reads_pump() {
+    use std::{io::Write as _, process::Stdio, sync::mpsc::Receiver, thread, time::Duration};
+    let mut child = ds()
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the binary spawns");
+    let mut stdin = child.stdin.take().expect("stdin pipes");
+    let stdout = child.stdout.take().expect("stdout pipes");
+    let lines: Receiver<String> = line_channel(stdout);
+    let mut seen: Vec<String> = Vec::new();
+    let mut next_line = |stem: &str| {
+        let line = lines
+            .recv_timeout(Duration::from_secs(90))
+            .unwrap_or_else(|_| panic!("no `{stem}` line within 90s"));
+        seen.push(line.clone());
+        line
+    };
+    // the sleeping submission: one print before the park, one after
+    stdin
+        .write_all(b"{\nprintln(\"before\")\nsleep(200000000)\nprintln(\"after\")\n}\n")
+        .expect("the submission writes");
+    stdin.flush().expect("the submission flushes");
+    let banner = next_line("banner");
+    assert!(banner.contains("DreamScript repl"), "the banner: {banner}");
+    assert!(
+        next_line("before").contains("before"),
+        "the submission prints before the park"
+    );
+    // the sleep's 200ms deadline fires while the host blocks on stdin:
+    // no pump runs, so the parked submission's tail cannot print
+    thread::sleep(Duration::from_millis(600));
+    assert!(
+        lines.try_recv().is_err(),
+        "the parked submission stays silent while the host blocks on stdin"
+    );
+    // the read's pass pumps the seam first: the expired deadline wakes
+    // the submission, its tail landing ahead of the line just read
+    stdin.write_all(b"1 + 1\n").expect("the line writes");
+    stdin.flush().expect("the line flushes");
+    let woken = next_line("after");
+    assert!(
+        woken.contains("after"),
+        "the pump wakes the submission: {woken}"
+    );
+    // the landing's report (the unit type, the effect row) prints ahead
+    // of the line the read just answered
+    let unit = next_line(": ()");
+    assert!(
+        unit.contains(": ()"),
+        "the landing reports its story: {unit}"
+    );
+    let row = next_line("~");
+    assert!(
+        row.starts_with('~'),
+        "the landing reports its effect row: {row}"
+    );
+    let answer = next_line("2");
+    assert!(
+        answer.contains('2'),
+        "the new line runs after the landing: {answer}"
+    );
+    drop(stdin);
+    let status = child.wait().expect("the session drains");
+    assert!(status.success(), "the session exits cleanly");
+    assert_eq!(
+        seen.iter().filter(|line| line.contains("after")).count(),
+        1,
+        "the parked submission's tail prints exactly once: {seen:?}"
+    );
+}

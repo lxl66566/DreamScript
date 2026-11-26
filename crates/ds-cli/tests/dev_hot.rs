@@ -223,7 +223,7 @@ fn a_refused_reload_keeps_the_installed_version_running() {
     swap_source(&prog, v1).expect("the source writes");
     // the wide poll keeps the round boundaries apart: each write lands
     // well inside one tick window, so the iteration counts stay fixed
-    let mut dev = Dev::spawn(&prog, 1000);
+    let mut dev = Dev::spawn(&prog, 500);
     assert_eq!(dev.line(), "0", "the first round runs v1's work");
     // a broken file refuses the reload, but the parked frame re-enters:
     // the installed version keeps running
@@ -328,7 +328,7 @@ fn a_reordering_reload_refuses_over_the_staged_word_and_recovers() {
     let v2 = format!("{PAD}{}", staged_program("x * 10", 4));
     let v3 = staged_program("x * 10", 4);
     swap_source(&prog, &v1).expect("the source writes");
-    let mut dev = Dev::spawn(&prog, 1000);
+    let mut dev = Dev::spawn(&prog, 500);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
     swap_source(&prog, &v2).expect("the reordering swap writes");
     assert_eq!(
@@ -369,7 +369,7 @@ fn a_reload_dropping_the_staged_function_refuses_and_keeps_running() {
               1\n  }\n}\n"
         .to_owned();
     swap_source(&prog, &v1).expect("the source writes");
-    let mut dev = Dev::spawn(&prog, 1000);
+    let mut dev = Dev::spawn(&prog, 500);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
     swap_source(&prog, &v2).expect("the dropping swap writes");
     assert_eq!(
@@ -404,7 +404,7 @@ fn a_content_preserving_reorder_rekeys_the_staged_lambda() {
     let v1 = staged_program("x * 2", 4);
     let v2 = format!("{PAD}{}", staged_program("x * 2", 4));
     swap_source(&prog, &v1).expect("the source writes");
-    let mut dev = Dev::spawn(&prog, 1000);
+    let mut dev = Dev::spawn(&prog, 500);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
     swap_source(&prog, &v2).expect("the content-preserving reorder writes");
     assert_eq!(
@@ -450,7 +450,7 @@ fn a_rekeyed_reorder_takes_so_the_follow_up_edit_lands() {
     let v2 = format!("{PAD}{}", staged_program("x * 2", 8));
     let v3 = format!("{PAD}{}", staged_program("x * 10", 8));
     swap_source(&prog, &v1).expect("the source writes");
-    let mut dev = Dev::spawn(&prog, 1000);
+    let mut dev = Dev::spawn(&prog, 500);
     assert_eq!(dev.line(), "0", "the first round runs v1's inc");
     swap_source(&prog, &v2).expect("the content-preserving reorder writes");
     assert_eq!(dev.line(), "2");
@@ -767,7 +767,7 @@ fn a_package_root_dev_session_hot_swaps_on_a_member_edit() {
         .arg(&entry)
         .arg("--args")
         .arg("21");
-    let mut dev = Dev::launch(command, 1000);
+    let mut dev = Dev::launch(command, 500);
     assert_eq!(
         dev.line(),
         "42",
@@ -985,7 +985,7 @@ fn a_repinned_dep_swaps_alongside_the_root() {
         .env_remove("DS_REGISTRY")
         .arg("dev")
         .arg(&fix.entry);
-    let mut dev = Dev::launch(command, 1000);
+    let mut dev = Dev::launch(command, 500);
     assert_eq!(
         dev.line(),
         "0",
@@ -1061,7 +1061,7 @@ fn a_dep_swap_refusing_over_a_live_call_site_keeps_running() {
         .env_remove("DS_REGISTRY")
         .arg("dev")
         .arg(&fix.entry);
-    let mut dev = Dev::launch(command, 1000);
+    let mut dev = Dev::launch(command, 500);
     assert_eq!(
         dev.line(),
         "0",
@@ -1157,7 +1157,7 @@ fn a_path_dep_source_edit_hot_reloads_without_a_repin() {
         .env_remove("DS_REGISTRY")
         .arg("dev")
         .arg(&entry);
-    let mut dev = Dev::launch(command, 1000);
+    let mut dev = Dev::launch(command, 500);
     assert_eq!(
         dev.line(),
         "0",
@@ -1197,4 +1197,63 @@ fn a_path_dep_source_edit_hot_reloads_without_a_repin() {
         "0\n10\n20\n30\n40\n50\n0\n",
         "the fresh run serves the edited dep source"
     );
+}
+
+/// A world-parked entry wakes at a watch window's pump: the entry's
+/// accept parks (the dev session's VM installs the platform's reactor,
+/// the `ds run` precedent) and the drive hands the window back, the
+/// watch keeps its cadence beside the parked op — a refused reload
+/// round reports while the accept stands — and the peer's late
+/// connection wakes the entry, its answer crossing exactly the echo
+/// round under `ds run`. The shape is the linux driver's own; a host
+/// without one keeps the blocking accept twin.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parked_accept_wakes_at_the_watch_windows_pump() {
+    use std::net::TcpStream;
+
+    /// A port with nothing bound on it: bind, note, drop.
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        listener.local_addr().expect("bound address").port()
+    }
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let prog = dir.path().join("parked_accept.ds");
+    for _ in 0..8 {
+        let port = free_port();
+        let source = format!(
+            "fn main() {{\n  const l = net_listen(\"127.0.0.1\", {port})\n  \
+             println(\"listening\")\n  const c = accept(l)\n  println(\"accepted\")\n  0\n}}\n"
+        );
+        swap_source(&prog, &source).expect("the source writes");
+        let mut dev = Dev::spawn(&prog, 50);
+        let listening = dev.line();
+        if listening != "listening" {
+            // a stolen port halts the failed bind before the park: re-pick
+            assert!(
+                listening.contains("net error:"),
+                "the first round prints or halts: {listening}"
+            );
+            dev.kill();
+            continue;
+        }
+        // the entry parks on the accept; the watch keeps its cadence — a
+        // refused reload round reports while the accept stands
+        swap_source(&prog, "fn broken {\n").expect("the broken source writes");
+        let diagnostic = dev.err();
+        assert!(
+            diagnostic.contains("DS"),
+            "the refused round reports beside the parked accept: {diagnostic}"
+        );
+        let peer = TcpStream::connect(("127.0.0.1", port)).expect("the peer dials");
+        assert_eq!(dev.line(), "accepted", "the window's pump wakes the accept");
+        assert_eq!(dev.line(), "0", "the completed entry answers the unit word");
+        // the accepted connection owns its deinit at scope exit: a clean
+        // close the dropped session proves
+        drop(peer);
+        dev.kill();
+        return;
+    }
+    panic!("no free loopback port answered the bind");
 }

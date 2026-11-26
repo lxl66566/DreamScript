@@ -94,8 +94,9 @@ pub fn run(args: &RunArgs) -> Result<ExitCode> {
     // executor runs the next ready fiber and the reactor bridges the
     // gap (the epoll driver on Linux, the tier-1 host; a host with no
     // driver keeps the blocking natives, blocking semantics staying the
-    // embedder's choice). The REPL and dev hosts keep blocking this
-    // round: their splice-park host loops predate the executor seam.
+    // embedder's choice). The REPL and dev hosts install the reactor
+    // over the same seam and pump the executor between their own
+    // waits (the prompt's reads, the watch windows).
     if let Some(reactor) = ds_vm::reactor::platform_default() {
         prepared.vm.install_reactor(reactor);
     }

@@ -1,7 +1,9 @@
 //! The widened link-fact vocabulary end to end: a consumer over a linked
-//! member surface carrying the artifact round's first shapes — a
+//! member surface carrying the artifact round's shapes — a
 //! list-literal const, a map-field and optional-field struct, a map
-//! alias — checks clean, lowers with the const's elements embedded over
+//! alias, the Named-word chain, a partial case-subset union field, and
+//! the richer alias bodies (a container over a linked type, a scalar
+//! union) — checks clean, lowers with the const's elements embedded over
 //! the same `list_new`/`list_push` seam a local list literal lowers
 //! through, round-trips through the ds-mod writer and reader, installs
 //! into the VM, and runs with the exact golden stdout.
@@ -26,6 +28,7 @@ const SOURCE: &str = concat!(
     "extern fn list_len[t] (xs: list[t]) -> int\n",
     "import @lib (pages, counts, keyed, opt, rrow, chain, cell)\n",
     "import @lib as w\n",
+    "import @lib (shade, red, green, blue, partisan, cells, either)\n",
     "\n",
     "fn port_of(o: opt) -> int {\n",
     "  const p = o.n\n",
@@ -57,7 +60,17 @@ const SOURCE: &str = concat!(
     "    other => other.n,\n",
     "  }\n",
     "  println(\"${linked.head.n + list_len(linked.tail) + picked + leaf.n}\")\n",
-    "  list_len(pages) + list_len(seen)\n",
+    "  const pick = partisan { pick: green }\n",
+    "  const sub = match pick.pick {\n",
+    "    red => 1,\n",
+    "    green => 2,\n",
+    "  }\n",
+    "  const held: cells = [leaf]\n",
+    "  const e: either = \"hi\"\n",
+    "  var pick_sum = sub + list_len(held)\n",
+    "  if e is string { pick_sum = pick_sum + 1 } else { pick_sum = pick_sum + 100 }\n",
+    "  println(\"${pick_sum}\")\n",
+    "  list_len(pages) + list_len(seen) + pick_sum\n",
     "}\n",
 );
 
@@ -108,6 +121,10 @@ fn build_vm() -> (Vm, Lowered) {
     let field = |name: &str, word: TypeWord| TypeField {
         name: name.to_owned(),
         word,
+    };
+    let case = |name: &str| ds_check::import::TypeCase {
+        name: name.to_owned(),
+        payload: ds_check::import::CasePayload::Unit,
     };
     let surface = ds_check::MemberSurface {
         tags: Vec::new(),
@@ -179,6 +196,58 @@ fn build_vm() -> (Vm, Lowered) {
                     Box::new(TypeWord::Scalar(ScalarWord::Str)),
                 ))),
             ),
+            // the subset-union field and the richer alias bodies: a
+            // linked struct whose field holds a partial case-subset
+            // union, an alias naming a linked type in a container body,
+            // and a union-body alias over the scalar words
+            ty_entry("shade", ds_check::TypeFact::Enum {
+                cases: vec![case("red"), case("green"), case("blue")],
+                linear: false,
+            }),
+            ty_entry(
+                "red",
+                ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "shade".to_owned(),
+                    payload: ds_check::import::CasePayload::Unit,
+                }),
+            ),
+            ty_entry(
+                "green",
+                ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "shade".to_owned(),
+                    payload: ds_check::import::CasePayload::Unit,
+                }),
+            ),
+            ty_entry(
+                "blue",
+                ds_check::TypeFact::Case(ds_check::import::CaseFact {
+                    enum_name: "shade".to_owned(),
+                    payload: ds_check::import::CasePayload::Unit,
+                }),
+            ),
+            ty_entry("partisan", ds_check::TypeFact::Struct {
+                fields: vec![TypeField {
+                    name: "pick".to_owned(),
+                    word: TypeWord::Union(vec![
+                        TypeWord::Named("red".to_owned()),
+                        TypeWord::Named("green".to_owned()),
+                    ]),
+                }],
+                linear: false,
+            }),
+            ty_entry(
+                "cells",
+                ds_check::TypeFact::Alias(Box::new(TypeWord::List(Box::new(TypeWord::Named(
+                    "cell".to_owned(),
+                ))))),
+            ),
+            ty_entry(
+                "either",
+                ds_check::TypeFact::Alias(Box::new(TypeWord::Union(vec![
+                    TypeWord::Scalar(ScalarWord::Int),
+                    TypeWord::Scalar(ScalarWord::Str),
+                ]))),
+            ),
         ],
     };
     let mut imports = ds_check::ImportGraph::new();
@@ -232,8 +301,8 @@ fn the_widened_facts_embed_round_trip_and_run() {
     vm.capture_output();
     assert_eq!(
         vm.run("linked_facts", "main", &[]),
-        Ok(FrameAnswer::one(Value::I64(4))),
-        "the entry answers the two embedded lists' lengths"
+        Ok(FrameAnswer::one(Value::I64(8))),
+        "the entry answers the embedded lists, the subset match, and the aliases"
     );
     assert_eq!(
         vm.captured_output(),
@@ -244,8 +313,10 @@ fn the_widened_facts_embed_round_trip_and_run() {
             "4\n",
             "1 8080 0 0\n",
             "7\n",
+            "4\n",
         )
         .as_bytes(),
-        "the embedded list consts, the map and optional words, and the alias all answer"
+        "the embedded list consts, the map and optional words, the aliases, and the subset word \
+         answer"
     );
 }

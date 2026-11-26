@@ -52,12 +52,28 @@ static CONSTS: Park<Arc<IdTable<DefId, Arc<LocalDecl>>>> = Park::new();
 /// once per member compile.
 static LINEARITY: Park<ds_check::ServedLinearity> = Park::new();
 
+/// The ambient's parked effect name rows, the fill-later [`Park`] kind:
+/// the first member compile's effects assemble builds the prefix's
+/// name entries and every later one installs them, so a process that
+/// compiles many members over one ambient stops cloning the prefix's
+/// name strings per compile (the entries name the serve's own
+/// definition ids, rebuilt identically by every serve).
+static EFFECT_NAMES: Park<ds_check::ServedEffectNames> = Park::new();
+
 /// The ambient serve's affine-walk park cell: the run path hands it to
 /// the checker's served walk, which fills it on the first compile and
 /// installs it after.
 #[must_use]
 pub fn ambient_linearity() -> &'static Park<ds_check::ServedLinearity> {
     &LINEARITY
+}
+
+/// The ambient serve's effect-name park cell: the run path hands it to
+/// the served effects pass, which fills it on the first compile and
+/// installs it after.
+#[must_use]
+pub fn ambient_effect_names() -> &'static Park<ds_check::ServedEffectNames> {
+    &EFFECT_NAMES
 }
 
 /// Generates the artifact from the current ambient source: parse,
@@ -146,6 +162,7 @@ pub fn ambient_dsi(file: ds_diag::FileId) -> Result<ServedPrefix, PrefixDsiError
 
 #[cfg(test)]
 mod tests {
+    use ds_check::Park;
     use ds_dsi::{PrefixDsiError, artifact_bytes, gates};
 
     use super::DSI;
@@ -332,7 +349,11 @@ mod tests {
         );
 
         // The effects: the served pass (user-only walk over the served
-        // rows) must equal the fresh whole-package pass.
+        // rows) must equal the fresh whole-package pass — twice over one
+        // park, so the fill and the install answer alike, and `of_name`
+        // reads the parked tier exactly (the rows compare and the name
+        // rows answer the fresh one-map pass's lookups).
+        let park = Park::new();
         let served_effects = ds_check::effects::effects_of_resolved_served(
             &served_run.asts[1..],
             &served_run.package,
@@ -342,6 +363,18 @@ mod tests {
             &served.effect_methods,
             crate::declared_rows(),
             crate::world_caps(),
+            &park,
+        );
+        let served_again = ds_check::effects::effects_of_resolved_served(
+            &served_run.asts[1..],
+            &served_run.package,
+            &served_run.resolutions[1..],
+            &served_run.checked.hole_show_dispatches,
+            &served.effect_defs,
+            &served.effect_methods,
+            crate::declared_rows(),
+            crate::world_caps(),
+            &park,
         );
         let fresh_effects = ds_check::effects::effects_of_resolved(
             &fresh_run.asts[..],
@@ -356,6 +389,31 @@ mod tests {
             fresh_effects.defs(),
             "the served effect rows must match the fresh pass"
         );
+        assert_eq!(
+            served_effects.defs(),
+            served_again.defs(),
+            "the filling serve and the installed serve answer alike"
+        );
+        assert!(
+            park.get().is_some(),
+            "the second serve finds the first's parked name rows"
+        );
+        assert!(
+            fresh_effects.of_name("concat").is_some(),
+            "the core's extern carries a row, so the name reads below stay non-vacuous"
+        );
+        for name in ["io_err", "net_err", "concat", "to_json"] {
+            assert_eq!(
+                served_effects.of_name(name),
+                fresh_effects.of_name(name),
+                "the filling serve answers {name}'s row"
+            );
+            assert_eq!(
+                served_again.of_name(name),
+                fresh_effects.of_name(name),
+                "the installed serve answers {name}'s row through the park"
+            );
+        }
     }
 
     /// A file id the artifact was not generated under is a cache miss,

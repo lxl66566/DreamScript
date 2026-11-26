@@ -32,6 +32,11 @@
 //!   machine. The shapes early-return on a host with no reactor driver.
 //! - no reactor installed: the identical program keeps the blocking semantics (the embedder's
 //!   platform choice, never a language fact).
+//! - the REPL drive's parked submission (the host executor seam): a spliced session main whose one
+//!   statement is a recv parks the drive (`WorldParked`, never a block), the host's pump between
+//!   its own waits answers the peer's late write exactly `ds run`'s executor would, and the landing
+//!   parks at the splice with the answer staged — while a pump ahead of the wake idles with the
+//!   wait standing.
 
 use std::{
     io::{Read, Write},
@@ -40,8 +45,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ds_mod::{Constant, FuncRefKey, Function, Module, TargetClass};
 use ds_vm::{
-    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
+    Const, ConstFuncRef, FrameAnswer, FunctionDef, ModuleRegistry, ModuleVersion, ReplOutcome,
+    Value, Vm,
     abi::{
         ConstIdx, FrameLayout, SlotType,
         SlotType::{I64, Raw, Ref},
@@ -53,6 +60,7 @@ use ds_vm::{
         Capability, OP_HTTP_GET, OP_NET_CLOSE, OP_NET_CONNECT, OP_NET_RECV, OP_NET_SEND, Platform,
         STD_NAME,
     },
+    splice_park,
 };
 
 fn k(idx: u16) -> ConstIdx {
@@ -987,4 +995,85 @@ fn a_resolving_fetch_answers_the_local_server() {
         .expect("the resolving fetch lands");
     assert_eq!(answer_string(&vm, &answer), "hello resolving fetch");
     server.join().expect("the server lands");
+}
+
+/// The spliced session main: one statement — a recv on the staged
+/// connection — with the park spliced before its `RET`, exactly the
+/// shape the CLI's REPL session lowers. The splice widens nothing (the
+/// one-word answer fits the call's own two-word area).
+fn repl_session(conn: i64) -> Module {
+    let main = Function::new(
+        "main".to_owned(),
+        FrameLayout::new(vec![Raw, Raw, Raw], 0, 2).expect("layout"),
+        vec![
+            Constant::I64(conn), // k0: the connection
+            Constant::I64(4096), // k1: net_recv max bytes
+            Constant::FuncRef {
+                key: FuncRefKey::Native(STD_NAME.into()),
+                func: OP_NET_RECV,
+            }, // k2: the recv
+        ],
+        vec![
+            Uop::Funcf { frame_slots: 3 },
+            Uop::Kimm {
+                dst: 1,
+                kidx: ConstIdx(0),
+            },
+            Uop::Kimm {
+                dst: 2,
+                kidx: ConstIdx(1),
+            },
+            Uop::Call {
+                callee: ConstIdx(2),
+                nargs: 2,
+            },
+            Uop::Ret { src: 2 },
+        ],
+    )
+    .expect("valid");
+    let module = Module::new(
+        "repl",
+        TargetClass::Bytecode,
+        ds_mod::Hash128::compute(b"repl"),
+    );
+    splice_park(module.with_function(main), "main", 4).expect("the splice lands")
+}
+
+/// The REPL drive's parked submission: the drive ends `WorldParked` (the
+/// prompt keeps serving, the wait registered), a pump ahead of the wake
+/// idles with the wait standing, and the peer's write wakes the parked
+/// recv at the next pump — the landing parks at the splice with the
+/// answer staged, the same word the blocking twin answers.
+#[test]
+fn a_repl_submission_parks_and_lands_at_the_host_pump() {
+    if !parks() {
+        return;
+    }
+    let (listener, addr) = listener();
+    let mut vm = scheduled_vm(vec![connect_def()]);
+    let (conn, mut peer) = connect(&mut vm, &listener, &addr);
+    vm.install_dsmod(repl_session(conn))
+        .expect("the session module installs");
+    // the submission's drive: the recv parks (no peer write yet), the
+    // drive never blocks, and the frame holds its partial run
+    assert_eq!(
+        vm.repl_start("repl", "main"),
+        Ok(ReplOutcome::WorldParked),
+        "the parked submission ends its drive in flight"
+    );
+    // a pump between the host's reads: nothing woke, the wait stands
+    assert_eq!(
+        vm.repl_continue(Some(Duration::ZERO)),
+        Ok(ReplOutcome::WorldParked),
+        "an idle pump leaves the wait standing"
+    );
+    peer.write_all(b"ping").expect("the peer writes");
+    peer.flush().expect("the peer flushes");
+    // the pump lands: the splice parks with the recv's answer staged
+    let answer = match vm.repl_continue(Some(Duration::ZERO)) {
+        Ok(ReplOutcome::Parked(answer)) => answer,
+        other => panic!("the pump lands the submission: {other:?}"),
+    };
+    assert_eq!(answer_string(&vm, &answer), "ping");
+    vm.repl_teardown();
 }

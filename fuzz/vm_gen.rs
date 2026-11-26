@@ -3143,9 +3143,27 @@ fn drive_repl_rollback(vm: &mut Vm, rng: &mut Stream, entries: &[ChildFn], shape
     // classification — a slot the line opened fresh
     let pre_open = open(vm);
     let line = vm.repl_start(MODULE_NAME, ENTRY_NAME);
+    let line = match line {
+        Ok(ReplOutcome::Parked(answer) | ReplOutcome::Died(answer)) => {
+            std::hint::black_box(&answer);
+            vm.repl_teardown();
+            return;
+        },
+        // a parked line (a reactor-installing shape alone): one zero
+        // budget pump, the landing exactly a landed line's — never a
+        // blocking wait inside the harness
+        Ok(ReplOutcome::WorldParked) => vm.repl_continue(Some(std::time::Duration::ZERO)),
+        Err(trap) => Err(trap),
+    };
     match line {
         Ok(ReplOutcome::Parked(answer) | ReplOutcome::Died(answer)) => {
             std::hint::black_box(&answer);
+            vm.repl_teardown();
+            return;
+        },
+        // the wait still stands: nothing drives it further, the line
+        // ends parked and the teardown releases it
+        Ok(ReplOutcome::WorldParked) => {
             vm.repl_teardown();
             return;
         },

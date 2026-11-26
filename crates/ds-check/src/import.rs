@@ -229,13 +229,15 @@ pub enum TypeFact {
     /// type namespace, naming its enum so the consuming compile's case
     /// row maps back. Registers only beside its enum's registration.
     Case(CaseFact),
-    /// A non-generic alias whose body spells in the word vocabulary: the
-    /// resolved word rides, and the consuming compile's mint rewrites it
-    /// as the written type a local alias of the same body would carry —
-    /// the name expands in that compile's own universe exactly like a
-    /// local spelling. An alias naming anything the vocabulary cannot
-    /// spell directly (another alias, a local type, a union) carries no
-    /// fact.
+    /// A non-generic alias whose body spells in the member's own
+    /// linkable vocabulary — the same words a struct field spells, an
+    /// alias chain expanding transparently, a union body carrying one
+    /// word per member: the resolved word rides, and the consuming
+    /// compile's mint rewrites it as the written type a local alias of
+    /// the same body would carry — the name expands in that compile's
+    /// own universe exactly like a local spelling. A generic alias and
+    /// a body the vocabulary cannot spell (a tuple, an applied alias)
+    /// carry no fact.
     Alias(Box<TypeWord>),
     /// A bodiless, non-generic, non-linear struct declaration: the
     /// opaque handle a local `struct x` with no body reserves — identity
@@ -328,6 +330,13 @@ pub enum TypeWord {
     /// its minted case atoms), a minted case, or a tag. The containers
     /// wrap it like any word.
     Named(String),
+    /// A union over other words: the member set the optional and the
+    /// one-enum complete-case spellings do not cover — a partial
+    /// case-subset union (`red | green`) or a mixed scalar-and-case set.
+    /// Each member spells a word of its own; `t | none` rides the
+    /// optional word, a lone unit-typed member stays outside (a field
+    /// naming one keeps its refusal, the local spelling's own seam).
+    Union(Vec<Self>),
 }
 
 /// The scalar atoms the surface trusts by name: the one word vocabulary
@@ -491,7 +500,9 @@ impl TypeFact {
                 .case_payload(def)?;
                 Some(Self::Case(CaseFact { enum_name, payload }))
             },
-            crate::DefKind::TypeAlias => Self::alias_fact(decls, def),
+            crate::DefKind::TypeAlias => {
+                Self::alias_fact(package, decls, eligible, package.def(def).span.file, def)
+            },
             crate::DefKind::Tag => Self::tag_fact(decls, def),
             _ => None,
         }
@@ -577,20 +588,36 @@ impl TypeFact {
         })
     }
 
-    /// The fact one declared alias carries, when its body spells
-    /// directly in the word vocabulary by name: non-generic (an alias
-    /// with parameters resolves through use-site args and is no single
-    /// word). A body naming anything the vocabulary cannot spell
-    /// directly — another alias, a local type, a union — answers `None`
-    /// (an alias body never carries the Named word: the universe
-    /// expands aliases transparently, so a solved field naming one
-    /// already carries the expansion).
-    fn alias_fact(decls: &crate::Decls, def: crate::DefId) -> Option<Self> {
+    /// The fact one declared alias carries, when its body spells in
+    /// the member's own linkable vocabulary: non-generic (an alias with
+    /// parameters resolves through use-site args and is no single
+    /// word), its written body resolving through the same word solver
+    /// a struct field's type does — the ambient spellings, an alias
+    /// chain (transparently expanded, visit-stack-guarded), a declared
+    /// type of the same member as the Named word, and a union body over
+    /// words. A tuple body and a generic alias keep their refusals.
+    fn alias_fact(
+        package: &crate::resolve::Package,
+        decls: &crate::Decls,
+        eligible: &FxHashSet<crate::DefId>,
+        file: ds_diag::FileId,
+        def: crate::DefId,
+    ) -> Option<Self> {
+        let solver = WordSolver {
+            package,
+            decls,
+            eligible,
+            file,
+        };
         let (params, body) = decls.aliases.get(&def)?;
         if !params.is_empty() {
             return None;
         }
-        Some(Self::Alias(Box::new(word_of_written(body)?)))
+        Some(Self::Alias(Box::new(solver.written_word(
+            body,
+            false,
+            &mut Vec::new(),
+        )?)))
     }
 
     /// The fact one declared tag carries: the unit atom's identity
@@ -631,7 +658,7 @@ impl WordSolver<'_> {
     /// One solved field type's word kind, when it spells in the
     /// vocabulary: a bare atom, or a union — `t | none` either order is
     /// exactly `t?` (B4), and any other union is one enum's complete
-    /// case set, that enum's own Named word.
+    /// case set or a union of words.
     fn word_of_expr(&self, expr: &crate::TypeExpr) -> Option<TypeWord> {
         match expr {
             crate::TypeExpr::Atom(id) => self.atom_word(*id),
@@ -642,9 +669,10 @@ impl WordSolver<'_> {
 
     /// One solved argument type's word kind — a container member's
     /// `Ty`, a solved set of atoms: a single-atom set is the atom's own
-    /// word, a set naming `none` beside one word is exactly that word's
-    /// optional, and any other multi-member set is one enum's complete
-    /// case set (the enum's Named word, the optional wrapping it).
+    /// word, a set naming `none` beside one word is exactly that
+    /// word's optional, and any other multi-member set is one enum's
+    /// complete case set (the enum's Named word) or a union of words
+    /// (the optional wrapping either).
     fn word_of_ty(&self, ty: crate::Ty) -> Option<TypeWord> {
         let mut atoms = Vec::new();
         let mut optional = false;
@@ -658,7 +686,7 @@ impl WordSolver<'_> {
         let word = match atoms.as_slice() {
             [only] => self.atom_word(*only),
             [] => return None,
-            many => self.enum_word(many),
+            many => self.enum_word(many).or_else(|| self.union_of_atoms(many)),
         }?;
         if optional { Some(TypeWord::Optional(Box::new(word))) } else { Some(word) }
     }
@@ -706,9 +734,8 @@ impl WordSolver<'_> {
     }
 
     /// One union's word kind: `t | none` in either order is exactly
-    /// `t?` (B4) — the optional over the other side's whole word (a
-    /// single atom or one enum's complete case set alike) — and any
-    /// other union must be one enum's complete case set.
+    /// `t?` (B4) — the optional over the other side's whole word — any
+    /// other union is one enum's complete case set or a union of words.
     fn union_word(&self, left: &crate::TypeExpr, right: &crate::TypeExpr) -> Option<TypeWord> {
         let atom = |expr: &crate::TypeExpr| match expr {
             crate::TypeExpr::Atom(id) => Some(*id),
@@ -722,13 +749,28 @@ impl WordSolver<'_> {
             let mut atoms = Vec::new();
             Self::flatten_union(left, &mut atoms)?;
             Self::flatten_union(right, &mut atoms)?;
-            return self.enum_word(&atoms);
+            return self
+                .enum_word(&atoms)
+                .or_else(|| self.union_of_atoms(&atoms));
         };
         if atom(inner) == Some(crate::TypeId::NONE) {
             return None; // `none` alone spells no payload word
         }
         self.word_of_expr(inner)
             .map(|word| TypeWord::Optional(Box::new(word)))
+    }
+
+    /// A multi-atom set's union word: one word per atom, each spelling
+    /// in the vocabulary (a scalar, `bytes`, a container, a declared
+    /// type's Named word). A lone unit-typed atom spells only inside a
+    /// union — a field naming one keeps its refusal — so the unit kind
+    /// falls to the Named word here alone.
+    fn union_of_atoms(&self, atoms: &[crate::atom::TypeId]) -> Option<TypeWord> {
+        let mut words = Vec::with_capacity(atoms.len());
+        for &atom in atoms {
+            words.push(self.atom_word(atom).or_else(|| self.named_word(atom))?);
+        }
+        Some(TypeWord::Union(words))
     }
 
     /// Collects one union tree's atoms; a non-atom node spells no Named
@@ -748,7 +790,8 @@ impl WordSolver<'_> {
     /// One atom set's word kind when the set is exactly one non-generic
     /// enum's case atoms — that enum's own Named word: the written
     /// spelling names the enum, whose solving rebuilds this union [B3].
-    /// A partial case set (a true subset union) spells no word.
+    /// A partial case set (a true subset union) answers `None` here and
+    /// the caller's union fallback spells it word per member.
     fn enum_word(&self, atoms: &[crate::atom::TypeId]) -> Option<TypeWord> {
         let mut enum_def = None;
         for &atom in atoms {
@@ -854,50 +897,154 @@ impl WordSolver<'_> {
             _ => None,
         }
     }
-}
 
-/// One written type's word kind, when it spells directly in the
-/// vocabulary by name — the alias body's resolver. A path segments
-/// through exactly one ambient spelling (a scalar, `bytes`, or the `list`
-/// /`map` constructors over scalar members), an optional marker wraps
-/// one scalar, and parenthesization peels; every other written shape (a
-/// union, a tuple, a fn type, a multi-segment path) answers `None`.
-/// Spelling-resolution equals universe-resolution only because ambient
-/// names are unshadowable (`Universe::declare_atom` refuses
-/// `DuplicateName`): resolving the body in the consuming universe
-/// would admit alias-of-alias chains this refusal excludes.
-fn word_of_written(ty: &ds_parse::Type) -> Option<TypeWord> {
-    match ty {
-        ds_parse::Type::Path { path, args, .. } => {
-            let [only] = path.segments.as_slice() else {
-                return None;
-            };
-            match only.name.as_str() {
-                "bytes" if args.is_empty() => Some(TypeWord::Bytes),
-                name if args.is_empty() => ScalarWord::by_name(name).map(TypeWord::Scalar),
-                "list" => {
-                    let [arg] = &**args else {
-                        return None;
-                    };
-                    word_of_written(arg).map(|word| TypeWord::List(Box::new(word)))
-                },
-                "map" => {
-                    let [key, value] = &**args else {
-                        return None;
-                    };
-                    Some(TypeWord::Map(
-                        Box::new(word_of_written(key)?),
-                        Box::new(word_of_written(value)?),
-                    ))
-                },
-                _ => None,
+    /// One written type's word kind — the alias body's resolver: the
+    /// ambient spellings resolve by name (spelling-resolution equals
+    /// universe-resolution only because ambient names are unshadowable,
+    /// `Universe::declare_atom` refusing `DuplicateName`), a path
+    /// naming the producer's own declared types carries the Named word
+    /// (a struct or an enum at the top level, a minted case or a tag
+    /// only inside a union — the field vocabulary's own line), an alias
+    /// chain expands transparently through the referenced alias's own
+    /// body (visit-stack-guarded, so an inline cycle refuses), an
+    /// optional marker wraps one word, parenthesization peels, and a
+    /// union body builds one word per member with `t | none` the
+    /// optional rule (B4). Every other written shape — a tuple, a fn
+    /// type, a multi-segment path, an applied alias — answers `None`.
+    fn written_word(
+        &self,
+        ty: &ds_parse::Type,
+        in_union: bool,
+        stack: &mut Vec<crate::DefId>,
+    ) -> Option<TypeWord> {
+        match ty {
+            ds_parse::Type::Path { path, args, .. } => {
+                let [only] = path.segments.as_slice() else {
+                    return None;
+                };
+                match (only.name.as_str(), args.as_slice()) {
+                    ("bytes", []) => Some(TypeWord::Bytes),
+                    ("list", [arg]) => self
+                        .written_word(arg, false, stack)
+                        .map(|word| TypeWord::List(Box::new(word))),
+                    ("map", [key, value]) => Some(TypeWord::Map(
+                        Box::new(self.written_word(key, false, stack)?),
+                        Box::new(self.written_word(value, false, stack)?),
+                    )),
+                    (name, []) => ScalarWord::by_name(name)
+                        .map(TypeWord::Scalar)
+                        .or_else(|| self.written_named(name, in_union, stack)),
+                    _ => None,
+                }
+            },
+            ds_parse::Type::Optional { inner, .. } => self
+                .written_word(inner, false, stack)
+                .map(|word| TypeWord::Optional(Box::new(word))),
+            ds_parse::Type::Paren { inner, .. } => self.written_word(inner, in_union, stack),
+            ds_parse::Type::Union { left, right, .. } => self.written_union(left, right, stack),
+            _ => None,
+        }
+    }
+
+    /// One written path's word when the name resolves onto the
+    /// producer's own declared types: another alias expands through its
+    /// own body (the visit stack breaking an inline cycle), and a
+    /// struct or an enum carries the Named word — a minted case or a
+    /// tag only inside a union, where the union's tag word carries
+    /// their values. The [`Self::named_name`] gates (the same-member
+    /// rule, the re-export row, the fixpoint's eligibility) own every
+    /// Named reference here.
+    fn written_named(
+        &self,
+        name: &str,
+        in_union: bool,
+        stack: &mut Vec<crate::DefId>,
+    ) -> Option<TypeWord> {
+        let def = self.package.lookup_type(name)?;
+        match self.package.def(def).kind {
+            crate::DefKind::TypeAlias => {
+                if stack.contains(&def) {
+                    return None;
+                }
+                let (params, body) = self.decls.aliases.get(&def)?;
+                if !params.is_empty() {
+                    return None;
+                }
+                stack.push(def);
+                let word = self.written_word(body, false, stack);
+                stack.pop();
+                word
+            },
+            crate::DefKind::Struct | crate::DefKind::Enum => {
+                self.named_name(def).map(TypeWord::Named)
+            },
+            crate::DefKind::Case | crate::DefKind::Tag if in_union => {
+                self.named_name(def).map(TypeWord::Named)
+            },
+            _ => None,
+        }
+    }
+
+    /// One written union body's word: the members flatten (a
+    /// parenthesized subtree recursing), the predeclared `none` marks
+    /// the optional (B4), and every other member carries one word — a
+    /// case or a tag spelling here as the Named word the union's tag
+    /// word carries. A `none`-only body answers `None`.
+    fn written_union(
+        &self,
+        left: &ds_parse::Type,
+        right: &ds_parse::Type,
+        stack: &mut Vec<crate::DefId>,
+    ) -> Option<TypeWord> {
+        let mut members: Vec<Option<TypeWord>> = Vec::new();
+        self.flatten_written_union(left, stack, &mut members)?;
+        self.flatten_written_union(right, stack, &mut members)?;
+        let mut optional = false;
+        let mut words = Vec::new();
+        for member in members {
+            match member {
+                None => optional = true,
+                Some(word) => words.push(word),
             }
-        },
-        ds_parse::Type::Optional { inner, .. } => {
-            word_of_written(inner).map(|word| TypeWord::Optional(Box::new(word)))
-        },
-        ds_parse::Type::Paren { inner, .. } => word_of_written(inner),
-        _ => None,
+        }
+        let inner = match words.len() {
+            0 => return None,
+            1 => words.pop().expect("the slice held one word"),
+            _ => TypeWord::Union(words),
+        };
+        if optional { Some(TypeWord::Optional(Box::new(inner))) } else { Some(inner) }
+    }
+
+    /// Flattens one written union subtree into per-member words, a
+    /// `None` entry marking the predeclared `none` sentinel.
+    fn flatten_written_union(
+        &self,
+        ty: &ds_parse::Type,
+        stack: &mut Vec<crate::DefId>,
+        members: &mut Vec<Option<TypeWord>>,
+    ) -> Option<()> {
+        match ty {
+            ds_parse::Type::Paren { inner, .. } => {
+                self.flatten_written_union(inner, stack, members)
+            },
+            ds_parse::Type::Union { left, right, .. } => {
+                self.flatten_written_union(left, stack, members)?;
+                self.flatten_written_union(right, stack, members)
+            },
+            ds_parse::Type::Path { path, args, .. }
+                if args.is_empty()
+                    && let [only] = path.segments.as_slice()
+                    && only.name == "none"
+                    && !self.package.declares("none") =>
+            {
+                members.push(None);
+                Some(())
+            },
+            other => {
+                members.push(Some(self.written_word(other, true, stack)?));
+                Some(())
+            },
+        }
     }
 }
 
@@ -1413,10 +1560,11 @@ mod tests {
 
     /// The Named word's own gates: a reference naming a def outside the
     /// member (here every def is one member, so the gate rides on the
-    /// eligible set instead), a type whose own fact refuses (a generic
-    /// struct, a deinit carrier, a tuple field), and a partial case
-    /// subset of one enum spell no word — the referencing fact refuses
-    /// with them.
+    /// eligible set instead) and a type whose own fact refuses (a
+    /// generic struct, a deinit carrier, a tuple field) spell no word —
+    /// the referencing fact refuses with them. A lone case field keeps
+    /// its refusal (a unit word spells only inside a union), while a
+    /// multi-atom case subset carries the union word.
     #[test]
     fn the_named_word_gates_on_the_referenced_fact() {
         let source = concat!(
@@ -1442,6 +1590,7 @@ mod tests {
             "pub enum shade {\n",
             "  red,\n",
             "  green,\n",
+            "  blue,\n",
             "}\n",
             "pub enum pick[t] {\n",
             "  one { v: t },\n",
@@ -1460,6 +1609,10 @@ mod tests {
             "}\n",
             "pub struct subset {\n",
             "  v: red,\n",
+            "}\n",
+            "pub struct partial {\n",
+            "  pick: red | green,\n",
+            "  mixed: red | int,\n",
             "}\n",
             "pub struct tinted {\n",
             "  shade: shade,\n",
@@ -1493,8 +1646,14 @@ mod tests {
             facts.get(&def).map(|fact| (**fact).clone())
         };
         let named = |name: &str| super::TypeWord::Named(name.to_owned());
+        let fields = |fields| {
+            Some(super::TypeFact::Struct {
+                fields,
+                linear: false,
+            })
+        };
         // the referenced facts that refuse take the referencing fact
-        // with them
+        // with them; a lone case field keeps its refusal
         for refused in [
             "over_boxed",
             "over_owned",
@@ -1504,14 +1663,26 @@ mod tests {
         ] {
             assert_eq!(fact(refused), None, "{refused} carries no fact");
         }
+        // a partial case-subset union and a mixed case-scalar set carry
+        // the union word, one word per member
+        assert_eq!(
+            fact("partial"),
+            fields(vec![
+                super::TypeField {
+                    name: "pick".to_owned(),
+                    word: super::TypeWord::Union(vec![named("red"), named("green"),]),
+                },
+                super::TypeField {
+                    name: "mixed".to_owned(),
+                    word: super::TypeWord::Union(vec![
+                        named("red"),
+                        super::TypeWord::Scalar(super::ScalarWord::Int),
+                    ]),
+                },
+            ])
+        );
         // a chain of Named references co-derives: nest names wrap names
         // cell, pair names both
-        let fields = |fields| {
-            Some(super::TypeFact::Struct {
-                fields,
-                linear: false,
-            })
-        };
         assert_eq!(
             fact("wrap"),
             fields(vec![super::TypeField {
@@ -1915,14 +2086,17 @@ mod tests {
         );
     }
 
-    /// The alias vocabulary carries: a non-generic alias whose body spells
-    /// directly in the word vocabulary rides as its resolved word — the
-    /// scalar, `bytes`, and the container spellings over any words
-    /// (parentheses peeling) — the same closure the structural fact
-    /// spells; a generic alias and a body naming anything else (another
-    /// alias, a local struct, a union, a tuple) carry nothing. A bodiless
-    /// struct carries the opaque identity (its atom stays shape-pending),
-    /// distinct from the part-less struct's empty field list.
+    /// The alias vocabulary carries: a non-generic alias whose body
+    /// spells in the member's own linkable vocabulary rides as its
+    /// resolved word — the ambient spellings, the container spellings
+    /// over any words (parentheses peeling), an alias chain expanding
+    /// transparently, a declared type of the same member as the Named
+    /// word, and a union body carrying one word per member — the same
+    /// closure the structural fact spells; a generic alias and a body
+    /// naming anything else (a tuple, an applied alias) carry nothing.
+    /// A bodiless struct carries the opaque identity (its atom stays
+    /// shape-pending), distinct from the part-less struct's empty
+    /// field list.
     #[test]
     fn the_fact_is_the_alias_s_word_and_the_bodiless_struct_s_identity() {
         let source = concat!(
@@ -1946,9 +2120,21 @@ mod tests {
             "pub type raw = bytes\n",
             "pub type paren = (int)\n",
             "pub type pair[k, v] = map[k, v]\n",
+            "pub enum shade {\n",
+            "  red,\n",
+            "  green,\n",
+            "  blue,\n",
+            "}\n",
             "pub type chain = row\n",
             "pub type local = cell\n",
+            "pub type held = list[cell]\n",
             "pub type either = int | string\n",
+            "pub type tint = red | green\n",
+            "pub type maybeset = red | green | none\n",
+            "pub type applied = pair[string, string]\n",
+            "pub type lone = red\n",
+            "pub type loop = cycle\n",
+            "pub type cycle = loop\n",
             "pub type two = (int, int)\n",
             "pub struct opaque\n",
             "pub struct empty {\n",
@@ -2022,10 +2208,63 @@ mod tests {
                 super::ScalarWord::Int
             ))))
         );
-        // the refusals: generic parameters, and bodies the vocabulary
-        // cannot spell directly — another alias, a local struct, a
-        // union, a tuple
-        for refused in ["pair", "chain", "local", "either", "two"] {
+        // an alias chain expands through the referenced alias's own
+        // body, and a body naming a declared type of the same member
+        // carries the Named word
+        assert_eq!(
+            alias("chain"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Map(
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Str)),
+                Box::new(super::TypeWord::Scalar(super::ScalarWord::Str))
+            ))))
+        );
+        assert_eq!(
+            alias("local"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Named(
+                "cell".to_owned()
+            ))))
+        );
+        assert_eq!(
+            alias("held"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::List(
+                Box::new(super::TypeWord::Named("cell".to_owned()))
+            ))))
+        );
+        // a union body carries one word per member — a scalar pair, a
+        // partial case-subset union, and the `t | none` optional rule
+        // wrapping the subset
+        let subset = |words| {
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Union(
+                words,
+            ))))
+        };
+        assert_eq!(
+            alias("either"),
+            subset(vec![
+                super::TypeWord::Scalar(super::ScalarWord::Int),
+                super::TypeWord::Scalar(super::ScalarWord::Str),
+            ])
+        );
+        assert_eq!(
+            alias("tint"),
+            subset(vec![
+                super::TypeWord::Named("red".to_owned()),
+                super::TypeWord::Named("green".to_owned()),
+            ])
+        );
+        assert_eq!(
+            alias("maybeset"),
+            Some(super::TypeFact::Alias(Box::new(super::TypeWord::Optional(
+                Box::new(super::TypeWord::Union(vec![
+                    super::TypeWord::Named("red".to_owned()),
+                    super::TypeWord::Named("green".to_owned()),
+                ]))
+            ))))
+        );
+        // the refusals: generic parameters, an applied alias, a lone
+        // case (a unit word spells only inside a union), an inline
+        // alias cycle, and a tuple body
+        for refused in ["pair", "applied", "lone", "loop", "cycle", "two"] {
             assert_eq!(alias(refused), None, "{refused} carries no fact");
         }
         let struct_fact = alias;
@@ -2036,6 +2275,232 @@ mod tests {
                 fields: Vec::new(),
                 linear: false,
             })
+        );
+    }
+
+    /// The consumer-side mint of the artifact round's richer alias and
+    /// union words: a linked struct field over a partial case-subset
+    /// union and linked aliases whose bodies name a linked type and a
+    /// union mint exactly the products a local declaration would — the
+    /// field's solved signature the union of the minted case atoms, the
+    /// aliases' written bodies expanding in this compile's own universe
+    /// through the link table — so the consumer constructs over the
+    /// subset, matches its members, and annotates through the aliases
+    /// checking clean.
+    #[test]
+    fn the_union_word_and_the_alias_body_mint_on_the_consumer() {
+        let source = concat!(
+            "pub tag int\n",
+            "pub tag string\n",
+            "pub struct list[t] {\n",
+            "}\n",
+            "import @lib (cell, shade, red, green, blue, partisan, cells, either)\n",
+            "\n",
+            "fn probe(p: partisan) -> int {\n",
+            "  match p.pick {\n",
+            "    red => 1,\n",
+            "    green => 2,\n",
+            "  }\n",
+            "}\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const held = partisan { pick: green }\n",
+            "  const xs: cells = [cell { n: 1 }]\n",
+            "  const e: either = \"hi\"\n",
+            "  var total = probe(held)\n",
+            "  match e {\n",
+            "    other => total = total + 1,\n",
+            "  }\n",
+            "  match held.pick {\n",
+            "    red => total = total + 10,\n",
+            "    green => total = total + 100,\n",
+            "  }\n",
+            "  total\n",
+            "}\n",
+        );
+        let mut files = ds_diag::Files::new();
+        let file = files.add_source("union_mint.ds", source);
+        let ast = ds_parse::parse(&files, file).expect("the source parses");
+        let at = ds_diag::Span::new(file, 1, 1);
+        let ty_entry = |name: &str, ty: super::TypeFact| crate::ForeignEntry {
+            name: name.to_owned(),
+            vis: crate::Vis::Pub,
+            kind: crate::ForeignKind::Type,
+            generic: false,
+            defaulted: false,
+            decl_span: at,
+            sig: None,
+            row: crate::EffectRow::default(),
+            caps: 0,
+            value: None,
+            ty: Some(std::sync::Arc::new(ty)),
+            link: 0,
+            origin: None,
+            func: None,
+            std: false,
+        };
+        let named = |name: &str| super::TypeWord::Named(name.to_owned());
+        let unit = |name: &str| super::TypeCase {
+            name: name.to_owned(),
+            payload: super::CasePayload::Unit,
+        };
+        let surface = crate::MemberSurface {
+            tags: Vec::new(),
+            entries: vec![
+                ty_entry("cell", super::TypeFact::Struct {
+                    fields: vec![super::TypeField {
+                        name: "n".to_owned(),
+                        word: super::TypeWord::Scalar(super::ScalarWord::Int),
+                    }],
+                    linear: false,
+                }),
+                ty_entry("shade", super::TypeFact::Enum {
+                    cases: vec![unit("red"), unit("green"), unit("blue")],
+                    linear: false,
+                }),
+                ty_entry(
+                    "red",
+                    super::TypeFact::Case(super::CaseFact {
+                        enum_name: "shade".to_owned(),
+                        payload: super::CasePayload::Unit,
+                    }),
+                ),
+                ty_entry(
+                    "green",
+                    super::TypeFact::Case(super::CaseFact {
+                        enum_name: "shade".to_owned(),
+                        payload: super::CasePayload::Unit,
+                    }),
+                ),
+                ty_entry(
+                    "blue",
+                    super::TypeFact::Case(super::CaseFact {
+                        enum_name: "shade".to_owned(),
+                        payload: super::CasePayload::Unit,
+                    }),
+                ),
+                ty_entry("partisan", super::TypeFact::Struct {
+                    fields: vec![super::TypeField {
+                        name: "pick".to_owned(),
+                        word: super::TypeWord::Union(vec![named("red"), named("green")]),
+                    }],
+                    linear: false,
+                }),
+                ty_entry(
+                    "cells",
+                    super::TypeFact::Alias(Box::new(super::TypeWord::List(Box::new(named(
+                        "cell",
+                    ))))),
+                ),
+                ty_entry(
+                    "either",
+                    super::TypeFact::Alias(Box::new(super::TypeWord::Union(vec![
+                        super::TypeWord::Scalar(super::ScalarWord::Int),
+                        super::TypeWord::Scalar(super::ScalarWord::Str),
+                    ]))),
+                ),
+            ],
+        };
+        let mut imports = crate::ImportGraph::new();
+        for item in ast.blocks.iter().flat_map(|block| block.items.iter()) {
+            if let ds_parse::ItemKind::Import(import) = &item.kind {
+                imports.add(import.span, crate::ImportSurface::Linked(surface.clone()));
+            }
+        }
+        let (package, resolutions, diags) = crate::resolve_package_linked(&[&ast], &imports);
+        assert!(diags.is_empty(), "the rows bind clean: {diags:?}");
+        let analyzed = crate::type_of::analyze_resolved(
+            &files,
+            vec![std::sync::Arc::new(ast)].into(),
+            package.into(),
+            resolutions.into(),
+            Vec::new(),
+            std::sync::Arc::default(),
+        );
+        assert!(
+            analyzed.checked.diags.is_empty(),
+            "the probe checks clean: {:?}",
+            analyzed.checked.diags
+        );
+        // the subset field's minted signature solves to the union of
+        // the minted case atoms — exactly the local spelling's set
+        let partisan = analyzed
+            .decls
+            .foreign_type("partisan")
+            .expect("partisan registers");
+        let atom = analyzed
+            .decls
+            .atoms
+            .get(&partisan)
+            .copied()
+            .expect("partisan's atom mints");
+        let crate::AtomKind::Struct(ref fields) = analyzed
+            .decls
+            .universe
+            .atom_decl(atom)
+            .expect("shapes")
+            .kind
+        else {
+            panic!("partisan's atom carries its fields");
+        };
+        // the subset field's minted signature is the union of the
+        // minted case atoms — exactly the local spelling's tree
+        let member_names = |expr: &crate::TypeExpr| match expr {
+            crate::TypeExpr::Atom(id) => Some(
+                analyzed
+                    .decls
+                    .universe
+                    .atom_decl(*id)
+                    .expect("a declared atom")
+                    .name
+                    .clone(),
+            ),
+            _ => None,
+        };
+        let crate::TypeExpr::Union(left, right) = &fields[0].ty else {
+            panic!("the subset field's signature spells the union");
+        };
+        for member in [left, right] {
+            let name = member_names(member).expect("a bare atom per member");
+            assert!(
+                name == "red" || name == "green",
+                "the subset holds the minted cases alone: {name}"
+            );
+        }
+        // the aliases' minted bodies carry the written spellings a local
+        // alias would: a container over the linked name, a union tree
+        // over the scalars
+        let cells = analyzed
+            .decls
+            .foreign_type("cells")
+            .expect("the alias registers");
+        let (params, body) = analyzed
+            .decls
+            .aliases
+            .get(&cells)
+            .expect("the alias's written body mints");
+        assert!(params.is_empty(), "the linked alias is non-generic");
+        let ds_parse::Type::Path { path, args, .. } = body else {
+            panic!("the alias body spells the container");
+        };
+        assert_eq!(path.segments.len(), 1, "a single-segment path");
+        assert_eq!(path.segments[0].name, "list", "the list constructor");
+        let [ds_parse::Type::Path { path: arg, .. }] = &args[..] else {
+            panic!("one constructor argument");
+        };
+        assert_eq!(arg.segments[0].name, "cell", "the linked cell name");
+        let either = analyzed
+            .decls
+            .foreign_type("either")
+            .expect("the union alias registers");
+        let (_, body) = analyzed
+            .decls
+            .aliases
+            .get(&either)
+            .expect("the union alias's written body mints");
+        assert!(
+            matches!(body, ds_parse::Type::Union { .. }),
+            "the union alias's body spells the union tree"
         );
     }
 }

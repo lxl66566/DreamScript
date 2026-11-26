@@ -1477,6 +1477,33 @@ version = \"1.0.0\"
         "pub type chain = words\n",
         "pub type wide[k] = map[k, int]\n",
         "pub type either = int | string\n",
+        "pub type cells = list[cell]\n",
+        "pub struct partisan {\n",
+        "  pick: red | green,\n",
+        "}\n",
+        "pub fn mk_partisan(n: int) -> partisan {\n",
+        "  if n > 0 {\n",
+        "    partisan { pick: green }\n",
+        "  } else {\n",
+        "    partisan { pick: red }\n",
+        "  }\n",
+        "}\n",
+        "pub fn tally(p: partisan) -> int {\n",
+        "  match p.pick {\n",
+        "    red => 5,\n",
+        "    green => 6,\n",
+        "  }\n",
+        "}\n",
+        "pub fn head_of(xs: cells) -> int {\n",
+        "  const first = xs.get(0)\n",
+        "  match first {\n",
+        "    none => 0,\n",
+        "    c => c.n,\n",
+        "  }\n",
+        "}\n",
+        "pub trait shapey {\n",
+        "  fn size(self) -> int\n",
+        "}\n",
     );
     let members = [("shapes.ds", member)];
     write_pkg(&pkg, &manifest, &members);
@@ -2082,15 +2109,14 @@ fn an_empty_linked_enum_binds_its_name() {
 
 /// The type shapes the vocabulary cannot spell and the names a local
 /// declaration or the consumer itself owns keep their refusals at the
-/// same walk (G4): an enum with a tuple payload, a generic enum, a
-/// generic struct, a linear struct, and a struct with a field outside
-/// the word vocabulary each carry no fact; the alias shapes outside
-/// the vocabulary — a body naming another alias, a generic alias, and
-/// a union body — carry none the same way; a locally declared
-/// spelling of a linked type name refuses both at the type's
-/// selection and at any linked signature naming it — the local would
-/// mis-shape every spelling — and a case selection whose enum refused
-/// the same way names its enum.
+/// same walk (G4): a deinit-carrying struct, a generic enum, a generic
+/// struct, a trait, and a struct with a field outside the word
+/// vocabulary each carry no fact; a generic alias — a declaration
+/// resolving through use-site arguments — carries none the same way;
+/// a locally declared spelling of a linked type name refuses both at
+/// the type's selection and at any linked signature naming it — the
+/// local would mis-shape every spelling — and a case selection whose
+/// enum refused the same way names its enum.
 #[test]
 fn the_uncarried_type_shapes_refuse() {
     let (work, pkg_id) = shapes_fixtures("shapes-tiers");
@@ -2130,17 +2156,6 @@ fn the_uncarried_type_shapes_refuse() {
             "layout and tag rows are the artifact round",
         ),
         (
-            "alias-of-alias",
-            concat!(
-                "import @shapes (chain)\n",
-                "\n",
-                "fn main() -> int {\n",
-                "7\n",
-                "}\n",
-            ),
-            "layout and tag rows are the artifact round",
-        ),
-        (
             "generic-alias",
             concat!(
                 "import @shapes (wide)\n",
@@ -2152,9 +2167,9 @@ fn the_uncarried_type_shapes_refuse() {
             "layout and tag rows are the artifact round",
         ),
         (
-            "union-body-alias",
+            "trait",
             concat!(
-                "import @shapes (either)\n",
+                "import @shapes (shapey)\n",
                 "\n",
                 "fn main() -> int {\n",
                 "7\n",
@@ -2257,6 +2272,60 @@ fn an_impl_over_a_linked_type_dispatches() {
     let (ok, out, err) = ds(&["run", entry]);
     assert!(ok, "the impl-over-linked-type run exits 0 (stderr: {err})");
     assert_eq!(out, "5\n5\n");
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The artifact round's richer alias and union words cross (G4): a
+/// linked alias whose body names a declared type of the same member
+/// (`cells = list[cell]`), an alias chain expanding through another
+/// alias (`chain = words`), a union-body alias (`either = int |
+/// string`), and a linked struct whose field holds a partial
+/// case-subset union (`partisan`'s `red | green`) — the consumer
+/// annotates through the aliases, constructs and matches over the
+/// subset, and passes its values through the producer's own
+/// subset-taking functions, the signature naming the alias binding
+/// the same way.
+#[test]
+fn the_alias_bodies_and_the_subset_union_cross() {
+    let (work, pkg_id) = shapes_fixtures("shapes-richer");
+    let root_manifest = shapes_root_manifest(&pkg_id);
+    let root = write_root(
+        &work,
+        &root_manifest,
+        concat!(
+            "import @std/io\n",
+            "import @shapes (cell, shade, red, green, make, chain, either, cells, head_of)\n",
+            "import @shapes (partisan, mk_partisan, tally)\n",
+            "\n",
+            "fn main() -> int {\n",
+            "  const made = mk_partisan(1)\n",
+            "  var total = tally(made)\n",
+            "  const own = partisan { pick: green }\n",
+            "  const sub = match own.pick {\n",
+            "    red => 10,\n",
+            "    green => 20,\n",
+            "  }\n",
+            "  total = total + sub\n",
+            "  const xs: cells = [make(3)]\n",
+            "  total = total + head_of(xs)\n",
+            "  const words: chain = [\"one\", \"two\"]\n",
+            "  total = total + len(words)\n",
+            "  const e: either = \"hi\"\n",
+            "  if e is string { total = total + len(e) } else { total = total + 1000 }\n",
+            "  println(\"${total}\")\n",
+            "  total\n",
+            "}\n",
+        ),
+    );
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", entry]);
+    assert!(ok, "the richer-words run exits 0 (stderr: {err})");
+    // tally(made) = 6 (green), the subset match adds 20, head_of adds
+    // 3, the chain list's len 2, and the string-narrowed either adds
+    // 2 — 33 in all, the run echoing the entry's return after the
+    // println
+    assert_eq!(out, "33\n33\n");
     fs::remove_dir_all(&work).expect("the temp tree removes");
 }
 

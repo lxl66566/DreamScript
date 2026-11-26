@@ -604,6 +604,7 @@ mod tests {
             &served.effect_methods,
             crate::source::session_rows(),
             ds_stdlib::world_caps(),
+            &ds_check::Park::new(),
         );
         let fresh_effects = ds_check::effects::effects_of_resolved(
             &fresh_run.asts[..],

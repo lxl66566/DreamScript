@@ -61,8 +61,10 @@ const SOURCES: [(&str, &str); 2] = [
 /// contended pair, a small fleet, and a wide fleet over one root.
 const COUNTS: [usize; 3] = [2, 4, 8];
 
-/// Rounds per process count: 210 concurrent rounds, 980 spawned runs.
-const ROUNDS_PER_COUNT: usize = 70;
+/// Rounds per process count: 72 concurrent rounds, 336 spawned runs —
+/// six full passes over the twelve-round (count, source, cold/warm)
+/// cycle, so every combination races cold and warm alike.
+const ROUNDS_PER_COUNT: usize = 24;
 
 /// The campaign's wall budget: a host slower than this stops early and
 /// asserts over the rounds that ran (the nextest profile carries its own

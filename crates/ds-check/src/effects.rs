@@ -73,7 +73,7 @@
 //! assert_eq!(body.render(), "error | world");
 //! ```
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use ds_diag::{FileId, Span};
 use ds_parse::{
@@ -275,6 +275,16 @@ pub struct DefEffects {
     pub caps: u8,
 }
 
+/// The served prefix's parked name rows: the [`Effects`] name map's
+/// base-tier entries alone (the assembled rows and their ids never
+/// park), built once per process by the first served compile's
+/// assemble and installed by every later one. The entries name the
+/// serve's own definition ids — identities every serve mints the same
+/// way, never minted atoms — so the park holds G3.5's rule the way
+/// every served table's park does: process memory, never an artifact
+/// row, rebuilt by whatever process runs the compile.
+pub type ServedEffectNames = Arc<HashMap<String, DefId>>;
+
 /// The computed rows of one package: every value-producing definition
 /// (named and extern functions, bindings) plus the per-expression table
 /// (every walked expression's own row, keyed by its span). Type
@@ -285,8 +295,14 @@ pub struct Effects {
     defs: Vec<DefEffects>,
     /// DefId index into `defs`; `None` for type-level definitions.
     index: Vec<Option<u32>>,
-    /// First-wins name lookup, mirroring the package table.
+    /// First-wins name lookup over the growth tier alone: a served
+    /// prefix's entries park per process behind [`ServedEffectNames`]
+    /// and install as `base_names`, so a served compile's own map
+    /// holds only its files' names.
     names: HashMap<String, DefId>,
+    /// The served prefix's parked name rows, installed by every serve
+    /// past the first ([`of_name`]'s base tier below the growth map).
+    base_names: Option<ServedEffectNames>,
     /// Every walked expression's own row (its subtree's intrinsics plus
     /// its uses' masked callee rows), keyed by the expression's span.
     expr_rows: FxHashMap<Span, EffectRow>,
@@ -305,7 +321,11 @@ impl Effects {
     /// type-level.
     #[must_use]
     pub fn of_name(&self, name: &str) -> Option<EffectRow> {
-        self.of(*self.names.get(name)?)
+        let def = self
+            .names
+            .get(name)
+            .or_else(|| self.base_names.as_deref().and_then(|base| base.get(name)))?;
+        self.of(*def)
     }
 
     /// The row of one expression, keyed by its exact span: `None` when
@@ -508,7 +528,7 @@ where
     );
     let solved = solve(&graph);
     let expr_rows = finalize_expr_rows(exprs, &solved);
-    assemble(package, &solved, expr_rows)
+    assemble(package, &solved, expr_rows, None)
 }
 
 /// One registered method's solved row, the checked-ambient artifact's
@@ -578,7 +598,11 @@ where
 /// exactly as in the fresh pass over the merged package's full
 /// definition range, so the answer equals the fresh one whenever the
 /// served rows are the ambient's true fixpoint rows (the artifact's
-/// drift gate pins that).
+/// drift gate pins that). The prefix's name rows park once per process
+/// in `park` (the first compile filling, every later one installing —
+/// see [`ServedEffectNames`]), the cell owned by the serve whose
+/// prefix it holds, so two serves never share one park.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn effects_of_resolved_served<T>(
     user_asts: &[T],
@@ -589,6 +613,7 @@ pub fn effects_of_resolved_served<T>(
     served_methods: &[ServedMethodRow],
     declared: &DeclaredRows,
     world: &WorldCaps,
+    park: &crate::Park<ServedEffectNames>,
 ) -> Effects
 where
     T: std::borrow::Borrow<Ast>,
@@ -622,7 +647,7 @@ where
     // nodes answer its edges like any solved callee; the ambient's own
     // spans carry no entries, and no REPL or hover query reaches them).
     let expr_rows = finalize_expr_rows(exprs, &solved);
-    assemble(package, &solved, expr_rows)
+    assemble(package, &solved, expr_rows, Some(park))
 }
 
 /// Builds the row graph over the walked trees, seeding into `graph` (the
@@ -717,15 +742,29 @@ fn finalize_expr_rows(
 /// Assembles the solved rows into the package's [`Effects`]: one entry
 /// per value definition in declaration order, the DefId index, the
 /// first-wins name table, and the finalized per-span expression rows.
+/// A caller handing a park splits the name table at the served
+/// prefix's def boundary: the prefix's entries build the park's rows
+/// (filling it when no earlier compile did), and every serve past the
+/// first installs the parked rows instead of re-cloning the prefix's
+/// names per compile.
 fn assemble(
     package: &Package,
     solved: &HashMap<Node, (EffectRow, u8)>,
     expr_rows: FxHashMap<Span, EffectRow>,
+    park: Option<&crate::Park<ServedEffectNames>>,
 ) -> Effects {
     let count = u32::try_from(package.len()).expect("definition count fits u32");
+    let boundary = package.base_def_count();
+    let parked = park.and_then(|park| park.get());
+    // the tiered build needs a served prefix to split at and a park to
+    // hold the prefix's rows; a base-tier package without a park (the
+    // fresh pass, a caller that hands none) builds the one map as ever
+    let tiered = parked.is_some() || (boundary > 0 && park.is_some());
+    let installing = parked.is_some();
     let mut defs = Vec::new();
     let mut index = vec![None; package.len()];
     let mut names = HashMap::new();
+    let mut prefix_names = HashMap::new();
     for raw in 0..count {
         let def_id = DefId::from_raw(raw);
         let def = package.def(def_id);
@@ -744,12 +783,33 @@ fn assemble(
                 caps,
             });
         }
-        names.entry(def.name.clone()).or_insert(def_id);
+        let in_prefix = tiered && (raw as usize) < boundary;
+        if in_prefix {
+            prefix_names.entry(def.name.clone()).or_insert(def_id);
+            // the filling compile keeps the one first-wins map too, so
+            // its own lookups answer before the park exists
+            if !installing {
+                names.entry(def.name.clone()).or_insert(def_id);
+            }
+        } else {
+            names.entry(def.name.clone()).or_insert(def_id);
+        }
     }
+    let base_names = if installing {
+        parked.map(Arc::clone)
+    } else {
+        if let Some(park) = park {
+            // the rows drop when a concurrent fill won the race, the
+            // loser's set discarded exactly like the fill's own
+            let _ = park.fill(Arc::new(prefix_names));
+        }
+        None
+    };
     Effects {
         defs,
         index,
         names,
+        base_names,
         expr_rows,
     }
 }
@@ -1329,9 +1389,144 @@ impl Walker<'_, '_> {
 mod tests {
     use ds_diag::{Files, Span};
     use ds_parse::parse;
+    use rustc_hash::FxHashMap;
 
-    use super::{DeclaredRows, Effect, EffectRow, effects_of};
-    use crate::platform::WorldCaps;
+    use super::{
+        DeclaredRows, DefEffects, DefId, DefKind, Effect, EffectRow, ServedEffectNames, WorldCaps,
+        effects_of, effects_of_resolved_served, solved_method_rows,
+    };
+    use crate::{
+        Park,
+        resolve::{Def, Package, PackageBase, Vis, resolve_package},
+    };
+
+    /// The served prefix's name rows park once per process: two served
+    /// compiles over one base share the prefix's name map — the first
+    /// fills the park with its own map still answering the whole
+    /// first-wins table, the second installs the parked handle
+    /// (identity-pinned, its own map carrying the growth alone) and
+    /// answers every name the one-map fresh pass does, the base's
+    /// extern and the growth's own fn alike.
+    #[test]
+    fn the_served_prefix_name_rows_park_per_process() {
+        let prefix_source = "extern fn speak (t: string) -> ()\n";
+        let user_source = concat!(
+            "fn twice() -> int {\n",
+            "  speak(\"hi\")\n",
+            "  1 + 2\n",
+            "}\n",
+        );
+        let mut files = Files::new();
+        let prefix_file = files.add_source("prefix.ds", prefix_source);
+        let user_file = files.add_source("user.ds", user_source);
+        let prefix_ast = parse(&files, prefix_file).expect("the prefix parses");
+
+        // the served rows: the fresh prefix pass's own rows, at the ids
+        // the base tier assigns (declaration order)
+        let declared = DeclaredRows::new().with("speak", EffectRow::of(Effect::World));
+        let caps = WorldCaps::new();
+        let (prefix_package, prefix_resolutions, _) =
+            resolve_package(std::slice::from_ref(&prefix_ast));
+        let served_defs: Vec<DefEffects> =
+            effects_of(std::slice::from_ref(&prefix_ast), &declared, &caps)
+                .defs()
+                .to_vec();
+        let served_methods = solved_method_rows(
+            std::slice::from_ref(&prefix_ast),
+            &prefix_package,
+            &prefix_resolutions,
+            &declared,
+            &caps,
+        );
+
+        // the base tier: the prefix's one extern under the same id the
+        // fresh pass assigns
+        let base = PackageBase::from_parts(
+            vec![prefix_file],
+            vec![Def {
+                name: "speak".to_owned(),
+                kind: DefKind::Fn,
+                vis: Vis::Pub,
+                span: Span::new(prefix_file, 10, 15),
+            }],
+            Vec::new(),
+            vec![("speak".to_owned(), DefId::from_raw(0))],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let park = Park::<ServedEffectNames>::new();
+        let run_served = |park: &Park<ServedEffectNames>| {
+            let user_ast = parse(&files, user_file).expect("the user parses");
+            let mut package = Package::with_base(std::sync::Arc::new(base.clone()));
+            let collection = package.add_file(&user_ast);
+            assert!(
+                collection.is_empty(),
+                "the user file collects clean: {collection:?}"
+            );
+            let (resolutions, _) = package.resolve(&user_ast);
+            effects_of_resolved_served(
+                &[user_ast],
+                &package,
+                &[resolutions],
+                &FxHashMap::default(),
+                &served_defs,
+                &served_methods,
+                &declared,
+                &caps,
+                park,
+            )
+        };
+
+        // the fresh one-map pass over prefix and user alike
+        let fresh_user_ast = parse(&files, user_file).expect("the user parses");
+        let fresh = effects_of(&[prefix_ast, fresh_user_ast], &declared, &caps);
+
+        // the first served compile fills the park, its own map answering
+        // the whole table
+        let first = run_served(&park);
+        let parked = park.get().expect("the first serve fills the park");
+        assert!(
+            first.base_names.is_none(),
+            "the filling compile reads its own one map"
+        );
+
+        // the second installs the parked handle and keeps only its own
+        // files' names
+        let second = run_served(&park);
+        assert!(
+            second
+                .base_names
+                .as_ref()
+                .is_some_and(|base| std::sync::Arc::ptr_eq(base, parked)),
+            "the second serve installs the parked handle"
+        );
+        assert!(
+            !second.names.contains_key("speak"),
+            "the installed compile's growth map carries only its own names"
+        );
+
+        // the tiered read answers the one-map pass on every name
+        assert_eq!(first.of_name("speak"), second.of_name("speak"));
+        assert_eq!(first.of_name("twice"), second.of_name("twice"));
+        for (effects, label) in [(&first, "first"), (&second, "second")] {
+            assert_eq!(
+                effects.of_name("speak"),
+                fresh.of_name("speak"),
+                "the {label} serve answers the base extern's row"
+            );
+            assert_eq!(
+                effects.of_name("twice"),
+                fresh.of_name("twice"),
+                "the {label} serve answers the growth fn's row"
+            );
+            assert_eq!(
+                effects.of_name("nowhere"),
+                None,
+                "an unknown name stays unknown"
+            );
+        }
+    }
 
     /// The per-span table reads each expression's own row: the call under
     /// the cursor, not the sibling statements; the covering and position

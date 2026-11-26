@@ -89,7 +89,7 @@ use ds_query::{
     ParseFile, PlatformCheck, Resolve, TypeOf,
 };
 use ds_vm::{
-    FiberId, FiberState, FrameAnswer, Value, Vm,
+    FiberId, FiberState, FrameAnswer, IoDrive, Trap, Value, Vm,
     native::{PLATFORM_NONE, PLATFORM_PARSE_ERR, PLATFORM_UTF8_ERR, is_io_class, is_net_class},
 };
 
@@ -236,7 +236,11 @@ impl DevSession {
     /// running while the host watches. A package root's watch composes
     /// every member below the root plus the resolved path deps' members
     /// and manifests, so a sibling or dep-source edit is a change.
-    fn round(&mut self, watched: Option<&str>) -> Result<()> {
+    /// `budget` bounds a world-parked drive's reactor wait (the hot
+    /// loop's windows own the cadence; the single-shot round keeps the
+    /// blocking wait a plain run's drive holds): a park hands the
+    /// window back, and the next round pumps the wait.
+    fn round(&mut self, watched: Option<&str>, budget: Option<Duration>) -> Result<()> {
         let mut installed = false;
         if let Some(watched) = watched.filter(|watched| self.loaded.as_deref() != Some(watched)) {
             self.loaded = Some(watched.to_owned());
@@ -249,20 +253,27 @@ impl DevSession {
             }
         }
         match self.fiber {
-            Some(fiber)
-                if matches!(
-                    self.vm.fiber_state(fiber),
-                    Some(FiberState::Ready | FiberState::Suspended | FiberState::Preempted)
-                ) =>
-            {
-                self.drive(fiber);
+            Some(fiber) => match self.vm.fiber_state(fiber) {
+                Some(FiberState::Ready | FiberState::Suspended | FiberState::Preempted) => {
+                    self.drive(fiber, budget);
+                },
+                // a world-parked entry (its own park or a child's): the
+                // wait owns its wake, never an entry switch — the window
+                // pumps the seam and the watch keeps its cadence beside
+                // the parked op
+                Some(FiberState::WorldParked) => self.pump(fiber, budget),
+                _ if installed => {
+                    if let Some(fiber) = self.spawn_entry() {
+                        self.fiber = Some(fiber);
+                        self.drive(fiber, budget);
+                    }
+                },
+                _ => {},
             },
-            // a completed or interrupted entry restarts exactly when this
-            // round installed a fresh version — never on the idle ticks
             _ if installed => {
                 if let Some(fiber) = self.spawn_entry() {
                     self.fiber = Some(fiber);
-                    self.drive(fiber);
+                    self.drive(fiber, budget);
                 }
             },
             _ => {},
@@ -548,15 +559,45 @@ impl DevSession {
     /// the fiber — the report's backtrace reads the kept frames first,
     /// and the release fires their deinit hooks once, drains the claims,
     /// and returns the pool slot, so nothing of the dead drive pins its
-    /// version's row past the two-slot bound.
-    fn drive(&mut self, fiber: FiberId) {
+    /// version's row past the two-slot bound. A world park registers its
+    /// wait and — when it does not resolve inside `budget` — hands the
+    /// window back, the next round pumping the wait.
+    fn drive(&mut self, fiber: FiberId, budget: Option<Duration>) {
         self.vm.request_suspend(fiber);
-        match self.vm.resume_fiber(fiber, Value::Tag(PLATFORM_NONE)) {
-            Ok(answer) => {
+        let driven = self
+            .vm
+            .resume_fiber_io(fiber, Value::Tag(PLATFORM_NONE), budget);
+        self.finish(fiber, driven);
+    }
+
+    /// One window's pump of the world-parked entry: the wait stands — no
+    /// entry switch, a WorldParked fiber is the scheduler's alone — and
+    /// the requested suspension keeps the cadence (the entry's post-wake
+    /// continuation parks at its next backward branch), while `budget`
+    /// bounds the reactor wait, so the watch keeps its cadence beside the
+    /// parked op and the peer's late arrival wakes the entry exactly
+    /// under `ds run`'s executor.
+    fn pump(&mut self, fiber: FiberId, budget: Option<Duration>) {
+        self.vm.request_suspend(fiber);
+        let pumped = self.vm.pump_io(fiber, budget);
+        self.finish(fiber, pumped);
+    }
+
+    /// One drive or pump's outcome: a completed entry reports its answer;
+    /// a trapped drive reports and then releases the fiber — the report's
+    /// backtrace reads the kept frames first, and the release fires their
+    /// deinit hooks once, drains the claims, and returns the pool slot,
+    /// so nothing of the dead drive pins its version's row past the
+    /// two-slot bound; a world park hands the window back, the next
+    /// round pumping the wait.
+    fn finish(&mut self, fiber: FiberId, driven: Result<IoDrive, Trap>) {
+        match driven {
+            Ok(IoDrive::Answer(answer)) => {
                 if self.vm.fiber_state(fiber) == Some(FiberState::Dead) {
                     self.report_answer(&answer);
                 }
             },
+            Ok(IoDrive::Parked) => {},
             Err(trap) => {
                 eprintln!("dev: {}", run::trap_error(&self.vm, &trap));
                 self.failed = true;
@@ -735,8 +776,13 @@ pub fn dev(args: &DevArgs) -> Result<ExitCode> {
     let name = source::script_module_name(path)?;
     let initial = read_watched(path, manifest.as_deref())?;
     let poll = Duration::from_millis(args.poll_ms);
+    // The hot loop's rounds bound a world-parked drive's reactor wait at
+    // the window cadence: the watch keeps its ticks beside a parked net
+    // op, the next window pumping the wait. The single-shot round keeps
+    // the blocking wait a plain run's drive holds.
+    let budget = args.hot.then_some(poll);
     let mut session = DevSession::new(args, &name, manifest.is_some(), &initial);
-    session.round(Some(&initial))?;
+    session.round(Some(&initial), budget)?;
     if !args.hot {
         let code =
             if session.clean && !session.failed { ExitCode::SUCCESS } else { ExitCode::FAILURE };
@@ -764,7 +810,7 @@ pub fn dev(args: &DevArgs) -> Result<ExitCode> {
             }
         });
         let epoch = session.dir_epoch;
-        session.round(watched.as_deref())?;
+        session.round(watched.as_deref(), budget)?;
         // a round that moved the path dep set (a manifest edit declaring
         // or undeclaring a path dep) rebuilds the signal over the new
         // roots and re-baselines the gate, the same ordering the startup

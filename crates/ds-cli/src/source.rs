@@ -787,6 +787,7 @@ fn compile_text(
                 &effect_methods,
                 rows,
                 caps,
+                ds_stdlib::ambient_effect_names(),
             )
         },
         None => ds_check::effects::effects_of_resolved(

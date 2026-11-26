@@ -90,7 +90,7 @@ pub mod ambient_dsi;
 #[cfg(feature = "ast-serde")]
 pub use ambient_blob::{AmbientBlobError, ambient_ast};
 #[cfg(feature = "ast-serde")]
-pub use ambient_dsi::{ambient_dsi, ambient_linearity};
+pub use ambient_dsi::{ambient_dsi, ambient_effect_names, ambient_linearity};
 #[cfg(feature = "ast-serde")]
 pub use ds_dsi::{PrefixDsiError, ServedPrefix};
 

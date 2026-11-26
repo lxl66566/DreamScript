@@ -1047,6 +1047,27 @@ fn foreign_field_type(
             let solved = enum_case_union(ctx.package, &shape.cases, decls)?;
             Some((solved, named(&name, Vec::new())))
         },
+        TypeWord::Union(members) => {
+            // One union word per member spelling, the same pair a
+            // local union annotation's own conversion builds: the
+            // solved tree folds pairwise, the written tree spelling the
+            // binary union the checker's solve reads back.
+            let [first, rest @ ..] = &members[..] else {
+                return None;
+            };
+            let (mut solved, mut written) = foreign_field_type(ctx, first.clone(), span, decls)?;
+            for member in rest {
+                let (next_solved, next_written) =
+                    foreign_field_type(ctx, member.clone(), span, decls)?;
+                solved = solved.union(next_solved);
+                written = Type::Union {
+                    span,
+                    left: Box::new(written),
+                    right: Box::new(next_written),
+                };
+            }
+            Some((solved, written))
+        },
     }
 }
 

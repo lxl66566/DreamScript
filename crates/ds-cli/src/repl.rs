@@ -61,11 +61,24 @@
 //! the session survives); a piped stdin reads plain lines — no editing
 //! exists over a pipe. Ctrl-C while a submission computes still kills the
 //! process: the VM has no step budget to observe an interrupt at.
+//!
+//! # The executor seam
+//!
+//! The session's VM installs the platform's reactor (the `ds run`
+//! precedent), so a submission whose code parks on a world op — an
+//! accept, a recv, a timed sleep — ends its drive in flight instead of
+//! blocking the prompt: the session holds the submission, refuses new
+//! submissions and `:drop` until it lands, and pumps the executor/wait
+//! seam between its own reads, so the parked fiber wakes exactly as
+//! under `ds run` while the prompt keeps serving the user. A host
+//! without a reactor driver keeps the blocking natives, no submission
+//! ever parks, and the pump is inert.
 
 use std::{
     collections::HashMap,
     io::{self, BufRead, IsTerminal, Write},
     process::ExitCode,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -131,7 +144,11 @@ pub fn repl(_args: &ReplArgs) -> Result<ExitCode> {
 /// The read-dispatch loop over one read layer: submissions run, `:`
 /// commands answer, end of input ends the session (the scope exit runs
 /// the surviving deinits), an interrupt discards the line in progress and
-/// re-issues the prompt.
+/// re-issues the prompt. The read is the host's blocking wait, so the
+/// pass pumps the executor/wait seam first: a submission parked on a
+/// world op wakes between the host's reads — what already stands ready
+/// or expired, never blocking the prompt — and its landing reports
+/// ahead of the line the read just answered.
 fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode> {
     loop {
         match read_submission(reader) {
@@ -144,6 +161,9 @@ fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode>
             // re-issues. The session survives.
             ReadOutcome::Interrupted => println!(),
             ReadOutcome::Text(line) => {
+                // the read blocked for the host's whole wait: take the
+                // wake that landed under it before the line is judged
+                session.pump()?;
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -152,6 +172,8 @@ fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode>
                         session.vm.repl_teardown();
                         return Ok(ExitCode::SUCCESS);
                     }
+                } else if session.in_flight.is_some() {
+                    println!("the previous submission still waits; :reset discards the session");
                 } else {
                     session.submit(&line)?;
                 }
@@ -161,8 +183,10 @@ fn drive(session: &mut Session, reader: &mut dyn ReadsLines) -> Result<ExitCode>
 }
 
 /// One live session: the query database over the ambient plus the session
-/// text, the submitted lines, the persistent VM, and the last committed
-/// round's placement facts (the `:drop` seam's word discovery).
+/// text, the submitted lines, the persistent VM, the last committed
+/// round's placement facts (the `:drop` seam's word discovery), and the
+/// in-flight submission parked on a world op (the executor seam's
+/// deferred landing).
 struct Session {
     db: Db,
     file: FileId,
@@ -175,6 +199,26 @@ struct Session {
     /// The renamed-away drop counter: one fresh unspellable-by-accident
     /// stem per `:drop`.
     drops: usize,
+    /// The submission parked on a world op, its text committed ahead (a
+    /// clean check ran and its effects stand): the host pumps until it
+    /// lands, and a pump-time failure rolls the text back to the
+    /// snapshot.
+    in_flight: Option<InFlight>,
+}
+
+/// The in-flight submission's deferred facts: the snapshot a pump-time
+/// failure restores the text to, the resume position its rollback
+/// re-parks at, the zone the landing report reads, and the round's
+/// binder registrations the landing commits.
+struct InFlight {
+    /// The committed-round snapshot (`decls`, `stmts`).
+    before: (Vec<String>, Vec<String>),
+    /// The resume position a pump-time trap's rollback re-parks at.
+    at: u32,
+    /// The submission's zone, the landing report's grain.
+    zone: Zone,
+    /// The round's registered binder spans, the landing's commit.
+    binders: HashMap<Span, Vec<u8>>,
 }
 
 impl Session {
@@ -236,6 +280,7 @@ impl Session {
             vm: fresh_vm(),
             binders: HashMap::new(),
             drops: 0,
+            in_flight: None,
         }
     }
 
@@ -262,10 +307,74 @@ impl Session {
         if !self.check_clean()? {
             return self.rollback(&before);
         }
-        match self.execute(&trial, zone) {
-            Ok(()) => Ok(()),
+        match self.execute(&trial, zone.clone()) {
+            Ok(SubmitEnd::Landed) => Ok(()),
+            // the submission parked on a world op: its text stays
+            // committed and the host pumps between its reads until the
+            // drive lands
+            Ok(SubmitEnd::Waiting { at, binders }) => {
+                self.in_flight = Some(InFlight {
+                    before,
+                    at,
+                    zone,
+                    binders,
+                });
+                Ok(())
+            },
             Err(Failure::Engine(error)) => Err(error),
             Err(_) => self.rollback(&before),
+        }
+    }
+
+    /// Pumps the executor/wait seam between the host's blocking reads: a
+    /// world-parked submission wakes here and lands exactly a drive-time
+    /// landing does — its answer reporting, its binders committing — and
+    /// a pump-time trap rolls the frame and the text back exactly a
+    /// drive-time trap would. The zero budget takes only what already
+    /// stands ready or expired, never blocking the prompt.
+    fn pump(&mut self) -> Result<()> {
+        let Some(flight) = self.in_flight.take() else {
+            return Ok(());
+        };
+        match self.vm.repl_continue(Some(Duration::ZERO)) {
+            Ok(ReplOutcome::Parked(answer)) => {
+                self.binders = flight.binders;
+                let session = query(self.db.get::<ParseFile>(self.file), "parse")?;
+                // the committed text checked clean: the tree exists
+                let Some(session_ast) = session.ast.as_deref() else {
+                    return Err(anyhow!("the session parse lost its tree"));
+                };
+                let analyzed =
+                    query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")?.analyzed;
+                self.report(session_ast, &analyzed, &answer, flight.zone)
+            },
+            Ok(ReplOutcome::WorldParked) => {
+                // the wait still stands: the next pass pumps again
+                self.in_flight = Some(flight);
+                Ok(())
+            },
+            Ok(ReplOutcome::Died(_)) => {
+                // the spliced body has no live exit path, so a completion
+                // is a should-not-happen: the frame is gone, the text the
+                // snapshot restores, and the session rebuilds from the
+                // next submission's fresh start
+                self.vm.repl_teardown();
+                self.vm = fresh_vm();
+                self.rollback(&flight.before)?;
+                println!("the entry frame completed instead of parking; the session rebuilt");
+                Ok(())
+            },
+            Err(trap) => {
+                // the report reads the interrupted fiber's kept frames
+                print!("{}", run::trap_error(&self.vm, &trap));
+                if let Err(rebuild) = self.vm.repl_rollback(MODULE, "main", CodePc(flight.at)) {
+                    self.vm.repl_teardown();
+                    self.vm = fresh_vm();
+                    print!("{}", run::trap_error(&self.vm, &rebuild));
+                }
+                self.rollback(&flight.before)?;
+                Ok(())
+            },
         }
     }
 
@@ -349,7 +458,7 @@ impl Session {
     /// re-run, only the new statement computes, and the parked frame
     /// carries the session's live bindings to the next round. A trap
     /// rolls the frame back to the parked extent before this answers.
-    fn execute(&mut self, text: &str, zone: Zone) -> std::result::Result<(), Failure> {
+    fn execute(&mut self, text: &str, zone: Zone) -> std::result::Result<SubmitEnd, Failure> {
         let analyzed = query(self.db.get::<Analyzed>(PackageId::new(0)), "analyzed")
             .map_err(Failure::Engine)?
             .analyzed;
@@ -419,8 +528,14 @@ impl Session {
                     return Err(Failure::Engine(anyhow!("the session parse lost its tree")));
                 };
                 self.report(session_ast, &analyzed, &answer, zone)
-                    .map_err(Failure::Engine)
+                    .map_err(Failure::Engine)?;
+                Ok(SubmitEnd::Landed)
             },
+            // the submission parked on a world op: the drive hands the
+            // host its own waits back, and the pump between the reads
+            // lands it — the facts the landing and a pump-time trap
+            // need ride out
+            Ok(ReplOutcome::WorldParked) => Ok(SubmitEnd::Waiting { at, binders }),
             Ok(ReplOutcome::Died(_)) => {
                 // the spliced body has no live exit path, so a completion
                 // is a should-not-happen: the frame is gone, and the
@@ -553,7 +668,12 @@ impl Session {
         match words.next() {
             Some("quit") => Ok(false),
             Some("drop") => {
-                if let Some(name) = words.next() {
+                if self.in_flight.is_some() {
+                    // a world-parked submission holds the frame mid-drive;
+                    // the drop's hook drive needs the frame parked at the
+                    // seam
+                    println!("the previous submission still waits; :drop needs the frame parked");
+                } else if let Some(name) = words.next() {
                     self.drop_binding(name);
                 } else {
                     println!("usage: :drop <name>");
@@ -561,6 +681,7 @@ impl Session {
                 Ok(true)
             },
             Some("reset") => {
+                self.in_flight = None;
                 self.vm.repl_teardown();
                 self.decls.clear();
                 self.stmts.clear();
@@ -671,6 +792,7 @@ impl Session {
 /// name, when it carries one — `impl`, `import`, and `platform` blocks
 /// declare none the package names), or a statement of the REPL-owned
 /// `main`.
+#[derive(Clone)]
 enum Zone {
     /// A declaration block defining `name`.
     Named(String),
@@ -678,6 +800,24 @@ enum Zone {
     Nameless,
     /// A statement of the REPL-owned `main`.
     Statement,
+}
+
+/// How a clean-checked submission's drive ended: parked at the splice
+/// (committed and reported), or parked on a world op (in flight — the
+/// host pumps until it lands).
+enum SubmitEnd {
+    /// The frame parked at the seam: the submission committed, its
+    /// story reported.
+    Landed,
+    /// The submission parked on a world op mid-drive: the resume
+    /// position a pump-time trap's rollback re-parks at, and the
+    /// round's binder registrations the landing commits.
+    Waiting {
+        /// The resume position.
+        at: u32,
+        /// The round's registered binder spans.
+        binders: HashMap<Span, Vec<u8>>,
+    },
 }
 
 /// Why a clean-checked submission still did not run: every arm but
@@ -737,11 +877,19 @@ pub(crate) fn query<T>(result: Result<T, QueryError>, pass: &str) -> Result<T> {
 }
 
 /// A fresh VM with the default platform installed (H5.5): the CLI is the
-/// provider, and the install validates pool FuncRefs against it.
+/// provider, and the install validates pool FuncRefs against it. The
+/// platform's reactor installs with it (the `ds run` precedent), so a
+/// session's world op parks on a would-block instead of blocking the
+/// drive; a host with no driver keeps the blocking natives — the
+/// embedder's platform choice, never a language fact.
 pub(crate) fn fresh_vm() -> Vm {
     let mut registry = ModuleRegistry::new();
     registry.install_platform(Platform::std());
-    Vm::new(registry)
+    let mut vm = Vm::new(registry);
+    if let Some(reactor) = ds_vm::reactor::platform_default() {
+        vm.install_reactor(reactor);
+    }
+    vm
 }
 
 /// One read at the prompt: a completed submission, end of input, or an

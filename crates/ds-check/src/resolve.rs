@@ -1585,6 +1585,14 @@ impl Package {
         &self.module_refs[id.index() as usize]
     }
 
+    /// The base tier's definition count: the boundary of the served
+    /// prefix's leading run of the def id space (a compile's own files
+    /// continue past it).
+    #[must_use]
+    pub fn base_def_count(&self) -> usize {
+        self.base.as_ref().map_or(0, |base| base.defs.len())
+    }
+
     /// The declaration of a definition: the base answers a served prefix
     /// id, the growth tier a compiled file's own.
     #[must_use]
