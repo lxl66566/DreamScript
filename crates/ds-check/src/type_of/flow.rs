@@ -42,6 +42,11 @@ impl Bodies<'_> {
             self.value_pos = pos;
             let val = self.block_expected(then, expected);
             self.value_pos = true;
+            // the arm's own early-exit flag lands on the block's span:
+            // the lowering reads it to skip the join widen for an arm a
+            // diverging call exits (the checked Val the block walk
+            // returns is not recorded by the expression wrapper)
+            self.record_val(then.span, val);
             val
         };
         self.restore(saved);

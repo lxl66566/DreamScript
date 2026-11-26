@@ -1,0 +1,34 @@
+// source: todo item 160, the never round 2026-11-27 — the refusal classes over the bottom type
+// purpose: a diverging call coerces into any expected type, but nothing else does: a position typed `never` (a binding annotation, a parameter, a field, a payload) refuses because no value inhabits the type, a non-diverging value against the never return refuses containment, and the retired wildcard return — a generic no parameter mentions — refuses at the declaration
+// items:
+// never-bound: stage: reject the never-typed binding annotation refuses at its own span (DS2053)
+// never-param: stage: reject a parameter typed never refuses (DS2053)
+// never-field-holder: stage: reject a struct field typed never refuses (DS2053)
+// never-payload: stage: reject a tag's payload field typed never refuses (DS2053)
+// never-slot: stage: reject a case's positional slot typed never refuses, naming the case (DS2053)
+// never-coerced: stage: reject a non-diverging value against the never return refuses containment (DS2001)
+// wild-return: stage: reject the retired wildcard return — a generic no parameter mentions — refuses at the declaration (DS2054)
+
+const never_bound: never = 0
+
+fn never_param(x: never) -> int {
+  0
+}
+
+struct never_field_holder {
+  x: never
+}
+
+tag never_payload { x: never }
+
+enum never_slot {
+  boxed(never)
+}
+
+fn never_coerced() -> never {
+  0
+}
+
+fn wild_return[t](x: int) -> t {
+  panic("wild")
+}

@@ -101,6 +101,22 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .copied()
     }
 
+    /// Whether the checked walk marked the expression at this span
+    /// diverging: a call to a `never` fn exits at the call, so the arm
+    /// or operand never hands its answer to the join, and the widen
+    /// over the answer span would stage dead words over a mismatched
+    /// shape.
+    pub(super) fn diverges_at(&self, span: Span) -> bool {
+        if !self.comptime_path.is_empty() {
+            return self.copy_val(span).is_some_and(|val| val.diverges);
+        }
+        self.analyzed
+            .checked
+            .expr_types
+            .get(&span)
+            .is_some_and(|val| val.diverges)
+    }
+
     pub(super) fn val(&self, span: Span) -> Result<Val, LowerError> {
         let val = if !self.comptime_path.is_empty() {
             self.copy_val(span).ok_or_else(|| {

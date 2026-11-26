@@ -134,9 +134,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.rc.store_over(&mut self.code, &[word]);
             }
         }
-        self.refuse_closure_widen(&assigned, declared, e.span())?;
-        self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
-        self.widen_into(&place, declared, &assigned, e.span())?;
+        // A diverging right-hand side (`exit(1)` as the assigned value)
+        // never hands its answer to the store: the call's own exit ends
+        // the path, so the var keeps its content and no widen stages
+        // dead words over a mismatched shape
+        if !self.diverges_at(right.span()) {
+            self.refuse_closure_widen(&assigned, declared, e.span())?;
+            self.guard_deinit_union_member(assigned.ty, declared, e.span())?;
+            self.widen_into(&place, declared, &assigned, e.span())?;
+        }
         // An assignment inside a lambda body to the frame's own captured
         // binding also publishes the new words into the running closure
         // object's capture block (the mut window over the uniquely-held

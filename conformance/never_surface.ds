@@ -1,0 +1,46 @@
+// source: todo item 160, the never round 2026-11-27, closing 139's check-side abort shape, over B1's bottom ruling
+// purpose: `never` is the ambient zero-case enum and the bottom type — the return type of a call that yields no value — so a diverging call sits in any value position: a block tail, an if arm, a match arm, a handler body, the generic assert_eq abort arm; the answer unifies wherever the position expects one while no value inhabits the type itself
+// items:
+// halt: stage: typecheck
+// branch: stage: typecheck
+// pick: stage: typecheck
+// hand: stage: typecheck
+// abort-eq: stage: typecheck
+
+// the body tail is the diverging call: the answer never arrives, so the
+// declared return checks without a value to widen
+fn halt() -> int {
+  exit(1)
+}
+
+// the if arm's exit constrains nothing: the join reads the other arm alone
+fn branch(b: bool) -> int {
+  if b {
+    exit(1)
+  } else {
+    0
+  }
+}
+
+// the match arm answering never stays out of the widened result
+fn pick(u: int | none) -> int {
+  match u {
+    none => exit(2)
+    other => other
+  }
+}
+
+// the handler body answering never contributes no member: the extraction
+// keeps the receiver's present side alone
+fn hand() -> string {
+  read_file("gone").err((e: io_err) => panic("io: aborting"))
+}
+
+// the generic abort arm rides never: the failing arm exits through the
+// panic while the satisfied arm answers unit, and the equality compare
+// lowers through the per-shape instance the call site stages
+fn abort_eq[t](a: t, b: t, msg: string) -> () {
+  if !(a == b) {
+    panic(msg)
+  }
+}

@@ -268,6 +268,19 @@ pub enum json {
 }
 ```
 
+#### `never`
+
+The bottom type: the zero-case enum every compile reaches, the return
+type of a call that yields no value. No value inhabits it, so a
+diverging call sits in any value position — the answer unifies
+wherever the position expects one — while a binding, parameter,
+field, or payload typed `never` refuses: the binder would hold a
+value no path produces.
+
+```ds
+pub enum never { }
+```
+
 ### Tags
 
 #### `addr_in_use`
@@ -468,8 +481,7 @@ io_err union and a child ended without a status code answering -1.
 capability's own op row, so a host refusing the capability refuses
 the spelling. The engine prints nothing and decides no exit code (the
 installing host owns what the status means), the call never answers,
-and the return generic answers whatever the call site expects,
-`panic`'s own shape.
+and the return is `never`, `panic`'s own shape.
 
 ```ds
 pub extern fn args() -> list[string]
@@ -681,7 +693,7 @@ pub extern fn eprintln(msg: string) -> ()
 #### `exit`
 
 ```ds
-pub extern fn exit[t](code: int) -> t
+pub extern fn exit(code: int) -> never
 ```
 
 #### `exp`
@@ -905,12 +917,12 @@ spelling every source sharing the ambient reaches, library packages
 included. The message rides the Die trap out to the drive — the
 engine prints nothing and decides no exit code, the host's policy
 applying above it (the CLI's `die` provision rides the same
-primitive) — and the return generic answers whatever the call site
-expects, so a statement position or a handler arm takes it while a
-block tail against an annotated return refuses.
+primitive) — and the return is `never`, so the call sits in any
+value position: a statement, a handler arm, a block tail, the
+folded main's tail.
 
 ```ds
-pub extern fn panic[t](msg: string) -> t
+pub extern fn panic(msg: string) -> never
 ```
 
 #### `partition`
@@ -1719,12 +1731,13 @@ pub type row = map[string, string]
 The assert family over the ambient `panic` abort: the condition is
 the bool word and the failure the deliberate-bug abort, so the
 members carry no capability and no return value. The equality pair
-spells one concrete member per scalar width, because a generic body
-refuses the variable word kinds the equality compare and the message
-rendering need (the == chain and the interpolation hole answering no
-runtime kind for a type variable — the reflection seam the generic
-spellings wait on), so the refused generic spelling stays a test
-pin, never a member.
+spells one concrete member per scalar width: the generic abort arm
+typechecks over `never` (the call's answer unifies with the unit
+return), and the equality compare lowers through its per-shape
+instance, while the message rendering's interpolation hole answers
+no runtime kind for a type variable — the reflection seam the
+generic spellings wait on — so the concrete members stay the landed
+surface.
 
 ```ds
 pub fn assert(cond: bool, msg: string) -> ()

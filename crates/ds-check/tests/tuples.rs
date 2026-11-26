@@ -91,7 +91,7 @@ fn tuple_products_distribute_over_unions() {
         .solve(&pair_expr(a.into(), TypeExpr::atom(b).inter(c.into())))
         .unwrap();
     assert!(u.is_empty(empty_el));
-    assert_eq!(u.render(empty_el), "empty");
+    assert_eq!(u.render(empty_el), "never");
     assert!(matches!(u.witness(empty_el), Err(Error::WitnessOfEmpty(_))));
 }
 

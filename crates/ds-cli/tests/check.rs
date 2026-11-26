@@ -167,6 +167,15 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     // qualified timeout escape check clean beside the shadowing
     // declaration
     assert_corpus_clean("tag_resolution.ds", 7);
+    // zero noise — the never faces check clean under the ambient's
+    // zero-case enum: the diverging call sits in a block tail, an if
+    // arm, a match arm, a handler body, and the generic abort arm
+    assert_corpus_clean("never_surface.ds", 0);
+    // the seven errors are the file's own reject items: the never-typed
+    // binding annotation, parameter, field, payload, and case slot, the
+    // non-diverging value against the never return, and the retired
+    // wildcard return
+    assert_corpus_clean("never_refusal.ds", 7);
 }
 
 /// The two-file visibility package: `pub(pkg)` and `pub` names answer a

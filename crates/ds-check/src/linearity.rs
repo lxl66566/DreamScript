@@ -25,7 +25,7 @@ use crate::{
     decls::{Decls, FnSig, linear_marker},
     expr::TypeExpr,
     resolve::{DefId, DefKind, DotRes, MethodId, Package, Res, Resolutions},
-    type_of::{Checked, TraitCall},
+    type_of::{Checked, TraitCall, Val},
     universe::Ty,
 };
 
@@ -145,6 +145,7 @@ where
         def_types: &checked.def_types,
         copy_counts: comptime_copy_counts(checked),
         res: resolutions.first(),
+        expr_types: &checked.expr_types,
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
         hole_runtime: &checked.hole_show_dispatches,
@@ -248,6 +249,7 @@ where
         def_types: &checked.def_types,
         copy_counts: comptime_copy_counts(checked),
         res: resolutions.first(),
+        expr_types: &checked.expr_types,
         hole_dispatches: &checked.trait_calls,
         hole_inherents: &checked.inherent_calls,
         hole_runtime: &checked.hole_show_dispatches,
@@ -392,6 +394,7 @@ mod tests {
             def_types: &checked.def_types,
             copy_counts: HashMap::default(),
             res: resolutions.first(),
+            expr_types: &checked.expr_types,
             hole_dispatches: &checked.trait_calls,
             hole_inherents: &checked.inherent_calls,
             hole_runtime: &checked.hole_show_dispatches,

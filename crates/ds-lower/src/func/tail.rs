@@ -144,6 +144,13 @@ impl FnLower<'_, '_, '_> {
                 let ty = self.val(e.span())?.ty;
                 if self.is_tail_callee(e) && ty == self.ret_ty {
                     self.call_impl(e, ty, true)?;
+                } else if self.members(ty).is_empty() {
+                    // a diverging tail (`exit`/`panic` in the body's
+                    // final position) never hands its answer to the
+                    // return: the call's own exit ends the frame, so no
+                    // return emission stages dead words over the unit
+                    // answer
+                    self.value(e)?;
                 } else {
                     let tp = self.value(e)?;
                     self.emit_return(&tp.place, tp.ty, e.span())?;

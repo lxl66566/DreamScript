@@ -2740,7 +2740,11 @@ fn an_empty_linked_enum_binds_its_name() {
         concat!(
             "import @shapes (hollow)\n",
             "\n",
-            "fn passthrough(v: hollow) -> hollow { v }\n",
+            // the return annotation names the linked empty enum: the
+            // name solves across the link, the diverging body never
+            // hands it a value (a never-typed parameter refuses under
+            // the bottom rule)
+            "fn give_up() -> hollow { exit(1) }\n",
             "\n",
             "fn main() -> int {\n",
             "  7\n",

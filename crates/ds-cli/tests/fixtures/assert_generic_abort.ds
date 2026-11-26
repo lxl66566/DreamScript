@@ -1,0 +1,17 @@
+// The generic assert_eq spelling riding the never-backed abort shape:
+// the failing arm exits through the ambient `panic` (the call's answer
+// is `never`, so the arm's exit stands in for the unit join) and the
+// equality compare lowers through its per-shape instance, so the same
+// body passes on the satisfied call and aborts through the trap line on
+// the differing one (the never round, closing the abort shape's
+// check-side refusal).
+
+fn assert_eq_any[t] (a: t, b: t, msg: string) -> () {
+  if !(a == b) { panic(msg) }
+}
+
+fn main() -> int {
+  assert_eq_any(1, 1, "ints")
+  assert_eq_any(1, 2, "ints")
+  0
+}

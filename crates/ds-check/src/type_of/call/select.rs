@@ -1180,7 +1180,7 @@ impl Bodies<'_> {
         self.type_vars.pop();
         Val {
             ty: ret,
-            diverges: false,
+            diverges: self.decls.universe.is_empty(ret),
             poisoned: false,
         }
     }

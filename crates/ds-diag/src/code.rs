@@ -233,6 +233,10 @@ error_codes! {
     UnknownInstanceSelection => "DS2051", Type,
     /// A root package's inherent impl member shadows a linked member of the same owner type (the root package's own impls over every dependency's, the link layering's root-over-deps rule), and the warning names the winner, the loser, and the action.
     LinkShadowedInherentMember => "DS2052", Type,
+    /// A position typed `never` (the empty type): a binding annotation, a parameter, a struct field, or an enum case payload. No value inhabits the type, so the position cannot hold one.
+    NeverTypedPosition => "DS2053", Type,
+    /// A fn declaration's return type names a type variable no parameter mentions; the variable never solves from a call's arguments, and a diverging declaration answers `never`.
+    UnconstrainedReturnVariable => "DS2054", Type,
     /// Binding used after being moved.
     MovedThenUsed => "DS3001", Linearity,
     /// Binding read on a path where it may not be initialized yet.
@@ -384,6 +388,8 @@ mod tests {
             ),
             ("UnknownInstanceSelection", "DS2051", ErrorClass::Type),
             ("LinkShadowedInherentMember", "DS2052", ErrorClass::Type),
+            ("NeverTypedPosition", "DS2053", ErrorClass::Type),
+            ("UnconstrainedReturnVariable", "DS2054", ErrorClass::Type),
             ("MovedThenUsed", "DS3001", ErrorClass::Linearity),
             ("UninitializedUse", "DS3002", ErrorClass::Linearity),
             ("LinearCopy", "DS3003", ErrorClass::Linearity),

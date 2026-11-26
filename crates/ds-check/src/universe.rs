@@ -623,9 +623,9 @@ impl Universe {
 
     // ---- rendering -----------------------------------------------------------
 
-    /// Renders a solved type as union syntax for diagnostics. The empty set
-    /// renders as `empty` (an internal marker; the decided surface has no
-    /// empty-type keyword). Members appear in declaration order.
+    /// Renders a solved type as union syntax for diagnostics. The empty
+    /// set renders as `never`, the ambient zero-case enum spelling of the
+    /// bottom type. Members appear in declaration order.
     #[must_use]
     pub fn render(&self, t: Ty) -> String {
         let names: Vec<&str> = self
@@ -636,7 +636,7 @@ impl Universe {
                     .map_or("<unknown>", |decl| decl.name.as_str())
             })
             .collect();
-        if names.is_empty() { "empty".to_owned() } else { names.join(" | ") }
+        if names.is_empty() { "never".to_owned() } else { names.join(" | ") }
     }
 
     fn intern(&mut self, mut set: Vec<TypeId>) -> Ty {

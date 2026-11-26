@@ -247,35 +247,32 @@ fn the_host_owns_the_exit_code() {
     assert_eq!(out.status.code(), Some(1), "a trap exits 1");
 }
 
-/// A never-returning generic extern cannot sit in a block's tail: the
-/// generic answer never unifies with the tail's required type, and the
-/// checker has no never-returns marker — the script fold's synthesized
-/// main refuses a trailing `exit` at the check, and an if arm holding
-/// one keeps the union over the type variable that lowering refuses.
-/// The mid-block spelling above is the working form.
+/// A never-returning call sits in a block's tail and in the script
+/// fold's synthesized main once the answers answer `never`: the
+/// deliberate status reaches the process from either seam, and the
+/// statements before the tail ran.
 #[test]
-fn a_tailing_exit_refuses_at_both_seams() {
+fn a_tailing_exit_answers_at_both_seams() {
     // the script fold: a top-level `exit` ends the synthesized main's
-    // body, whose `()` answer the generic call never unifies with
+    // body, the deliberate status the run's own answer
     let script = source_file("script", "println(\"bye\")\nexit(0)\n");
     let out = ds_run(&script, &[]);
-    assert_ne!(out.status.code(), Some(0), "a tailing script exit refuses");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("DS2001"),
-        "the check refusal names the containment: {:?}",
-        out.stderr
+    assert_eq!(out.status.code(), Some(0), "the deliberate status lands");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "bye\n",
+        "the prefix ran"
     );
 
-    // the arm union: an `exit` inside an if arm unions its generic
-    // answer into the arm's value, and lowering refuses the member
-    // over the type variable
+    // the arm union: an `exit` inside an if arm leaves the arm's exit
+    // standing in for the join, the status riding out the same way
     let armed = source_file("armed", "if 1 > 0 {\n  exit(3)\n}\nprintln(\"never\")\n");
     let out = ds_run(&armed, &[]);
-    assert_ne!(out.status.code(), Some(0), "an armed exit refuses");
+    assert_eq!(out.status.code(), Some(3), "the armed exit lands");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("DS4009"),
-        "the lowering refusal names the variable member: {:?}",
-        out.stderr
+        String::from_utf8_lossy(&out.stdout).is_empty(),
+        "the continuation never ran: {:?}",
+        out.stdout
     );
 }
 

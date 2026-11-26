@@ -1302,14 +1302,18 @@ impl<'a> FnLower<'a, '_, '_> {
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
-            self.refuse_fn_word_answer(
-                ty,
-                &body_tp,
-                body.span(),
-                "a capturing closure in a handler's answer",
-                "an unproven callable in a handler's answer",
-            )?;
-            self.widen_into(&result, ty, &body_tp, body.span())?;
+            // a diverging handler (`panic` in the body) never hands its
+            // answer to the join: the firing arm's own exit stands in
+            if !self.diverges_at(body.span()) {
+                self.refuse_fn_word_answer(
+                    ty,
+                    &body_tp,
+                    body.span(),
+                    "a capturing closure in a handler's answer",
+                    "an unproven callable in a handler's answer",
+                )?;
+                self.widen_into(&result, ty, &body_tp, body.span())?;
+            }
             self.scope_pop();
         }
         let arm_err = self.rc.take();
@@ -1473,14 +1477,18 @@ impl<'a> FnLower<'a, '_, '_> {
             self.rc_bind_borrowed(param.name.span, src.place.base, param_ty)?;
             self.scope_insert(&param.name.name, param.name.span);
             let body_tp = self.value(body)?;
-            self.refuse_fn_word_answer(
-                ty,
-                &body_tp,
-                body.span(),
-                "a capturing closure in a handler's answer",
-                "an unproven callable in a handler's answer",
-            )?;
-            self.widen_into(&result, ty, &body_tp, body.span())?;
+            // a diverging handler (`panic` in the body) never hands its
+            // answer to the join: the firing arm's own exit stands in
+            if !self.diverges_at(body.span()) {
+                self.refuse_fn_word_answer(
+                    ty,
+                    &body_tp,
+                    body.span(),
+                    "a capturing closure in a handler's answer",
+                    "an unproven callable in a handler's answer",
+                )?;
+                self.widen_into(&result, ty, &body_tp, body.span())?;
+            }
             self.scope_pop();
         }
         let arm_ok = self.rc.take();

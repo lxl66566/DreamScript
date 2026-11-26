@@ -1342,7 +1342,7 @@ fn the_trait_families_host_an_empty_enum() {
     for index in 0..4_u32 {
         let instance = ds_check::InstanceId::from_raw(index);
         let head = analyzed.decls.instances.head(instance).unwrap();
-        assert_eq!(analyzed.decls.universe.render(head), "empty");
+        assert_eq!(analyzed.decls.universe.render(head), "never");
     }
     lower(
         "empty_enum_host",
@@ -1366,11 +1366,21 @@ fn the_trait_families_host_an_empty_enum() {
         "fn f(v: never) -> string { v.show() }\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    // the never-typed parameter refuses first (the bottom rule), and the
+    // dispatch over the empty type names no instance: the empty set
+    // rendered as itself
+    assert_eq!(rendered.len(), 2, "{rendered:?}");
     assert!(
-        rendered[0].contains("DS2013") && rendered[0].contains("no instance of `show` for `empty`"),
-        "{}",
-        rendered[0]
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2053") && r.contains("parameter `v` is typed `never`")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|r| r.contains("DS2013") && r.contains("no instance of `show` for `never`")),
+        "{rendered:?}"
     );
 }
 

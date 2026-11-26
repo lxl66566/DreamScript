@@ -52,7 +52,7 @@ pub(crate) const HOST_FILE: &str = "$host.ds";
 /// which is why it stays here while the policy-free `panic` and the
 /// deliberate-status `exit` are ambient declarations; an un-provisioned
 /// compile keeps the name unknown, the die split's discipline.
-pub(crate) const HOST_SOURCE: &str = "pub extern fn die[t](msg: string) -> t\n";
+pub(crate) const HOST_SOURCE: &str = "pub extern fn die(msg: string) -> never\n";
 
 /// The entry session's declared rows: the ambient's table plus the die
 /// spelling's trap row — the host's own declaration, so the row rides

@@ -18,16 +18,16 @@ pub(super) enum AmbientExtern {
     /// declaration the checker rows with the `cancel` effect — the
     /// internal effect the nursery boundary dispatches.
     Cancel,
-    /// A `die` spelling's declaration: the generic one-parameter extern —
-    /// the return generic the call site's own type answers — wherever the
-    /// merged reading serves it (the host member a CLI entry session
-    /// registers, or a file-owned extern). The declaration is the
-    /// provider's own code; the primitive it routes to is the builtin core's
-    /// `trap`.
+    /// A `die` spelling's declaration: the one-parameter diverging extern
+    /// — the answer `never`, the retired generic spelling still
+    /// recognized beside it — wherever the merged reading serves it (the
+    /// host member a CLI entry session registers, or a file-owned
+    /// extern). The declaration is the provider's own code; the primitive
+    /// it routes to is the builtin core's `trap`.
     Die,
     /// The ambient `panic` extern: the policy-free abort over the same
-    /// `trap` primitive, the same generic one-parameter shape, served to
-    /// every source that registers the ambient.
+    /// `trap` primitive, the same one-parameter diverging shape, served
+    /// to every source that registers the ambient.
     Panic,
     /// An `exit` spelling's declaration: the same generic one-parameter
     /// shape as `Die`, served by the ambient (or a file-owned extern)
@@ -257,14 +257,18 @@ impl FnLower<'_, '_, '_> {
         let base = self.rc.save();
         self.scope_push();
         let body_tp = self.value(body)?;
-        self.refuse_fn_word_answer(
-            ty,
-            &body_tp,
-            body.span(),
-            "a capturing closure in unwrap_or_else's fallback",
-            "an unproven callable in unwrap_or_else's fallback",
-        )?;
-        self.widen_into(&result, ty, &body_tp, body.span())?;
+        // a diverging fallback (`panic` in the lambda) never hands its
+        // answer to the join: the none side's own exit stands in
+        if !self.diverges_at(body.span()) {
+            self.refuse_fn_word_answer(
+                ty,
+                &body_tp,
+                body.span(),
+                "a capturing closure in unwrap_or_else's fallback",
+                "an unproven callable in unwrap_or_else's fallback",
+            )?;
+            self.widen_into(&result, ty, &body_tp, body.span())?;
+        }
         self.scope_pop();
         let arm_none = self.rc.take();
         let none_div = self.rc.diverged();
@@ -560,7 +564,27 @@ impl FnLower<'_, '_, '_> {
                 .decls
                 .fns
                 .get(&def)
-                .is_some_and(|sig| sig.generics.len() == 1 && sig.params.len() == 1)
+                .is_some_and(|sig| match which {
+                    // The diverging spellings carry two shapes: the
+                    // `never` answer and the retired generic one — a
+                    // file-owned extern predating the retirement keeps
+                    // routing to the primitive.
+                    AmbientExtern::Die | AmbientExtern::Panic => {
+                        sig.params.len() == 1 && (sig.generics.len() == 1 || self.is_never_ret(sig))
+                    },
+                    _ => sig.generics.len() == 1 && sig.params.len() == 1,
+                })
+    }
+
+    /// Whether the signature's written return is the bare `never` type:
+    /// the zero-case enum's name, no type arguments, no union.
+    fn is_never_ret(&self, sig: &ds_check::decls::FnSig) -> bool {
+        match &sig.ret {
+            Some(Type::Path { path, args, .. }) => {
+                args.is_empty() && path.segments.len() == 1 && path.segments[0].name == "never"
+            },
+            _ => false,
+        }
     }
 
     /// The `cancel(e)` call: the operand is one bare enum member
@@ -783,7 +807,11 @@ impl FnLower<'_, '_, '_> {
             ));
         }
         self.seam_call(native, &[(addr.slot, SlotType::Ref)], &[SlotType::I64])?;
-        self.temp_span(ty)
+        // the answer never arrives: the place reads as the empty type's
+        // one inert word, so a binder or tail reading it stages one
+        // word, never a member layout the type cannot name
+        let base = self.temp_span(ty)?.base;
+        self.place_of_ty(base, ty)
     }
 
     /// The `exit(code)` call: the one i64 word stages to the proc
@@ -817,7 +845,8 @@ impl FnLower<'_, '_, '_> {
             ));
         }
         self.seam_call(native, &[(addr.slot, SlotType::I64)], &[SlotType::I64])?;
-        self.temp_span(ty)
+        let base = self.temp_span(ty)?.base;
+        self.place_of_ty(base, ty)
     }
 
     /// The ambient `str[t]` conversion as an explicit call: the

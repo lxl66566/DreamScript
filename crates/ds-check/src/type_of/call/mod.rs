@@ -434,7 +434,7 @@ impl Bodies<'_> {
         self.check_args(&all, &params, span);
         Val {
             ty: ret,
-            diverges: false,
+            diverges: self.decls.universe.is_empty(ret),
             poisoned: false,
         }
     }
@@ -559,7 +559,7 @@ impl Bodies<'_> {
             self.comptime = outer;
             return Val {
                 ty: ret,
-                diverges: false,
+                diverges: self.decls.universe.is_empty(ret),
                 poisoned: false,
             };
         }
@@ -767,7 +767,7 @@ impl Bodies<'_> {
         self.assumptions.truncate(assumption_mark);
         Val {
             ty: ret,
-            diverges: false,
+            diverges: self.decls.universe.is_empty(ret),
             poisoned: unsolved,
         }
     }

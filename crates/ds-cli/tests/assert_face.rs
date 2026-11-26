@@ -3,10 +3,10 @@
 //! the ambient `panic` (the deliberate-bug spelling's own member face),
 //! the differing-equality message rendering the operands into the trap
 //! line, and the passing calls answering in statement position. The
-//! refused generic spelling pins its classes: the abort shape's
-//! unsolved union at the check, and the equality compare's missing
-//! runtime word kind at lowering — every door a generic body needs —
-//! so the concrete per-width members are the landed surface.
+//! generic equality spelling rides the never-backed abort shape end to
+//! end: the failing arm exits through the panic call answering
+//! `never`, and the diverging call sits in a block tail and a script's
+//! folded main the same way.
 
 use std::{
     env, fs,
@@ -105,23 +105,73 @@ fn a_differing_equality_renders_the_operands_into_the_trap_line() {
     );
 }
 
-/// The refused generic spelling: the natural `assert_eq_any` body
-/// refuses at the check first — the panic return's type variable never
-/// solves inside the if arm, so the arm's value unions it into a
-/// `() | t` that does not fit the unit answer.
+/// The generic equality spelling rides the never-backed abort arm: the
+/// satisfied call answers and the differing one aborts through the trap
+/// line, the same body carrying both faces end to end.
 #[test]
-fn the_generic_equality_spelling_refuses_at_the_abort_shape() {
-    let out = run(&["run", &fixture("assert_generic_refusal.ds")]);
+fn the_generic_equality_spelling_aborts_through_never() {
+    let out = run(&["run", &fixture("assert_generic_abort.ds")]);
     assert_eq!(
         out.status.code(),
         Some(1),
-        "the generic spelling refuses: {}",
+        "the differing call aborts: {}",
         text(&out.stderr)
     );
     let err = text(&out.stderr);
     assert!(
-        err.contains("not contained in `()`"),
-        "the refusal names the unsolved union: {err}"
+        err.contains("trap: die: ints"),
+        "the generic abort rides the trap line: {err}"
+    );
+}
+
+/// A diverging call sits in a block tail: the branch whose arm exits
+/// through `exit` joins on the other arm alone, and the deliberate
+/// status reaches the process when the arm fires.
+#[test]
+fn a_diverging_call_sits_in_a_block_tail() {
+    let entry = script(
+        "tail",
+        "fn branch(b: bool) -> int {\n  if b { exit(1) } else { 7 }\n}\n\nfn main() -> int {\n  \
+         branch(false)\n}\n",
+    );
+    let out = run(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the live arm answers: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "7\n", "the live arm's answer prints");
+
+    let entry = script(
+        "tail-fire",
+        "fn branch(b: bool) -> int {\n  if b { exit(3) } else { 7 }\n}\n\nfn main() -> int {\n  \
+         branch(true)\n}\n",
+    );
+    let out = run(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "the exiting arm's deliberate status reaches the process"
+    );
+}
+
+/// The script's folded main carries a diverging tail: the top-level
+/// `exit` is the synthesized main's final expression, and the
+/// deliberate status is the run's own answer.
+#[test]
+fn a_diverging_call_sits_in_the_folded_main() {
+    let entry = script("folded", "println(\"reached\")\nexit(2)\n");
+    let out = run(&["run", entry.to_str().expect("temp path is UTF-8")]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "the folded main exits deliberately"
+    );
+    assert!(
+        text(&out.stdout).contains("reached"),
+        "the tail's prefix ran: {}",
+        text(&out.stdout)
     );
 }
 

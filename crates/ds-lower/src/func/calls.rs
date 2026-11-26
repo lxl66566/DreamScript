@@ -764,7 +764,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 // family, and the staged words must be the whole
                 // span the channel carries
                 let channel_ty = self.element_slot_ty(&target, receiver_ty);
-                if let Some(channel_ty) = channel_ty.filter(|ty| *ty != arg_val.ty) {
+                if let Some(channel_ty) =
+                    channel_ty.filter(|ty| *ty != arg_val.ty && !self.diverges_at(arg.span()))
+                {
                     let temp = self.temp_span(channel_ty)?;
                     self.widen_into(&temp, channel_ty, &arg_val, arg.span())?;
                     arg_val = TypedPlace {
@@ -850,11 +852,17 @@ impl<'a> FnLower<'a, '_, '_> {
                              contract of its own; the deinit arc owns the seam",
                         ));
                     }
-                    let temp = self.temp_span(param_ty)?;
-                    self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
-                    TypedPlace {
-                        place: temp,
-                        ty: param_ty,
+                    // a diverging argument never hands its answer to
+                    // the staging temp: the call's own exit ends the path
+                    if !self.diverges_at(arg.span()) {
+                        let temp = self.temp_span(param_ty)?;
+                        self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
+                        TypedPlace {
+                            place: temp,
+                            ty: param_ty,
+                        }
+                    } else {
+                        arg_val
                     }
                 },
                 _ => arg_val,
@@ -1696,11 +1704,15 @@ impl<'a> FnLower<'a, '_, '_> {
                              contract of its own; the deinit arc owns the seam",
                         ));
                     }
-                    let temp = self.temp_span(param_ty)?;
-                    self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
-                    TypedPlace {
-                        place: temp,
-                        ty: param_ty,
+                    if !self.diverges_at(arg.span()) {
+                        let temp = self.temp_span(param_ty)?;
+                        self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
+                        TypedPlace {
+                            place: temp,
+                            ty: param_ty,
+                        }
+                    } else {
+                        arg_val
                     }
                 },
                 _ => arg_val,

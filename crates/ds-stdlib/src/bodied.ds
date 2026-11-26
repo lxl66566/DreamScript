@@ -210,12 +210,13 @@ pub fn rand_seed () -> int {
 // The assert family over the ambient `panic` abort: the condition is
 // the bool word and the failure the deliberate-bug abort, so the
 // members carry no capability and no return value. The equality pair
-// spells one concrete member per scalar width, because a generic body
-// refuses the variable word kinds the equality compare and the message
-// rendering need (the == chain and the interpolation hole answering no
-// runtime kind for a type variable — the reflection seam the generic
-// spellings wait on), so the refused generic spelling stays a test
-// pin, never a member.
+// spells one concrete member per scalar width: the generic abort arm
+// typechecks over `never` (the call's answer unifies with the unit
+// return), and the equality compare lowers through its per-shape
+// instance, while the message rendering's interpolation hole answers
+// no runtime kind for a type variable — the reflection seam the
+// generic spellings wait on — so the concrete members stay the landed
+// surface.
 pub fn assert (cond: bool, msg: string) -> () {
   if cond {
   } else {

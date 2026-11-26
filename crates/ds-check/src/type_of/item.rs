@@ -34,7 +34,7 @@ impl Bodies<'_> {
         match &item.kind {
             ItemKind::Fn(f) => {
                 if f.body.is_some() {
-                    self.fn_decl(f, None, false);
+                    self.fn_decl(f, None, false, false);
                 }
             },
             ItemKind::Trait(t) => {
@@ -55,7 +55,7 @@ impl Bodies<'_> {
                 }
                 for member in &t.members {
                     if let TraitMember::Fn(f) = member {
-                        self.fn_decl(f, Some(self_ty), true);
+                        self.fn_decl(f, Some(self_ty), true, false);
                     }
                 }
                 if self_trait.is_some() {
@@ -171,7 +171,7 @@ impl Bodies<'_> {
                     impl_sig::agree_member_signature(self, f, &sig, sig_span, subst);
                 }
             }
-            let inferred = self.fn_decl(f, Some(target), false);
+            let inferred = self.fn_decl(f, Some(target), false, item.synthesized);
             // An inferred return is agreed through the body's checked tail
             // type, exactly as a written one is: the trait member's
             // registered signature stays the call-site contract.
@@ -282,12 +282,33 @@ impl Bodies<'_> {
         // in it resolves against the expected members, so the written
         // type solves BEFORE the walk
         let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
+        if let Some(expected) = expected
+            && self.decls.universe.is_empty(expected)
+        {
+            self.error(
+                ErrorCode::NeverTypedPosition,
+                "binding annotated `never`: no value inhabits the type, so the binder holds \
+                 nothing"
+                    .to_owned(),
+                local
+                    .ty
+                    .as_ref()
+                    .map(Type::span)
+                    .expect("the annotation solved"),
+                "binding typed never",
+            );
+        }
         let mut val = self.expr(&local.init, expected);
         self.comptime = was;
         if let Some(ann) = &local.ty {
             if let Some(expected) = expected {
-                self.expect_contains(val, expected, local.init.span(), "annotated binding");
-                val.ty = expected;
+                // The annotation's own refusal fired above; checking the
+                // initializer against the empty type would cascade a
+                // second error onto the root cause.
+                if !self.decls.universe.is_empty(expected) {
+                    self.expect_contains(val, expected, local.init.span(), "annotated binding");
+                    val.ty = expected;
+                }
             } else if !self.take_solve_reported() {
                 self.error(
                     ErrorCode::TypeMismatch,
@@ -330,6 +351,7 @@ impl Bodies<'_> {
         f: &FnDecl,
         self_ty: Option<Ty>,
         trait_member: bool,
+        synthesized: bool,
     ) -> Option<Ty> {
         let generics: Vec<GenericParam> = f.generics.iter().map(generic_of).collect();
         self.push_generics(&generics);
@@ -378,6 +400,26 @@ impl Bodies<'_> {
                 continue;
             }
             if let Some(solved) = param.ty.as_ref().and_then(|t| self.solve_here(t)) {
+                // A derive-synthesized member over a zero-case head types
+                // its receiver the empty set by construction; the vacuous
+                // body never dispatches for an inhabited query, so the
+                // no-value refusal stays the user surface's own.
+                if !synthesized && self.decls.universe.is_empty(solved) {
+                    self.error(
+                        ErrorCode::NeverTypedPosition,
+                        format!(
+                            "parameter `{}` is typed `never`: no value inhabits the type, so no \
+                             call ever supplies one",
+                            param.name.name
+                        ),
+                        param
+                            .ty
+                            .as_ref()
+                            .map(Type::span)
+                            .expect("the solved parameter carries its annotation"),
+                        "parameter typed never",
+                    );
+                }
                 self.bind_local(param.name.span, Binding {
                     ty: solved,
                     mutable: param_is_mut(param),
@@ -417,6 +459,37 @@ impl Bodies<'_> {
                 self.empty()
             })
         });
+        // The retired wildcard return: a generic whose return type names
+        // a variable no parameter mentions never solves from a call's
+        // arguments — the escape made every diverging ambient spell a
+        // fake generic answer, and `never` is the real spelling.
+        if !f.generics.is_empty()
+            && let Some(ret_ty) = f.ret.as_ref()
+        {
+            let generic_names: Vec<String> =
+                f.generics.iter().map(|g| g.name.name.clone()).collect();
+            let mut unbound = Vec::new();
+            collect_type_names(ret_ty, &mut unbound);
+            unbound.retain(|name| generic_names.contains(name));
+            for param in &f.params {
+                if let Some(param_ty) = &param.ty {
+                    let mut mentioned = Vec::new();
+                    collect_type_names(param_ty, &mut mentioned);
+                    unbound.retain(|name| !mentioned.contains(name));
+                }
+            }
+            for name in unbound {
+                self.error(
+                    ErrorCode::UnconstrainedReturnVariable,
+                    format!(
+                        "return variable `{name}` names no parameter, so no call's arguments bind \
+                         it; a diverging declaration answers `never`"
+                    ),
+                    ret_ty.span(),
+                    "unconstrained return variable",
+                );
+            }
+        }
         let old_ret = self.ret;
         self.ret = ret;
         let mut body_val: Option<Val> = None;
@@ -518,11 +591,32 @@ impl Bodies<'_> {
         // the annotation directs the initializer, the same
         // solve-before-walk the top-level binding takes
         let expected = local.ty.as_ref().and_then(|ann| self.solve_here(ann));
+        if let Some(expected) = expected
+            && self.decls.universe.is_empty(expected)
+        {
+            self.error(
+                ErrorCode::NeverTypedPosition,
+                "binding annotated `never`: no value inhabits the type, so the binder holds \
+                 nothing"
+                    .to_owned(),
+                local
+                    .ty
+                    .as_ref()
+                    .map(Type::span)
+                    .expect("the annotation solved"),
+                "binding typed never",
+            );
+        }
         let mut val = self.expr(&local.init, expected);
         if let Some(ann) = &local.ty {
             if let Some(expected) = expected {
-                self.expect_contains(val, expected, local.init.span(), "annotated binding");
-                val.ty = expected;
+                // The annotation's own refusal fired above; checking the
+                // initializer against the empty type would cascade a
+                // second error onto the root cause.
+                if !self.decls.universe.is_empty(expected) {
+                    self.expect_contains(val, expected, local.init.span(), "annotated binding");
+                    val.ty = expected;
+                }
             } else if !self.take_solve_reported() {
                 self.error(
                     ErrorCode::TypeMismatch,
@@ -536,7 +630,10 @@ impl Bodies<'_> {
             }
         }
         // A poisoned initializer already reported why its type is empty;
-        // only a clean-but-empty initializer is its own root cause.
+        // only a clean-but-empty initializer is its own root cause. A
+        // diverging empty answer (a call to a `never` fn) stays legal:
+        // the binder holds a value no path produces, the same dead
+        // binding an annotated position refuses.
         if self.decls.universe.is_empty(val.ty)
             && !val.diverges
             && !val.poisoned
@@ -561,4 +658,46 @@ impl Bodies<'_> {
     // the written loops' copies in the once-check's table, a
     // per-instance expansion's copies in the instance tables keyed by
     // the walked fn's definition and solved arguments.
+}
+
+/// Every single-segment name a written type spells, recursions included:
+/// the fn-type parameters and return walk with the union and tuple arms,
+/// so a bound mention reads like a parameter mention.
+pub(super) fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
+    match ty {
+        Type::Path { path, args, .. } => {
+            if let [only] = path.segments.as_slice() {
+                out.push(only.name.clone());
+            }
+            for arg in args {
+                collect_type_names(arg, out);
+            }
+        },
+        Type::Optional { inner, .. }
+        | Type::Negation { inner, .. }
+        | Type::Paren { inner, .. }
+        | Type::Ptr { inner, .. } => collect_type_names(inner, out),
+        Type::Union { left, right, .. }
+        | Type::Intersect { left, right, .. }
+        | Type::Difference { left, right, .. } => {
+            collect_type_names(left, out);
+            collect_type_names(right, out);
+        },
+        Type::Tuple { items, .. } => {
+            for item in items {
+                collect_type_names(item, out);
+            }
+        },
+        Type::Fn { params, ret, .. } => {
+            for param in params {
+                if let Some(t) = &param.ty {
+                    collect_type_names(t, out);
+                }
+            }
+            if let Some(ret) = ret {
+                collect_type_names(ret, out);
+            }
+        },
+        Type::Unit(_) | Type::TypeKw(_) | Type::Foreign { .. } => {},
+    }
 }

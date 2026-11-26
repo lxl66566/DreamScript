@@ -211,6 +211,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Pattern::Binding { span, .. } => self.binder_fact(*span)?.map_or(init.ty, |f| f.ty),
             _ => init.ty,
         };
+        // A diverging initializer (`exit(1)` behind an annotated binder)
+        // never hands its answer to the binding: the call's own exit ends
+        // the path, so the binder stages its declared span unwritten
+        // instead of widening dead words over a mismatched shape
+        let diverging = self.diverges_at(local.init.span());
         let place = if local.mutable {
             if self.is_var_ty(declared) {
                 return Err(LowerError::unsupported(
@@ -227,7 +232,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             // slot at the binding, so an assignment through an
             // element re-stores its slot alone — the const
             // convention aliases the tuple's words instead.
-            if let Pattern::Tuple { pats, .. } = pat {
+            if diverging {
+                let target = self.temp_span(declared)?;
+                self.place_of_ty(target.base, declared)?
+            } else if let Pattern::Tuple { pats, .. } = pat {
                 self.var_tuple_slots(pats, &init, declared)?;
                 init.place.clone()
             } else {
@@ -235,6 +243,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.widen_into(&target, declared, &init, local.span)?;
                 self.place_of_ty(target.base, declared)?
             }
+        } else if diverging && declared != init.ty {
+            let target = self.temp_span(declared)?;
+            self.place_of_ty(target.base, declared)?
         } else if declared != init.ty && self.is_union_ty(declared)? {
             // An annotated const over a narrower source claims the
             // destination union's region under its source member: the

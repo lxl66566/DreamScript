@@ -1,7 +1,7 @@
 //! Lambda typing: parameter and return types inferred against the expected
 //! fn type, parameter binding, and the body walk under its own scope frame.
 
-use super::*;
+use super::{item::collect_type_names, *};
 
 impl Bodies<'_> {
     pub(super) fn lambda(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
@@ -146,6 +146,30 @@ impl Bodies<'_> {
                 continue;
             };
             param_tys.push(solved);
+            // A parameter typed the empty set holds a value no call ever
+            // supplies: no value inhabits `never`, so the annotation
+            // refuses at its own span.
+            // The refusal reads the written annotation alone: a type the
+            // expected fn signature threads in (an un-annotated
+            // parameter) inherits whatever its caller solved, and an
+            // empty arrival there is the poisoned chain's own cascade,
+            // never this position's root cause.
+            if param.ty.is_some() && self.decls.universe.is_empty(solved) {
+                self.error(
+                    ErrorCode::NeverTypedPosition,
+                    format!(
+                        "parameter `{}` is typed `never`: no value inhabits the type, so no call \
+                         ever supplies one",
+                        param.name.name
+                    ),
+                    param
+                        .ty
+                        .as_ref()
+                        .map(Type::span)
+                        .expect("the refusal reads the written annotation"),
+                    "parameter typed never",
+                );
+            }
             // A `type`-annotated parameter without the comptime mode has
             // no runtime spelling: nothing constructs the builtin atom's
             // values outside comptime evaluation, so the annotation
@@ -169,6 +193,38 @@ impl Bodies<'_> {
             });
         }
         let declared_ret = ret.as_ref().and_then(|r| self.solve_here(r));
+        // The retired wildcard return: a generic whose return type names
+        // a variable no parameter mentions never solves from a call's
+        // arguments — the escape made every diverging ambient spell a
+        // fake generic answer, and `never` is the real spelling. A
+        // lambda literal carries no generics, so the check reads only
+        // the named-fn spelling's own parameters.
+        if !generics.is_empty()
+            && let Some(ret_ty) = ret.as_ref()
+        {
+            let generic_names: Vec<String> = generics.iter().map(|g| g.name.name.clone()).collect();
+            let mut unbound = Vec::new();
+            collect_type_names(ret_ty, &mut unbound);
+            unbound.retain(|name| generic_names.contains(name));
+            for param in params {
+                if let Some(param_ty) = &param.ty {
+                    let mut mentioned = Vec::new();
+                    collect_type_names(param_ty, &mut mentioned);
+                    unbound.retain(|name| !mentioned.contains(name));
+                }
+            }
+            for name in unbound {
+                self.error(
+                    ErrorCode::UnconstrainedReturnVariable,
+                    format!(
+                        "return variable `{name}` names no parameter, so no call's arguments bind \
+                         it; a diverging declaration answers `never`"
+                    ),
+                    ret_ty.span(),
+                    "unconstrained return variable",
+                );
+            }
+        }
         let fn_ret_expected = declared_ret.or_else(|| expected_sig.as_ref().map(|(_, r)| *r));
         // A still-unbound variable as the expected return is the
         // instantiation's inference hole (a generic callee's `r`): the

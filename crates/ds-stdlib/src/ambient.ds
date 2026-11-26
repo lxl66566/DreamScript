@@ -45,6 +45,14 @@
 // process spawn.
 platform "std" provides <console, fsys, net, time, proc>
 
+// The bottom type: the zero-case enum every compile reaches, the return
+// type of a call that yields no value. No value inhabits it, so a
+// diverging call sits in any value position — the answer unifies
+// wherever the position expects one — while a binding, parameter,
+// field, or payload typed `never` refuses: the binder would hold a
+// value no path produces.
+pub enum never { }
+
 pub trait Copyable { }
 
 // The show derive's target: one member answering the
@@ -579,17 +587,18 @@ pub extern fn int_of_u32 (v: u32) -> int
 // extern does, the lowerer reading the callee by name alone. The
 // message rides the Die trap out to the drive, so the CLI's trap report
 // prints a u32 range failure exactly like `die`; the declared return is
-// the member's own checking surface — the primitive never answers.
-extern fn trap (msg: string) -> u32
+// `never` — the primitive never answers, so the call sits in any value
+// position and the check skips its containment.
+extern fn trap (msg: string) -> never
 // The policy-free abort over the trap primitive: the deliberate-bug
 // spelling every source sharing the ambient reaches, library packages
 // included. The message rides the Die trap out to the drive — the
 // engine prints nothing and decides no exit code, the host's policy
 // applying above it (the CLI's `die` provision rides the same
-// primitive) — and the return generic answers whatever the call site
-// expects, so a statement position or a handler arm takes it while a
-// block tail against an annotated return refuses.
-pub extern fn panic[t] (msg: string) -> t
+// primitive) — and the return is `never`, so the call sits in any
+// value position: a statement, a handler arm, a block tail, the
+// folded main's tail.
+pub extern fn panic (msg: string) -> never
 // The u32 width's trapping construction:
 // the receiverless member answers the in-range word and traps out of
 // range naming the value and the range — the checked `u32_of` above
@@ -703,12 +712,11 @@ pub extern fn utc_offset (unix_seconds: int) -> int
 // capability's own op row, so a host refusing the capability refuses
 // the spelling. The engine prints nothing and decides no exit code (the
 // installing host owns what the status means), the call never answers,
-// and the return generic answers whatever the call site expects,
-// `panic`'s own shape.
+// and the return is `never`, `panic`'s own shape.
 pub extern fn args () -> list[string]
 pub extern fn env (name: string) -> string | none
 pub extern fn proc_run (cmd: string, args: list[string]) -> int | io_err
-pub extern fn exit[t] (code: int) -> t
+pub extern fn exit (code: int) -> never
 pub extern fn net_connect (host: string, port: int) -> net_handle
 pub extern fn net_send (conn: int, data: string) -> () | net_err
 pub extern fn net_recv (conn: int, max_bytes: int) -> string | net_err

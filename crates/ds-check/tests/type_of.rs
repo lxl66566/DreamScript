@@ -1049,10 +1049,12 @@ fn field_access_needs_one_struct() {
 fn difference_types_erase_to_the_solved_shape() {
     // `io_err - io_err` erases entirely: the annotation solves to
     // `empty`, and nothing inhabits it — no any fallback.
-    // the directed label against the erased set refuses unknown-member,
+    // the erased annotation refuses the never-typed binding, and the
+    // directed label against the erased set refuses unknown-member,
     // rendering the empty shape the difference solved to
     assert_eq!(check("const x: io_err - io_err = io_err\n"), [
-        "DS2045 a bare `io_err` names no member of `empty` [F9.5]"
+        "DS2053 binding annotated `never`: no value inhabits the type, so the binder holds nothing",
+        "DS2045 a bare `io_err` names no member of `never` [F9.5]",
     ]);
 }
 
@@ -1931,7 +1933,11 @@ fn nearby_field_spellings_stay_clean() {
         "}\n",
         "const v = s { a: quiet, b: red, c: none, d: none, f: on }\n",
     ));
-    clean("enum void {}\nstruct s { e: void }\n");
+    // a field typed the zero-case enum refuses under the bottom rule:
+    // no value inhabits the type, so the field holds nothing
+    assert_eq!(check("enum void {}\nstruct s { e: void }\n"), [
+        "DS2053 field `e` is typed `never`: no value inhabits the type, so the field holds nothing"
+    ]);
 }
 
 /// `none` applied with type arguments is a unit-tag head that takes
@@ -2241,18 +2247,24 @@ fn written_type_applications_validate_arity_and_constructor_kind() {
 #[test]
 fn a_zero_case_enum_s_name_solves_to_its_type() {
     // The union of zero case atoms is the empty set: uninhabited, still
-    // a type — so the name checks at every annotation boundary and an
-    // inherent impl head hosts members over it.
-    clean("enum never { }\nfn f(v: never) -> never { v }\nfn main() -> int { 0 }\n");
+    // a type — an inherent impl head hosts members over it, while a
+    // position typed the name refuses under the bottom rule.
     clean(concat!(
         "enum never { }\n",
         "impl never { fn size(self) -> int { 0 } }\n",
         "fn main() -> int { 0 }\n",
     ));
+    assert_eq!(
+        check("enum never { }\nfn f(v: never) -> never { v }\nfn main() -> int { 0 }\n"),
+        [
+            "DS2053 parameter `v` is typed `never`: no value inhabits the type, so no call ever \
+             supplies one"
+        ]
+    );
     // No value inhabits it: a construction attempt keeps the union's
     // own refusal.
     assert_eq!(
         check(concat!("enum never { }\n", "fn f() -> never { 0 }\n",)),
-        ["DS2001 `lambda body` has type `int`, not contained in `empty` [B2]"]
+        ["DS2001 `lambda body` has type `int`, not contained in `never` [B2]"]
     );
 }

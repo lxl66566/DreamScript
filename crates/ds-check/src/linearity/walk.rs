@@ -57,6 +57,9 @@ pub(super) struct Lin<'a> {
     /// own span: a copy walks once per field, straight-line.
     pub(super) copy_counts: HashMap<Span, usize>,
     pub(super) res: Option<&'a Resolutions>,
+    /// The checked `Val` of every expression, keyed by its span: the
+    /// early-exit flag read here marks a call to a `never` fn diverging.
+    pub(super) expr_types: &'a FxHashMap<Span, Val>,
     /// The interpolation holes whose `show` the checker solved at their
     /// own span: the solved dispatch, read for the receiver's
     /// passing mode — the implicit dispatch borrows exactly where the
@@ -1031,6 +1034,13 @@ impl<'a> Lin<'a> {
         any_linear
     }
 
+    /// Whether the checked walk marked this expression's answer
+    /// diverging: a call to a `never` fn exits at the call, so the state
+    /// after it is unreachable and the walk reports it as an early exit.
+    fn expr_diverges(&self, span: Span) -> bool {
+        self.expr_types.get(&span).is_some_and(|val| val.diverges)
+    }
+
     fn place_ty(&self, place: Place) -> Option<Ty> {
         match place {
             Place::Local(span) => self.facts.get(&span).map(|fact| fact.ty),
@@ -1210,7 +1220,8 @@ impl<'a> Lin<'a> {
         };
         let callee = peel(callee);
         if let Expr::Field { recv, name, .. } = callee {
-            return self.dot_call(recv, name, args, trailing.as_deref());
+            let _ = self.dot_call(recv, name, args, trailing.as_deref());
+            return self.expr_diverges(e.span());
         }
         if let Expr::Path { path, .. } = callee {
             match path.segments.as_slice() {
@@ -1219,7 +1230,8 @@ impl<'a> Lin<'a> {
                         self.res.and_then(|res| res.get(only.span)).cloned()
                         && let Some(sig) = self.decls.fns.get(&def).cloned()
                     {
-                        return self.sig_call(&sig, None, args, trailing.as_deref());
+                        let _ = self.sig_call(&sig, None, args, trailing.as_deref());
+                        return self.expr_diverges(e.span());
                     }
                 },
                 [_, method] => {
@@ -1227,7 +1239,8 @@ impl<'a> Lin<'a> {
                         self.res.and_then(|res| res.get(method.span)).cloned()
                         && let Some(sig) = self.member_sig(method_id)
                     {
-                        return self.sig_call(&sig, None, args, trailing.as_deref());
+                        let _ = self.sig_call(&sig, None, args, trailing.as_deref());
+                        return self.expr_diverges(e.span());
                     }
                 },
                 _ => {},
@@ -1242,7 +1255,7 @@ impl<'a> Lin<'a> {
         if let Some(tail) = trailing.as_deref() {
             self.expr(tail, false);
         }
-        false
+        self.expr_diverges(e.span())
     }
 
     fn dot_call(

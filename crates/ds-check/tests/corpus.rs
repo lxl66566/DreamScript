@@ -560,7 +560,7 @@ fn render_empty_and_none() {
     let mut c = corpus();
     let empty = c.universe.empty_ty();
     let text_empty = c.universe.render(empty);
-    assert_eq!(text_empty, "empty");
+    assert_eq!(text_empty, "never");
     let none = c.ty(TypeId::NONE);
     let text_none = c.universe.render(none);
     assert_eq!(text_none, "none");

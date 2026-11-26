@@ -311,6 +311,7 @@ impl<'a> FnLower<'a, '_, '_> {
             let mut arg = this.value(item)?;
             if let Some(element) = element
                 && element != arg.ty
+                && !this.diverges_at(item.span())
                 && this.is_union_ty(element)?
             {
                 let temp = this.temp_span(element)?;

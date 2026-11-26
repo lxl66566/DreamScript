@@ -412,8 +412,8 @@ fn canonical_empty_head_hosts_a_vacuous_instance() {
     let mut f = fixture();
     let ids = f.declare(f.show, TypeExpr::Empty).unwrap();
     assert_eq!(ids.len(), 1);
-    assert_eq!(f.universe.render(f.env.head(ids[0]).unwrap()), "empty");
-    assert_eq!(f.universe.render(f.env.written(ids[0]).unwrap()), "empty");
+    assert_eq!(f.universe.render(f.env.head(ids[0]).unwrap()), "never");
+    assert_eq!(f.universe.render(f.env.written(ids[0]).unwrap()), "never");
 
     // Disjoint from every inhabited head, and from a second vacuous
     // instance of the same trait: both coexist and the closure pass

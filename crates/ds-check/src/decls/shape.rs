@@ -261,5 +261,22 @@ pub(super) fn field_expr(
         );
         return None;
     }
+    let uninhabited = decls
+        .universe
+        .solve(&expr)
+        .is_ok_and(|solved| decls.universe.is_empty(solved));
+    if uninhabited {
+        diags.push(
+            Diagnostic::error(
+                ErrorCode::NeverTypedPosition,
+                format!(
+                    "{subject} is typed `never`: no value inhabits the type, so the field holds \
+                     nothing"
+                ),
+            )
+            .with_primary(span, "field typed never"),
+        );
+        return None;
+    }
     Some(expr)
 }

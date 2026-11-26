@@ -25,11 +25,12 @@ impl FnLower<'_, '_, '_> {
         // with its own value; the join keeps what both arms kept
         let base = self.rc.save();
         let then_tp = self.block_value(then)?;
-        let then_div = self.rc.diverged();
+        let then_div = self.rc.diverged() || self.diverges_at(then.span);
         // an arm that exited the frame never reaches the join: its
         // handed-back place is the exit's dead answer, so the join widen
         // would emit dead code over a mismatched shape (a statement if's
-        // early-exit arm) — the arm's own exit stands in for the join
+        // early-exit arm, or a diverging call's — the call answers
+        // `never` and the arm's own exit stands in for the join
         if !then_div {
             self.refuse_fn_word_answer(
                 ty,
@@ -47,7 +48,7 @@ impl FnLower<'_, '_, '_> {
         self.bind_label(else_lbl);
         if let Some(else_expr) = else_ {
             let else_tp = self.value(else_expr)?;
-            let else_div = self.rc.diverged();
+            let else_div = self.rc.diverged() || self.diverges_at(else_expr.span());
             if !else_div {
                 self.refuse_fn_word_answer(
                     ty,
@@ -304,7 +305,7 @@ impl FnLower<'_, '_, '_> {
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                let div = self.rc.diverged();
+                let div = self.rc.diverged() || self.diverges_at(arm.body.span());
                 // an exited arm never reaches the join (if_value's arm
                 // comment): its dead answer does not widen
                 if !div {
@@ -430,7 +431,7 @@ impl FnLower<'_, '_, '_> {
                     let body = self.value(&arm.body)?;
                     // an exited arm never reaches the join (if_value's arm
                     // comment): its dead answer does not widen
-                    if !self.rc.diverged() {
+                    if !(self.rc.diverged() || self.diverges_at(arm.body.span())) {
                         self.refuse_fn_word_answer(
                             ty,
                             &body,
@@ -532,7 +533,7 @@ impl FnLower<'_, '_, '_> {
             // state
             if let Some((result, ty, join)) = value {
                 let body_tp = self.value(&arm.body)?;
-                let div = self.rc.diverged();
+                let div = self.rc.diverged() || self.diverges_at(arm.body.span());
                 // an exited arm never reaches the join (if_value's arm
                 // comment): its dead answer does not widen
                 if !div {
