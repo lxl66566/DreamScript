@@ -60,7 +60,7 @@
 //! same `jump!` macro as any code.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     hash::{BuildHasherDefault, Hasher},
     sync::Arc,
     time::{Duration, Instant},
@@ -75,7 +75,7 @@ use ds_abi::{
 use crate::{
     EVIDENCE_MODULE,
     claims::{CLAIM_BAND_CLEAR, CLAIM_BAND_SET, ClaimReading, ClaimTable, HookSite, hook_sites},
-    fiber::{FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
+    fiber::{ERR_RING_CAP, ErrHop, FIBER_ROOT, Fiber, FiberId, FiberState, ResumePoint, Segment},
     loader::{LoadError, StagedSite},
     module::{ModuleRegistry, ModuleVersion, VersionIdx},
     native::{
@@ -2932,6 +2932,86 @@ pub struct BacktraceFrame {
     /// How many logical frames this physical frame elided via tail calls
     /// since the normal call that created it.
     pub elided: u32,
+    /// The frame position resolved through the module's pc-to-span table
+    /// (H7), `None` before a region (or with the section stripped): the
+    /// one source channel a renderer names a frame through.
+    pub location: Option<SourceLocation>,
+}
+
+/// A source position the span table named: file name plus 1-based line
+/// and column. The trap renderer, the debugger, and the sampler report
+/// through this one shape; nothing else in the VM carries source text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// The file name as the module's span table recorded it.
+    pub file: String,
+    /// 1-based line.
+    pub line: u32,
+    /// 1-based column.
+    pub col: u32,
+}
+
+/// One hop of the boundary's recorded error chain (H7): the frame whose
+/// `?` error leg propagated, innermost first, source resolved through
+/// the span table at read time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrorTraceFrame {
+    /// The frame's module.
+    pub module: String,
+    /// The frame's function.
+    pub func: String,
+    /// The propagation mark's pc.
+    pub pc: u32,
+    /// The position the span table names, `None` before a region.
+    pub location: Option<SourceLocation>,
+}
+
+/// Where the debugger's armed breakpoint stopped the running fiber.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreakpointHit {
+    /// The module the stopped function runs in.
+    pub module: String,
+    /// The stopped function.
+    pub func: String,
+    /// The stop's instruction pc.
+    pub pc: u32,
+    /// The position the span table names, `None` before a region.
+    pub location: Option<SourceLocation>,
+}
+
+/// A source position the host arms a breakpoint at: file name plus
+/// 1-based line, resolved to instruction pcs through the span tables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Breakpoint {
+    /// The file name as the module's span table records it.
+    pub file: String,
+    /// 1-based line.
+    pub line: u32,
+}
+
+/// One sampling histogram row: a frame position and its backward-branch
+/// sample count, source resolved through the span table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileRow {
+    /// The frame's module.
+    pub module: String,
+    /// The frame's function.
+    pub func: String,
+    /// Recorded samples.
+    pub hits: u64,
+    /// The position the span table names, `None` before a region.
+    pub location: Option<SourceLocation>,
+}
+
+/// What a debugged run ends on: the entry's own answer, or a breakpoint
+/// stop the host inspects and resumes past ([`Vm::resume_fiber`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DebugStop {
+    /// The entry completed: its whole answer span.
+    Answer(FrameAnswer),
+    /// The running fiber stopped at an armed breakpoint: it stays
+    /// resumable at the stop, [`Vm::breakpoint_hit`] names it.
+    Breakpoint,
 }
 
 /// The tier-1 VM. Construct with a [`ModuleRegistry`], then run encoded
@@ -3036,6 +3116,35 @@ pub struct Vm {
     /// parks — the frame has advanced a full iteration). Set by the
     /// switch into a Preempted fiber; every switch resets it.
     suspend_skip: Option<(FiberId, CodePc)>,
+    /// The error-trace switch (H7): armed, the ERR_MARK arm writes the
+    /// failing frame's position into the running fiber's private ring.
+    /// VM-layer state alone — no lowering input reads it, so flipping it
+    /// changes no artifact.
+    trace_errors: bool,
+    /// The debugger's armed breakpoints, resolved to (version, function,
+    /// pc) triples through the span tables at arm time; `None` keeps the
+    /// dispatch's per-instruction check to one branch test.
+    breakpoints: Option<BTreeSet<(u32, u32, u32)>>,
+    /// The parked hit a resumed breakpoint re-enters: its own re-take is
+    /// the resume, not a fresh stop, so the check skips it exactly once.
+    breakpoint_skip: Option<(FiberId, CodePc)>,
+    /// The last breakpoint the running fiber stopped at, reset when the
+    /// host reads it.
+    last_breakpoint: Option<(VersionIdx, u32, u32)>,
+    /// Whether the last Yielded park was a breakpoint stop, so the root
+    /// drive hands the host the parked fiber instead of resuming it.
+    breakpoint_park: bool,
+    /// Whether the current root drive was entered through
+    /// [`Vm::run_debugged`], so a breakpoint park ends the drive instead
+    /// of resuming under the host's nose.
+    debug_stops: bool,
+    /// The sampling profiler's interval in backward branches (0 off):
+    /// armed, every Nth taken back edge records the running frame's
+    /// position into the histogram.
+    sample_every: u32,
+    sample_tick: u32,
+    /// The sampler's histogram: (version, function, pc) hits.
+    samples: BTreeMap<(u32, u32, u32), u64>,
     /// The budgeted drive's remaining steps ([`Vm::run_with_budget`]):
     /// charged one per decoded instruction by the fueled instantiation
     /// of the dispatch loop alone, so every unbounded drive ignores it
@@ -3152,6 +3261,7 @@ const OP_CALLG: u8 = 0xa4;
 const OP_CALLTG: u8 = 0xa5;
 const OP_CALLS: u8 = 0xa6;
 const OP_FUNCF: u8 = 0xb0;
+const OP_ERR_MARK: u8 = 0xb1;
 const OP_HALT: u8 = 0xc0;
 const OP_EQ_STR: u8 = 0xd0;
 const OP_NEQ_STR: u8 = 0xd1;
@@ -3201,6 +3311,15 @@ impl Vm {
             repl_park: None,
             suspend_request: None,
             suspend_skip: None,
+            trace_errors: false,
+            breakpoints: None,
+            breakpoint_skip: None,
+            last_breakpoint: None,
+            breakpoint_park: false,
+            debug_stops: false,
+            sample_every: 0,
+            sample_tick: 0,
+            samples: BTreeMap::new(),
             fuel: 0,
             fork_pool: false,
             fork_pool_drives: 0,
@@ -7721,6 +7840,211 @@ impl Vm {
         self.run_budgeted(module, func, args, None)
     }
 
+    /// The debugger's drive: exactly [`Vm::run`], except an armed
+    /// breakpoint stop ends the drive with [`DebugStop::Breakpoint`] —
+    /// the fiber stays resumable at the stop, [`Vm::breakpoint_hit`]
+    /// names it, and [`Vm::resume_fiber`] continues the program (to the
+    /// next stop or the entry's answer, whichever comes first).
+    ///
+    /// # Errors
+    ///
+    /// [`Vm::run`]'s own.
+    pub fn run_debugged(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+    ) -> Result<DebugStop, Trap> {
+        self.debug_stops = true;
+        let answer = self.run_budgeted(module, func, args, None);
+        self.debug_stops = false;
+        match answer {
+            Ok(_a) if self.breakpoint_park => {
+                self.breakpoint_park = false;
+                Ok(DebugStop::Breakpoint)
+            },
+            Ok(a) => Ok(DebugStop::Answer(a)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The error-trace switch (H7): armed, the `?` error leg's mark
+    /// writes the failing frame's position into the running fiber's
+    /// private ring. VM-layer state alone — no lowering input reads it,
+    /// so flipping it changes no artifact.
+    pub fn set_trace_errors(&mut self, on: bool) {
+        self.trace_errors = on;
+    }
+
+    /// The running fiber's recorded error chain, innermost first: one
+    /// hop per `?` error leg the fiber took, source resolved through the
+    /// span tables at read time. The boundary prints it beside the
+    /// unhandled-error message; the ring is the trap layer's diagnostic,
+    /// carried by no error value.
+    #[must_use]
+    pub fn error_trace(&self) -> Vec<ErrorTraceFrame> {
+        let fiber = &self.pool[self.current.index()];
+        fiber
+            .err_ring
+            .iter()
+            .map(|hop| {
+                let (module, func, location) = self
+                    .registry
+                    .version(hop.version)
+                    .and_then(|version| {
+                        let f = version.functions().get(hop.func as usize)?;
+                        let location =
+                            version.location(hop.func, hop.pc).map(|(file, line, col)| {
+                                SourceLocation {
+                                    file: file.to_owned(),
+                                    line,
+                                    col,
+                                }
+                            });
+                        Some((version.name().to_owned(), f.name.clone(), location))
+                    })
+                    .unwrap_or_else(|| ("(retired)".to_owned(), format!("fn {}", hop.func), None));
+                ErrorTraceFrame {
+                    module,
+                    func,
+                    pc: hop.pc,
+                    location,
+                }
+            })
+            .collect()
+    }
+
+    /// Arms the debugger's breakpoints: every span-table region whose
+    /// position names one of the spots resolves to a stop pc, and the
+    /// running fiber parks there before the word executes. Answers how
+    /// many pcs the spots resolved to (a spot no installed module's
+    /// table names resolves to nothing). An empty slice disarms.
+    pub fn arm_breakpoints(&mut self, spots: &[Breakpoint]) -> usize {
+        self.breakpoint_skip = None;
+        self.last_breakpoint = None;
+        self.breakpoint_park = false;
+        if spots.is_empty() {
+            self.breakpoints = None;
+            return 0;
+        }
+        let mut set = BTreeSet::new();
+        for row in 0..self.registry.version_rows() {
+            let Some(version) = self.registry.version(VersionIdx(
+                u32::try_from(row).expect("version rows fit u32"),
+            )) else {
+                continue;
+            };
+            let Some(spans) = version.pc_spans() else {
+                continue;
+            };
+            for row_spans in &spans.funcs {
+                for region in &row_spans.regions {
+                    let named = spans.file(region.at.file).unwrap_or_default();
+                    if spots
+                        .iter()
+                        .any(|spot| spot.file == named && spot.line == region.at.line)
+                    {
+                        set.insert((
+                            u32::try_from(row).expect("version rows fit u32"),
+                            row_spans.func,
+                            region.pc,
+                        ));
+                    }
+                }
+            }
+        }
+        let resolved = set.len();
+        self.breakpoints = Some(set);
+        resolved
+    }
+
+    /// Whether the last drive ended parked at an armed breakpoint (the
+    /// resume word is in the host's hand): read without consuming the
+    /// stop's memory, which [`Vm::breakpoint_hit`] does.
+    #[must_use]
+    pub fn parked_at_breakpoint(&self) -> bool {
+        self.breakpoint_park
+    }
+
+    /// The breakpoint the running fiber last stopped at, resetting the
+    /// stop's memory: `None` once the program moved past it (a completed
+    /// resume reads `None` exactly once).
+    pub fn breakpoint_hit(&mut self) -> Option<BreakpointHit> {
+        let (version, func, pc) = self.last_breakpoint.take()?;
+        self.breakpoint_park = false;
+        let named = self.registry.version(version).and_then(|version| {
+            let f = version.functions().get(func as usize)?;
+            let location = version
+                .location(func, pc)
+                .map(|(file, line, col)| SourceLocation {
+                    file: file.to_owned(),
+                    line,
+                    col,
+                });
+            Some((version.name().to_owned(), f.name.clone(), location))
+        });
+        let Some((module, func_name, location)) = named else {
+            return Some(BreakpointHit {
+                module: "(retired)".to_owned(),
+                func: format!("fn {func}"),
+                pc,
+                location: None,
+            });
+        };
+        Some(BreakpointHit {
+            module,
+            func: func_name,
+            pc,
+            location,
+        })
+    }
+
+    /// Arms the sampling profiler: every `every`-th taken backward
+    /// branch records the running frame's position into the histogram
+    /// (0 disarms and clears). The samples' source resolves only at
+    /// report time, through the span tables — the shared substrate the
+    /// trap renderer and the debugger read.
+    pub fn arm_sampling(&mut self, every: u32) {
+        self.sample_every = every;
+        self.sample_tick = 0;
+        if every == 0 {
+            self.samples.clear();
+        }
+    }
+
+    /// The sampling histogram, heaviest first: one row per sampled
+    /// frame position, ties broken by module, function, and pc for a
+    /// deterministic report.
+    #[must_use]
+    pub fn sampling_report(&self) -> Vec<ProfileRow> {
+        let mut rows: Vec<((u32, u32, u32), u64)> =
+            self.samples.iter().map(|(k, v)| (*k, *v)).collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        rows.into_iter()
+            .map(|((version, func, pc), hits)| {
+                let named = self.registry.version(VersionIdx(version)).and_then(|v| {
+                    let f = v.functions().get(func as usize)?;
+                    let location = v
+                        .location(func, pc)
+                        .map(|(file, line, col)| SourceLocation {
+                            file: file.to_owned(),
+                            line,
+                            col,
+                        });
+                    Some((v.name().to_owned(), f.name.clone(), location))
+                });
+                let (module, func_name, location) =
+                    named.unwrap_or_else(|| ("(retired)".to_owned(), format!("fn {func}"), None));
+                ProfileRow {
+                    module,
+                    func: func_name,
+                    hits,
+                    location,
+                }
+            })
+            .collect()
+    }
+
     /// [`Vm::run`] under a total step budget (the comptime fence's
     /// runaway bound): the fueled instantiation of the dispatch loop
     /// charges one step per decoded instruction, and a drive past the
@@ -7767,6 +8091,7 @@ impl Vm {
         self.release_owned_nurseries(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();
+        root.err_ring.clear();
         Self::push_entry_frame(root, version, func_id, args, frame_size);
         root.resume = None;
         root.resumer = None;
@@ -7818,6 +8143,16 @@ impl Vm {
                     return Ok(answer);
                 },
                 Ok(DriveOutcome::Yielded(_)) => {
+                    // a debugged root's breakpoint stop hands the host
+                    // the parked fiber: the drive ends, the host inspects
+                    // (the backtrace now carries positions) and resumes
+                    // through [`Vm::resume_fiber`]. An un-debugged run
+                    // never parks this way, so the switch_in path is the
+                    // ordinary one.
+                    if self.breakpoint_park && self.debug_stops {
+                        self.host_release();
+                        return Ok(FrameAnswer::one(Value::Tag(PLATFORM_NONE)));
+                    }
                     let (a, p) = self.switch_in(FIBER_ROOT, Value::Tag(PLATFORM_NONE));
                     active = a;
                     pc = p;
@@ -9164,6 +9499,37 @@ impl Vm {
                     };
                     return Err((e, pc));
                 }
+                // The debugger's stop-before (the one data-path guard the
+                // tier contract allows beside the stack-limit compare):
+                // a pc the armed set names parks the fiber there before
+                // the word executes, and the resumed drive's re-take of
+                // the parked pc is the resume itself, skipped once. Never
+                // under a teardown drive, whose walk must finish. The
+                // span table is read at arm time only; the per-instruction
+                // cost when disarmed is one branch on the Option.
+                if self.breakpoints.is_some()
+                    && !self.teardown_drive
+                    && self
+                        .breakpoints
+                        .as_ref()
+                        .is_some_and(|set| set.contains(&(active.version.0, active.func, pc.0)))
+                {
+                    if self.breakpoint_skip.take() == Some((self.current, pc)) {
+                        // the resumed hit's own re-take
+                    } else {
+                        let fiber = &mut self.pool[self.current.index()];
+                        fiber.resume = Some(ResumePoint {
+                            version: active.version,
+                            func: active.func,
+                            pc,
+                        });
+                        fiber.state = FiberState::Preempted;
+                        self.last_breakpoint = Some((active.version, active.func, pc.0));
+                        self.breakpoint_park = true;
+                        self.breakpoint_skip = Some((self.current, pc));
+                        return Ok(DriveOutcome::Yielded(Value::Tag(PLATFORM_NONE)));
+                    }
+                }
                 macro_rules! jump {
                     ($target:expr) => {{
                         let t = $target;
@@ -9182,6 +9548,20 @@ impl Vm {
                         // instead of cutting: the cut would kill the fiber whose
                         // death walk is driving the hook (a teardown hook must
                         // not re-enter the nursery)
+                        // the sampling profiler's tick (H7): every Nth
+                        // taken back edge records the running frame's
+                        // position into the histogram, source resolved
+                        // only at report time through the span tables
+                        if self.sample_every != 0 && t <= pc.0 {
+                            self.sample_tick += 1;
+                            if self.sample_tick >= self.sample_every {
+                                self.sample_tick = 0;
+                                *self
+                                    .samples
+                                    .entry((active.version.0, active.func, pc.0))
+                                    .or_insert(0) += 1;
+                            }
+                        }
                         if t <= pc.0 && self.cancel_requested() {
                             if self.teardown_drive {
                                 return Err((Trap::ReentrancyRefused, pc));
@@ -9356,6 +9736,27 @@ impl Vm {
                                 layout: frame_slots,
                             };
                             return Err((e, pc));
+                        }
+                        pc.0 += 1;
+                    },
+                    // the `?` error leg's propagation mark (H7): no
+                    // operands, the frame's own position is the datum.
+                    // Armed, the hop joins the running fiber's private
+                    // ring, innermost first, the oldest dropping past the
+                    // cap; disarmed, the mark falls through — the switch
+                    // is VM state, so the same body runs either way.
+                    OP_ERR_MARK => {
+                        if self.trace_errors {
+                            let fiber = &mut self.pool[self.current.index()];
+                            let ring = &mut fiber.err_ring;
+                            ring.push_back(ErrHop {
+                                version: active.version,
+                                func: active.func,
+                                pc: pc.0,
+                            });
+                            if ring.len() > ERR_RING_CAP {
+                                ring.pop_front();
+                            }
                         }
                         pc.0 += 1;
                     },
@@ -11913,11 +12314,25 @@ impl Vm {
                 Word::Meta(m) => m.tail.elided,
                 Word::Slot(_) => 0,
             };
+            let version = self.registry.pinned(ci.module);
+            let location = match pc {
+                FramePc::At(at) => {
+                    version
+                        .location(ci.func, at.0)
+                        .map(|(file, line, col)| SourceLocation {
+                            file: file.to_owned(),
+                            line,
+                            col,
+                        })
+                },
+                FramePc::Hosted => None,
+            };
             frames.push(BacktraceFrame {
-                module: self.registry.pinned(ci.module).name().to_owned(),
+                module: version.name().to_owned(),
                 func: f.name.clone(),
                 pc,
                 elided,
+                location,
             });
         }
         frames

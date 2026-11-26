@@ -158,4 +158,7 @@ pub use repl::{ReplEntry, ReplOutcome, SpliceError, splice_park};
 pub use value::{
     ARENA_CHUNK_LIMIT, ARENA_LEN_LIMIT, ArenaPackError, ArenaStr, FuncRef, RefId, Value, Word,
 };
-pub use vm::{BacktraceFrame, FrameAnswer, FramePc, IoDrive, Trap, Vm};
+pub use vm::{
+    BacktraceFrame, Breakpoint, BreakpointHit, DebugStop, ErrorTraceFrame, FrameAnswer, FramePc,
+    IoDrive, ProfileRow, SourceLocation, Trap, Vm,
+};

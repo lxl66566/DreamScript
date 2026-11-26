@@ -311,6 +311,11 @@ pub(crate) enum Op {
     Halt {
         slot: Slot,
     },
+    /// The `?` error leg's propagation mark (ERR_MARK, 0xB.1): no
+    /// operands, no slot effects. The VM records the frame's position
+    /// into the running fiber's ring under its error-trace switch, and
+    /// falls through otherwise.
+    ErrMark,
 }
 
 /// How the words of a place are shaped: a solved type's span, or a single
@@ -2623,6 +2628,18 @@ pub(crate) struct FnLower<'a, 'p, 's> {
     /// its discards, plus the tail's exit boundary — recorded only for
     /// `main`, rebased through `finalize`'s movements.
     value_ends: Vec<u32>,
+    /// The source span the ops currently emit under: `value` sets it for
+    /// its expression's walk and restores the enclosing one after, so
+    /// every op attributes to the innermost expression lowering it.
+    cur_span: Span,
+    /// The span the last recorded mark carries: a mark lands only when
+    /// the span changes, so consecutive ops under one expression share
+    /// one region.
+    last_span: Option<Span>,
+    /// The region starts, in stream order: stream position plus the span
+    /// the ops from there run under. Positions shift with every splice
+    /// like the labels, and `finalize` rebases them onto final word pcs.
+    span_marks: Vec<(usize, Span)>,
 }
 
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
@@ -2638,7 +2655,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         planned: &PlannedFn,
         index: u32,
         run: RunContext<'a>,
-    ) -> Result<(ds_mod::Function, Vec<PlacedOp>, crate::FnFacts), LowerError> {
+    ) -> Result<crate::FinalizedFn, LowerError> {
         // A declared impl-member body lowers its declaration's params (the
         // `Self` receiver among them) and block body; every other entry
         // is a lambda's shape.
@@ -2791,6 +2808,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             spawn_child: planned.spawn_child,
             unit_slot: None,
             value_ends: Vec::new(),
+            cur_span: body.span(),
+            last_span: None,
+            span_marks: Vec::new(),
         };
         if planned.deinit.is_some() {
             this.bind_deinit_param(params)?;
@@ -3070,6 +3090,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     fn emit(&mut self, op: Op) {
+        if self.last_span != Some(self.cur_span) {
+            self.last_span = Some(self.cur_span);
+            self.span_marks.push((self.code.len(), self.cur_span));
+        }
         self.code.push(op);
     }
 
@@ -3117,6 +3141,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
             if span.back != usize::MAX && span.back > at {
                 span.back += len;
+            }
+        }
+        for (pos, _) in &mut self.span_marks {
+            if *pos > at {
+                *pos += len;
             }
         }
     }
@@ -5078,7 +5107,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     // ---- the expression walk ---------------------------------------------------
 
     fn value(&mut self, e: &Expr) -> Result<TypedPlace, LowerError> {
-        self.value_node(e).map_err(|err| err.respanned(e.span()))
+        let enclosing = std::mem::replace(&mut self.cur_span, e.span());
+        let out = self.value_node(e).map_err(|err| err.respanned(e.span()));
+        self.cur_span = enclosing;
+        out
     }
 
     /// The expression walk. Type-keyed refusals (shapes, word
@@ -8532,7 +8564,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// word, so a label's stream position is its op index plus one; jump
     /// targets cannot shift.
     #[allow(clippy::too_many_lines)]
-    fn finalize(mut self) -> Result<(ds_mod::Function, Vec<PlacedOp>, crate::FnFacts), LowerError> {
+    fn finalize(mut self) -> Result<crate::FinalizedFn, LowerError> {
         // The canonical unit word's one `Kimm 0` enters at the frame top:
         // a use inside a branch arm must not own the only write (a path
         // through another arm would read the previous frame's garbage),
@@ -8558,6 +8590,9 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             }
             for end in &mut self.value_ends {
                 *end += 1;
+            }
+            for (pos, _) in &mut self.span_marks {
+                *pos += 1;
             }
         }
         // Stage three's temporary slices: every slot the placement pass
@@ -8715,6 +8750,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 }
                 *end = u32::try_from(base - removed + added).expect("code length fits u32");
             }
+            // the span marks ride the same movements, so each region
+            // start stays on the op it named
+            for (pos, _) in &mut self.span_marks {
+                let base = *pos;
+                let (mut removed, mut added) = (0usize, 0usize);
+                while removed < dead.len() && dead[removed] < base {
+                    removed += 1;
+                }
+                while added < insertions.len() && insertions[added].0 < base {
+                    added += 1;
+                }
+                *pos = base - removed + added;
+            }
         }
         let body_len = self.slots.len();
         // one word type per overlay slot, or Raw when shapes mix there
@@ -8829,6 +8877,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 Op::Ret { src } => PlacedOp::Uop(Uop::Ret { src: body(src) }),
                 Op::RetSpan { src, n } => PlacedOp::Uop(Uop::RetSpan { src: body(src), n }),
                 Op::Halt { slot } => PlacedOp::Uop(Uop::Halt { slot: body(slot) }),
+                Op::ErrMark => PlacedOp::Uop(Uop::ErrMark),
             };
             code.push(match rendered {
                 PlacedOp::Uop(uop) => ds_abi::Inst::Uop(uop),
@@ -8848,7 +8897,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .collect(),
             registered: self.rc.take_registered(),
         };
-        Ok((function, placed, facts))
+        // FUNCF occupies stream word 0, so every span mark's final pc is
+        // one word above its op position; regions merge nothing here —
+        // the module's table build merges adjacent equal locations.
+        let marks = self
+            .span_marks
+            .into_iter()
+            .map(|(pos, span)| (u32::try_from(pos + 1).expect("code length fits u32"), span))
+            .collect();
+        Ok((function, placed, facts, marks))
     }
 }
 

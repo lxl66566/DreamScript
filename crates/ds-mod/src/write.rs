@@ -5,7 +5,7 @@ use crate::{
     FORMAT_VERSION, MAGIC,
     header::{SectionKind, TargetClass},
     module::{
-        Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, MemberTag, Module, bound_ret_tag,
+        Constant, EvidenceChain, FuncRefKey, Function, MemberTag, Module, SpanTable, bound_ret_tag,
         slot_tag,
     },
     varint::{put_uleb, uleb_len},
@@ -19,6 +19,12 @@ use crate::{
 /// row's declaring declaration name beside the label (F9.5, the
 /// re-key's format leg).
 pub(crate) const BLOCKS_PAYLOAD_VERSION: u8 = 5;
+
+/// The debug-spans section's payload version: the pc-to-span table's
+/// encoding (the file table plus per-function regions). Version 1 is
+/// the section's first real producer; no earlier encoding ever shipped,
+/// so the version byte starts here and a later reshape bumps it.
+pub(crate) const SPANS_PAYLOAD_VERSION: u8 = 1;
 
 /// Serializes `module` deterministically: equal modules produce equal
 /// bytes, and reading the output back yields a module that serializes to
@@ -43,7 +49,7 @@ pub fn write(module: &Module) -> Vec<u8> {
     ));
     entries.push((SectionKind::TypeMetadata, placeholder_len));
     entries.push((SectionKind::EffectRows, placeholder_len));
-    if let Some(spans) = module.debug_spans() {
+    if let Some(spans) = module.pc_spans() {
         entries.push((
             SectionKind::DebugSpans,
             measure(|out| spans_into(out, spans)),
@@ -107,7 +113,7 @@ pub fn write(module: &Module) -> Vec<u8> {
             SectionKind::TypeMetadata | SectionKind::EffectRows => placeholder_into(&mut out),
             SectionKind::DebugSpans => {
                 let spans = module
-                    .debug_spans()
+                    .pc_spans()
                     .expect("a listed debug-spans section is present");
                 spans_into(&mut out, spans);
             },
@@ -315,10 +321,32 @@ fn put_constant<S: Sink>(out: &mut S, constant: &Constant) {
     }
 }
 
-fn spans_into<S: Sink>(out: &mut S, spans: &[DebugSpan]) {
-    out.uleb(uleb64(spans.len()));
-    for span in spans {
-        out.put(&span.start.to_le_bytes());
-        out.put(&span.end.to_le_bytes());
+/// The pc-to-span table: payload version and reserved word, the file
+/// names, then per covered function (ascending index) its regions
+/// (ascending pc) as uleb sextets.
+fn spans_into<S: Sink>(out: &mut S, spans: &SpanTable) {
+    out.push(SPANS_PAYLOAD_VERSION);
+    out.uleb(0);
+    out.uleb(uleb64(spans.files.len()));
+    for file in &spans.files {
+        out.uleb(uleb64(file.len()));
+        out.put(file.as_bytes());
+    }
+    out.uleb(uleb64(spans.funcs.len()));
+    for func in &spans.funcs {
+        out.uleb(uleb64(
+            usize::try_from(func.func).expect("func index fits usize"),
+        ));
+        out.uleb(uleb64(func.regions.len()));
+        for region in &func.regions {
+            out.uleb(uleb64(usize::try_from(region.pc).expect("pc fits usize")));
+            out.uleb(uleb64(usize::from(region.at.file)));
+            out.uleb(uleb64(
+                usize::try_from(region.at.line).expect("line fits usize"),
+            ));
+            out.uleb(uleb64(
+                usize::try_from(region.at.col).expect("column fits usize"),
+            ));
+        }
     }
 }

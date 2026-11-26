@@ -60,7 +60,7 @@
 //! |                      | RETSPAN, CALLG, CALLTG, | src slot | (CALLS only) | (RETSPAN)  | (CALL/       |
 //! |                      | CALLS                   |          |             |            | CALLT/CALLG/ |
 //! |                      |                         |          |             |            | CALLTG)      |
-//! | Frame (0xB)          | FUNCF                   | —        | —          | —          | frame slots
+//! | Frame (0xB)          | FUNCF, ERR_MARK         | —        | —          | —          | frame slots
 //! | Halt (0xC)           | HALT                    | slot     | —          | —          | —
 //!
 //! # Immediates go through the constant pool (BL-1)
@@ -460,6 +460,17 @@ pub enum Uop {
     /// it is part of the tier-1 entry protocol every tier must recognize
     /// (tier 2 entry stubs keep the check); it is not a data op.
     Funcf { frame_slots: u16 },
+    /// `0xB.1` — the `?` error leg's propagation mark: no operands, no
+    /// slot effects, and the running frame's pc is the datum (the
+    /// dispatcher reads it off the instruction itself). Under the VM's
+    /// error-trace switch the arm writes the frame's position into the
+    /// running fiber's private ring; with the switch off it falls
+    /// through. The mark always lowers — the switch is VM state, never
+    /// lowering state — and it is impure (it observes global trace
+    /// state), so a reordering window may not move it. M9 extension,
+    /// justified: the error return trace names each propagating frame by
+    /// position alone, and no existing uop observes one.
+    ErrMark,
     /// `0xC.0` — stop the VM and report `slots[slot]` as the run result.
     Halt { slot: u8 },
 }

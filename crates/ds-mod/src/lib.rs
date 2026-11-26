@@ -65,9 +65,13 @@
 //! is version 5 (below); the type-metadata and effect-rows payloads remain
 //! versioned minimal placeholders (payload version 0 plus a reserved zero
 //! uleb), completed at M2/M3 inside the locked framing by bumping their
-//! per-section payload version. Debug spans are a list of byte-offset
-//! spans into the source and the only strippable section: a module built
-//! with [`Flags::STRIP`] set carries no debug-spans section.
+//! per-section payload version. The debug-spans payload is the
+//! pc-to-span table — a file-name table plus, per covered function, the
+//! ascending region starts naming file, line, and column — and the only
+//! strippable section: a module built with [`Flags::STRIP`] set carries
+//! no debug-spans section. Its encoding is versioned (payload version 1
+//! plus a reserved zero uleb, the placeholder sections' framing), so a
+//! later reshape bumps the payload version, not the format version.
 //!
 //! # Blocks payload, version 5 `[BL-5, BL-6, BL-7]`
 //!
@@ -143,7 +147,8 @@ pub use hash::Hash128;
 pub use header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass};
 pub use mmap::{LoadError, MappedModule, read_mmap};
 pub use module::{
-    Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, FunctionError, MemberTag, Module,
+    Constant, EvidenceChain, FuncRefKey, FuncSpans, Function, FunctionError, MemberTag, Module,
+    SpanLocation, SpanRegion, SpanTable,
 };
 pub use read::{ReadError, read, read_checked};
 pub use write::write;

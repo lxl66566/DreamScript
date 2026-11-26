@@ -102,6 +102,7 @@ fn samples() -> Vec<Uop> {
         Funcf {
             frame_slots: MAX_FRAME_SLOTS,
         },
+        ErrMark,
         Halt { slot: 255 },
         Halt { slot: 0 },
         Ret { src: 0 },
@@ -514,6 +515,7 @@ fn documented_opcodes() -> Vec<(Uop, u8)> {
         (Ret { src: 0 }, 0xa2),
         (RetSpan { src: 0, n: 1 }, 0xa3),
         (Funcf { frame_slots: 0 }, 0xb0),
+        (ErrMark, 0xb1),
         (Halt { slot: 0 }, 0xc0),
         (Kstr { dst: 0, kidx: K0 }, 0x02),
         (KstrBorrow { dst: 0, kidx: K0 }, 0x03),
@@ -1102,6 +1104,7 @@ fn effects_are_consistent_with_slot_operands() {
             Calls { callee_slot, .. } => vec![callee_slot],
             Jmp { .. }
             | Funcf { .. }
+            | ErrMark
             | Call { .. }
             | Callg { .. }
             | Callt { .. }
@@ -1175,6 +1178,7 @@ fn effects_are_consistent_with_slot_operands() {
                 | Ret { .. }
                 | RetSpan { .. }
                 | Funcf { .. }
+                | ErrMark
                 | Halt { .. }
         );
         assert_eq!(u.writes().len(), usize::from(writes_one), "{u:?}");
@@ -1240,6 +1244,7 @@ fn purity_table_is_exact() {
                 | ClosureNew { .. }
                 | CaptureStore { .. }
                 | Funcf { .. }
+                | ErrMark
                 | Halt { .. }
         );
         assert_eq!(u.is_pure(), pure, "{u:?}");

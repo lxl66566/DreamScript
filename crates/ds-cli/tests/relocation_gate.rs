@@ -171,6 +171,7 @@ fn composition(source: &str) -> (ds_mod::Module, ds_mod::Module) {
         ds_lower::Served {
             functions: ambient_module.clone().into_functions(),
             tags: ambient_module.tags().to_vec(),
+            spans: ambient_module.pc_spans().cloned(),
         },
         Some(&served_linear),
         &ds_lower::ComptimeValues::default(),

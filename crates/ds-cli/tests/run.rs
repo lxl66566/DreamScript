@@ -353,8 +353,13 @@ fn a_trapped_run_fires_the_kept_frames_deinit_after_the_report() {
     fs::remove_file(&path).expect("temp source removes");
     assert!(!ok, "a trapped run exits nonzero");
     assert!(err.contains("trap: division by zero"), "stderr: {err}");
+    // the frame renders the span table's position (the division's own
+    // line and column), not a raw pc
     assert!(
-        err.contains("boom at pc"),
+        err.contains(&format!(
+            "boom at {0}:7:13",
+            path.to_str().expect("temp path is UTF-8")
+        )),
         "the backtrace names the frame: {err}"
     );
     assert_eq!(

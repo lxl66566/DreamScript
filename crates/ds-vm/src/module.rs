@@ -209,6 +209,11 @@ pub struct ModuleVersion {
     /// this round); `None` for a directly built version, which carries
     /// no content identity.
     content_hash: Option<ds_mod::Hash128>,
+    /// The strippable pc-to-span table (H7): the one source channel the
+    /// trap renderer, the debugger breakpoints, and the sampling
+    /// profiler name positions through. `None` when the module was
+    /// stripped or built directly.
+    spans: Option<ds_mod::SpanTable>,
 }
 
 impl ModuleVersion {
@@ -242,6 +247,7 @@ impl ModuleVersion {
             chains: Vec::new(),
             index,
             content_hash: None,
+            spans: None,
         })
     }
 
@@ -288,6 +294,30 @@ impl ModuleVersion {
     pub fn with_content_hash(mut self, hash: ds_mod::Hash128) -> Self {
         self.content_hash = Some(hash);
         self
+    }
+
+    /// Attaches the module's pc-to-span table; the dsmod install takes
+    /// it from the module's debug-spans section, a host building a
+    /// version directly records none.
+    #[must_use]
+    pub fn with_spans(mut self, spans: Option<ds_mod::SpanTable>) -> Self {
+        self.spans = spans;
+        self
+    }
+
+    /// The version's pc-to-span table, `None` when stripped or absent:
+    /// the only source channel the tools name positions through.
+    #[must_use]
+    pub fn pc_spans(&self) -> Option<&ds_mod::SpanTable> {
+        self.spans.as_ref()
+    }
+
+    /// The source position one function's pc runs at: file name, line,
+    /// and column, read only through the span table; `None` before a
+    /// region or with no table.
+    #[must_use]
+    pub fn location(&self, func: u32, pc: u32) -> Option<(&str, u32, u32)> {
+        self.spans.as_ref()?.location(func, pc)
     }
 
     /// The version's recorded content hash, if any: what a dependency

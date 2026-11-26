@@ -12,7 +12,17 @@ const SOURCE: &[u8] = b"const x = 1";
 fn module_bytes(with_spans: bool) -> Vec<u8> {
     let module = Module::new("m", TargetClass::Bytecode, Hash128::compute(SOURCE))
         .with_constant(Constant::I64(7));
-    let module = if with_spans { module.with_debug_span(0, 12) } else { module };
+    let module = if with_spans {
+        // the module carries no functions, so the table holds the file
+        // row alone: the section's presence is what the framing tests
+        // corrupt against
+        module.with_pc_spans(ds_mod::SpanTable {
+            files: vec!["m.ds".to_owned()],
+            funcs: Vec::new(),
+        })
+    } else {
+        module
+    };
     write(&module)
 }
 

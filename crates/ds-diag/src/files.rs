@@ -1,6 +1,7 @@
 //! Source registry and byte-offset span model.
 
 use core::ops::Range;
+use std::sync::Arc;
 
 /// Identifier of a source file, handed out by [`Files::add_source`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -71,10 +72,80 @@ pub struct Location {
 #[derive(Clone, Debug)]
 struct SourceFile {
     name: String,
-    source: String,
+    source: Arc<str>,
     len: u32,
     /// Byte offset at which each 1-based line starts; entry 0 is always 0.
-    line_starts: Vec<u32>,
+    line_starts: Arc<[u32]>,
+}
+
+/// The span facts one registered file contributes to a shared bundle:
+/// the name, the text, and the line index — enough to map any byte
+/// offset in the file to its position without the registry. The text
+/// and line index ride shared handles, so a bundle's copy is two
+/// refcount bumps and one name, never a source re-copy.
+#[derive(Clone, Debug)]
+pub struct FileSpans {
+    name: String,
+    source: Arc<str>,
+    line_starts: Arc<[u32]>,
+    len: u32,
+}
+
+impl FileSpans {
+    /// The name the file was registered under.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The source length in bytes.
+    #[must_use]
+    pub const fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// Whether the source is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The 1-based line and column of `byte_offset`, offsets past the
+    /// source clamped to its end: the rendering paths' degrade rule, so
+    /// a span predating a content swap resolves instead of panicking.
+    #[must_use]
+    pub fn location_clamped(&self, byte_offset: u32) -> Location {
+        self.location(byte_offset.min(self.len))
+    }
+
+    /// The 1-based line and column of `byte_offset`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `byte_offset` exceeds the source length.
+    #[must_use]
+    pub fn location(&self, byte_offset: u32) -> Location {
+        assert!(
+            byte_offset <= self.len,
+            "byte offset {} out of bounds for `{}` (len {})",
+            byte_offset,
+            self.name,
+            self.len
+        );
+        // Last line start <= byte_offset; starts[0] == 0 always satisfies it.
+        let line_idx = self.line_starts.partition_point(|&s| s <= byte_offset) - 1;
+        let col = self
+            .source
+            .get((self.line_starts[line_idx] as usize)..(byte_offset as usize))
+            .map_or_else(
+                || (byte_offset - self.line_starts[line_idx]) as usize,
+                |slice| slice.chars().count(),
+            );
+        Location {
+            line: u32::try_from(line_idx).expect("line index overflows u32") + 1,
+            col: u32::try_from(col + 1).expect("column overflows u32"),
+        }
+    }
 }
 
 /// Registry of named source files, supporting byte-offset to line/column
@@ -127,13 +198,46 @@ impl Files {
     /// Panics if the source is longer than `u32` byte offsets (4 GiB).
     pub fn add_source(&mut self, name: impl Into<String>, source: &str) -> FileId {
         let file = FileId::new(u32::try_from(self.files.len()).expect("file count overflows u32"));
+        let source: Arc<str> = Arc::from(source);
+        let line_starts: Arc<[u32]> = line_starts_of(&source).into();
+        let len = u32::try_from(source.len()).expect("source overflows u32 byte offsets");
         self.files.push(SourceFile {
             name: name.into(),
-            len: u32::try_from(source.len()).expect("source overflows u32 byte offsets"),
-            line_starts: line_starts_of(source),
-            source: source.to_owned(),
+            len,
+            line_starts,
+            source,
         });
         file
+    }
+
+    /// The registry's file count; ids above it name nothing.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Whether the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// The span facts of one registered file: the shared text and line
+    /// index beside its name, cloned for a bundle that must resolve
+    /// spans without the registry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `file` was never registered.
+    #[must_use]
+    pub fn file_spans(&self, file: FileId) -> FileSpans {
+        let f = self.get(file);
+        FileSpans {
+            name: f.name.clone(),
+            source: Arc::clone(&f.source),
+            line_starts: Arc::clone(&f.line_starts),
+            len: f.len,
+        }
     }
 
     /// Replaces the content of one registered file in place: the file id
@@ -153,12 +257,10 @@ impl Files {
             .files
             .get_mut(file.as_u32() as usize)
             .unwrap_or_else(|| panic!("unknown FileId {}", file.as_u32()));
+        let source: Arc<str> = Arc::from(source);
         f.len = u32::try_from(source.len()).expect("source overflows u32 byte offsets");
-        f.line_starts = line_starts_of(source);
-        // Reuse the existing allocation when the edit fits; the LSP edit
-        // path calls this per keystroke.
-        f.source.clear();
-        f.source.push_str(source);
+        f.line_starts = line_starts_of(&source).into();
+        f.source = source;
     }
 
     fn get(&self, file: FileId) -> &SourceFile {

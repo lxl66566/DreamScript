@@ -7,10 +7,10 @@ use super::{
     Uop::{
         AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64, Call, Callg,
         Calls, Callt, Calltg, CaptureStore, ClosureNew, CvtF2I, CvtI2F, DivF64, DivI64, EqBool,
-        EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif, JmpifNot, Kconst,
-        Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64, MulI64, NeqBool,
-        NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64,
-        TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
+        EqF64, EqI64, EqStr, ErrMark, Funcf, GeF64, GeI64, GtF64, GtI64, Halt, Jmp, Jmpif,
+        JmpifNot, Kconst, Kimm, Kstr, KstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov, MulF64,
+        MulI64, NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena,
+        SubF64, SubI64, TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -194,7 +194,7 @@ impl Uop {
             | Calltg { .. }
             | Ret { .. }
             | RetSpan { .. } => Major::Call,
-            Funcf { .. } => Major::Frame,
+            Funcf { .. } | ErrMark => Major::Frame,
             Halt { .. } => Major::Halt,
         }
     }
@@ -212,6 +212,7 @@ impl Uop {
             | Jmp { .. }
             | ArenaMark { .. }
             | Funcf { .. }
+            | ErrMark
             | Call { .. }
             | Callg { .. }
             | Callt { .. }
@@ -334,6 +335,7 @@ impl Uop {
             | Ret { .. }
             | RetSpan { .. }
             | Funcf { .. }
+            | ErrMark
             | Halt { .. } => SlotList::none(),
         }
     }
@@ -372,6 +374,7 @@ impl Uop {
                 | ClosureNew { .. }
                 | CaptureStore { .. }
                 | Funcf { .. }
+                | ErrMark
                 | Halt { .. }
         )
     }

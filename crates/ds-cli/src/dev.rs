@@ -620,18 +620,22 @@ impl DevSession {
         match answer.as_slice() {
             [Value::Tag(tag), ..] if is_io_class(*tag) => {
                 eprintln!("dev: the entry halted on an unhandled io failure");
+                run::print_error_trace(&self.vm);
                 self.failed = true;
             },
             [Value::Tag(tag), ..] if is_net_class(*tag) => {
                 eprintln!("dev: the entry halted on an unhandled net failure");
+                run::print_error_trace(&self.vm);
                 self.failed = true;
             },
             [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => {
                 eprintln!("dev: the entry halted on an unhandled parse failure");
+                run::print_error_trace(&self.vm);
                 self.failed = true;
             },
             [Value::Tag(tag), ..] if *tag == PLATFORM_UTF8_ERR => {
                 eprintln!("dev: the entry halted on an unhandled utf8 failure");
+                run::print_error_trace(&self.vm);
                 self.failed = true;
             },
             [Value::Tag(tag), ..] if *tag == PLATFORM_NONE => println!("none"),

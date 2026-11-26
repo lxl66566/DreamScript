@@ -16,11 +16,11 @@ use super::{
         self, AddF64, AddI64, ArenaMark, ArenaRestore, BitAndI64, BitOrI64, BitXorI64,
         Call as UCall, Callg as UCallg, Calls as UCalls, Callt, Calltg as UCalltg,
         CaptureStore as UCaptureStore, ClosureNew as UClosureNew, CvtF2I, CvtI2F, DivF64, DivI64,
-        EqBool, EqF64, EqI64, EqStr, Funcf, GeF64, GeI64, GtF64, GtI64, Halt as UHalt, Jmp, Jmpif,
-        JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr, KstrBorrow as UKstrBorrow,
-        LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64, NeqBool, NeqF64, NeqI64,
-        NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64, SubI64, TagNew, TagTest,
-        TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
+        EqBool, EqF64, EqI64, EqStr, ErrMark as UErrMark, Funcf, GeF64, GeI64, GtF64, GtI64,
+        Halt as UHalt, Jmp, Jmpif, JmpifNot, Kconst as UKconst, Kimm as UKimm, Kstr as UKstr,
+        KstrBorrow as UKstrBorrow, LeF64, LeI64, LtF64, LtI64, ModI64, Mov as UMov, MulF64, MulI64,
+        NeqBool, NeqF64, NeqI64, NeqStr, Ret, RetSpan, ShlI64, ShrI64, StrCat, StrCatArena, SubF64,
+        SubI64, TagNew, TagTest, TagTestNot, WrapAddI64, WrapMulI64, WrapSubI64,
     },
 };
 
@@ -280,13 +280,20 @@ impl Uop {
                 },
                 _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
-            Frame => {
-                cx(minor == 0)?;
-                cx(a == 0)?;
-                if d > MAX_FRAME_SLOTS {
-                    return Err(DecodeError::FrameSlotsExceedCap { frame_slots: d });
-                }
-                Ok(Funcf { frame_slots: d })
+            Frame => match minor {
+                0 => {
+                    cx(a == 0)?;
+                    if d > MAX_FRAME_SLOTS {
+                        return Err(DecodeError::FrameSlotsExceedCap { frame_slots: d });
+                    }
+                    Ok(Funcf { frame_slots: d })
+                },
+                1 => {
+                    cx(a == 0)?;
+                    cx(d == 0)?;
+                    Ok(UErrMark)
+                },
+                _ => Err(DecodeError::UnknownOpcode { major, minor }),
             },
             Halt => {
                 cx(minor == 0)?;
@@ -324,7 +331,8 @@ impl Uop {
             | TagTestNot { .. }
             | CvtF2I { .. }
             | JmpifNot { .. }
-            | Callt { .. } => 1,
+            | Callt { .. }
+            | UErrMark => 1,
             MulI64 { .. }
             | MulF64 { .. }
             | LtI64 { .. }
@@ -429,7 +437,7 @@ impl Uop {
             | RetSpan { src, .. }
             | ArenaRestore { src } => src,
             UHalt { slot } => slot,
-            Jmp { .. } | Funcf { .. } => 0,
+            Jmp { .. } | Funcf { .. } | UErrMark => 0,
         }
     }
 
@@ -502,7 +510,9 @@ impl Uop {
             | NeqStr { lhs, rhs, .. }
             | StrCat { lhs, rhs, .. }
             | StrCatArena { lhs, rhs, .. } => Bc::Reg { b: lhs, c: rhs },
-            Ret { .. } | UHalt { .. } | ArenaMark { .. } | ArenaRestore { .. } => Bc::Wide(0),
+            Ret { .. } | UHalt { .. } | ArenaMark { .. } | ArenaRestore { .. } | UErrMark => {
+                Bc::Wide(0)
+            },
         })
     }
 }

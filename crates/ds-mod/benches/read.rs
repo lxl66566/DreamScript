@@ -83,12 +83,26 @@ fn fixture_bytes() -> Vec<u8> {
         key: FuncRefKey::Dep(2), // the "csv" dependency entry
         func: 2,
     });
+    let mut funcs = Vec::new();
     for index in 0..FUNCTIONS {
-        let span = u32::try_from(index).expect("fixture index fits u32");
-        module = module
-            .with_function(function(index))
-            .with_debug_span(span, span + 1);
+        let pc = u32::try_from(index).expect("fixture index fits u32");
+        module = module.with_function(function(index));
+        funcs.push(ds_mod::FuncSpans {
+            func: pc,
+            regions: vec![ds_mod::SpanRegion {
+                pc,
+                at: ds_mod::SpanLocation {
+                    file: 0,
+                    line: 1,
+                    col: 1,
+                },
+            }],
+        });
     }
+    module = module.with_pc_spans(ds_mod::SpanTable {
+        files: vec!["bench.ds".to_owned()],
+        funcs,
+    });
     write(&module)
 }
 

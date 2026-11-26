@@ -123,6 +123,7 @@ pub(crate) fn serve() -> Option<ds_lower::Served> {
     Some(ds_lower::Served {
         tags: module.tags().to_vec(),
         functions: module.functions().to_vec(),
+        spans: module.pc_spans().cloned(),
     })
 }
 
@@ -153,9 +154,11 @@ fn decode(bytes: &[u8], identity: &Hash128) -> Option<Module> {
 #[cfg(test)]
 fn serve_bytes(bytes: &[u8], identity: &Hash128) -> Option<ds_lower::Served> {
     let module = decode(bytes, identity)?;
+    let spans = module.pc_spans().cloned();
     Some(ds_lower::Served {
         tags: module.tags().to_vec(),
         functions: module.into_functions(),
+        spans,
     })
 }
 

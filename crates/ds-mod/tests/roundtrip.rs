@@ -49,8 +49,12 @@ fn sample_module() -> Module {
         key: FuncRefKey::Native("builtin".to_owned()),
         func: 7,
     })
-    .with_debug_span(0, 24)
-    .with_debug_span(24, 25)
+    // the sample carries no functions, so the table holds the file row
+    // alone; the location resolution probe below builds its own function
+    .with_pc_spans(ds_mod::SpanTable {
+        files: vec!["probe.ds".to_owned()],
+        funcs: Vec::new(),
+    })
 }
 
 #[test]
@@ -103,15 +107,63 @@ fn round_trip_preserves_every_field() {
         Constant::F64(value) => assert_eq!(value.to_bits(), 0x7ff8_0000_dead_beef),
         other => panic!("expected the NaN constant, got {other:?}"),
     }
-    assert_eq!(
-        module.debug_spans(),
-        Some(
-            &[
-                ds_mod::DebugSpan::new(0, 24),
-                ds_mod::DebugSpan::new(24, 25)
-            ][..]
-        )
-    );
+    let spans = module.pc_spans().expect("the sample carries the table");
+    assert_eq!(spans.files, ["probe.ds"]);
+    assert_eq!(spans.funcs, []);
+}
+
+/// The pc-to-span table's resolution probe: a function-bearing module's
+/// regions answer the position a pc runs under, the gap before the
+/// first region answers nothing, and a pc past the last region names
+/// the last region's position.
+#[test]
+fn the_span_table_resolves_pcs_to_positions() {
+    use ds_abi::{SlotType, Uop};
+    let function = Function::new(
+        "probe",
+        FrameLayout::new(vec![SlotType::I64], 1, 0).expect("the layout fits"),
+        Vec::new(),
+        vec![
+            Uop::Funcf { frame_slots: 1 },
+            Uop::Mov { dst: 0, src: 0 },
+            Uop::Halt { slot: 0 },
+        ],
+    )
+    .expect("the probe function builds");
+    let module = Module::new("probe", TargetClass::Bytecode, Hash128::ZERO)
+        .with_function(function)
+        .with_pc_spans(ds_mod::SpanTable {
+            files: vec!["probe.ds".to_owned()],
+            funcs: vec![ds_mod::FuncSpans {
+                func: 0,
+                regions: vec![
+                    ds_mod::SpanRegion {
+                        pc: 1,
+                        at: ds_mod::SpanLocation {
+                            file: 0,
+                            line: 3,
+                            col: 5,
+                        },
+                    },
+                    ds_mod::SpanRegion {
+                        pc: 2,
+                        at: ds_mod::SpanLocation {
+                            file: 0,
+                            line: 4,
+                            col: 9,
+                        },
+                    },
+                ],
+            }],
+        });
+    let bytes = write(&module);
+    let module = read(&bytes).expect("the module reads back");
+    let spans = module.pc_spans().expect("the table rides the round trip");
+    assert_eq!(spans.location(0, 0), None, "before the first region");
+    assert_eq!(spans.location(0, 1), Some(("probe.ds", 3, 5)));
+    assert_eq!(spans.location(0, 2), Some(("probe.ds", 4, 9)));
+    assert_eq!(spans.location(0, 99), Some(("probe.ds", 4, 9)));
+    assert_eq!(spans.location(1, 1), None, "function 1 carries no regions");
 }
 
 #[test]
@@ -180,7 +232,7 @@ fn strip_removes_debug_spans_section() {
     let stripped_bytes = write(&sample_module().stripped());
     let stripped = read(&stripped_bytes).expect("stripped module must read");
     assert!(stripped.flags().strips_debug_spans());
-    assert_eq!(stripped.debug_spans(), None);
+    assert_eq!(stripped.pc_spans(), None);
     assert!(
         stripped_bytes.len() < plain.len(),
         "stripping must shrink the artifact"
@@ -198,7 +250,7 @@ fn bytecode_target_and_empty_module_round_trip() {
     assert_eq!(read_back.deps(), []);
     assert_eq!(read_back.constants(), []);
     assert_eq!(read_back.tags(), []);
-    assert_eq!(read_back.debug_spans(), None);
+    assert_eq!(read_back.pc_spans(), None);
     assert_eq!(write(&read_back), bytes);
 
     let module = Module::new("b", TargetClass::Wasm, Hash128::ZERO);

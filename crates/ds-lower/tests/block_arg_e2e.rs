@@ -109,7 +109,13 @@ fn refused(source: &str, needle: &str) {
 /// The module bytes of one check-clean source, lowered under one fixed
 /// name and source hash so two spellings of the same program compare
 /// directly (the module embeds the source hash it was lowered with).
-fn module_bytes(source: &str) -> Vec<u8> {
+/// The module bytes with the span section stripped off: the byte pin
+/// for spellings that differ only in where the source wrote them.
+fn stripped_bytes(source: &str) -> Vec<u8> {
+    write(&module_of(source).stripped())
+}
+
+fn module_of(source: &str) -> ds_mod::Module {
     let mut files = Files::new();
     let id = files.add_source("sugar.ds", source);
     let asts = [parse(&files, id).expect("the source parses")];
@@ -126,7 +132,7 @@ fn module_bytes(source: &str) -> Vec<u8> {
     );
     let lowered = lower("sugar", Hash128::compute(b"one program"), &asts, &analyzed)
         .expect("the source lowers");
-    write(lowered.module())
+    lowered.module().clone()
 }
 
 /// The declarations every probe shares.
@@ -247,9 +253,13 @@ fn answer(f: fn() -> int) -> int {{ f() }}
 fn main() -> int {{ answer(() => 42) }}
 "
     );
+    // the two spellings lower to one module body: the span table still
+    // records each spelling's own source positions, so the sugar pin
+    // reads the stripped bytes (the section stripped off, everything
+    // else identical)
     assert_eq!(
-        module_bytes(&scalar_sugar),
-        module_bytes(&scalar_written),
+        stripped_bytes(&scalar_sugar),
+        stripped_bytes(&scalar_written),
         "the scalar block and the written lambda lower to one module"
     );
     let closure_sugar = format!(
@@ -273,8 +283,8 @@ fn main() -> int {{
 "
     );
     assert_eq!(
-        module_bytes(&closure_sugar),
-        module_bytes(&closure_written),
+        stripped_bytes(&closure_sugar),
+        stripped_bytes(&closure_written),
         "the capturing block and the written lambda lower to one module"
     );
 }

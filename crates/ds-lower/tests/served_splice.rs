@@ -49,9 +49,16 @@ fn served(analyzed: &ds_check::Analyzed, count: usize) -> Served {
         analyzed,
     )
     .expect("the probe lowers again");
+    let module = lowered.module();
+    let mut spans = module.pc_spans().cloned();
+    if let Some(table) = &mut spans {
+        // the served table names the served prefix only
+        table.funcs.retain(|row| (row.func as usize) < count);
+    }
     Served {
-        functions: lowered.module().functions()[..count].to_vec(),
-        tags: lowered.module().tags().to_vec(),
+        functions: module.functions()[..count].to_vec(),
+        tags: module.tags().to_vec(),
+        spans,
     }
 }
 

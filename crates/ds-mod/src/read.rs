@@ -9,10 +9,10 @@ use crate::{
     hash::Hash128,
     header::{CollectorHooks, Dep, Flags, SectionKind, TargetClass},
     module::{
-        Constant, DebugSpan, EvidenceChain, FuncRefKey, Function, MemberTag, Module,
-        bound_ret_from_tag, jump_target_of, slot_from_tag,
+        Constant, EvidenceChain, FuncRefKey, FuncSpans, Function, MemberTag, Module, SpanLocation,
+        SpanRegion, SpanTable, bound_ret_from_tag, jump_target_of, slot_from_tag,
     },
-    write::BLOCKS_PAYLOAD_VERSION,
+    write::{BLOCKS_PAYLOAD_VERSION, SPANS_PAYLOAD_VERSION},
 };
 
 /// Everything that can be wrong with a dsmod byte stream.
@@ -306,8 +306,14 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
         let (offset, len) = sections[kind.index()].expect("checked above");
         parse_placeholder(bytes, offset, len)?;
     }
-    let debug_spans = sections[SectionKind::DebugSpans.index()]
-        .map(|(offset, len)| parse_debug_spans(bytes, offset, len))
+    let pc_spans = sections[SectionKind::DebugSpans.index()]
+        .map(|(offset, len)| {
+            let code_lens: Vec<u32> = functions
+                .iter()
+                .map(|function| u32::try_from(function.code().len()).expect("code length fits u32"))
+                .collect();
+            parse_debug_spans(bytes, offset, len, &code_lens)
+        })
         .transpose()?;
 
     Ok(Module {
@@ -323,7 +329,7 @@ pub fn read(bytes: &[u8]) -> Result<Module, ReadError> {
         functions,
         chains,
         tags,
-        debug_spans,
+        pc_spans,
     })
 }
 
@@ -566,24 +572,94 @@ fn parse_placeholder(bytes: &[u8], offset: usize, len: usize) -> Result<(), Read
     p.exhausted("trailing bytes in placeholder section")
 }
 
-/// Parses the strippable debug-spans payload: byte-offset spans.
-fn parse_debug_spans(bytes: &[u8], offset: usize, len: usize) -> Result<Vec<DebugSpan>, ReadError> {
+/// Parses the strippable debug-spans payload: the pc-to-span table.
+/// `code_lens` maps each function's table index to its body length, so a
+/// region naming a pc past its function's own code refuses here — the
+/// section never serves a position no instruction occupies.
+fn parse_debug_spans(
+    bytes: &[u8],
+    offset: usize,
+    len: usize,
+    code_lens: &[u32],
+) -> Result<SpanTable, ReadError> {
     let mut p = Cursor::section(bytes, offset, len);
-    let count = p.count()?;
-    let spans_at = p.abs();
-    let span_bytes = p.run(count, 8)?;
-    let mut spans = Vec::with_capacity(count);
-    for (index, span) in span_bytes.as_chunks::<8>().0.iter().enumerate() {
-        let at = spans_at + index * 8;
-        let start = u32::from_le_bytes(span[..4].try_into().expect("a half of the span pair"));
-        let end = u32::from_le_bytes(span[4..].try_into().expect("a half of the span pair"));
-        if start > end {
-            return Err(malformed(at, "span start exceeds end"));
+    if p.u8()? != SPANS_PAYLOAD_VERSION {
+        return Err(malformed(offset, "unsupported section payload version"));
+    }
+    if p.uleb()? != 0 {
+        return Err(malformed(offset, "nonzero reserved field"));
+    }
+    let file_count = p.count()?;
+    let mut files = Vec::with_capacity(file_count.min(4096));
+    for _ in 0..file_count {
+        let name_at = p.abs();
+        let name = p.utf8()?;
+        if name.is_empty() {
+            return Err(malformed(name_at, "an empty span file name"));
         }
-        spans.push(DebugSpan { start, end });
+        files.push(name.to_owned());
+    }
+    let func_count = p.count()?;
+    let mut funcs = Vec::with_capacity(func_count.min(4096));
+    let mut prev_func = None;
+    for _ in 0..func_count {
+        let func = u32::try_from(p.count()?)
+            .map_err(|_| malformed(offset, "a span function index overflows u32"))?;
+        if let Some(prev) = prev_func
+            && func <= prev
+        {
+            return Err(malformed(offset, "span function rows out of order"));
+        }
+        prev_func = Some(func);
+        let Some(code_len) = code_lens
+            .get(
+                usize::try_from(func)
+                    .map_err(|_| malformed(offset, "a span function index overflows usize"))?,
+            )
+            .copied()
+        else {
+            return Err(malformed(
+                offset,
+                "a span row names a function past the table",
+            ));
+        };
+        let region_count = p.count()?;
+        let mut regions = Vec::with_capacity(region_count.min(4096));
+        let mut prev_pc = None;
+        for _ in 0..region_count {
+            let at = p.abs();
+            let pc = u32::try_from(p.count()?)
+                .map_err(|_| malformed(at, "a region pc overflows u32"))?;
+            if let Some(prev) = prev_pc
+                && pc <= prev
+            {
+                return Err(malformed(at, "span regions out of order"));
+            }
+            prev_pc = Some(pc);
+            if pc >= code_len {
+                return Err(malformed(at, "a region pc past its function's code"));
+            }
+            let file = u16::try_from(p.count()?)
+                .map_err(|_| malformed(at, "a span region's file index overflows u16"))?;
+            if usize::from(file) >= files.len() {
+                return Err(malformed(at, "a span region names a file past the table"));
+            }
+            let line = u32::try_from(p.count()?)
+                .map_err(|_| malformed(at, "a region line overflows u32"))?;
+            let col = u32::try_from(p.count()?)
+                .map_err(|_| malformed(at, "a region column overflows u32"))?;
+            if line == 0 || col == 0 {
+                return Err(malformed(at, "a span region carries a zero line or column"));
+            }
+            regions.push(SpanRegion {
+                pc,
+                at: SpanLocation { file, line, col },
+            });
+        }
+        funcs.push(FuncSpans { func, regions });
     }
     p.exhausted("trailing bytes in debug-spans section")?;
-    Ok(spans)
+    Ok(SpanTable { files, funcs })
 }
 
 fn malformed(at: usize, reason: &'static str) -> ReadError {

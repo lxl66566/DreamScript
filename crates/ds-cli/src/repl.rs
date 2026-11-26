@@ -607,6 +607,7 @@ impl Session {
                         if let Some(ret) = main_return(analyzed, universe) {
                             if ret != "()" {
                                 print_result(span);
+                                run::print_error_trace(&self.vm);
                             }
                             println!(": {ret}");
                         }
@@ -886,6 +887,10 @@ pub(crate) fn fresh_vm() -> Vm {
     let mut registry = ModuleRegistry::new();
     registry.install_platform(Platform::std());
     let mut vm = Vm::new(registry);
+    // the interactive sessions' boundary reports read the recorded
+    // error chain (H7): the switch is the VM's debug face, armed here
+    // for the session's whole life
+    vm.set_trace_errors(true);
     if let Some(reactor) = ds_vm::reactor::platform_default() {
         vm.install_reactor(reactor);
     }

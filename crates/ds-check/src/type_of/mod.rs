@@ -47,7 +47,7 @@
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
-use ds_diag::{Diagnostic, ErrorCode, Files, LabelStyle, Span};
+use ds_diag::{Diagnostic, ErrorCode, FileId, Files, LabelStyle, Span};
 use ds_parse::{
     Ast, BinaryOp, BlockExpr, Delim, EnumPayload, Expr, FnDecl, Ident, Item, ItemKind, Literal,
     LocalDecl, MatchArm, Param, Path, Pattern, Stmt, StrPart, TraitMember, Type, TypeParam,
@@ -477,6 +477,7 @@ pub fn analyze_resolved(
         artifacts,
         checked: Arc::new(checked),
         resolve_diag_count,
+        span_files: span_files_of(files),
     }
 }
 
@@ -644,6 +645,7 @@ fn analyze_served_over(
         artifacts,
         checked: Arc::new(checked),
         resolve_diag_count,
+        span_files: span_files_of(files),
     }
 }
 
@@ -837,6 +839,14 @@ where
 /// installed library's exported C symbols, in enumeration order.
 pub type ArtifactSymbols = std::collections::BTreeMap<String, Arc<Vec<String>>>;
 
+/// The bundle's span facts: one row per registered file, indexed by raw
+/// file id.
+fn span_files_of(files: &Files) -> Arc<[ds_diag::FileSpans]> {
+    (0..files.len())
+        .map(|at| files.file_spans(FileId::new(u32::try_from(at).expect("file count fits u32"))))
+        .collect()
+}
+
 /// The tables of one analyzed package; see [`analyze`]. Every field is a
 /// shared handle, so cloning the bundle clones pointers — the query layer
 /// hands it out of a memo without copying the namespace — and a consumer
@@ -872,6 +882,12 @@ pub struct Analyzed {
     /// declaration and body classes, like [`analyze`]), top-level types,
     /// binder facts, per-expression types.
     pub checked: Arc<Checked>,
+    /// Per registered file, the span facts (name, text, line index) the
+    /// bundle's spans resolve against, indexed by raw file id. The trees'
+    /// byte offsets mean nothing without it, so the bundle carries it:
+    /// the lowering pass builds the module's pc-to-span table from the
+    /// same facts, and the registry itself never crosses this seam.
+    pub span_files: Arc<[ds_diag::FileSpans]>,
     /// The count of leading resolve-half diagnostics in `checked.diags`
     /// (see [`check_diags`](Self::check_diags)): the merge order both
     /// analyze constructors build, kept private so the split stays this
@@ -923,7 +939,7 @@ impl FilePositions {
         Self(positions)
     }
 
-    fn get(&self, file: ds_diag::FileId) -> Option<usize> {
+    fn get(&self, file: FileId) -> Option<usize> {
         self.0.get(file.as_u32() as usize).copied().flatten()
     }
 }
@@ -949,7 +965,7 @@ struct Bodies<'a> {
     /// The file whose bodies this walk checks: a tag label resolves
     /// through the declaring file's shadow entry first (F9.5), `None`
     /// in the foreign-defs pass where only linked names answer.
-    file: Option<ds_diag::FileId>,
+    file: Option<FileId>,
     decls: &'a mut Decls,
     def_types: &'a mut FxHashMap<DefId, Ty>,
     binders: &'a mut HashMap<Span, crate::linearity::BinderFact>,
@@ -8694,7 +8710,7 @@ fn comptime_annotation(ty: Option<&Type>) -> bool {
 /// bare fn-type parameter (`fn(t) -> r`), resolved through scopes like any
 /// written type.
 fn name_type(name: &str) -> Type {
-    let span = Span::new(ds_diag::FileId::new(0), 0, 0);
+    let span = Span::new(FileId::new(0), 0, 0);
     Type::Path {
         span,
         path: Path {

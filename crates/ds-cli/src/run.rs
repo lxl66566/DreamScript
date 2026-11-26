@@ -464,6 +464,11 @@ fn resolve_and_run(
 /// trap carries no report at all — the host's door observed the event
 /// and owns the status.
 fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode> {
+    // the error-trace switch (H7) is a VM debug switch the boundary
+    // report reads: armed, every `?` error leg records the failing
+    // frame's position into the fiber's private ring, and an
+    // unhandled-failure run prints the chain beside the report
+    prepared.vm.set_trace_errors(true);
     if prepared
         .vm
         .registry()
@@ -480,18 +485,30 @@ fn resolve_and_drive(prepared: &mut PreparedRun, entry: &str) -> Result<ExitCode
         Ok(answer) => match answer.as_slice() {
             // the failure tags and the checked read's `none` member ride
             // the answer's head word
-            [Value::Tag(tag), ..] if is_io_class(*tag) => Err(anyhow!(
-                "the run halted on an unhandled io failure (the message is on stdout)"
-            )),
-            [Value::Tag(tag), ..] if is_net_class(*tag) => Err(anyhow!(
-                "the run halted on an unhandled net failure (the message is on stdout)"
-            )),
-            [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => Err(anyhow!(
-                "the run halted on an unhandled parse failure (the message is on stdout)"
-            )),
-            [Value::Tag(tag), ..] if *tag == PLATFORM_UTF8_ERR => Err(anyhow!(
-                "the run halted on an unhandled utf8 failure (the message is on stdout)"
-            )),
+            [Value::Tag(tag), ..] if is_io_class(*tag) => {
+                print_error_trace(&prepared.vm);
+                Err(anyhow!(
+                    "the run halted on an unhandled io failure (the message is on stdout)"
+                ))
+            },
+            [Value::Tag(tag), ..] if is_net_class(*tag) => {
+                print_error_trace(&prepared.vm);
+                Err(anyhow!(
+                    "the run halted on an unhandled net failure (the message is on stdout)"
+                ))
+            },
+            [Value::Tag(tag), ..] if *tag == PLATFORM_PARSE_ERR => {
+                print_error_trace(&prepared.vm);
+                Err(anyhow!(
+                    "the run halted on an unhandled parse failure (the message is on stdout)"
+                ))
+            },
+            [Value::Tag(tag), ..] if *tag == PLATFORM_UTF8_ERR => {
+                print_error_trace(&prepared.vm);
+                Err(anyhow!(
+                    "the run halted on an unhandled utf8 failure (the message is on stdout)"
+                ))
+            },
             // The `none` member of a checked read is a plain result: print
             // its name, not the platform reservation's raw id.
             [Value::Tag(tag), ..] if *tag == PLATFORM_NONE => {
@@ -705,6 +722,32 @@ fn describe_build_error(error: &ModuleBuildError) -> String {
     }
 }
 
+/// Prints the recorded error chain (H7) to stderr beside the boundary's
+/// unhandled-error report: one line per `?` error leg the entry fiber
+/// took, innermost first, each named through the module's span table.
+/// A chain the ring never recorded (no `?` on the path, or a stripped
+/// module's unresolvable positions) prints nothing.
+pub(crate) fn print_error_trace(vm: &Vm) {
+    let frames = vm.error_trace();
+    if frames.is_empty() {
+        return;
+    }
+    eprintln!("error trace (innermost first):");
+    for frame in frames {
+        match &frame.location {
+            Some(loc) => {
+                eprintln!(
+                    "  at {}:{}:{} in {}::{}",
+                    loc.file, loc.line, loc.col, frame.module, frame.func
+                );
+            },
+            None => {
+                eprintln!("  at pc {} in {}::{}", frame.pc, frame.module, frame.func);
+            },
+        }
+    }
+}
+
 /// Prints the run result to stdout. Unit-result entries halt on the inert
 /// unit word (`I64(0)`), so nothing distinguishes them; a heap reference
 /// prints as its object-table index (the object kind is a VM concern).
@@ -733,8 +776,16 @@ pub(crate) fn trap_error(vm: &Vm, trap: &Trap) -> Error {
         for frame in &frames {
             let _ = write!(message, "\n  {}::{} ", frame.module, frame.func);
             match frame.pc {
-                FramePc::At(pc) => {
-                    let _ = write!(message, "at pc {}", pc.0);
+                // the position the module's pc-to-span table names: file,
+                // line, column — the one source channel the renderer
+                // reads (a stripped module renders the raw pc)
+                FramePc::At(pc) => match &frame.location {
+                    Some(loc) => {
+                        let _ = write!(message, "at {}:{}:{}", loc.file, loc.line, loc.col);
+                    },
+                    None => {
+                        let _ = write!(message, "at pc {}", pc.0);
+                    },
                 },
                 // a caller parked inside a hosted native call names no
                 // bytecode position: the seam, not a sentinel integer

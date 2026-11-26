@@ -29,6 +29,8 @@
 //! complete — live in the dispatcher (`crate::vm`); this module is the data
 //! representation and the per-fiber TCO/stack-limit accounting surface.
 
+use std::collections::VecDeque;
+
 use ds_abi::CodePc;
 use ds_rt::Arena;
 
@@ -146,7 +148,27 @@ pub(crate) struct Fiber {
     /// (open, a race, this owner), so a value left behind by an ended
     /// race names nothing.
     pub(crate) race: Option<NurseryId>,
+    /// The fiber's private error-trace ring [H7]: the failing frame's
+    /// position per `?` error leg the fiber took, innermost first,
+    /// bounded (the oldest hop drops past the cap). Nothing an error
+    /// value carries — the trace is the trap layer's diagnostic alone.
+    pub(crate) err_ring: VecDeque<ErrHop>,
 }
+
+/// One recorded error-leg hop: the frame's module version, function
+/// index, and the propagation mark's pc. The renderer resolves source
+/// only through the version's span table, so the hop itself names no
+/// source.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ErrHop {
+    pub(crate) version: VersionIdx,
+    pub(crate) func: u32,
+    pub(crate) pc: u32,
+}
+
+/// The error-trace ring's hop cap: past it, the oldest hop drops — the
+/// trace stays a bounded window over the deepest propagation chain.
+pub(crate) const ERR_RING_CAP: usize = 64;
 
 impl Fiber {
     /// An empty fiber: no segment, no frames, nothing resumable. The pool's
@@ -164,6 +186,7 @@ impl Fiber {
             resumer: None,
             nursery: None,
             race: None,
+            err_ring: VecDeque::new(),
         }
     }
 

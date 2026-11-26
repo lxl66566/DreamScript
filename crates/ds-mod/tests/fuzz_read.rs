@@ -147,13 +147,24 @@ fn random_module(u: &mut Unstructured) -> Module {
     for id in 0..u8::arbitrary(u).unwrap_or(0) % 5 {
         module = module.with_tag(random_string(u, 10), random_string(u, 10), id);
     }
-    for _ in 0..u8::arbitrary(u).unwrap_or(0) % 9 {
-        let (a, b) = (
-            u32::arbitrary(u).unwrap_or(0),
-            u32::arbitrary(u).unwrap_or(0),
-        );
-        let (start, end) = if a <= b { (a, b) } else { (b, a) };
-        module = module.with_debug_span(start, end);
+    let rows = u8::arbitrary(u).unwrap_or(0) % 9;
+    if rows > 0 {
+        let mut regions = Vec::new();
+        for (row_index, _) in (0..rows).enumerate() {
+            let line = u32::arbitrary(u).unwrap_or(1).max(1);
+            regions.push(ds_mod::SpanRegion {
+                pc: u32::try_from(row_index).expect("fixture index fits u32"),
+                at: ds_mod::SpanLocation {
+                    file: 0,
+                    line,
+                    col: 1,
+                },
+            });
+        }
+        module = module.with_pc_spans(ds_mod::SpanTable {
+            files: vec!["fuzz.ds".to_owned()],
+            funcs: vec![ds_mod::FuncSpans { func: 0, regions }],
+        });
     }
     module
 }

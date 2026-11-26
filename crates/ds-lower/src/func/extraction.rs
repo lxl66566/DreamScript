@@ -444,6 +444,7 @@ impl FnLower<'_, '_, '_> {
         let base = self.rc.save();
         for (member, exit) in propagated.iter().zip(exits) {
             self.bind_label(exit);
+            self.emit(Op::ErrMark);
             self.respan_exit(&src.place, *member)?;
             // the exit dropped from its own fork of the post-call state;
             // the next exit forks from the same place
@@ -489,6 +490,7 @@ impl FnLower<'_, '_, '_> {
                 let base = self.rc.save();
                 for (index, (member, exit)) in members.iter().zip(exits).enumerate() {
                     self.bind_label(exit);
+                    self.emit(Op::ErrMark);
                     self.respan_exit(&src.place, *member)?;
                     // every member's exit drops from the same fork of the
                     // ownership map; the divergence marker stays set, so

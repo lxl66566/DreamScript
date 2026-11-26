@@ -147,26 +147,82 @@ pub struct MemberTag {
     pub id: u8,
 }
 
-/// A half-open byte-offset span `[start, end)` into the module source,
-/// used for strippable debug information.
+/// A source position the span table names: the file table's index plus a
+/// 1-based line and column.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct DebugSpan {
-    /// First byte offset, inclusive.
-    pub start: u32,
-    /// Last byte offset, exclusive.
-    pub end: u32,
+pub struct SpanLocation {
+    /// The file table's index.
+    pub file: u16,
+    /// 1-based line.
+    pub line: u32,
+    /// 1-based column.
+    pub col: u32,
 }
 
-impl DebugSpan {
-    /// Creates a span; `start` must not exceed `end`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `start > end`.
+/// One instruction region's start: the pc the location holds from, up to
+/// the next region's pc (or the function's end).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SpanRegion {
+    /// First instruction pc the location covers.
+    pub pc: u32,
+    /// The location from this pc on.
+    pub at: SpanLocation,
+}
+
+/// One function's pc-to-source regions, ascending by pc with no two
+/// regions sharing a start.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct FuncSpans {
+    /// The function's index in the blocks payload's function table.
+    pub func: u32,
+    /// The regions, ascending by pc.
+    pub regions: Vec<SpanRegion>,
+}
+
+impl FuncSpans {
+    /// The location `pc` runs under: the last region whose pc is at or
+    /// below it, or `None` before the first region.
     #[must_use]
-    pub const fn new(start: u32, end: u32) -> Self {
-        assert!(start <= end, "span start must not exceed end");
-        Self { start, end }
+    pub fn location(&self, pc: u32) -> Option<SpanLocation> {
+        let at = match self.regions.binary_search_by_key(&pc, |region| region.pc) {
+            Ok(at) => at,
+            Err(0) => return None,
+            Err(at) => at - 1,
+        };
+        self.regions.get(at).map(|region| region.at)
+    }
+}
+
+/// The strippable pc-to-span section's payload: a file-name table and,
+/// per covered function, the pc regions mapping instructions to source
+/// positions. The trap renderer, debugger breakpoints, and sampling
+/// profiler name source only through this table; a module built with
+/// [`crate::Flags::STRIP`] set carries none.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct SpanTable {
+    /// The file names, in the writer's first-use order.
+    pub files: Vec<String>,
+    /// Per covered function, ascending by function index.
+    pub funcs: Vec<FuncSpans>,
+}
+
+impl SpanTable {
+    /// The file name a location's index names, or `None` past the table.
+    #[must_use]
+    pub fn file(&self, index: u16) -> Option<&str> {
+        self.files.get(usize::from(index)).map(String::as_str)
+    }
+
+    /// The source position one function's pc runs at, or `None` when the
+    /// function carries no region covering the pc.
+    #[must_use]
+    pub fn location(&self, func: u32, pc: u32) -> Option<(&str, u32, u32)> {
+        let at = self
+            .funcs
+            .binary_search_by_key(&func, |row| row.func)
+            .ok()?;
+        let found = self.funcs.get(at)?.location(pc)?;
+        Some((self.file(found.file)?, found.line, found.col))
     }
 }
 
@@ -390,8 +446,8 @@ pub struct Module {
     pub(crate) chains: Vec<EvidenceChain>,
     /// The tag table (member atom name to tag id), in first-use order.
     pub(crate) tags: Vec<MemberTag>,
-    /// `None` means the module carries no debug-spans section.
-    pub(crate) debug_spans: Option<Vec<DebugSpan>>,
+    /// `None` means the module carries no pc-to-span section.
+    pub(crate) pc_spans: Option<SpanTable>,
 }
 
 impl Module {
@@ -413,7 +469,7 @@ impl Module {
             functions: Vec::new(),
             chains: Vec::new(),
             tags: Vec::new(),
-            debug_spans: None,
+            pc_spans: None,
         }
     }
 
@@ -443,11 +499,11 @@ impl Module {
     }
 
     /// Marks the module stripped: sets [`Flags::STRIP`] and drops the
-    /// debug spans so the writer emits no debug-spans section.
+    /// span table so the writer emits no debug-spans section.
     #[must_use]
     pub fn stripped(mut self) -> Self {
         self.flags = self.flags.with_strip(true);
-        self.debug_spans = None;
+        self.pc_spans = None;
         self
     }
 
@@ -588,19 +644,17 @@ impl Module {
         self
     }
 
-    /// The debug spans, or `None` when the section is absent (stripped or
-    /// never recorded).
+    /// The pc-to-span table, or `None` when the section is absent
+    /// (stripped or never recorded).
     #[must_use]
-    pub fn debug_spans(&self) -> Option<&[DebugSpan]> {
-        self.debug_spans.as_deref()
+    pub fn pc_spans(&self) -> Option<&SpanTable> {
+        self.pc_spans.as_ref()
     }
 
-    /// Appends a debug span covering `[start, end)`.
+    /// Attaches the pc-to-span table.
     #[must_use]
-    pub fn with_debug_span(mut self, start: u32, end: u32) -> Self {
-        self.debug_spans
-            .get_or_insert_with(Vec::new)
-            .push(DebugSpan::new(start, end));
+    pub fn with_pc_spans(mut self, spans: SpanTable) -> Self {
+        self.pc_spans = Some(spans);
         self
     }
 }

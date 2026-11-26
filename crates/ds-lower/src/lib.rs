@@ -82,6 +82,11 @@ pub enum PlacedOp {
     Rc(RcOp),
 }
 
+/// One function's lowering yield: the validated record, its placed op
+/// sequence, the resumed-frame facts, and the span marks (final word pc
+/// plus the source span each region runs under).
+pub type FinalizedFn = (ds_mod::Function, Vec<PlacedOp>, FnFacts, Vec<(u32, Span)>);
+
 /// The served ambient splice: the pre-lowered function records plus
 /// the member-tag rows their bodies minted, both read off the checked-in
 /// dsmod artifact. The rows seed the merged lowering's tag table so the
@@ -94,6 +99,10 @@ pub struct Served {
     pub functions: Vec<ds_mod::Function>,
     /// The member-tag rows the bodies mint, in id order.
     pub tags: Vec<ds_mod::MemberTag>,
+    /// The served bodies' pc-to-span rows, re-installed verbatim so the
+    /// merged module's table equals the fresh lowering's; `None` when
+    /// the served artifact carries no table (stripped).
+    pub spans: Option<ds_mod::SpanTable>,
 }
 
 /// The lowered module plus the tables callers need: the function table's
@@ -444,7 +453,8 @@ where
             count: lin.diags.len(),
         });
     }
-    let (functions, placed, facts, shapes, spliced) = lower_all(
+    let served_spans = served.as_ref().and_then(|served| served.spans.clone());
+    let (functions, placed, facts, shapes, spliced, marks) = lower_all(
         &mut plan,
         analyzed,
         &types,
@@ -469,6 +479,7 @@ where
     for row in &tags {
         module = module.with_tag(row.decl.clone(), row.name.clone(), row.id);
     }
+    module = module.with_pc_spans(span_table(analyzed, served_spans, spliced, &marks));
     Ok(Lowered {
         module,
         functions: plan.names(),
@@ -1346,6 +1357,61 @@ fn collect_bounds(
     }
 }
 
+/// The module's pc-to-span section: the served table (the spliced
+/// prefix's rows, installed verbatim) plus, per freshly lowered
+/// function, its region starts resolved against the bundle's span facts.
+/// Adjacent regions naming the same position merge, so one expression's
+/// ops share one region, and the rows stay ascending by function index —
+/// the writer's canonical order, byte-identical between the served and
+/// fresh lowerings of the same package.
+fn span_table(
+    analyzed: &Analyzed,
+    served: Option<ds_mod::SpanTable>,
+    spliced: usize,
+    marks: &[Vec<(u32, Span)>],
+) -> ds_mod::SpanTable {
+    let mut table = served.unwrap_or_default();
+    // the belt: the served table names the spliced prefix only, so a
+    // table carrying rows past the splice drops them here — the fresh
+    // rows own every function the walk lowered
+    let spliced = u32::try_from(spliced).expect("function index fits u32");
+    table.funcs.retain(|row| row.func < spliced);
+    for (index, fn_marks) in marks.iter().enumerate() {
+        if index < spliced as usize {
+            continue;
+        }
+        let func = u32::try_from(index).expect("function index fits u32");
+        let mut regions = Vec::with_capacity(fn_marks.len());
+        for (pc, span) in fn_marks {
+            let facts = &analyzed.span_files[span.file.as_u32() as usize];
+            let at = facts.location_clamped(span.start);
+            let name = facts.name();
+            let file = if let Some(at) = table.files.iter().position(|known| known == name) {
+                at
+            } else {
+                table.files.push(name.to_owned());
+                table.files.len() - 1
+            };
+            let at = ds_mod::SpanLocation {
+                file: u16::try_from(file).expect("the file table fits u16"),
+                line: at.line,
+                col: at.col,
+            };
+            if regions
+                .last()
+                .is_some_and(|last: &ds_mod::SpanRegion| last.at == at)
+            {
+                continue;
+            }
+            regions.push(ds_mod::SpanRegion { pc: *pc, at });
+        }
+        if !regions.is_empty() {
+            table.funcs.push(ds_mod::FuncSpans { func, regions });
+        }
+    }
+    table
+}
+
 /// What lowering every planned function yields: the module's functions,
 /// each function's placed op sequence, and the shared shape tables.
 type LowerAll<'b> = (
@@ -1354,6 +1420,7 @@ type LowerAll<'b> = (
     Vec<FnFacts>,
     Shapes<'b>,
     usize,
+    Vec<Vec<(u32, Span)>>,
 );
 
 /// The platform name the world natives' pool FuncRefs address (H5, E1):
@@ -1393,6 +1460,7 @@ fn lower_all<'b>(
     let mut functions = Vec::with_capacity(plan.functions().len());
     let mut placed = Vec::with_capacity(plan.functions().len());
     let mut facts = Vec::with_capacity(plan.functions().len());
+    let mut marks = Vec::with_capacity(plan.functions().len());
     let mut spliced = 0;
     // The served prefix installs verbatim (names already validated
     // against the plan): its bodies carry their own placed streams as
@@ -1410,6 +1478,7 @@ fn lower_all<'b>(
             functions.push(body);
             placed.push(Vec::new());
             facts.push(FnFacts::default());
+            marks.push(Vec::new());
         }
         spliced = placed.len();
     }
@@ -1430,7 +1499,7 @@ fn lower_all<'b>(
         // node-observing re-point lands on the function being lowered:
         // the sentinel renders against the first file's first line,
         // which is the stdlib ambient in the CLI pipeline.
-        let (function, ops, fact) = FnLower::lower(
+        let (function, ops, fact, fn_marks) = FnLower::lower(
             analyzed,
             res,
             plan,
@@ -1448,7 +1517,8 @@ fn lower_all<'b>(
         functions.push(function);
         placed.push(ops);
         facts.push(fact);
+        marks.push(fn_marks);
         index += 1;
     }
-    Ok((functions, placed, facts, shapes, spliced))
+    Ok((functions, placed, facts, shapes, spliced, marks))
 }

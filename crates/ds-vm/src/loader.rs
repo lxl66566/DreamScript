@@ -412,6 +412,7 @@ pub fn build(
     // pre-install resolve and the install itself agree)
     let own_id = registry.id_for_install(&name);
     let chains = module.chains().to_vec();
+    let spans = module.pc_spans().cloned();
     let functions = module.into_functions();
     let local_len = functions.len();
     // the function table's length is known and a `Result` collect gets no
@@ -426,7 +427,8 @@ pub fn build(
         .map_err(LoadError::Build)?
         .with_chains(chains)
         .map_err(LoadError::Build)?
-        .with_content_hash(content_hash))
+        .with_content_hash(content_hash)
+        .with_spans(spans))
 }
 
 #[cfg(test)]

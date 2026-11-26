@@ -1,0 +1,35 @@
+fn leaf(p: string) -> int | io_err {
+    const text = read_file(p)?
+    7
+}
+
+fn middle(p: string) -> string | io_err {
+    const n = leaf(p)?
+    "n=${n}"
+}
+
+fn spin(limit: int) -> int {
+    var acc = 0
+    var i = 0
+    while i < limit {
+        acc = acc + i
+        i = i + 1
+    }
+    acc
+}
+
+fn overflow(x: int) -> int {
+    x + 1
+}
+
+fn boom() -> int {
+    overflow(9223372036854775807)
+}
+
+fn spinmain() -> int {
+    spin(1000)
+}
+
+fn main() -> string | io_err {
+    middle("/nonexistent/span-probe")
+}
