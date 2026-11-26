@@ -645,6 +645,36 @@ pub(crate) const NATIVES: &[Native] = &[
         shape: NativeShape::TotalByResultType,
     },
     Native {
+        // the read-side aliasing container's seams: the constructor
+        // answers the arena's Ref word, insert the packed
+        // (index, generation) handle as one i64 word, remove the unit
+        // word, and at's answer kind is the call's own result type's
+        // (the element's one word — the staging's one-word element
+        // policy keeps it there)
+        name: "arena_new",
+        module: NativeModule::Builtin,
+        index: 98,
+        shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "arena_insert",
+        module: NativeModule::Builtin,
+        index: 99,
+        shape: NativeShape::Total(SlotType::I64), // the packed handle
+    },
+    Native {
+        name: "arena_remove",
+        module: NativeModule::Builtin,
+        index: 100,
+        shape: NativeShape::Total(SlotType::I64), // the unit word
+    },
+    Native {
+        name: "arena_at",
+        module: NativeModule::Builtin,
+        index: 101,
+        shape: NativeShape::TotalByResultType,
+    },
+    Native {
         name: "join",
         module: NativeModule::Builtin,
         index: 45,
@@ -1256,6 +1286,7 @@ pub(crate) const GENERIC_NATIVES: &[GenericNative] = &[
             BuiltinInstance::Bytes,
             BuiltinInstance::List,
             BuiltinInstance::Map,
+            BuiltinInstance::Arena,
         ],
     },
     GenericNative {

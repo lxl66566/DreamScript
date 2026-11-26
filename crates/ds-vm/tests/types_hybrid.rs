@@ -33,6 +33,7 @@ use ds_vm::{
     },
     assemble,
     native::{
+        BUILTIN_ARENA_AT, BUILTIN_ARENA_INSERT, BUILTIN_ARENA_NEW, BUILTIN_ARENA_REMOVE,
         BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF,
         BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF,
         BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE,
@@ -1136,19 +1137,25 @@ fn both_native_modules_are_installed_and_resolvable() {
             .is_some()
     );
     assert!(reg.resolve_native("builtin", BUILTIN_MAP_ENTRIES).is_some());
+    // the arena face (98-101): the read-side aliasing container's
+    // construct/store/remove/read seams over the object store
+    for index in BUILTIN_ARENA_NEW..=BUILTIN_ARENA_AT {
+        assert!(reg.resolve_native("builtin", index).is_some());
+    }
     assert!(
-        reg.resolve_native("builtin", 98).is_none(),
-        "98 table entries: the core's, the list block, the fiber pair, the push, the map block,
-         the generic container closes, the reentrant combinators, the nursery seams, the join,
-         the partition, the fork-join combinator, the fork-join fold, the float sort key, the
-         string, char, and byte sort keys, the string, float, and char content hashes, the
-         REPL's spliced park, the float reader, the char face, the retired JSON reader's
-         reserved slot, the map key face, the bytes collection's face with its content
-         compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
-         bare trap primitive, the list and map collections' content compares, the
-         byte/u32 width bridges, the float math family, the string search triple, the
-         bounded channel's intercepted send/recv/construct triple, and the ord-routed list
-         sort's reserved slot, and the collection member round"
+        reg.resolve_native("builtin", 102).is_none(),
+        "102 table entries: the core's, the list block, the fiber pair, the push, the map block,
+     the generic container closes, the reentrant combinators, the nursery seams, the join,
+     the partition, the fork-join combinator, the fork-join fold, the float sort key, the
+     string, char, and byte sort keys, the string, float, and char content hashes, the
+     REPL's spliced park, the float reader, the char face, the retired JSON reader's
+     reserved slot, the map key face, the bytes collection's face with its content
+     compare, the bytes representation's sort key, content hash, and UTF-8 bridges, the
+     bare trap primitive, the list and map collections' content compares, the
+     byte/u32 width bridges, the float math family, the string search triple, the
+     bounded channel's intercepted send/recv/construct triple, the ord-routed list
+     sort's reserved slot, the collection member round, and the arena face's
+     construct/store/remove/read seams"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

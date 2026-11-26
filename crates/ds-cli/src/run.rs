@@ -606,6 +606,9 @@ fn describe_staged_site(site: &StagedSite) -> String {
             format!("a closure capture on fiber {fiber}'s heap")
         },
         StagedSite::ListElement { fiber } => format!("a list element on fiber {fiber}'s heap"),
+        StagedSite::ArenaElement { fiber } => {
+            format!("an arena element on fiber {fiber}'s heap")
+        },
         StagedSite::MapWord { fiber } => {
             format!("a map key or value on fiber {fiber}'s heap")
         },
@@ -843,6 +846,12 @@ fn describe_trap(trap: &Trap) -> String {
             .to_owned(),
         Trap::ChanCapacity { cap } => {
             format!("chan_new refuses a negative bound: {cap}")
+        },
+        Trap::DanglingArenaHandle { index, generation } => {
+            format!(
+                "an arena handle names slot {index} at generation {generation}, which the arena \
+                 never held or already retired (a handle copy taken before the removal)"
+            )
         },
         Trap::SchedulerDeadlock => "the IO scheduler found nothing runnable and nothing able to \
                                     wake (every fiber parked on a wait no reactor interest, no \

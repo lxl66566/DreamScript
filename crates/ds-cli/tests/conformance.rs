@@ -249,3 +249,21 @@ fn the_json_width_vocabulary_round_trips_both_derive_families() {
         ),
     );
 }
+
+#[test]
+fn the_arena_surface_builds_traverses_and_reuses() {
+    // the read-side aliasing container: the handle-built cycle walks
+    // home through the at answers' mut windows, the removal retires the
+    // slot the reuse reanswers under the bumped generation, the handle
+    // crosses calls as a plain int word, and the dangling probe stays
+    // uncalled — its trap is the ds-cli arena_face suite's pin
+    run_golden("arena_surface.ds", "cycle 9\nreuse 0\ncrossed 7\n0\n");
+}
+
+#[test]
+fn the_string_view_surface_holds_cursors_into_a_shared_base() {
+    // the zero-copy parsing face: the validated construction, the
+    // checked char read, the composing slice, the content equality, and
+    // the materializing text — every refusal answering the none member
+    run_golden("string_view_surface.ds", "roundtrip dream\nrefused 3\n0\n");
+}

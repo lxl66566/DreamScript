@@ -816,6 +816,24 @@ pub const BUILTIN_MAP_CONTAINS: u32 = 96;
 /// for the fresh list's edge (the map keeps its own, C4). The member
 /// tier's `map[k, v].entries` routes here.
 pub const BUILTIN_MAP_ENTRIES: u32 = 97;
+/// `arena_new() -> arena[t]` — the read-side aliasing container's
+/// construction seam: a fresh empty arena object on the calling
+/// fiber's store. The element type never reaches the code (every arena
+/// one Ref word).
+pub const BUILTIN_ARENA_NEW: u32 = 98;
+/// `arena_insert(a: mut arena[t], x: t) -> int` — store one element
+/// word, answer the packed `(index, generation)` handle. The element
+/// stages as exactly one word (the one-word element policy the call's
+/// staging enforces).
+pub const BUILTIN_ARENA_INSERT: u32 = 99;
+/// `arena_remove(a: mut arena[t], h: int) -> ()` — retire the element
+/// behind a live handle, the slot tombstoning onto the free list with a
+/// generation bump at reuse.
+pub const BUILTIN_ARENA_REMOVE: u32 = 100;
+/// `arena_at(a: mut arena[t], h: int) -> t` — the element word behind a
+/// live handle, a `Ref` element answering as one retained count; a
+/// dangling handle traps deterministically.
+pub const BUILTIN_ARENA_AT: u32 = 101;
 
 /// The success discriminant of every fallible native's result span: the
 /// top of the platform tag-id reservation both native modules share (see
@@ -2731,6 +2749,11 @@ fn len_generic_fn(vm: &mut Vm, evidence: &[Value], args: &[Value]) -> Result<Nat
             let n = i64::try_from(heaps.map_len(ref_arg(args, 0)?)?).expect("map length fits i64");
             Ok(NativeResult::Word(Value::I64(n)))
         },
+        Value::I64(id) if id == ds_abi::BuiltinInstance::Arena as i64 => {
+            let n =
+                i64::try_from(heaps.arena_len(ref_arg(args, 0)?)?).expect("arena length fits i64");
+            Ok(NativeResult::Word(Value::I64(n)))
+        },
         staged => Err(Trap::UnknownInstance {
             evidence: match staged {
                 Value::I64(id) => id,
@@ -4177,10 +4200,46 @@ pub fn builtin_module() -> Vec<NativeFunction> {
             channel: None,
             func: map_entries_fn,
         },
+        NativeFunction {
+            name: "arena_new",
+            params: &[],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: arena_new_fn,
+        },
+        NativeFunction {
+            name: "arena_insert",
+            params: &[SlotType::Ref, SlotType::Raw],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: arena_insert_fn,
+        },
+        NativeFunction {
+            name: "arena_remove",
+            params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: arena_remove_fn,
+        },
+        NativeFunction {
+            name: "arena_at",
+            params: &[SlotType::Ref, SlotType::I64],
+            variadic: false,
+            result_words: 1,
+            control: None,
+            channel: None,
+            func: arena_at_fn,
+        },
     ];
     // install-time guard (debug builds): the pinned index run ends at
-    // BUILTIN_MAP_ENTRIES, so the table must cover exactly that run
-    debug_assert_eq!(fns.len(), BUILTIN_MAP_ENTRIES as usize + 1);
+    // BUILTIN_ARENA_AT, so the table must cover exactly that run
+    debug_assert_eq!(fns.len(), BUILTIN_ARENA_AT as usize + 1);
     fns
 }
 
@@ -4194,6 +4253,58 @@ fn chan_refuse_fn(
     _args: &[Value],
 ) -> Result<NativeResult, Trap> {
     Err(Trap::ReentrancyRefused)
+}
+
+// The arena natives (the read-side aliasing container): ordinary pure
+// natives over the object store — no scheduler step, so no dispatcher
+// interception; the handle packing and the slot discipline live in the
+// store (`crate::object`).
+
+// total: the Result is the calling convention every native shares, not
+// this body's
+#[allow(clippy::unnecessary_wraps)]
+fn arena_new_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    _args: &[Value],
+) -> Result<NativeResult, Trap> {
+    Ok(NativeResult::Word(heaps.alloc_arena()))
+}
+
+fn arena_insert_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let arena = ref_arg(args, 0)?;
+    // the one element word (the staging's one-word element policy)
+    let handle = heaps.arena_insert(arena, args[1])?;
+    Ok(NativeResult::Word(Value::I64(handle)))
+}
+
+fn arena_remove_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let arena = ref_arg(args, 0)?;
+    let handle = i64_arg(args, 1)?;
+    heaps.arena_remove(arena, handle)?;
+    // the inert unit word: no caller reads the overlay result
+    Ok(NativeResult::Word(Value::I64(0)))
+}
+
+fn arena_at_fn(
+    heaps: &mut Heaps,
+    _out: &mut OutputSink,
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    let arena = ref_arg(args, 0)?;
+    let handle = i64_arg(args, 1)?;
+    // a `Ref` element answers as one retained count (the arena keeps
+    // its own), a scalar word verbatim; a dangling handle traps here
+    let word = heaps.arena_at(arena, handle)?;
+    Ok(NativeResult::Word(word))
 }
 
 /// The native convention's second host reference (beside the object
@@ -5001,7 +5112,11 @@ mod tests {
         assert_eq!(fns[BUILTIN_MAP_REMOVE as usize].name, "map_remove");
         assert_eq!(fns[BUILTIN_MAP_CONTAINS as usize].name, "map_contains");
         assert_eq!(fns[BUILTIN_MAP_ENTRIES as usize].name, "map_entries");
-        assert_eq!(fns.len(), BUILTIN_MAP_ENTRIES as usize + 1);
+        assert_eq!(fns[BUILTIN_ARENA_NEW as usize].name, "arena_new");
+        assert_eq!(fns[BUILTIN_ARENA_INSERT as usize].name, "arena_insert");
+        assert_eq!(fns[BUILTIN_ARENA_REMOVE as usize].name, "arena_remove");
+        assert_eq!(fns[BUILTIN_ARENA_AT as usize].name, "arena_at");
+        assert_eq!(fns.len(), BUILTIN_ARENA_AT as usize + 1);
         // every world index, the spare slot, and the generic builtins'
         // slots stay a reserved trap
         for index in [

@@ -880,6 +880,15 @@ impl<'a> Shapes<'a> {
         self.heap_arg(ty, "chan", 0)
     }
 
+    /// The element type of one whole-arena application: the insert's
+    /// staging reads it (a bare member value re-spanning into the
+    /// element type before the store, and the one-word policy checking
+    /// the staged width). `None` for any other type — a union of
+    /// arenas, a non-arena application, a non-application.
+    pub(crate) fn arena_element(&self, ty: Ty) -> Option<Ty> {
+        self.heap_arg(ty, "arena", 0)
+    }
+
     /// The value type of one whole-map application [F7]: the map value
     /// channel's staging reads it (a bare member value re-spans into the
     /// value type's whole span before the store). `None` for any other
@@ -955,6 +964,7 @@ impl<'a> Shapes<'a> {
                 match universe.atom_decl(*ctor).ok()?.name.as_str() {
                     "list" => Some(BuiltinInstance::List),
                     "map" => Some(BuiltinInstance::Map),
+                    "arena" => Some(BuiltinInstance::Arena),
                     _ => None,
                 }
             },

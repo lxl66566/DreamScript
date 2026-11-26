@@ -470,6 +470,10 @@ pub enum BuiltinInstance {
     /// reference (the immutable byte sequence, `string`'s shape over
     /// bytes), whatever the collection seam answering it.
     Bytes = 6,
+    /// The `arena` instance: the receiver is an arena object reference,
+    /// whatever the element type — the free `len`'s instance over the
+    /// read-side aliasing container.
+    Arena = 7,
 }
 
 /// The biased u16 field for a jump from pc to `target` (BL-1):

@@ -1,0 +1,57 @@
+// source: todo item 119, the read-side aliasing round (ruled 2026-11-25)
+// purpose: the @std string_view's zero-copy parsing surface — the bounds-validated construction, the length, the checked char read, the slice composing another view inside the first's bounds, the content equality, and the one materializing door — every member answering without substring allocation
+// items:
+// view-roundtrip: stage: run
+// view-refusals: stage: run
+// main: stage: run
+
+// The held cursor: construction inside the range, the length, the
+// checked char read, the composing slice, the equality against a whole
+// string, and the materializing text.
+fn view_roundtrip() -> string {
+  const base = "hello, dreamscript world"
+  match view(base, 7, 12) {
+    none => "no view"
+    v => {
+      if view_len(v) != 5 { return "wrong len" }
+      if view_char_at(v, 0).unwrap_or('?') != 'd' { return "wrong char" }
+      match view_slice(v, 0, 5) {
+        none => "no slice"
+        s => if view_eq(s, "dream") { view_text(s) } else { "content mismatch" }
+      }
+    }
+  }
+}
+
+// The validated refusals: the out-of-range construction (both bounds
+// sides), the past-the-view slice, and the out-of-range char read all
+// answer the none member, never clamping and never trapping.
+fn view_refusals() -> int {
+  const base = "alpha"
+  var refused = 0
+  match view(base, 0, 99) {
+    none => refused += 1
+    v => refused += 100
+  }
+  match view(base, 3, 2) {
+    none => refused += 1
+    v => refused += 100
+  }
+  const whole = view(base, 0, 5)
+  match whole {
+    none => refused += 100
+    w => {
+      match view_slice(w, 2, 9) {
+        none => refused += 1
+        s => refused += 100
+      }
+      if view_char_at(w, 5).unwrap_or('!') != '!' { refused += 100 }
+    }
+  }
+  refused
+}
+
+fn main() -> () {
+  println("roundtrip ${view_roundtrip()}")
+  println("refused ${view_refusals()}")
+}

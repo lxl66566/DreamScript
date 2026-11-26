@@ -392,6 +392,19 @@ pub enum Trap {
         /// The refused bound.
         cap: i64,
     },
+    /// An arena handle named no live element (the read-side aliasing
+    /// container): the copy carried a retired slot's generation, an
+    /// index the arena never held, or a reused slot's old one — the
+    /// deterministic trap the removal makes of every handle copy taken
+    /// before it. Lowered code reaches it plainly (a handle is a copyable
+    /// int-backed scalar), so unlike most traps this is source-reachable
+    /// by honest programs.
+    DanglingArenaHandle {
+        /// The handle's slot index half.
+        index: u32,
+        /// The handle's generation half, the one the check refused.
+        generation: u32,
+    },
     /// `cancel(payload)` [E1, E2]: the fiber's own deliberate failure. The
     /// payload is the error value's whole word span — word 0 the
     /// failing member's tag, the rest its payload words in declaration

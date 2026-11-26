@@ -576,6 +576,11 @@ const HEAP_REFS: &[HeapRefWord] = &[
         args: 1,
         linked: false,
     },
+    HeapRefWord {
+        name: "arena",
+        args: 1,
+        linked: false,
+    },
 ];
 
 /// The heap-reference container one ambient atom name constructs,

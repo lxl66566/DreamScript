@@ -1,0 +1,82 @@
+// source: todo item 119, the read-side aliasing round (ruled 2026-11-25)
+// purpose: the @std arena's library surface — the handle-built cycle, the in-place node update over the at answer's mut window, the retire/reuse walk under the generation bump, and the free len — with the dangling trap's probe declared but never called from main (its deterministic report is pinned in the ds-lower arena_e2e and ds-cli arena_face suites)
+// items:
+// cycle-walk: stage: run
+// retire-reuse: stage: run
+// read-through: stage: run
+// handle-int-word: stage: run
+// dangling-probe: stage: run (traps deterministically at the run; the probe stays uncalled from main, exactly shift_bitwise's own trap items)
+// main: stage: run
+
+// The cyclic graph the round targets: three nodes whose element is the
+// successor list, built through handles and traversed home.
+fn cycle_walk() -> int {
+  var a = arena[list[int]]()
+  const h0 = a.insert(list[int]())
+  const h1 = a.insert(list[int]())
+  const h2 = a.insert(list[int]())
+  var s0 = a.at(h0)
+  s0.push(h1)
+  var s1 = a.at(h1)
+  s1.push(h2)
+  var s2 = a.at(h2)
+  s2.push(h0)
+  var cur = h0
+  var hops = 0
+  while hops < 9 {
+    var links = a.at(cur)
+    const step = first(links)
+    if step is int { cur = step } else { return 1 }
+    hops += 1
+  }
+  if a.len() != 3 { return 2 }
+  if cur != h0 { return 3 }
+  hops
+}
+
+// The removal retires the element (the free len observing it), the
+// reuse answers the retired slot under the bumped generation, and the
+// two handles disagree though they name the one slot.
+fn retire_reuse() -> int {
+  var a = arena[int]()
+  const old = a.insert(10)
+  if a.len() != 1 { return 1 }
+  a.remove(old)
+  if a.len() != 0 { return 2 }
+  const fresh = a.insert(99)
+  if a.len() != 1 { return 3 }
+  if a.at(fresh) != 99 { return 4 }
+  if old == fresh { return 5 }
+  0
+}
+
+// The handle is a copyable int word: it crosses calls as a plain value
+// and compares structurally — the cross-call cursor the round names.
+fn read_through(h: int, mut a: arena[int]) -> int {
+  a.at(h)
+}
+
+fn handle_int_word() -> int {
+  var a = arena[int]()
+  const h = a.insert(7)
+  read_through(h, a)
+}
+
+// The deterministic trap: a handle copy taken before the removal names
+// a retired slot, and at answers the trap instead of the reused
+// element. Declared but never called from main — its report and exit
+// status are pinned in the ds-cli arena_face suite.
+fn dangling_probe() -> int {
+  var a = arena[int]()
+  const stale = a.insert(41)
+  a.remove(stale)
+  a.insert(99)
+  const v = a.at(stale)
+  v
+}
+
+fn main() -> () {
+  println("cycle ${cycle_walk()}")
+  println("reuse ${retire_reuse()}")
+  println("crossed ${handle_int_word()}")
+}

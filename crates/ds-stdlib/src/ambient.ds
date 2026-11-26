@@ -261,6 +261,21 @@ impl[t] chan[t] {
   fn recv (self) -> t
 }
 
+// The arena face (the read-side aliasing container): every member
+// takes the `mut` window over the arena's own word (the one
+// exclusively-held owner mutates and reads; handles cross calls as
+// plain copyable ints). `insert` answers the packed handle, `remove`
+// the tombstone (the slot's generation bumping at the removal, every
+// handle copy taken before it going stale at once), `at` the element
+// behind a live handle — a reference element as one counted share, the
+// arena keeping its own — and a dangling handle traps deterministically
+// at either member.
+impl[t] arena[t] {
+  fn insert (mut self, x: t) -> int
+  fn remove (mut self, h: int) -> ()
+  fn at (mut self, h: int) -> t
+}
+
 pub tag int
 pub tag float
 pub tag bool
@@ -293,6 +308,24 @@ pub struct map[k, v]
 // retention owns counts, never claims), and a channel every fiber has
 // parked on is the honest deadlock: no sender, no answer.
 pub struct chan[t]
+
+// The read-side aliasing container (ruled 2026-11-25): the library
+// shape for cyclic graphs, node trees, ECS, and cross-call cursors —
+// no language change. One opaque word behind one heap object on the
+// owning fiber's store, the payload a slot array of one element word
+// per handle with a per-slot generation counter: `insert` answers a
+// copyable handle (the index and generation packed into one int word,
+// so the handle keeps scalar provenance through every value position),
+// `remove` tombstones the slot onto the free list with the generation
+// bumping at the removal, and a stale handle — any copy taken before it
+// — traps deterministically instead of naming the reused element. Elements stage one word this round (a scalar or reference
+// word; a multi-word record or a deinit-carrying value refuses at the
+// insert's staging), and a reference element is a counted share: the
+// arena's store owns one edge count per element, released at the
+// remove or the arena's death. The hand-rolled handle-plus-table
+// alternative stays observable beside it — the bypass tax the
+// generational-reference trigger measures against this vocabulary.
+pub struct arena[t]
 
 // The json value family, the typed face over the JSON grammar: one case
 // per grammar shape, the number split kept faithful (a token with a
@@ -425,6 +458,15 @@ extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 extern fn chan_new[t] (cap: int) -> chan[t]
 extern fn chan_send[t] (ch: chan[t], x: t) -> ()
 extern fn chan_recv[t] (ch: chan[t]) -> t
+// The arena's native face: the construction is the type application
+// `arena[t]()` (the element type never reaches the code, every arena
+// one Ref word), so `arena_new` stays a private seam like `list_new`'s,
+// and `arena_insert`/`arena_remove`/`arena_at` the private seams
+// behind the member spellings above (the handle a plain int word).
+extern fn arena_new[t] () -> arena[t]
+extern fn arena_insert[t] (a: mut arena[t], x: t) -> int
+extern fn arena_remove[t] (a: mut arena[t], h: int) -> ()
+extern fn arena_at[t] (a: mut arena[t], h: int) -> t
 // The bytes collection's native face: `bytes_of` is the construction
 // seam (the `list[byte]` bridge in — one payload byte per element word),
 // `byte_list` the bridge back out (one word per byte), `byte_at`

@@ -48,6 +48,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "list_insert" => self.shapes.list_element(ty),
             Callee::Builtin(native) if native.name == "map_set" => self.shapes.map_value(ty),
             Callee::Builtin(native) if native.name == "chan_send" => self.shapes.chan_payload(ty),
+            Callee::Builtin(native) if native.name == "arena_insert" => {
+                self.shapes.arena_element(ty)
+            },
             _ => None,
         }
     }
@@ -474,6 +477,35 @@ impl<'a> FnLower<'a, '_, '_> {
             self.rc.produced(chan);
             return Ok(Place {
                 base: chan,
+                shape: PlaceShape::Word(SlotType::Ref),
+            });
+        }
+        // the arena's construction (the read-side aliasing container):
+        // the empty-arena spelling `arena[t]()`, the element type never
+        // reaching the code (every arena one Ref word) — the runtime
+        // half is `arena_new`, whose Ref answer the frame owns
+        if one_param_fieldless && head.name.as_str() == "arena" {
+            if !args.is_empty() {
+                return Err(mismatch("the empty-arena constructor's arguments"));
+            }
+            let native = crate::native::lookup("arena_new")
+                .expect("the arena surface is covered by the native table");
+            self.overlay_site(&[], &[SlotType::Ref]);
+            self.rc.native_open();
+            let kidx = self.pool(self.funcref_const(Callee::Builtin(native)));
+            self.emit(Op::Call {
+                callee: kidx,
+                nargs: 0,
+            });
+            self.rc.native_done(&mut self.code);
+            let arena = self.temp_word(SlotType::Ref)?;
+            self.emit(Op::Mov {
+                dst: Slot::body(arena),
+                src: Slot::overlay(0),
+            });
+            self.rc.produced(arena);
+            return Ok(Place {
+                base: arena,
                 shape: PlaceShape::Word(SlotType::Ref),
             });
         }
@@ -1253,6 +1285,9 @@ impl<'a> FnLower<'a, '_, '_> {
             Callee::Builtin(native) if native.name == "chan_send" => {
                 Some((1usize, "a chan_send payload"))
             },
+            Callee::Builtin(native) if native.name == "arena_insert" => {
+                Some((1usize, "an arena_insert element"))
+            },
             Callee::Generic(generic) if generic.name == "cons" => Some((0usize, "a cons element")),
             _ => None,
         };
@@ -1420,6 +1455,21 @@ impl<'a> FnLower<'a, '_, '_> {
                          per-span deinit claims own the seam",
                     ));
                 }
+                // An arena element names its own refusal seam: the slot's
+                // edge retention owns counts exactly a channel buffer's,
+                // so the element's hook has no door at the remove or the
+                // arena's death
+                if let Some((slot, _)) = element_slot
+                    && slot == index
+                    && matches!(target, Callee::Builtin(native) if native.name == "arena_insert")
+                {
+                    return Err(LowerError::unsupported(
+                        arg.span(),
+                        "a deinit-carrying arena element",
+                        "the element's hook has no claim inside the arena's edge retention; \
+                         per-span deinit claims own the seam",
+                    ));
+                }
                 if matches!(
                     target,
                     Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }
@@ -1464,6 +1514,22 @@ impl<'a> FnLower<'a, '_, '_> {
                     };
                 }
                 self.guard_list_element(&arg_val, arg.span(), what)?;
+                // an arena element stages exactly one word this round:
+                // the slot array stores one element word per handle, so
+                // a wider element (a multi-word record or tuple, a
+                // union's region) refuses at the staging with the
+                // per-instantiation seam its own residual
+                if matches!(target, Callee::Builtin(native) if native.name == "arena_insert") {
+                    let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
+                    if addrs.len() != 1 {
+                        return Err(LowerError::unsupported(
+                            arg.span(),
+                            "an arena_insert element",
+                            "arena elements lower as one machine word per slot this round; a \
+                             wider element waits on the per-instantiation element-span seam",
+                        ));
+                    }
+                }
             }
             // a map_set's key stages exactly one word: the probe
             // resolution and the row index hash whole words, so a wider
@@ -2858,6 +2924,9 @@ impl<'a> FnLower<'a, '_, '_> {
             ("map", "entries") => ("map_entries", false),
             ("chan", "send") => ("chan_send", false),
             ("chan", "recv") => ("chan_recv", false),
+            ("arena", "insert") => ("arena_insert", false),
+            ("arena", "remove") => ("arena_remove", false),
+            ("arena", "at") => ("arena_at", false),
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;

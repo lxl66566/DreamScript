@@ -42,3 +42,70 @@ pub extern fn char_at (s: string, i: int) -> char | none
 pub extern fn contains (haystack: string, needle: string) -> bool
 pub extern fn index_of (haystack: string, needle: string) -> int | none
 pub extern fn replace (haystack: string, needle: string, with: string) -> string
+
+// The zero-copy parsing face (ruled 2026-11-25): one view over a
+// counted share of a base string — the `s` field's Ref word is the
+// share, safe under precise counting with no model change — carrying
+// the half-open char range [start, end) into it. Every position is a
+// char index, the checked reads' own vocabulary, so a view composes
+// with `char_at` and `substring` with no boundary translation, and a
+// free `len` owns the dot position [F3], so the range spells its two
+// bounds instead of a length. Construction validates the range against
+// the base's char count (the checked-API convention: the none member
+// outside it, never clamping and never a trap), the members answer
+// without substring allocation, and `view_text` is the one
+// materializing door — a parser holds cursors into a shared base and
+// pays the copy only at the exit that needs the text.
+pub struct string_view { s: string, start: int, end: int }
+
+pub fn view (s: string, start: int, end: int) -> string_view | none {
+  if start < 0 || end < start || end > len(s) { none }
+  else { string_view { s: s, start: start, end: end } }
+}
+
+pub fn view_len (v: string_view) -> int {
+  v.end - v.start
+}
+
+pub fn view_char_at (v: string_view, i: int) -> char | none {
+  if i < 0 || i >= v.end - v.start {
+    none
+  } else {
+    const c = char_at(v.s, v.start + i)
+    c
+  }
+}
+
+// The slice composing a further view: the range validated against this
+// view's own bounds, so the composed view can never fall off the base
+// it already sits inside.
+pub fn view_slice (v: string_view, start: int, end: int) -> string_view | none {
+  if start < 0 || end < start || v.start + end > v.end {
+    none
+  } else {
+    const inner = view(v.s, v.start + start, v.start + end)
+    inner
+  }
+}
+
+// The content equality against a whole string: the length read first,
+// then the char walk over both — no substring allocation on either
+// side of the compare.
+pub fn view_eq (v: string_view, other: string) -> bool {
+  if v.end - v.start != len(other) { return false }
+  var i = 0
+  var same = true
+  while i < v.end - v.start {
+    if char_at(v.s, v.start + i).unwrap_or('\0') != char_at(other, i).unwrap_or('\0') {
+      same = false
+    }
+    i += 1
+  }
+  same
+}
+
+// The materializing read back out: the one door that allocates, over a
+// range construction already validated.
+pub fn view_text (v: string_view) -> string {
+  substring(v.s, v.start, v.end).unwrap_or("")
+}

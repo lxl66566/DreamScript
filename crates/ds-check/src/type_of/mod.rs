@@ -3199,7 +3199,25 @@ impl Bodies<'_> {
             self.solve_reported = true;
             return Some(self.empty_val());
         };
-        let ty = if chan_bound { self.applied_chan_ty(elem)? } else { self.applied_list_ty(elem)? };
+        // the arena's construction (the read-side aliasing container):
+        // the empty-arena spelling `arena[t]()` — one more type
+        // application constructing by call form, the element type the
+        // only argument
+        let is_arena = |this: &Self| {
+            head.name.as_str() == "arena"
+                && this
+                    .decls
+                    .structs
+                    .get(&def)
+                    .is_some_and(|shape| shape.params.len() == 1 && shape.fields.is_empty())
+        };
+        let ty = if chan_bound {
+            self.applied_chan_ty(elem)?
+        } else if is_arena(self) {
+            self.applied_arena_ty(elem)?
+        } else {
+            self.applied_list_ty(elem)?
+        };
         Some(Val {
             ty,
             diverges: false,
@@ -3383,6 +3401,14 @@ impl Bodies<'_> {
     /// The applied `chan[t]` type over the payload type.
     fn applied_chan_ty(&mut self, elem: Ty) -> Option<Ty> {
         let def = self.package.lookup_type("chan")?;
+        let ctor = self.decls.atoms.get(&def).copied()?;
+        let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
+        self.decls.universe.atom_ty(atom).ok()
+    }
+
+    /// The applied `arena[t]` type over the element type.
+    fn applied_arena_ty(&mut self, elem: Ty) -> Option<Ty> {
+        let def = self.package.lookup_type("arena")?;
         let ctor = self.decls.atoms.get(&def).copied()?;
         let atom = self.decls.universe.apply_atom(ctor, &[elem]).ok()?;
         self.decls.universe.atom_ty(atom).ok()

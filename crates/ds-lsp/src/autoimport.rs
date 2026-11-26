@@ -506,6 +506,13 @@ mod tests {
             ("contains", DefKind::Fn),
             ("index_of", DefKind::Fn),
             ("replace", DefKind::Fn),
+            ("string_view", DefKind::Struct),
+            ("view", DefKind::Const),
+            ("view_len", DefKind::Const),
+            ("view_char_at", DefKind::Const),
+            ("view_slice", DefKind::Const),
+            ("view_eq", DefKind::Const),
+            ("view_text", DefKind::Const),
         ]);
     }
 

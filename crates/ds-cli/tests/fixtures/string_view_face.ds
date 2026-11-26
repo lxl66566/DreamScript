@@ -1,0 +1,29 @@
+// The zero-copy parsing face through `ds run`: view construction with
+// bounds validation (the none member outside the range, never clamping
+// and never a trap), the length, the checked char read, the slicing
+// that composes another view, the equality against a whole string, and
+// the one materializing door.
+
+fn main() -> () {
+  const base = "hello, dreamscript world"
+  match view(base, 7, 12) {
+    none => println("no view")
+    v => {
+      println("len ${view_len(v)} text ${view_text(v)}")
+      println("c0 ${view_char_at(v, 0).unwrap_or('?')} oob ${view_char_at(v, 5).unwrap_or('?')}")
+      match view_slice(v, 0, 5) {
+        none => println("no slice")
+        s => println("slice ${view_text(s)} eq ${view_eq(s, "dream")}")
+      }
+      match view_slice(v, 0, 9) {
+        none => println("beyond-the-view slice refused")
+        s => println("unreachable ${view_text(s)}")
+      }
+      println("eq ${view_eq(v, "dream")} ${view_eq(v, "world")}")
+    }
+  }
+  match view(base, 20, 99) {
+    none => println("range refused")
+    v => println("unreachable ${view_len(v)}")
+  }
+}

@@ -1,0 +1,31 @@
+// The arena face through `ds run`: the cyclic graph the read-side
+// aliasing round targets — three nodes whose element is the successor
+// list, built through handles and traversed three rounds — beside the
+// retire/reuse walk and the free `len` count.
+
+fn main() -> () {
+  var a = arena[list[int]]()
+  const h0 = a.insert(list[int]())
+  const h1 = a.insert(list[int]())
+  const h2 = a.insert(list[int]())
+  var s0 = a.at(h0)
+  s0.push(h1)
+  var s1 = a.at(h1)
+  s1.push(h2)
+  var s2 = a.at(h2)
+  s2.push(h0)
+  var cur = h0
+  var hops = 0
+  while hops < 9 {
+    var links = a.at(cur)
+    const step = first(links)
+    if step is int { cur = step } else { println("no successor") }
+    hops += 1
+  }
+  println("cycle ${hops} home ${cur == h0}")
+  a.remove(h1)
+  const h3 = a.insert([42])
+  var s0b = a.at(h0)
+  s0b.push(h3)
+  println("len ${a.len()} at0 ${a.at(h0).len()}")
+}

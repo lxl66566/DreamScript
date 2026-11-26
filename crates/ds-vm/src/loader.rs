@@ -166,6 +166,11 @@ pub enum StagedSite {
         /// The fiber owning the list's heap.
         fiber: u32,
     },
+    /// An arena object's stored element word.
+    ArenaElement {
+        /// The fiber owning the arena's heap.
+        fiber: u32,
+    },
     /// A map object's key or value word.
     MapWord {
         /// The fiber owning the map's heap.

@@ -263,6 +263,13 @@ enum Object {
     /// count, the parked-send discipline the net send wait set), so the
     /// death cascade decs the buffer alone.
     Chan(ChanData),
+    /// The read-side aliasing container: one heap object behind one
+    /// `Ref` word on the owning fiber's store, the slot array with its
+    /// per-slot generation counters the whole payload. Live element
+    /// words own one edge count each exactly like list elements (a
+    /// foreign element's inc posts through the pending queue), released
+    /// at the remove or by the death cascade.
+    Arena(ArenaData),
 }
 
 /// A channel's payload: the bound, the FIFO buffer, and the fibers
@@ -292,6 +299,36 @@ pub(crate) struct ChanData {
     pub(crate) senders: VecDeque<ChanSender>,
     /// The parked receivers in park order.
     pub(crate) receivers: VecDeque<FiberId>,
+}
+
+/// The arena's slot payload (the read-side aliasing container): one
+/// element word per live slot, a per-slot generation counter that
+/// retires the handles of removed elements, and the retired slots'
+/// free list. The slot array grows by amortized doubling; a removed
+/// slot tombstones (its word leaves first) and its generation bumps at
+/// reuse, so a stale handle — a copy taken before the removal — names
+/// the slot's old generation and never the reused element.
+#[derive(Debug, Default)]
+pub(crate) struct ArenaData {
+    /// One slot per allocated index: the generation plus the element
+    /// word (`None` on a retired slot awaiting reuse).
+    pub(crate) slots: Vec<ArenaSlot>,
+    /// The retired slots' free list, last-retired-first-reused.
+    pub(crate) free: Vec<u32>,
+    /// The live element count.
+    pub(crate) live: usize,
+}
+
+/// One arena slot: the generation counter plus the stored element word.
+#[derive(Debug)]
+pub(crate) struct ArenaSlot {
+    /// The generation this slot's current occupant inserted under; the
+    /// removal bumps it ahead of the tombstone, so every stale copy
+    /// fails the check at once and the next reuse answers handles
+    /// under the bumped one.
+    pub(crate) generation: u32,
+    /// The stored element word; `None` while the slot sits retired.
+    pub(crate) word: Option<Value>,
 }
 
 /// One parked sender: the fiber and its staged payload span.
@@ -1006,6 +1043,162 @@ impl Objects {
         }
     }
 
+    /// Allocates a fresh empty arena, owned by the caller: the birth
+    /// count is the creating frame's, exactly a fresh list's.
+    pub fn alloc_arena(&mut self) -> u32 {
+        self.alloc(Object::Arena(ArenaData::default()))
+    }
+
+    /// Unpacks one handle word: the low half the slot index, the high
+    /// half the generation the insert answered.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn arena_unpack(handle: i64) -> (u32, u32) {
+        ((handle & 0xffff_ffff) as u32, (handle >> 32) as u32)
+    }
+
+    /// The slot an insert takes: the free list's head (the removal
+    /// already bumped its generation, so the next handle under it
+    /// disagrees with every stale copy) or a fresh slot past the array's
+    /// end (the backing buffer's amortized doubling).
+    fn arena_take_slot(&mut self, header: NonNull<RcHeader>) -> (u32, u32) {
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Arena(data) => {
+                if let Some(index) = data.free.pop() {
+                    (index, data.slots[index as usize].generation)
+                } else {
+                    let index =
+                        u32::try_from(data.slots.len()).expect("the slot index stays below 2^32");
+                    data.slots.push(ArenaSlot {
+                        generation: 0,
+                        word: None,
+                    });
+                    (index, 0)
+                }
+            },
+            _ => unreachable!("the kind check precedes the slot take"),
+        }
+    }
+
+    /// Stores one element word into arena object `obj`, answering the
+    /// packed `(index, generation)` handle: the store acquires one edge
+    /// count for a `Ref` element exactly like a list element (a local
+    /// word through the store's own inc, a foreign word by posting the
+    /// inc to the pending queue), and the slot array's growth is the
+    /// backing buffer's amortized doubling.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no arena.
+    pub fn arena_insert(&mut self, obj: u32, word: Value) -> Result<i64, Trap> {
+        let header = self.header_of(obj)?;
+        if !matches!(self.heap.payload::<Object>(header), Object::Arena(_)) {
+            return Err(Trap::UnknownObject { obj });
+        }
+        // the acquire happens before the store: a bogus element
+        // reference leaves the arena untouched
+        if let Value::Ref(word) = word {
+            if word.fiber() == self.owner {
+                self.inc(word.id())?;
+            } else {
+                self.pending.push_back(ForeignOp::Inc(word));
+            }
+        }
+        let (index, generation) = self.arena_take_slot(header);
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Arena(data) => {
+                let slot = &mut data.slots[index as usize];
+                debug_assert!(slot.word.is_none(), "a taken slot sits retired");
+                slot.word = Some(word);
+                data.live += 1;
+            },
+            _ => unreachable!("the kind check precedes the store"),
+        }
+        Ok((i64::from(generation) << 32) | i64::from(index))
+    }
+
+    /// The element word behind a live handle, shared: the slot's stored
+    /// word without any count move — the caller (the routed read) owns
+    /// the retain the answer needs, exactly a list's checked read-out.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no arena;
+    /// [`Trap::DanglingArenaHandle`] when the handle names a retired
+    /// slot, a slot the arena never held, or an old generation of a
+    /// reused one.
+    pub fn arena_word(&mut self, obj: u32, handle: i64) -> Result<Value, Trap> {
+        let header = self.header_of(obj)?;
+        let (index, generation) = Self::arena_unpack(handle);
+        let slot = match self.heap.payload::<Object>(header) {
+            Object::Arena(data) => data.slots.get(index as usize),
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        match slot {
+            Some(ArenaSlot {
+                generation: live,
+                word: Some(word),
+            }) if *live == generation => Ok(*word),
+            _ => Err(Trap::DanglingArenaHandle { index, generation }),
+        }
+    }
+
+    /// Removes the element behind a live handle: the stored word leaves
+    /// the slot first, its edge count releasing at the store's own dec
+    /// (a foreign word's count posting to the pending queue), the slot
+    /// tombstones onto the free list with the generation bumping at the
+    /// removal — so every handle copy taken before it goes stale at
+    /// once, and the next reuse answers handles under the bumped one.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no arena;
+    /// [`Trap::DanglingArenaHandle`] when the handle names no live
+    /// element.
+    pub fn arena_remove(&mut self, obj: u32, handle: i64) -> Result<(), Trap> {
+        let header = self.header_of(obj)?;
+        let (index, generation) = Self::arena_unpack(handle);
+        let word = match self.heap.payload_mut::<Object>(header) {
+            Object::Arena(data) => {
+                let Some(ArenaSlot {
+                    generation: live,
+                    word,
+                }) = data.slots.get_mut(index as usize)
+                else {
+                    return Err(Trap::DanglingArenaHandle { index, generation });
+                };
+                if *live != generation {
+                    return Err(Trap::DanglingArenaHandle { index, generation });
+                }
+                *live = live.wrapping_add(1);
+                data.live -= 1;
+                data.free.push(index);
+                word.take()
+            },
+            _ => return Err(Trap::UnknownObject { obj }),
+        };
+        if let Some(Value::Ref(word)) = word {
+            if word.fiber() == self.owner {
+                self.dec(word.id())?;
+            } else {
+                self.pending.push_back(ForeignOp::Dec(word));
+            }
+        }
+        Ok(())
+    }
+
+    /// The arena's live element count.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no arena.
+    pub fn arena_len(&self, obj: u32) -> Result<usize, Trap> {
+        let header = self.header_of(obj)?;
+        match self.heap.payload::<Object>(header) {
+            Object::Arena(data) => Ok(data.live),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// `rc_inc` (C4): the reference in the slot naming `obj` gains one
     /// owner.
     ///
@@ -1080,6 +1273,17 @@ impl Objects {
                     Vec::new()
                 },
                 Object::Chan(data) => std::mem::take(&mut data.elems).into(),
+                Object::Arena(data) => {
+                    // the live element words leave the payload before it
+                    // dies, one owned count per `Ref` word exactly like a
+                    // list's; the retired slots hold nothing
+                    for slot in &mut data.slots {
+                        if let Some(word) = slot.word.take() {
+                            spill.push(word);
+                        }
+                    }
+                    Vec::new()
+                },
                 Object::Str(_) | Object::Bytes(_) => Vec::new(),
             };
             let words: &[Value] = if owned.is_empty() { &spill } else { &owned };
@@ -1636,6 +1840,13 @@ impl Objects {
                     for word in &mut list.elems {
                         if let Value::Fn(func) = word {
                             visit(StagedSite::ListElement { fiber: owner }, func)?;
+                        }
+                    }
+                },
+                Object::Arena(arena) => {
+                    for slot in &mut arena.slots {
+                        if let Some(Value::Fn(func)) = &mut slot.word {
+                            visit(StagedSite::ArenaElement { fiber: owner }, func)?;
                         }
                     }
                 },
@@ -2455,6 +2666,49 @@ impl<'a> Heaps<'a> {
     pub(crate) fn alloc_chan(&mut self, cap: usize) -> Value {
         let id = self.current.alloc_chan(cap);
         self.claimed_alloc(id)
+    }
+
+    /// Allocates a fresh empty arena on the running fiber's store, the
+    /// birth count claimed for the caller's frame — exactly a fresh
+    /// list's.
+    pub(crate) fn alloc_arena(&mut self) -> Value {
+        let id = self.current.alloc_arena();
+        self.claimed_alloc(id)
+    }
+
+    /// Stores one element word into arena `arena`, routed: the mutation
+    /// and the element's edge count land on the arena's store (a
+    /// foreign element's inc posting through the pending funnel).
+    /// Answers the packed `(index, generation)` handle.
+    pub(crate) fn arena_insert(&mut self, arena: RefId, word: Value) -> Result<i64, Trap> {
+        let handle = self.store(arena)?.arena_insert(arena.id(), word)?;
+        self.settle(arena.fiber())?;
+        Ok(handle)
+    }
+
+    /// The element word behind a live handle in arena `arena`, routed:
+    /// a `Ref` element answers as one retained count for the reading
+    /// frame (the arena keeps its own), exactly a checked list
+    /// read-out.
+    pub(crate) fn arena_at(&mut self, arena: RefId, handle: i64) -> Result<Value, Trap> {
+        let word = self.store(arena)?.arena_word(arena.id(), handle)?;
+        if let Value::Ref(word) = word {
+            self.inc(word)?;
+        }
+        Ok(word)
+    }
+
+    /// Removes the element behind a live handle in arena `arena`,
+    /// routed: the stored word's edge count releases on the element's
+    /// own heap, the queues draining with it.
+    pub(crate) fn arena_remove(&mut self, arena: RefId, handle: i64) -> Result<(), Trap> {
+        self.store(arena)?.arena_remove(arena.id(), handle)?;
+        self.settle(arena.fiber())
+    }
+
+    /// The arena's live element count, routed as a shared read.
+    pub(crate) fn arena_len(&self, arena: RefId) -> Result<usize, Trap> {
+        self.store_shared(arena)?.arena_len(arena.id())
     }
 
     /// Whether channel `chan`'s buffer has room for one more payload
@@ -3887,6 +4141,82 @@ mod tests {
         assert!(
             objects.is_empty(),
             "the span's payload died with the channel"
+        );
+    }
+
+    /// The arena's slot discipline: insert answers packed
+    /// `(index, generation)` handles, the read answers the stored word
+    /// with no count move, remove retires the slot (its edge count
+    /// releasing with it), reuse takes the retired slot first with the
+    /// generation bumped — so a stale handle traps instead of naming the
+    /// reused element — and the death cascade drops one count per live
+    /// element word.
+    #[test]
+    fn arena_slots_retire_and_reuse_with_generation_bumps() {
+        let mut objects = Objects::new(FIBER_ROOT);
+        let text = objects.intern("payload");
+        let arena = objects.alloc_arena();
+        let first = objects
+            .arena_insert(arena, Value::Ref(RefId::new(FIBER_ROOT, text)))
+            .expect("the first element stores");
+        assert_eq!(first, 0, "slot 0, generation 0");
+        assert_eq!(
+            objects.rc_at(text),
+            Ok(2),
+            "the arena's edge count beside the caller's word"
+        );
+        assert_eq!(objects.arena_len(arena), Ok(1), "one live element");
+        assert_eq!(
+            objects.arena_word(arena, first),
+            Ok(Value::Ref(RefId::new(FIBER_ROOT, text)))
+        );
+        // a second insert takes a fresh slot, the index packing one past
+        let second = objects
+            .arena_insert(arena, Value::I64(9))
+            .expect("the scalar element stores");
+        assert_eq!(second >> 32, 0, "generation 0 again, a fresh slot");
+        // the removal retires the first slot and releases its edge count
+        objects
+            .arena_remove(arena, first)
+            .expect("the live handle removes");
+        assert_eq!(objects.rc_at(text), Ok(1), "the edge count released");
+        assert_eq!(objects.arena_len(arena), Ok(1));
+        // the retired slot's stale handle traps with its own halves
+        assert_eq!(
+            objects.arena_word(arena, first),
+            Err(Trap::DanglingArenaHandle {
+                index: 0,
+                generation: 0
+            })
+        );
+        assert_eq!(
+            objects.arena_remove(arena, first),
+            Err(Trap::DanglingArenaHandle {
+                index: 0,
+                generation: 0
+            })
+        );
+        // a never-held index traps the same deterministic trap
+        assert_eq!(
+            objects.arena_word(arena, (i64::from(7u32) << 32) | 0x63),
+            Err(Trap::DanglingArenaHandle {
+                index: 99,
+                generation: 7
+            })
+        );
+        // the reuse takes the retired slot first, its generation bumped
+        let third = objects
+            .arena_insert(arena, Value::I64(11))
+            .expect("the reuse stores");
+        assert_eq!(third, 1 << 32, "slot 0, generation 1");
+        assert_eq!(objects.arena_word(arena, third), Ok(Value::I64(11)));
+        // the death cascade drops one count per live element word, the
+        // retired slot holding nothing
+        objects.dec(arena).expect("the arena's owner drops");
+        objects.dec(text).expect("the caller drops its word");
+        assert!(
+            objects.is_empty(),
+            "the arena's payload died with its elements"
         );
     }
 
