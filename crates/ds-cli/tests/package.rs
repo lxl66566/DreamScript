@@ -1520,7 +1520,7 @@ version = \"1.0.0\"
         "pub enum hollow {\n",
         "}\n",
         "pub enum mixed[t] {\n",
-        "  one { v: t },\n",
+        "  just { v: t },\n",
         "}\n",
         "pub struct slot[t] {\n",
         "  v: t,\n",

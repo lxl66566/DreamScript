@@ -344,19 +344,20 @@ pub(super) fn declare_foreign_unit_name(decls: &mut Decls, name: &str) -> Option
     }
 }
 
-/// Records the solved field signature of every application of a
-/// user-declared generic struct, after the whole package resolves: the
-/// walk enumerates the universe's atoms in id order (growing as field
-/// solving mints nested applications), reads the constructor's
-/// declared shape, and solves each declared field under the
-/// parameter-to-argument substitution — the same solving field access
-/// and construction run at their sites, the field types resolving
-/// under the declaring file's shadow map. An application whose fields
+/// Records the solved signature of every application of a user-declared
+/// generic struct or enum, after the whole package resolves: the walk
+/// enumerates the universe's atoms in id order (growing as field and
+/// slot solving mint nested applications and the enum applications'
+/// own case atoms), reads the constructor's declared shape, and solves
+/// each declared field or case slot under the parameter-to-argument
+/// substitution — the same solving field access, construction, and
+/// matching run at their sites, the types resolving under the
+/// declaring file's shadow map. An application whose fields or slots
 /// do not all solve records nothing, and its values keep the lowering
 /// refusal they always carried; a self-containing application records
 /// the entry its fields name, and the shape layer's cycle budget
 /// refuses the value shape the entry describes.
-pub(crate) fn record_apply_structs(package: &Package, decls: &mut Decls) {
+pub(crate) fn record_applications(package: &Package, decls: &mut Decls) {
     let mut at = 0u32;
     while at < decls.universe.atom_count() {
         let id = TypeId::from_raw(at);
@@ -371,6 +372,12 @@ pub(crate) fn record_apply_structs(package: &Package, decls: &mut Decls) {
         let Some(&def) = decls.defs_of_atoms.get(&ctor) else {
             continue;
         };
+        // An enum application's own walk derives the case atoms under
+        // the application's arguments, growing the universe it walks.
+        if decls.enums.contains_key(&def) {
+            let _ = applied_enum_cases(package, decls, id);
+            continue;
+        }
         let Some(shape) = decls.structs.get(&def) else {
             continue;
         };
@@ -404,6 +411,160 @@ pub(crate) fn record_apply_structs(package: &Package, decls: &mut Decls) {
             decls.apply_structs.insert(id, fields.into());
         }
     }
+}
+
+/// The per-case facts of one application of a user-declared generic
+/// enum, recorded once per application atom and minted on demand: each
+/// case's def, the atom its values carry under the application's
+/// arguments, and the case's solved payload slots. A bare case keeps
+/// the shared unit atom it minted at reservation — a unit word carries
+/// no substitution, so it tests over every application of the head. A
+/// payloaded case mints its own atom per application (a struct-shaped
+/// atom over the solved slots, the shape a nominal payload case
+/// carries) and records the slots the construction and the arm binders
+/// check against, the slot types solving under the parameter-to-argument
+/// substitution exactly a struct application's fields do. A case whose
+/// slots do not all solve, a payloaded case named `none` (the
+/// predeclared unit atom takes no payload), and a case whose def never
+/// reserved all refuse the whole application: the doors fall back to
+/// the refusals they always carried. An empty record marks such a
+/// refusal, so a repeated read never mints twice.
+pub(crate) fn applied_enum_cases(
+    package: &Package,
+    decls: &mut Decls,
+    app: TypeId,
+) -> Option<std::rc::Rc<[AppliedCase]>> {
+    if let Some(recorded) = decls.apply_enums.get(&app) {
+        return Some(recorded.clone());
+    }
+    let derived = derive_apply_enum_cases(package, decls, app);
+    let record = derived.unwrap_or_default();
+    decls.apply_enums.insert(app, record.clone());
+    if record.is_empty() { None } else { Some(record) }
+}
+
+/// One application's case derivation: `None` when any case refuses,
+/// the empty list never answers (the caller records the refusal).
+fn derive_apply_enum_cases(
+    package: &Package,
+    decls: &mut Decls,
+    app: TypeId,
+) -> Option<std::rc::Rc<[AppliedCase]>> {
+    let kind = decls.universe.atom_decl(app).ok()?.kind.clone();
+    let crate::AtomKind::Apply(ctor, args) = kind else {
+        return None;
+    };
+    let def = decls.defs_of_atoms.get(&ctor).copied()?;
+    let shape = decls.enums.get(&def)?.clone();
+    if shape.params.is_empty() || shape.params.len() != args.len() {
+        return None;
+    }
+    let mut vars: FxHashMap<String, Ty> = FxHashMap::default();
+    for (param, arg) in shape.params.iter().zip(args.iter()) {
+        vars.insert(param.name.clone(), *arg);
+    }
+    let saved = decls.current_file;
+    decls.current_file = Some(package.def(def).span.file);
+    let mut cases = Vec::with_capacity(shape.cases.len());
+    let mut derived_all = true;
+    for (name, span, payload) in &shape.cases {
+        let Some(case_def) =
+            type_def_for_use(package, decls, name).filter(|&d| package.def(d).span == *span)
+        else {
+            derived_all = false;
+            continue;
+        };
+        match payload {
+            EnumPayload::None => match decls.atoms.get(&case_def).copied() {
+                Some(atom) => cases.push(AppliedCase {
+                    def: case_def,
+                    atom,
+                    slots: None,
+                }),
+                None => derived_all = false,
+            },
+            payload @ (EnumPayload::Tuple(_) | EnumPayload::Struct(_)) => {
+                // `none` is the predeclared unit atom with no payload of
+                // its own: a payloaded case claiming the name keeps the
+                // construction refusal it always carried.
+                if name == "none" {
+                    derived_all = false;
+                    continue;
+                }
+                let written: Vec<(Option<String>, Type)> = match payload {
+                    EnumPayload::Tuple(types) => types.iter().map(|t| (None, t.clone())).collect(),
+                    EnumPayload::Struct(fields) => fields
+                        .iter()
+                        .map(|f| (Some(f.name.name.clone()), f.ty.clone()))
+                        .collect(),
+                    EnumPayload::None => unreachable!("matched above"),
+                };
+                let mut slots = Vec::with_capacity(written.len());
+                let mut fields = Vec::with_capacity(written.len());
+                for (slot_name, ty_written) in &written {
+                    match solve_written(package, ty_written, &vars, decls) {
+                        Some(ty) => {
+                            slots.push(AppliedSlot {
+                                name: slot_name.clone(),
+                                ty,
+                            });
+                            fields.push(Field {
+                                name: slot_name.clone(),
+                                ty: expr_of_ty(decls, ty),
+                            });
+                        },
+                        None => derived_all = false,
+                    }
+                }
+                if !derived_all {
+                    continue;
+                }
+                let atom = decls.universe.mint_payload_tag(name);
+                let _ = decls.universe.set_struct_fields(atom, fields);
+                cases.push(AppliedCase {
+                    def: case_def,
+                    atom,
+                    slots: Some(slots.into()),
+                });
+            },
+        }
+    }
+    decls.current_file = saved;
+    (derived_all && cases.len() == shape.cases.len()).then(|| cases.into())
+}
+
+/// The solved type re-expressed as the union-of-atoms [`TypeExpr`] the
+/// universe shapes carry: the minted case atom's field signature reads
+/// it exactly like a declared field's written form.
+fn expr_of_ty(decls: &Decls, ty: Ty) -> TypeExpr {
+    let mut expr: Option<TypeExpr> = None;
+    for atom in decls.universe.members(ty) {
+        expr = Some(match expr {
+            None => TypeExpr::atom(*atom),
+            Some(e) => e.union((*atom).into()),
+        });
+    }
+    expr.unwrap_or(TypeExpr::Empty)
+}
+
+/// The applications of one generic enum head inside a scrutinee's
+/// members: the ctor-head route the constructions and the member arms
+/// resolve through, applications staying opaque to the set algebra. A
+/// caller over several applications refuses ambiguous; one over none
+/// keeps its own refusal.
+pub(crate) fn applications_of_head(decls: &Decls, scrut: Ty, head: TypeId) -> Vec<TypeId> {
+    decls
+        .universe
+        .members(scrut)
+        .iter()
+        .copied()
+        .filter(|&member| {
+            matches!(
+                decls.universe.atom_decl(member).ok().map(|d| &d.kind),
+                Some(crate::AtomKind::Apply(ctor, _)) if *ctor == head
+            )
+        })
+        .collect()
 }
 
 /// Converts one written type into a solved singleton [`TypeExpr`] for

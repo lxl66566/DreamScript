@@ -18,7 +18,7 @@
 
 use std::{collections::HashMap, rc::Rc};
 
-use ds_check::{AtomKind, Ty, TypeId, Universe};
+use ds_check::{AtomKind, Ty, TypeExpr, TypeId, Universe};
 
 use crate::{error::LowerError, shape::is_var_atom};
 
@@ -93,6 +93,18 @@ pub(crate) struct Types<'a> {
     /// The analyzed package's own solved signatures, the derivation's
     /// source table for the atoms the checker minted.
     analyzed_apply_structs: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
+    /// The per-case facts of every enum application atom a
+    /// substitution minted, derived from its source's own record —
+    /// the minted case atoms substituted per the same rule.
+    apply_enums: HashMap<TypeId, Rc<[ds_check::decls::AppliedCase]>>,
+    /// The payloaded case atoms each substitution minted, keyed by
+    /// (substitution, the source record's own case atom): the arm
+    /// and construction reads map the checked record's atom to the
+    /// instance's own.
+    case_mints: HashMap<(u32, TypeId), TypeId>,
+    /// The analyzed package's own per-case facts, the derivation's
+    /// source table for the applications the checker minted.
+    analyzed_apply_enums: &'a HashMap<TypeId, Rc<[ds_check::decls::AppliedCase]>>,
 }
 
 impl<'a> Types<'a> {
@@ -101,6 +113,7 @@ impl<'a> Types<'a> {
     pub(crate) fn new(
         universe: &'a Universe,
         analyzed_apply_structs: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
+        analyzed_apply_enums: &'a HashMap<TypeId, Rc<[ds_check::decls::AppliedCase]>>,
     ) -> Self {
         Self {
             uni: Uni::Analyzed(universe),
@@ -108,6 +121,9 @@ impl<'a> Types<'a> {
             minted: HashMap::new(),
             apply_structs: HashMap::new(),
             analyzed_apply_structs,
+            apply_enums: HashMap::new(),
+            case_mints: HashMap::new(),
+            analyzed_apply_enums,
         }
     }
 
@@ -143,6 +159,18 @@ impl<'a> Types<'a> {
         &self.apply_structs
     }
 
+    /// The substitution's own derived case records, the frozen read's
+    /// first table over the analyzed package's own.
+    pub(crate) fn apply_enum_map(&self) -> &HashMap<TypeId, Rc<[ds_check::decls::AppliedCase]>> {
+        &self.apply_enums
+    }
+
+    /// The case atoms each substitution minted, keyed by
+    /// (substitution, the source record's own atom).
+    pub(crate) fn case_mint_map(&self) -> &HashMap<(u32, TypeId), TypeId> {
+        &self.case_mints
+    }
+
     /// The solved field signature one application atom carries: the
     /// substitution's own derivations first, the analyzed package's
     /// entries under them.
@@ -151,6 +179,16 @@ impl<'a> Types<'a> {
             .get(&atom)
             .cloned()
             .or_else(|| self.analyzed_apply_structs.get(&atom).cloned())
+    }
+
+    /// The per-case facts one enum application atom carries: the
+    /// substitution's own derivations first, the analyzed package's
+    /// records under them.
+    pub(crate) fn apply_cases(&self, atom: TypeId) -> Option<Rc<[ds_check::decls::AppliedCase]>> {
+        self.apply_enums
+            .get(&atom)
+            .cloned()
+            .or_else(|| self.analyzed_apply_enums.get(&atom).cloned())
     }
 
     /// Records the substituted signature of one minted application: the
@@ -178,6 +216,101 @@ impl<'a> Types<'a> {
         }
         self.apply_structs.insert(applied, derived.into());
         Ok(())
+    }
+
+    /// Records the per-case facts of one minted enum application and the
+    /// case-atom mapping its arm records read: the source application's
+    /// own cases under the same substitution — a bare case keeps its
+    /// shared unit atom, a payloaded case mints its own atom over the
+    /// substituted slots. The substituted application's record answers
+    /// from either table first (the checker minted the concrete
+    /// application's own case atoms when a site's written types solved
+    /// it), so the mapping points at whichever record the shape layer
+    /// reads.
+    fn derive_apply_enum_cases(
+        &mut self,
+        applied: TypeId,
+        source_app: TypeId,
+        subst: &Subst,
+    ) -> Result<(), LowerError> {
+        let Some(source) = self.apply_cases(source_app) else {
+            return Ok(());
+        };
+        let target = if let Some(cases) = self.apply_enums.get(&applied).cloned() {
+            cases
+        } else if let Some(cases) = self.analyzed_apply_enums.get(&applied).cloned() {
+            cases
+        } else {
+            let cases = self.derive_enum_cases(&source, subst)?;
+            self.apply_enums.insert(applied, cases.clone());
+            cases
+        };
+        for (from, to) in source.iter().zip(target.iter()) {
+            self.case_mints.insert((subst.id, from.atom), to.atom);
+        }
+        Ok(())
+    }
+
+    /// One substituted application's case list: each source case's slots
+    /// substituted, its payloaded cases minting fresh atoms.
+    fn derive_enum_cases(
+        &mut self,
+        source: &Rc<[ds_check::decls::AppliedCase]>,
+        subst: &Subst,
+    ) -> Result<Rc<[ds_check::decls::AppliedCase]>, LowerError> {
+        let mut cases = Vec::with_capacity(source.len());
+        for case in source.iter() {
+            let Some(slots) = &case.slots else {
+                // a bare case keeps its shared unit atom: a unit word
+                // carries no substitution
+                cases.push(ds_check::decls::AppliedCase {
+                    def: case.def,
+                    atom: case.atom,
+                    slots: None,
+                });
+                continue;
+            };
+            let mut solved = Vec::with_capacity(slots.len());
+            for slot in slots.iter() {
+                solved.push(ds_check::decls::AppliedSlot {
+                    name: slot.name.clone(),
+                    ty: self.substitute(subst, slot.ty)?,
+                });
+            }
+            let label = self
+                .universe()
+                .atom_decl(case.atom)
+                .map_or_else(|_| "case".to_owned(), |decl| decl.name.clone());
+            let atom = self.universe_mut().mint_payload_tag(&label);
+            let fields = solved
+                .iter()
+                .map(|slot| ds_check::Field {
+                    name: slot.name.clone(),
+                    ty: Self::expr_of_members(self.universe(), slot.ty),
+                })
+                .collect();
+            let _ = self.universe_mut().set_struct_fields(atom, fields);
+            cases.push(ds_check::decls::AppliedCase {
+                def: case.def,
+                atom,
+                slots: Some(solved.into()),
+            });
+        }
+        Ok(cases.into())
+    }
+
+    /// The solved type re-expressed as the union-of-atoms [`TypeExpr`] a
+    /// minted case atom's field signature carries, over the lens's own
+    /// registry.
+    fn expr_of_members(universe: &Universe, ty: Ty) -> TypeExpr {
+        let mut expr: Option<TypeExpr> = None;
+        for atom in universe.members(ty) {
+            expr = Some(match expr {
+                None => TypeExpr::atom(*atom),
+                Some(e) => e.union((*atom).into()),
+            });
+        }
+        expr.unwrap_or(TypeExpr::Empty)
     }
 
     fn universe_mut(&mut self) -> &mut Universe {
@@ -265,6 +398,7 @@ impl<'a> Types<'a> {
                         .apply_atom(*ctor, &args)
                         .map_err(|_| unsubstituted())?;
                     self.derive_apply_fields(applied, *ctor, subst)?;
+                    self.derive_apply_enum_cases(applied, atom, subst)?;
                     Some(applied)
                 },
                 AtomKind::Tuple(elements)
@@ -354,7 +488,8 @@ mod tests {
         let expected = universe.union(point_ty, io_ty);
 
         let empty_apply = HashMap::new();
-        let mut types = Types::new(&universe, &empty_apply);
+        let empty_enum_apply = HashMap::new();
+        let mut types = Types::new(&universe, &empty_apply, &empty_enum_apply);
         let subst = types.subst(HashMap::from([(var, point_ty)]));
         // a type naming no substituted variable is itself, and nothing
         // minted yet

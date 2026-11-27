@@ -87,7 +87,7 @@ impl Bodies<'_> {
             Pattern::Str { span, .. } | Pattern::RawStr { span, .. } => {
                 self.literal_pattern(*span, "string", &members, scrut);
             },
-            Pattern::Path { span, path } => match self.pattern_path_atom(path) {
+            Pattern::Path { span, path } => match self.pattern_path_atom(path, scrut) {
                 Some(atom) => self.case_cover(*span, atom, &members, scrut, covered),
                 None if self.take_pattern_label_reported() => {},
                 None => self.error(
@@ -98,7 +98,7 @@ impl Bodies<'_> {
                 ),
             },
             Pattern::Call { span, path, args } => {
-                let Some(atom) = self.pattern_path_atom(path) else {
+                let Some(atom) = self.pattern_path_atom(path, scrut) else {
                     if !self.take_pattern_label_reported() {
                         self.error(
                             ErrorCode::UnresolvedName,
@@ -148,7 +148,7 @@ impl Bodies<'_> {
                 }
             },
             Pattern::Struct { span, path, fields } => {
-                let Some(atom) = self.pattern_path_atom(path) else {
+                let Some(atom) = self.pattern_path_atom(path, scrut) else {
                     self.error(
                         ErrorCode::UnresolvedName,
                         format!("pattern `{}` names no declared atom", path.text()),
@@ -542,9 +542,60 @@ impl Bodies<'_> {
         matches!(self.applied_enum_head(scrut), Some((_, atoms, _)) if atoms.contains(&atom))
     }
 
-    fn pattern_path_atom(&mut self, path: &Path) -> Option<TypeId> {
+    /// The per-application case atom one enum case def names over a
+    /// scrutinee: the head's own applications in the scrutinee pick
+    /// the one the case's values carry — a bare case keeps its shared
+    /// unit atom, a payloaded case the application's minted atom —
+    /// answering `(application, case atom)`. One application answers,
+    /// several refuse ambiguous (the case names a different shape per
+    /// application), and none answers `None` for the caller's own
+    /// resolution error. The lowerer reads the atom through the
+    /// span-keyed directed-tag record, so both layers share one
+    /// mapping.
+    pub(super) fn applied_case_atom(
+        &mut self,
+        case_def: DefId,
+        scrut: Ty,
+        span: Span,
+    ) -> Option<(TypeId, TypeId)> {
+        let enum_def = self.decls.cases.get(&case_def).map(|case| case.enum_def)?;
+        let shape = self.decls.enums.get(&enum_def)?;
+        if shape.params.is_empty() {
+            return None;
+        }
+        let head_atom = self.decls.atoms.get(&enum_def).copied()?;
+        let apps = decls::applications_of_head(self.decls, scrut, head_atom);
+        let app = match apps.as_slice() {
+            [one] => *one,
+            [] => return None,
+            many => {
+                let spelled: Vec<String> = many.iter().map(|&m| self.atom_name(m)).collect();
+                self.error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the case matches several applications of the head: {}; name the \
+                         application",
+                        spelled.join(", ")
+                    ),
+                    span,
+                    "ambiguous application",
+                );
+                return None;
+            },
+        };
+        let cases = decls::applied_enum_cases(self.package, self.decls, app)?;
+        let case = cases.iter().find(|case| case.def == case_def)?;
+        self.record_directed_tag(span, case.atom);
+        Some((app, case.atom))
+    }
+
+    fn pattern_path_atom(&mut self, path: &Path, scrut: Ty) -> Option<TypeId> {
         match path.segments.as_slice() {
-            [only] => self.unit_pattern_atom(&only.name),
+            [only] => self.unit_pattern_atom(&only.name).or_else(|| {
+                let def = self.type_def_of(&only.name)?;
+                self.applied_case_atom(def, scrut, only.span)
+                    .map(|(_, atom)| atom)
+            }),
             [head, tail] => {
                 let def = self
                     .type_def_of(&head.name)
@@ -563,8 +614,15 @@ impl Bodies<'_> {
                         .package
                         .lookup_type_in(enum_file, case_name)
                         .or_else(|| self.decls.foreign_type(case_name))?;
-                    let atom = self.decls.atoms.get(&case_def).copied()?;
-                    self.record_directed_tag(tail.span, atom);
+                    let atom = match self.decls.atoms.get(&case_def).copied() {
+                        Some(atom) => {
+                            self.record_directed_tag(tail.span, atom);
+                            atom
+                        },
+                        None => self
+                            .applied_case_atom(case_def, scrut, tail.span)
+                            .map(|(_, atom)| atom)?,
+                    };
                     return Some(atom);
                 }
                 if matches!(

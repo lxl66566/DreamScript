@@ -422,20 +422,17 @@ impl<'a> FnLower<'a, '_, '_> {
                 )
             } else if path.segments.len() == 2
                 && let [.., last] = path.segments.as_slice()
+                && let Some(Res::Def(def)) = self.res.get(last.span)
                 && matches!(
-                    self.res.get(last.span),
-                    Some(Res::Def(def))
-                        if matches!(
-                            self.analyzed.package.def(*def).kind,
-                            ds_check::DefKind::Tag | ds_check::DefKind::Case
-                        )
+                    self.analyzed.package.def(*def).kind,
+                    ds_check::DefKind::Tag | ds_check::DefKind::Case
                 )
             {
                 // The qualified `type::label` call form: a payloaded
                 // label constructs through the same case-value door as
                 // the bare spelling, over the call's own checked type
                 // (a unit label's call never leaves the checker).
-                return self.case_value(args, ty);
+                return self.case_value_for(args, ty, *def, call_span);
             } else if let Some(Res::Def(def)) = self.res.get(*span) {
                 (
                     Some(*def),
@@ -468,8 +465,11 @@ impl<'a> FnLower<'a, '_, '_> {
         if let Some(block) = trailing {
             arg_exprs.push(&**block);
         }
-        if case_ctor.is_some() && case_ctor == def {
-            return self.case_value(args, ty);
+        if case_ctor.is_some()
+            && case_ctor == def
+            && let Some(def) = def
+        {
+            return self.case_value_for(args, ty, def, call_span);
         }
         // A comptime call's answer embeds at the call site: the
         // evaluator ran the callee on the fenced VM and recorded the

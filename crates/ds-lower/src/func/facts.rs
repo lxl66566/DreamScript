@@ -81,12 +81,19 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.copy_record(span)?.place_store.clone()
     }
 
-    /// The directed label's atom at one span, the copy-active read.
+    /// The directed label's atom at one span, the copy-active read: a
+    /// generic enum's case record maps to the active instance's own
+    /// minted atom under an instantiation.
     pub(super) fn directed_tag(&self, span: Span) -> Option<TypeId> {
         if let Some(atom) = self.copy_record(span).and_then(|rec| rec.directed_tag) {
-            return Some(atom);
+            return self.shapes.substituted_case_atom(atom).or(Some(atom));
         }
-        self.analyzed.checked.directed_tags.get(&span).copied()
+        self.analyzed
+            .checked
+            .directed_tags
+            .get(&span)
+            .copied()
+            .and_then(|atom| self.shapes.substituted_case_atom(atom).or(Some(atom)))
     }
 
     /// The hole's solved show dispatch at one span, the copy-active read.

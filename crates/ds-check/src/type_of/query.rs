@@ -211,8 +211,21 @@ impl Bodies<'_> {
     }
 
     /// Payload types of a struct (named fields, positionally matched) or an
-    /// enum case, for call patterns.
+    /// enum case, for call patterns. A minted application case atom
+    /// carries no def; its own field signature already holds the solved
+    /// slot expressions.
     pub(super) fn payload_tys(&mut self, _path: &Path, atom: TypeId) -> Option<Vec<Ty>> {
+        if !self.decls.defs_of_atoms.contains_key(&atom)
+            && let Ok(decl) = self.decls.universe.atom_decl(atom)
+            && let AtomKind::Struct(fields) = &decl.kind
+        {
+            let fields = fields.clone();
+            let mut out = Vec::with_capacity(fields.len());
+            for field in &fields {
+                out.push(self.decls.universe.solve(&field.ty).ok()?);
+            }
+            return Some(out);
+        }
         let def = self.decls.defs_of_atoms.get(&atom).copied()?;
         if let Some(shape) = self.decls.structs.get(&def).cloned() {
             let mut out = Vec::with_capacity(shape.fields.len());
@@ -265,18 +278,28 @@ impl Bodies<'_> {
     /// atoms: `(head atom, case atoms, any unminted case)` — the head
     /// atom is the application itself, the member a catchall covers.
     /// Applications stay opaque to the set algebra, so case patterns
-    /// over an enum application cover it case-wise — a unit case's atom
-    /// carries no substitution, while a case minting no atom (a
-    /// payloaded case over a generic head) can never be covered. `None`
-    /// when the scrutinee is not one application of a declared enum
-    /// head.
+    /// over an enum application cover it case-wise — a non-generic
+    /// head's minted case atoms, a generic head's per-application
+    /// case atoms (a bare case's shared unit atom among them), and an
+    /// application whose derivation refused leaving every case
+    /// unminted, so nothing covers it. `None` when the scrutinee is
+    /// not one application of a declared enum head.
     pub(super) fn applied_enum_head(&mut self, scrut: Ty) -> Option<(TypeId, Vec<TypeId>, bool)> {
         let [only] = self.decls.universe.members(scrut) else {
             return None
         };
-        let (ctor, _) = self.single_apply_of(*only)?;
+        let only = *only;
+        let (ctor, _) = self.single_apply_of(only)?;
         let enum_def = self.decls.defs_of_atoms.get(&ctor).copied()?;
         let shape = self.decls.enums.get(&enum_def)?.clone();
+        if !shape.params.is_empty() {
+            let cases = decls::applied_enum_cases(self.package, self.decls, only);
+            let atoms = cases.map(|cases| cases.iter().map(|case| case.atom).collect::<Vec<_>>());
+            return match atoms {
+                Some(atoms) => Some((only, atoms, false)),
+                None => Some((only, Vec::new(), true)),
+            };
+        }
         let mut atoms = Vec::with_capacity(shape.cases.len());
         let mut unminted = false;
         for (name, ..) in &shape.cases {
@@ -289,7 +312,7 @@ impl Bodies<'_> {
                 None => unminted = true,
             }
         }
-        Some((*only, atoms, unminted))
+        Some((only, atoms, unminted))
     }
 
     pub(super) fn decompose_fn(&mut self, ty: Ty) -> Option<(Vec<Ty>, Ty)> {

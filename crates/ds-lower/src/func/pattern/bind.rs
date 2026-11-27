@@ -938,14 +938,19 @@ impl FnLower<'_, '_, '_> {
     }
 
     /// The member atoms a pattern's head path tests: a bare label reads
-    /// the name-namespace atom, a qualified `type::label` the
-    /// member the checker picked and recorded at the label's span.
+    /// the checker's span-keyed directed record first (a generic enum's
+    /// case names its per-application atom there, the record the arm's
+    /// truth), then the name-namespace atom; a qualified `type::label`
+    /// the member the checker picked and recorded at the label's span.
     fn label_pattern_atoms(&self, path: &Path) -> Result<Vec<TypeId>, LowerError> {
         match path.segments.as_slice() {
-            [only] => self
-                .path_atom(&only.name)
-                .map(|atom| vec![atom])
-                .ok_or_else(|| mismatch("a pattern's member atom")),
+            [only] => {
+                let directed = self.directed_tag(only.span);
+                directed
+                    .or_else(|| self.path_atom(&only.name))
+                    .map(|atom| vec![atom])
+                    .ok_or_else(|| mismatch("a pattern's member atom"))
+            },
             [_head, tail] => self
                 .analyzed
                 .checked
@@ -964,9 +969,16 @@ impl FnLower<'_, '_, '_> {
     /// The member atom a pattern's head path names: a bare label reads the
     /// name namespace, a qualified `type::label` the member the
     /// checker recorded at the label's span.
+    /// The member atom a pattern's head path names: a bare label reads
+    /// the checker's span-keyed directed record first (a generic enum's
+    /// case names its per-application atom there), then the name
+    /// namespace; a qualified `type::label` the member the checker
+    /// picked and recorded at the label's span.
     fn pattern_head_atom(&self, path: &Path) -> Option<TypeId> {
         match path.segments.as_slice() {
-            [only] => self.path_atom(&only.name),
+            [only] => self
+                .directed_tag(only.span)
+                .or_else(|| self.path_atom(&only.name)),
             [_head, tail] => self.directed_tag(tail.span),
             _ => None,
         }
@@ -1060,12 +1072,13 @@ impl FnLower<'_, '_, '_> {
             };
             let Some(bind) = bind else { continue };
             let at = base + field.word;
-            // a struct-typed inner field binds the span its checked
-            // type names, however many words it spans; every other
-            // field binds its one word
+            // a span-shaped inner field (a struct, a union, a generic
+            // enum's application) binds the span its checked type
+            // names, however many words it spans; every other field
+            // binds its one word
             let fact = self.binder_fact(bind.0)?;
             let shape = match fact {
-                Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
+                Some(fact) if self.span_typed(fact.ty) => PlaceShape::Span(fact.ty),
                 _ => PlaceShape::Word(field.slot()),
             };
             self.binders.insert(bind.0, Place { base: at, shape });
@@ -1238,12 +1251,13 @@ impl FnLower<'_, '_, '_> {
                         continue;
                     };
                     let base = scrut.place.base + field.word;
-                    // a struct-typed field binds the span its checked
-                    // type names, however many words it spans; every
-                    // other field binds its one word
+                    // a span-shaped field (a struct, a union, a
+                    // generic enum's application) binds the span its
+                    // checked type names, however many words it spans;
+                    // every other field binds its one word
                     let fact = self.binder_fact(bind.0)?;
                     let shape = match fact {
-                        Some(fact) if self.struct_typed(fact.ty) => PlaceShape::Span(fact.ty),
+                        Some(fact) if self.span_typed(fact.ty) => PlaceShape::Span(fact.ty),
                         _ => PlaceShape::Word(field.slot()),
                     };
                     self.binders.insert(bind.0, Place { base, shape });
@@ -1313,7 +1327,7 @@ impl FnLower<'_, '_, '_> {
                                 let base = scrut.place.base + field.word;
                                 let fact = self.binder_fact(*span)?;
                                 let shape = match fact {
-                                    Some(fact) if self.struct_typed(fact.ty) => {
+                                    Some(fact) if self.span_typed(fact.ty) => {
                                         PlaceShape::Span(fact.ty)
                                     },
                                     _ => PlaceShape::Word(field.slot()),
@@ -1341,14 +1355,14 @@ impl FnLower<'_, '_, '_> {
                                 ));
                             }
                             let base = scrut.place.base + field.word;
-                            // a struct-typed payload binds the span its
-                            // checked type names, however many words it
-                            // spans; every other field binds its one word
+                            // a span-shaped payload (a struct, a union, a
+                            // generic enum's application) binds the span
+                            // its checked type names, however many words
+                            // it spans; every other field binds its one
+                            // word
                             let fact = self.binder_fact(*span)?;
                             let shape = match fact {
-                                Some(fact) if self.struct_typed(fact.ty) => {
-                                    PlaceShape::Span(fact.ty)
-                                },
+                                Some(fact) if self.span_typed(fact.ty) => PlaceShape::Span(fact.ty),
                                 _ => PlaceShape::Word(field.slot()),
                             };
                             self.binders.insert(*span, Place { base, shape });

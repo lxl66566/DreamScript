@@ -880,6 +880,121 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(target)
     }
 
+    /// The case-construction door both spellings share: a payloaded case
+    /// of a user-declared generic enum constructs over the call's own
+    /// checked application (the per-application case the checker's
+    /// construction record names), every other case or tag over its own
+    /// atom.
+    pub(in crate::func) fn case_value_for(
+        &mut self,
+        args: &[CallArg],
+        ty: Ty,
+        case_def: DefId,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let generic_enum = self
+            .analyzed
+            .decls
+            .cases
+            .get(&case_def)
+            .and_then(|case| self.analyzed.decls.enums.get(&case.enum_def))
+            .is_some_and(|shape| !shape.params.is_empty());
+        if generic_enum {
+            return self.applied_case_value(args, ty, case_def, span);
+        }
+        self.case_value(args, ty)
+    }
+
+    /// Constructs one payloaded case of a user-declared generic enum's
+    /// application: the call's checked type is the application itself,
+    /// so the temp spans the application's whole union — the case's
+    /// tag minted at the tag word, the dead region zeroed, and each
+    /// payload slot stored at the case's claimed region offsets.
+    pub(in crate::func) fn applied_case_value(
+        &mut self,
+        args: &[CallArg],
+        ty: Ty,
+        case_def: DefId,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let app = self.only_atom(ty, span)?;
+        let Some(cases) = self.shapes.apply_cases_of(app) else {
+            return Err(LowerError::unsupported(
+                span,
+                "a case construction",
+                "the application's case atoms never minted; a payload that never solved carries \
+                 no value shape",
+            ));
+        };
+        let Some(case) = cases.iter().find(|case| case.def == case_def) else {
+            return Err(mismatch("a case construction"));
+        };
+        let Some(slots) = &case.slots else {
+            return Err(mismatch("a case construction"));
+        };
+        let atom = case.atom;
+        let shape = self.shapes.shape(ty)?;
+        let Shape::Union(union) = &*shape else {
+            return Err(mismatch("a case construction"));
+        };
+        let member = union
+            .member(atom)
+            .cloned()
+            .ok_or_else(|| mismatch("a case construction's member"))?;
+        let target = self.temp_span(ty)?;
+        let tag = self.shapes.tag_id(atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(target.base),
+            tag,
+        });
+        self.zero_init_member(target.base, &union.words, &member.fields)?;
+        let mut positional = 0usize;
+        for arg in args {
+            let position = if let Some(name) = &arg.name {
+                member
+                    .fields
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(name.name.as_str()))
+                    .ok_or_else(|| mismatch("a case construction field"))?
+            } else {
+                let index = positional;
+                positional += 1;
+                index
+            };
+            let Some(field) = member.fields.get(position) else {
+                return Err(mismatch("a case construction slot"));
+            };
+            let Some(slot) = slots.get(position) else {
+                return Err(mismatch("a case construction slot"));
+            };
+            let v = self.value(&arg.value)?;
+            let addrs = self
+                .word_addrs(&v.place, v.ty)
+                .map_err(|err| err.respanned(arg.value.span()))?;
+            if addrs.len() != field.width() {
+                // a member value into a union-typed payload slot re-spans
+                // through the slot's own region, the literal store's rule
+                let members = self.universe().members(slot.ty).to_vec();
+                self.store_union_member_field(
+                    target.base + field.word,
+                    Some(members.as_slice()),
+                    &v,
+                    arg.span,
+                )?;
+                continue;
+            }
+            // a fn-typed payload slot holds the closure Ref word: the
+            // struct literal's own store rule
+            let addrs = if field.slot() == SlotType::Ref && addrs[0].slot_ty == SlotType::Fn {
+                vec![self.stage_heap_fn(&v, arg.span)?]
+            } else {
+                addrs
+            };
+            self.store_field_span(target.base, field, &addrs);
+        }
+        Ok(target)
+    }
+
     /// The literal-only parameter defaults a local call stages
     /// for its omitted trailing parameters: the checker proved each
     /// default's literal against its parameter type, so the call lowers

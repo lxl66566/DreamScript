@@ -4,6 +4,29 @@
 use super::*;
 
 impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+    /// One bare member value of a generic enum's application: the
+    /// checked type is the application itself, so the temp spans its
+    /// whole union — the case's tag minted at the tag word, the dead
+    /// region zeroed — the one-word Tag answer the non-generic case
+    /// value keeps.
+    pub(super) fn union_member_value(&mut self, atom: TypeId, ty: Ty) -> Result<Place, LowerError> {
+        let shape = self.shapes.shape(ty)?;
+        let Shape::Union(union) = &*shape else {
+            return Err(mismatch("a case value's application"));
+        };
+        let Some(member) = union.member(atom) else {
+            return Err(mismatch("a case value's member"));
+        };
+        let target = self.temp_span(ty)?;
+        let tag = self.shapes.tag_id(atom)?;
+        self.emit(Op::TagNew {
+            dst: Slot::body(target.base),
+            tag,
+        });
+        self.zero_init_member(target.base, &union.words, &member.fields)?;
+        Ok(target)
+    }
+
     pub(super) fn path_value(
         &mut self,
         path: &Path,
@@ -23,7 +46,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         {
             // The qualified `type::label` use: the head's member
             // the checker picked is the value's atom, recorded at the
-            // label's span.
+            // label's span. A generic enum's qualified case constructs
+            // the application's whole union span, exactly the bare
+            // spelling's rule.
+            if let [app] = self.universe().members(ty)
+                && self.shapes.is_enum_application(*app)
+            {
+                return self.union_member_value(atom, ty);
+            }
             let dst = self.temp_word(SlotType::Tag)?;
             let tag = self.shapes.tag_id(atom)?;
             self.emit(Op::TagNew {
@@ -71,6 +101,17 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                             .copied()
                             .or_else(|| self.analyzed.decls.atoms.get(def).copied())
                             .ok_or_else(|| mismatch("a tag construction"))?;
+                        // A generic enum's bare case constructs the
+                        // application's whole union span: the value's
+                        // checked type is the application itself, so
+                        // the tag word and the zeroed region land
+                        // together; every other checked type keeps the
+                        // lone Tag word, the store re-spanning it.
+                        if let [app] = self.universe().members(ty)
+                            && self.shapes.is_enum_application(*app)
+                        {
+                            return self.union_member_value(atom, ty);
+                        }
                         let dst = self.temp_word(SlotType::Tag)?;
                         let tag = self.shapes.tag_id(atom)?;
                         self.emit(Op::TagNew {

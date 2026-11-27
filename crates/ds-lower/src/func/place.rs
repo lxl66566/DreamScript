@@ -172,8 +172,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
+    /// Whether one type's values carry the tag-plus-region span: a
+    /// multi-member union, or a user-declared generic enum's
+    /// application — one atom whose own shape is the union over its
+    /// case atoms, so its values test and dispatch like any union's.
     pub(super) fn is_span_ty(&self, ty: Ty) -> bool {
-        self.members(ty).len() > 1
+        match self.members(ty) {
+            [only] => self.shapes.is_enum_application(*only),
+            members => !members.is_empty(),
+        }
     }
 
     /// Whether a checked binder's type is a bare struct span: its
@@ -185,6 +192,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             Ok(shape) => matches!(&*shape, Shape::Struct(_)),
             Err(_) => false,
         }
+    }
+
+    /// Whether a checked binder's type carries a whole span — a bare
+    /// struct's field words, a union's tag-plus-region words, a generic
+    /// enum's application — so a field the binder claims binds every
+    /// word of the field's span, never its one leading word.
+    pub(super) fn span_typed(&mut self, ty: Ty) -> bool {
+        self.struct_typed(ty) || self.is_span_ty(ty)
     }
 
     // ---- statements ------------------------------------------------------------

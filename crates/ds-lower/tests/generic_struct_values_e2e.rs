@@ -424,29 +424,6 @@ fn a_multi_word_tuple_element_over_an_application_refuses() {
     );
 }
 
-/// A generic enum's payloaded case stays refused at the checker: the
-/// case atoms are per-instantiation facts no mint grows yet, so the
-/// case name resolves to nothing and the payload spelling refuses at
-/// its own door.
-#[test]
-fn a_generic_enum_payloaded_case_refuses_at_the_checker() {
-    check_refuses(
-        "apply_enum",
-        concat!(
-            "tag int\n",
-            "enum opt[t] {\n",
-            "  some(t)\n",
-            "  nada\n",
-            "}\n",
-            "fn main() -> int {\n",
-            "  const o: opt[int] = some(1)\n",
-            "  0\n",
-            "}\n",
-        ),
-        "unknown",
-    );
-}
-
 /// An arm naming a generic head over two applications of one
 /// constructor refuses ambiguous: the head names two tags.
 #[test]

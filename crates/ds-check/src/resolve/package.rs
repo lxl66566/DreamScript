@@ -1199,14 +1199,13 @@ impl Package {
                 // A case carries its enum's tier: the case is the enum's
                 // own surface. A generic enum's unit cases collect beside
                 // the others — a unit word carries no substitution, so its
-                // name resolves over every application of the head — while
-                // a payloaded case's shape is a per-instantiation fact,
-                // so its name stays uncollected until case minting grows
-                // substitution.
+                // name resolves over every application of the head — and
+                // a payloaded case's name collects too: the shape is a
+                // per-instantiation fact the application's own derivation
+                // mints, and every door (the construction, the member
+                // arm) resolves the case's def first.
                 for case in &e.cases {
-                    if e.generics.is_empty() || matches!(case.payload, EnumPayload::None) {
-                        self.declare(&case.name, DefKind::Case, vis, diags);
-                    }
+                    self.declare(&case.name, DefKind::Case, vis, diags);
                 }
             },
             ItemKind::Tag(t) => {

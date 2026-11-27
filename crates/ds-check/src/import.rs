@@ -681,7 +681,16 @@ impl TypeFact {
         };
         let mut out = Vec::with_capacity(shape.cases.len());
         for (name, ..) in &shape.cases {
-            let case_def = package.lookup_type(name)?;
+            // the case resolves scoped to this enum, not by global name:
+            // two enums may share a case name, and either one's def
+            // would answer the bare lookup
+            let case_def = decls
+                .cases
+                .iter()
+                .find_map(|(case, info)| {
+                    (info.enum_def == def && package.def(*case).name == *name).then_some(*case)
+                })
+                .or_else(|| package.lookup_type(name))?;
             out.push(TypeCase {
                 name: name.clone(),
                 payload: solver.case_payload(case_def)?,
@@ -1840,8 +1849,8 @@ mod tests {
             "  red,\n",
             "}\n",
             "pub enum trip {\n",
-            "  one(int, int),\n",
-            "  two(string, byte),\n",
+            "  first(int, int),\n",
+            "  second(string, byte),\n",
             "}\n",
             "pub enum wide {\n",
             "  lone { v: list[list[byte]] },\n",
@@ -1883,11 +1892,20 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} declares"));
             facts.get(&def).map(|fact| (**fact).clone())
         };
-        let case_fact = |name: &str, _enum_name: &str| {
-            let def = analyzed
+        let case_fact = |name: &str, enum_name: &str| {
+            let enum_def = analyzed
                 .package
-                .lookup_type(name)
-                .unwrap_or_else(|| panic!("{name} declares"));
+                .lookup_type(enum_name)
+                .unwrap_or_else(|| panic!("{enum_name} declares"));
+            let def = analyzed
+                .decls
+                .cases
+                .iter()
+                .find_map(|(case, info)| {
+                    (info.enum_def == enum_def && analyzed.package.def(*case).name == name)
+                        .then_some(*case)
+                })
+                .unwrap_or_else(|| panic!("{enum_name}::{name} declares"));
             facts.get(&def).map(|fact| (**fact).clone())
         };
         let rows = |cases, linear| Some(super::TypeFact::Enum { cases, linear });
@@ -1940,14 +1958,14 @@ mod tests {
             rows(
                 vec![
                     super::TypeCase {
-                        name: "one".to_owned(),
+                        name: "first".to_owned(),
                         payload: super::CasePayload::Tuple(vec![
                             super::TypeWord::Scalar(super::ScalarWord::Int),
                             super::TypeWord::Scalar(super::ScalarWord::Int),
                         ]),
                     },
                     super::TypeCase {
-                        name: "two".to_owned(),
+                        name: "second".to_owned(),
                         payload: super::CasePayload::Tuple(vec![
                             super::TypeWord::Scalar(super::ScalarWord::Str),
                             super::TypeWord::Scalar(super::ScalarWord::Byte),
@@ -1958,7 +1976,7 @@ mod tests {
             )
         );
         assert_eq!(
-            case_fact("one", "trip"),
+            case_fact("first", "trip"),
             Some(super::TypeFact::Case(super::CaseFact {
                 enum_name: "trip".to_owned(),
                 payload: super::CasePayload::Tuple(vec![

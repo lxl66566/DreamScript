@@ -585,6 +585,20 @@ impl FnLower<'_, '_, '_> {
         span: Span,
     ) -> Result<(), LowerError> {
         self.transfer_claim(dst.base, &src.place, src.ty)?;
+        // Two applications of distinct generic enums with equal word
+        // layouts move whole when an instance the shapes share lowered
+        // the value: the shared body keyed the first site's nominal
+        // union, the tag word's content is the value's own case, and no
+        // body over the variable names a case to test — so the spans
+        // pair word for word and the in-place move is exact.
+        let src_members = self.members(src.ty).to_vec();
+        let dst_members = self.members(dst_ty).to_vec();
+        let shared_enum_layouts = src.ty != dst_ty
+            && matches!((src_members.as_slice(), dst_members.as_slice()),
+                ([src_app], [dst_app])
+                    if self.shapes.is_enum_application(*src_app)
+                        && self.shapes.is_enum_application(*dst_app)
+                        && self.shapes.words(src.ty)? == self.shapes.words(dst_ty)?);
         // A place keyed to a wider union can keep a different layout,
         // so an equal checked type is not always an in-place move: the
         // flat path would stage the operand's words over the
@@ -592,7 +606,9 @@ impl FnLower<'_, '_, '_> {
         // union whose payload interleaves differently). Only a place
         // whose layout is the type's own takes the fast path; the rest
         // re-span member-wise below.
-        if src.ty == dst_ty && self.place_layout_matches(&src.place, src.ty)? {
+        if (src.ty == dst_ty || shared_enum_layouts)
+            && self.place_layout_matches(&src.place, src.ty)?
+        {
             let addrs = self.word_addrs(&src.place, src.ty)?;
             if addrs.is_empty() {
                 return Ok(());

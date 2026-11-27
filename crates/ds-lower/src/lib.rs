@@ -377,7 +377,11 @@ where
     // types of every instantiated body under it, and the lowering reads
     // the results through the shape layer — one registry, the
     // analyzed package's own until a substitution mints a type
-    let mut types = types::Types::new(&analyzed.decls.universe, &analyzed.decls.apply_structs);
+    let mut types = types::Types::new(
+        &analyzed.decls.universe,
+        &analyzed.decls.apply_structs,
+        &analyzed.decls.apply_enums,
+    );
     // every struct declaring a `deinit`: the instance keys read the set
     // before the plan's own deinit table completes (it fills in only
     // after all items plan), and a deinit-carrying struct keys an

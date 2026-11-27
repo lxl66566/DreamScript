@@ -78,7 +78,7 @@ impl Bodies<'_> {
                 self.value_pos = pos;
                 self.expr(inner, expected)
             },
-            Expr::Call { .. } => self.call(e),
+            Expr::Call { .. } => self.call(e, expected),
             Expr::Field { recv, name, .. } => self.field_access(recv, name),
             Expr::FieldKey { span, recv, name } => self.keyed_field_access(*span, recv, name),
             Expr::Index { span, recv, index } => {

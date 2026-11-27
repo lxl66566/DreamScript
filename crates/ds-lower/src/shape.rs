@@ -251,6 +251,11 @@ pub(crate) enum ShapeKey {
     /// A union: one entry per member — the member's atom and its payload
     /// fields' (word offset, span) pairs, in claim order.
     Union(Vec<UnionMemberKey>),
+    /// A generic enum's application, keyed by its members' claimed
+    /// spans alone: the per-application case atoms erase, so equal
+    /// layouts share one body (a generic body can name no case of its
+    /// own variable, so no tag constant separates them).
+    UnionSpans(Vec<Vec<(u8, Vec<SlotType>)>>),
 }
 
 /// The claim-band tags of the teardown establishment marker (see the
@@ -293,6 +298,12 @@ pub(crate) struct Shapes<'a> {
     /// The solved field signatures the plan's substitutions derived, the
     /// frozen read's first table over the analyzed package's own.
     apply_lens: &'a HashMap<TypeId, Rc<[ds_check::decls::SolvedField]>>,
+    /// The per-case facts the plan's substitutions derived, the frozen
+    /// read's first table over the analyzed package's own.
+    enum_lens: &'a HashMap<TypeId, Rc<[ds_check::decls::AppliedCase]>>,
+    /// The case atoms the substitutions minted, keyed by
+    /// (substitution, the source record's own case atom).
+    case_mints: &'a HashMap<(u32, TypeId), TypeId>,
     /// The instantiation the body being lowered was planned under.
     active: Option<Rc<Subst>>,
     /// Every struct whose declaration carries a `deinit` member: the
@@ -332,6 +343,8 @@ impl<'a> Shapes<'a> {
             universe: types.universe(),
             minted: types.minted(),
             apply_lens: types.apply_map(),
+            enum_lens: types.apply_enum_map(),
+            case_mints: types.case_mint_map(),
             active: None,
             declared_deinits,
             cache: HashMap::new(),
@@ -355,6 +368,37 @@ impl<'a> Shapes<'a> {
             .get(&atom)
             .cloned()
             .or_else(|| self.analyzed.decls.apply_structs.get(&atom).cloned())
+    }
+
+    /// The per-case facts one enum application atom carries: the
+    /// plan's derived entries first, the analyzed package's recorded
+    /// ones under them.
+    pub(crate) fn apply_cases_of(
+        &self,
+        atom: TypeId,
+    ) -> Option<Rc<[ds_check::decls::AppliedCase]>> {
+        self.enum_lens
+            .get(&atom)
+            .cloned()
+            .or_else(|| self.analyzed.decls.apply_enums.get(&atom).cloned())
+    }
+
+    /// Whether one atom is an application of a user-declared generic
+    /// enum head: the value shape the application's own case atoms lay
+    /// out, the payloaded ones minted per application.
+    pub(crate) fn is_enum_application(&self, atom: TypeId) -> bool {
+        match self.universe.atom_decl(atom) {
+            Ok(decl) => match &decl.kind {
+                ds_check::AtomKind::Apply(ctor, _) => self
+                    .analyzed
+                    .decls
+                    .defs_of_atoms
+                    .get(ctor)
+                    .is_some_and(|def| self.analyzed.decls.enums.contains_key(def)),
+                _ => false,
+            },
+            Err(_) => false,
+        }
     }
 
     /// The word span of a solved field type: the same vocabulary the
@@ -415,6 +459,33 @@ impl<'a> Shapes<'a> {
             });
         }
         Ok(laid)
+    }
+
+    /// The case atom the active instantiation minted for the checked
+    /// record's own: a generic body's arm and construction records name
+    /// the once-check's case atom, the instance's union shape its own
+    /// mint. `None` keeps the record's atom (no active substitution, or
+    /// a bare case's shared unit atom).
+    pub(crate) fn substituted_case_atom(&self, atom: TypeId) -> Option<TypeId> {
+        let active = self.active.as_ref()?;
+        self.case_mints.get(&(active.id, atom)).copied()
+    }
+
+    /// The case atoms of one enum application, in the enum's declaration
+    /// order — the bare cases' shared unit atoms and the per-application
+    /// payloaded case atoms the checker (or the lens) minted. No record
+    /// answers the application whose derivation refused: a payload
+    /// that never solved, or a body naming a variable where the
+    /// checker recorded none.
+    fn enum_case_atoms(&self, atom: TypeId) -> Result<Vec<TypeId>, LowerError> {
+        let Some(cases) = self.apply_cases_of(atom) else {
+            return Err(unsupported(
+                "an enum application value",
+                "its case atoms never minted: a payload that never solved under the application's \
+                 arguments carries no value shape",
+            ));
+        };
+        Ok(cases.iter().map(|case| case.atom).collect())
     }
 
     /// The module-wide tag id of one atom, assigned in first-use order
@@ -725,10 +796,24 @@ impl<'a> Shapes<'a> {
                         }
                         return Ok(ShapeKey::Tuple(keys));
                     },
-                    Shape::Union(_) => {
-                        return Err(unsupported(
-                            "an instance key",
-                            "a single-atom type whose atom is a union; report the construct",
+                    Shape::Union(u) => {
+                        // A generic enum's application is one atom whose
+                        // shape is a union — its minted case atoms are
+                        // per-application facts, so the key erases them:
+                        // equal member spans share one body, and a body
+                        // over its own variable can name no case, so no
+                        // tag constant the sharing could confuse
+                        return Ok(ShapeKey::UnionSpans(
+                            u.members
+                                .iter()
+                                .map(|member| {
+                                    member
+                                        .fields
+                                        .iter()
+                                        .map(|field| (field.word, field.slots.clone()))
+                                        .collect()
+                                })
+                                .collect(),
                         ));
                     },
                 }
@@ -828,6 +913,23 @@ impl<'a> Shapes<'a> {
                         out.push(',');
                     }
                     self.render_ty(&ShapeKey::Word(word.clone()), out);
+                }
+                out.push(')');
+            },
+            ShapeKey::UnionSpans(members) => {
+                out.push_str("union(");
+                for (at, fields) in members.iter().enumerate() {
+                    if at > 0 {
+                        out.push(',');
+                    }
+                    out.push('{');
+                    for (word, span) in fields {
+                        write!(out, "{word}:").expect("a String write");
+                        for slot in span {
+                            write!(out, "{slot:?};").expect("a String write");
+                        }
+                    }
+                    out.push('}');
                 }
                 out.push(')');
             },
@@ -1053,16 +1155,27 @@ impl<'a> Shapes<'a> {
             // read, and stage. A field nesting through the application
             // itself has no finite span; the depth budget refuses it
             // typed.
-            ds_check::AtomKind::Apply(..) => {
+            ds_check::AtomKind::Apply(ctor, _) if !self.is_enum_application(atom) => {
                 let Some(fields) = self.apply_fields_of(atom) else {
                     return Err(unsupported(
                         "an application value",
                         "its constructor declares no fields this lowering solved; a generic \
-                         enum's payloaded cases wait on their own seam",
+                         body's own variable or an unsolved field type carries no value shape here",
                     ));
                 };
                 let fields = self.solved_struct_fields(&fields)?;
                 Ok(Shape::Struct(StructShape { fields }))
+            },
+            // A user-declared generic enum's application: a tagged union
+            // over its own case atoms — the bare cases' shared unit
+            // atoms and the per-application payloaded case atoms, each
+            // claiming the shared payload region. A single-case
+            // application lays out as its case's own shape, exactly the
+            // singleton union the non-generic spelling names.
+            ds_check::AtomKind::Apply(..) => {
+                let members = self.enum_case_atoms(atom)?;
+                let shape = self.members_shape(&members, 0)?;
+                Ok(shape)
             },
             // A fn value is one Fn word:
             // a non-capturing lambda mints its copyable scalar FuncRef
@@ -1166,12 +1279,12 @@ impl<'a> Shapes<'a> {
             // member: its solved fields claim the region exactly like a
             // struct member's (the deinit guard `union_shape` runs
             // already resolved the constructor's own hook)
-            ds_check::AtomKind::Apply(..) => {
+            ds_check::AtomKind::Apply(..) if !self.is_enum_application(atom) => {
                 let Some(fields) = self.apply_fields_of(atom) else {
                     return Err(unsupported(
                         "an application member",
                         "its constructor declares no fields this lowering solved; a generic \
-                         enum's payloaded cases wait on their own seam",
+                         body's own variable or an unsolved field type carries no value shape here",
                     ));
                 };
                 let mut out = Vec::with_capacity(fields.len());
@@ -1193,6 +1306,18 @@ impl<'a> Shapes<'a> {
                     out.push(reserved_word());
                 }
                 Ok(out)
+            },
+            // A user-declared generic enum's application as a union
+            // member: the application's own whole tag-plus-region span
+            // claims the region as one positional claim, the same
+            // whole-span rule a union-typed field carries
+            ds_check::AtomKind::Apply(..) => {
+                let members = self.enum_case_atoms(atom)?;
+                let shape = self.union_shape(&members, depth + 1)?;
+                Ok(vec![PayloadField {
+                    name: None,
+                    slots: shape_words(&shape),
+                }])
             },
             _ => Err(unsupported(
                 "an enum member",
@@ -1311,7 +1436,7 @@ impl<'a> Shapes<'a> {
             // fields' whole flattened span claims the field, the same
             // walk a nominal struct's field takes; a deinit-carrying
             // constructor keeps the refusal its own binding takes
-            ds_check::AtomKind::Apply(ctor, _) => {
+            ds_check::AtomKind::Apply(ctor, _) if !self.is_enum_application(id) => {
                 if let Some(def) = self.analyzed.decls.defs_of_atoms.get(ctor)
                     && self.declared_deinits.contains(def)
                 {
@@ -1339,6 +1464,16 @@ impl<'a> Shapes<'a> {
                     slots.push(SlotType::I64);
                 }
                 Ok(Some(slots))
+            },
+            // a user-declared generic enum's application: its own whole
+            // tag-plus-region span, the same union layout the value
+            // shape lays out — the depth budget riding the span walk,
+            // so a payload nesting through the application itself
+            // refuses typed instead of recursing
+            ds_check::AtomKind::Apply(..) => {
+                let members = self.enum_case_atoms(id)?;
+                let shape = self.union_shape(&members, depth + 1)?;
+                Ok(Some(shape_words(&shape)))
             },
             // an aliased tuple: the same one-word-per-element rule the
             // written tuple spelling takes, the empty tuple refusing on
@@ -1889,7 +2024,9 @@ mod tests {
             .find(|ty| analyzed.decls.universe.render(*ty) == rendered)
             .unwrap_or_else(|| panic!("no expression of {rendered}"));
         let empty_apply = HashMap::new();
-        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
+        let empty_enum_apply = HashMap::new();
+        let types =
+            crate::types::Types::new(&analyzed.decls.universe, &empty_apply, &empty_enum_apply);
         let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes.shape(ty).expect("the shape lowers")
     }
@@ -2277,7 +2414,9 @@ mod tests {
         // the keyed seed: quiet at 5, loud at 6, an exact repeat skipped,
         // the local atom's row dropped, a name resolving to nothing dropped
         let empty_apply = HashMap::new();
-        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
+        let empty_enum_apply = HashMap::new();
+        let types =
+            crate::types::Types::new(&analyzed.decls.universe, &empty_apply, &empty_enum_apply);
         let mut shapes = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         shapes
             .seed_linked(&[
@@ -2297,7 +2436,9 @@ mod tests {
         // a second linked name claiming a keyed id refuses, naming the
         // row and the holder
         let empty_apply = HashMap::new();
-        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
+        let empty_enum_apply = HashMap::new();
+        let types =
+            crate::types::Types::new(&analyzed.decls.universe, &empty_apply, &empty_enum_apply);
         let mut crossed = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         crossed
             .seed_linked(&[row("quiet", 5)])
@@ -2312,7 +2453,9 @@ mod tests {
 
         // a row reaching the reserved range refuses
         let empty_apply = HashMap::new();
-        let types = crate::types::Types::new(&analyzed.decls.universe, &empty_apply);
+        let empty_enum_apply = HashMap::new();
+        let types =
+            crate::types::Types::new(&analyzed.decls.universe, &empty_apply, &empty_enum_apply);
         let mut reserved = Shapes::new(&analyzed, &types, std::collections::HashSet::new());
         let err = reserved
             .seed_linked(&[row("quiet", FIRST_RESERVED_TAG)])

@@ -223,12 +223,11 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             // walk: a unit word carries no substitution, so its atom
             // tests and covers over every application of the head. A
             // payloaded case keeps no atom — its shape is a
-            // per-instantiation fact (the pattern seam the derive gate
-            // names).
+            // per-instantiation fact the application's own derivation
+            // mints — while its case row lands for every door (the
+            // construction, the member arm) that resolves the def
+            // first.
             for case in &e.cases {
-                if generic && !matches!(case.payload, EnumPayload::None) {
-                    continue;
-                }
                 // The def's name span proves this item owns the def; a
                 // cross-file same-label case resolves through its own
                 // file's shadow entry first.
@@ -242,7 +241,8 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
                     // the re-keyed mint: the declaring case's own atom,
                     // never a name lookup; a payloaded case named `none`
                     // claims no atom
-                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => (case.name.name != "none")
+                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => (!generic
+                        && case.name.name != "none")
                         .then(|| decls.universe.mint_payload_tag(&case.name.name)),
                 };
                 if let Some(id) = atom {

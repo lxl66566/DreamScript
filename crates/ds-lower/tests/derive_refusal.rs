@@ -412,15 +412,13 @@ fn the_generic_enum_causes_refuse_per_family() {
     }
 }
 
-/// The narrowed gate's honest edge, pinned at the checker: a unit-only
-/// generic enum derives `show` (and the same-door families), the
-/// synthesized arms resolving their case atoms over the application of
-/// the head — the source checks clean through the expansion and
-/// lowering refuses at the receiver frame, exactly the struct lift's
-/// door. The hand-written mirror rides the same path beside it.
+/// A unit-only generic enum derives `show` through the whole pipeline:
+/// every arm's case atom is shared per unit, the receiver's layout is
+/// the tag word alone, and the synthesized body lowers beside the
+/// hand-written mirror — the same door the struct lift rides.
 #[test]
-fn a_unit_only_generic_enum_derive_meets_the_lowering_door() {
-    lift_mirror_refuses_at_lowering(concat!(
+fn a_unit_only_generic_enum_derive_lands() {
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -521,11 +519,10 @@ fn the_lifted_show_product_lowers_over_the_applied_receiver() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    // the enum shape keeps the door closed: the member's `self:
-    // flag[t]` names an enum application whose payloaded cases are
-    // per-instantiation facts no mint grows yet, so the receiver has no
-    // solved field signature to lay out
-    lift_mirror_refuses_at_lowering(concat!(
+    // the enum shape rides the same door: the member's `self:
+    // flag[t]` names an enum application laying out as the tag word,
+    // the unit arms resolving their shared case atoms
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -748,17 +745,17 @@ fn the_lifted_default_product_lowers_at_the_construction() {
     ));
 }
 
-/// The enum families' second door, ahead of any runtime question: a
-/// payloaded case pattern over a generic head resolves no atom in any
-/// spelling (the hand-written impl here, a generic free fn the same),
-/// while the unit-case arms above resolve — so a lifted derive over a
-/// generic enum whose cases carry parts would synthesize arms the
-/// checker refuses before the receiver frame is ever reached. The
-/// enum-body walk (`arm` in the derive engine) needs this resolution
-/// seam named and fixed first.
+/// The enum bodies' resolution seam, landed: a payloaded case pattern
+/// over a generic head resolves through the head's own application (the
+/// impl variable standing as the argument), so the hand-written impl
+/// here — and a generic free fn the same — checks clean and lowers,
+/// the receiver laying out over the application's case atoms while a
+/// variable part rides its Raw word through the bound's runtime
+/// evidence. The derive families keep their own attribute gate until
+/// the engine's enum-body walk adopts this seam.
 #[test]
-fn a_payloaded_case_pattern_over_a_generic_head_refuses_at_checking() {
-    let rendered = refusals(concat!(
+fn a_payloaded_case_pattern_over_a_generic_head_lands() {
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "trait show {\n",
@@ -778,12 +775,6 @@ fn a_payloaded_case_pattern_over_a_generic_head_refuses_at_checking() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    assert!(
-        rendered
-            .iter()
-            .any(|r| r.contains("DS2004") && r.contains("unknown pattern `big`")),
-        "the payloaded case resolves no atom over the generic head: {rendered:?}"
-    );
 }
 
 /// A derive attribute that somehow survives into the trees lowering

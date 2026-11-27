@@ -8,7 +8,7 @@ use super::*;
 mod select;
 
 impl Bodies<'_> {
-    pub(super) fn call(&mut self, e: &Expr) -> Val {
+    pub(super) fn call(&mut self, e: &Expr, expected: Option<Ty>) -> Val {
         let Expr::Call {
             callee,
             args,
@@ -121,14 +121,28 @@ impl Bodies<'_> {
                         if let Some(case) = self.decls.cases.get(&def)
                             && !matches!(case.payload, EnumPayload::None)
                         {
-                            return self.case_call(def, only, args, trailing.as_deref(), *span);
+                            return self.case_call(
+                                def,
+                                only,
+                                args,
+                                trailing.as_deref(),
+                                *span,
+                                expected,
+                            );
                         }
                         // A payloaded tag constructs by call form too: the
                         // same named-field slots over its own struct shape.
                         if self.package.def(def).kind == DefKind::Tag
                             && self.decls.structs.contains_key(&def)
                         {
-                            return self.case_call(def, only, args, trailing.as_deref(), *span);
+                            return self.case_call(
+                                def,
+                                only,
+                                args,
+                                trailing.as_deref(),
+                                *span,
+                                expected,
+                            );
                         }
                         if self.decls.structs.contains_key(&def)
                             || self.decls.atoms.contains_key(&def)
@@ -188,7 +202,14 @@ impl Bodies<'_> {
                             );
                         }
                         if payloaded {
-                            return self.case_call(def, method, args, trailing.as_deref(), *span);
+                            return self.case_call(
+                                def,
+                                method,
+                                args,
+                                trailing.as_deref(),
+                                *span,
+                                expected,
+                            );
                         }
                         self.error(
                             ErrorCode::InferenceFailed,
@@ -227,7 +248,21 @@ impl Bodies<'_> {
         args: &[ds_parse::CallArg],
         trailing: Option<&Expr>,
         span: Span,
+        expected: Option<Ty>,
     ) -> Val {
+        // A user-declared generic enum's case constructs over the
+        // expected application: the case's own atom keys no
+        // application, so the position's one application of the owner
+        // head names the per-application case the construction fills.
+        if let Some(enum_def) = self.decls.cases.get(&def).map(|case| case.enum_def)
+            && self
+                .decls
+                .enums
+                .get(&enum_def)
+                .is_some_and(|shape| !shape.params.is_empty())
+        {
+            return self.applied_case_call(def, name, args, trailing, span, expected);
+        }
         let payload = if let Some(case) = self.decls.cases.get(&def) {
             case.payload.clone()
         } else if let Some(shape) = self.decls.structs.get(&def) {
@@ -383,6 +418,253 @@ impl Bodies<'_> {
         };
         Val {
             ty,
+            diverges: false,
+            poisoned: false,
+        }
+    }
+
+    /// Constructs one case of a user-declared generic enum's
+    /// application: the application's own per-case slots fill
+    /// positionally or by name, the checked answer the application
+    /// itself — the value a member arm and a payload read address
+    /// through the application's union. The position's one application
+    /// of the owner head names the case; no expected application
+    /// refuses typed (no inference manufactures one), several refuse
+    /// ambiguous, and an application whose derivation refused keeps
+    /// the refusal it always carried.
+    fn applied_case_call(
+        &mut self,
+        def: DefId,
+        name: &Ident,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Val {
+        let case_name = self.package.def(def).name.clone();
+        if trailing.is_some() {
+            self.error(
+                ErrorCode::ArityMismatch,
+                format!("enum case `{case_name}` takes no trailing block"),
+                span,
+                "trailing block on a case construction",
+            );
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        }
+        let needs_application = |self_: &mut Self| {
+            self_.error(
+                ErrorCode::InferenceFailed,
+                format!(
+                    "a generic enum's case `{case_name}` needs the application in the position's \
+                     type; annotate the binding, the parameter, or the return"
+                ),
+                name.span,
+                "no application to construct into",
+            );
+        };
+        let Some(expected) = expected.filter(|ty| !self.decls.universe.is_empty(*ty)) else {
+            needs_application(self);
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        };
+        let enum_def = self
+            .decls
+            .cases
+            .get(&def)
+            .map(|case| case.enum_def)
+            .expect("the caller checked the case table");
+        let Some(&head_atom) = self.decls.atoms.get(&enum_def) else {
+            needs_application(self);
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        };
+        let apps = decls::applications_of_head(self.decls, expected, head_atom);
+        let app = match apps.as_slice() {
+            [one] => *one,
+            [] => {
+                needs_application(self);
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                };
+            },
+            many => {
+                let spelled: Vec<String> = many
+                    .iter()
+                    .map(|&app| {
+                        self.decls
+                            .universe
+                            .atom_decl(app)
+                            .map_or_else(|_| "?".to_owned(), |decl| decl.name.clone())
+                    })
+                    .collect();
+                self.error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the position carries several applications of the head: {}; the case \
+                         `{case_name}` names one",
+                        spelled.join(", ")
+                    ),
+                    name.span,
+                    "ambiguous application",
+                );
+                for arg in args {
+                    self.expr(&arg.value, None);
+                }
+                return Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: true,
+                };
+            },
+        };
+        let Some(cases) = decls::applied_enum_cases(self.package, self.decls, app) else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!(
+                    "the case's payload never solved under the application's arguments; \
+                     `{case_name}` carries no constructed form here"
+                ),
+                name.span,
+                "unsolved case payload",
+            );
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        };
+        let Some(case_record) = cases.iter().find(|case| case.def == def) else {
+            needs_application(self);
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: true,
+            };
+        };
+        let Some(slots) = &case_record.slots else {
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!("`{case_name}` is a bare case; it constructs by name"),
+                name.span,
+                "unit case called as a function",
+            );
+            for arg in args {
+                self.expr(&arg.value, None);
+            }
+            return Val {
+                ty: self.empty(),
+                diverges: false,
+                poisoned: false,
+            };
+        };
+        let slots: Vec<(Option<String>, Ty)> = slots
+            .iter()
+            .map(|slot| (slot.name.clone(), slot.ty))
+            .collect();
+        let mut written = vec![false; slots.len()];
+        let mut broken = false;
+        let mut positional = 0usize;
+        for arg in args {
+            let slot = if let Some(arg_name) = &arg.name {
+                let index = slots
+                    .iter()
+                    .position(|(field, _)| field.as_deref() == Some(arg_name.name.as_str()));
+                let Some(index) = index else {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("enum case `{case_name}` has no field `{}`", arg_name.name),
+                        arg_name.span,
+                        "no such field",
+                    );
+                    self.expr(&arg.value, None);
+                    broken = true;
+                    continue;
+                };
+                index
+            } else {
+                let index = positional;
+                positional += 1;
+                if slots.get(index).is_none() {
+                    self.error(
+                        ErrorCode::ArityMismatch,
+                        format!("enum case `{case_name}` takes {} argument(s)", slots.len()),
+                        arg.span,
+                        "extra argument",
+                    );
+                    self.expr(&arg.value, None);
+                    continue;
+                }
+                index
+            };
+            if written[slot] {
+                self.error(
+                    ErrorCode::DuplicateDefinition,
+                    format!(
+                        "field `{}` of `{case_name}` is written twice",
+                        slots[slot].0.clone().unwrap_or_default()
+                    ),
+                    arg.span,
+                    "duplicate field",
+                );
+            }
+            written[slot] = true;
+            let val = self.expr(&arg.value, Some(slots[slot].1));
+            self.expect_contains(val, slots[slot].1, arg.value.span(), "case field value");
+        }
+        if !broken {
+            for (index, &is_written) in written.iter().enumerate() {
+                if is_written {
+                    continue;
+                }
+                match &slots[index].0 {
+                    Some(field) => self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("enum case `{case_name}` misses field `{field}`"),
+                        span,
+                        "missing field",
+                    ),
+                    None => self.error(
+                        ErrorCode::ArityMismatch,
+                        format!("enum case `{case_name}` takes {} argument(s)", slots.len()),
+                        span,
+                        "missing argument",
+                    ),
+                }
+            }
+        }
+        Val {
+            ty: self
+                .decls
+                .universe
+                .atom_ty(app)
+                .unwrap_or_else(|_| self.empty()),
             diverges: false,
             poisoned: false,
         }
@@ -602,7 +884,16 @@ impl Bodies<'_> {
             {
                 continue;
             }
-            let arg_val = self.expr(arg, None);
+            // the expected type the arguments already solved carry — a
+            // fully solved one only, so a label argument never hears
+            // the position's own unsolved variable: a generic enum's
+            // case construction inside the argument reads the solved
+            // application from it, while this argument's own binding
+            // still happens at its match below
+            let pre_expected = self
+                .solve_with(param_ty, &subst, &sig.generics)
+                .filter(|ty| !self.has_free_vars(*ty));
+            let arg_val = self.expr(arg, pre_expected);
             self.match_param(param_ty, arg_val.ty, &sig.generics, &mut subst);
             if let Some(expected) = self.solve_with(param_ty, &subst, &sig.generics) {
                 self.expect_param_contains(arg_val, param_ty, expected, arg.span());

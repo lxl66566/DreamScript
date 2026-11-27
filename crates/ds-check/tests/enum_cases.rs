@@ -180,18 +180,30 @@ fn qualified_case_paths_test_the_case_atom() {
 }
 
 #[test]
-fn generic_enums_keep_the_opaque_atom_until_substitution_lands() {
-    // A generic enum still checks as before (an applied atom); a
-    // payloaded case's name stays uncollected — its shape is a
-    // per-instantiation fact — so a use reports the unknown name.
-    clean("tag int\nenum opt[t] { some(t) }\nfn f(x: opt[int]) -> int { 0 }\n");
+fn generic_enums_mint_their_cases_per_application() {
+    // A generic enum's payloaded case name resolves: its shape is a
+    // per-instantiation fact the position's own application names, so
+    // the construction and the arm read it over the applied head, and
+    // a bare use with no application refuses naming the missing fact.
+    clean(concat!(
+        "tag int\n",
+        "enum opt[t] { some(t), nada }\n",
+        "fn f(x: opt[int]) -> int {\n",
+        "  match x {\n",
+        "    some(n) => n,\n",
+        "    nada => 0,\n",
+        "  }\n",
+        "}\n",
+    ));
+    clean("tag int\nenum opt[t] { some(t), nada }\nfn f(x: opt[int]) -> opt[int] { some(1) }\n");
     let found = codes("tag int\nenum opt[t] { some(t) }\nconst v = some\n");
-    // The resolver reports the unknown name and the checker's value walk
-    // follows with its unresolvable-value note, as for any unknown name.
+    // A bare payloaded-case name with no application carries no fact
+    // of its own: the call form names the payload the application
+    // carries.
     assert!(
         found
             .iter()
-            .any(|(code, msg)| *code == "DS2004" && msg.contains("some")),
+            .any(|(code, msg)| *code == "DS2002" && msg.contains("construct it by call form")),
         "{found:?}"
     );
 }

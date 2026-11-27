@@ -125,7 +125,7 @@ impl Bodies<'_> {
             if let Some(Res::Def(def)) = self.res.get(tail.span)
                 && matches!(self.package.def(*def).kind, DefKind::Tag | DefKind::Case)
             {
-                return self.qualified_label_val(head, tail);
+                return self.qualified_label_val(head, tail, expected);
             }
             if self.res.get(head.span).is_some_and(|res| {
                 matches!(res, Res::Def(def) if matches!(
@@ -284,8 +284,37 @@ impl Bodies<'_> {
     /// member's type, none refuses unknown-member, several refuse
     /// ambiguous naming both declarations. The qualified spelling is
     /// never re-directed by an expected type; it is the escape hatch the
-    /// bare label's refusals point at.
-    pub(super) fn qualified_label_val(&mut self, head: &Ident, tail: &Ident) -> Val {
+    /// bare label's refusals point at. A generic enum's head carries
+    /// no members of its own — its cases are per-application facts —
+    /// so the qualified case resolves through the expected application
+    /// alone, the one fact that names the case's shape.
+    pub(super) fn qualified_label_val(
+        &mut self,
+        head: &Ident,
+        tail: &Ident,
+        expected: Option<Ty>,
+    ) -> Val {
+        if let Some(Res::Def(case_def)) = self.res.get(tail.span)
+            && self
+                .decls
+                .cases
+                .get(case_def)
+                .and_then(|case| self.decls.enums.get(&case.enum_def))
+                .is_some_and(|shape| !shape.params.is_empty())
+            && let Some((app, _)) = expected
+                .filter(|ty| !self.decls.universe.is_empty(*ty))
+                .and_then(|expected| self.applied_case_atom(*case_def, expected, tail.span))
+        {
+            return Val {
+                ty: self
+                    .decls
+                    .universe
+                    .atom_ty(app)
+                    .unwrap_or_else(|_| self.empty()),
+                diverges: false,
+                poisoned: false,
+            };
+        }
         let Some(head_ty) = self.head_type_of(head) else {
             self.error(
                 ErrorCode::TypeMismatch,
@@ -369,6 +398,26 @@ impl Bodies<'_> {
     ) -> Val {
         let own = self.decls.atoms.get(&def).copied();
         let label = self.package.def(def).name.clone();
+        // A generic enum's case resolves through the expected
+        // application first: the position's own application names the
+        // per-application case the value carries (a bare case keeps
+        // its shared unit atom), and the value's checked type is the
+        // application itself — the application stays opaque to the set
+        // algebra, so the case atom's own type would never contain.
+        if let Some((app, _)) = expected
+            .filter(|ty| !self.decls.universe.is_empty(*ty))
+            .and_then(|expected| self.applied_case_atom(def, expected, span))
+        {
+            return Val {
+                ty: self
+                    .decls
+                    .universe
+                    .atom_ty(app)
+                    .unwrap_or_else(|_| self.empty()),
+                diverges: false,
+                poisoned: false,
+            };
+        }
         let atom = match expected.and_then(|expected| self.probe_label(&label, own, expected, span))
         {
             Some(DirectedLabel::Directed(atom)) => Some(atom),

@@ -51,7 +51,9 @@ mod reserve;
 mod shape;
 
 use conv::*;
-pub(crate) use conv::{check_application, record_apply_structs};
+pub(crate) use conv::{
+    applications_of_head, applied_enum_cases, check_application, record_applications,
+};
 use foreign::*;
 pub(crate) use instance::trait_member_sig;
 use instance::*;
@@ -168,6 +170,33 @@ pub struct SolvedField {
     pub name: String,
     /// The field's type under the application's arguments.
     pub ty: Ty,
+}
+
+/// One payload slot of a generic enum's applied case: the declared
+/// slot's name (`None` for a tuple payload's positional slot) and its
+/// type solved under the application's arguments.
+#[derive(Clone, Debug)]
+pub struct AppliedSlot {
+    /// The declared slot name; `None` marks a positional tuple slot.
+    pub name: Option<String>,
+    /// The slot's type under the application's arguments.
+    pub ty: Ty,
+}
+
+/// One case of a user-declared generic enum's application: the case's
+/// def, the atom its values carry under the application's arguments —
+/// a bare case the shared unit atom it always minted, a payloaded case
+/// the application's own atom over its solved slots — and the solved
+/// payload slots (`None` for a bare case). The whole application's
+/// case list rides [`Decls::apply_enums`].
+#[derive(Clone, Debug)]
+pub struct AppliedCase {
+    /// The case declaration's own def.
+    pub def: DefId,
+    /// The member atom the case's values carry under this application.
+    pub atom: TypeId,
+    /// The solved payload slots; `None` for a bare case.
+    pub slots: Option<std::rc::Rc<[AppliedSlot]>>,
 }
 
 /// A struct's declared shape, AST-shaped: generic parameter names plus
@@ -357,6 +386,15 @@ pub struct Decls {
     /// through it, and an instantiation derives the substituted
     /// application's entry from its source's.
     pub apply_structs: std::collections::HashMap<TypeId, std::rc::Rc<[SolvedField]>>,
+    /// The per-case facts of every minted application of a user-declared
+    /// generic enum: each case's def, the atom its values carry under
+    /// the application's arguments, and the case's solved payload
+    /// slots. Recorded once per application atom (the checking walk
+    /// minting on demand at the doors that need the member identity,
+    /// the post-resolution walk covering the rest); the lowering pass
+    /// shapes the application's union through it, and an instantiation
+    /// derives the substituted application's entry from its source's.
+    pub apply_enums: std::collections::HashMap<TypeId, std::rc::Rc<[AppliedCase]>>,
     /// The `#[sealed]` traits, keyed by the trait def with the sealed
     /// name occurrence's span: the origin attribute whose seal admits
     /// only the trait's own declaring file's impls. A local trait
