@@ -135,6 +135,29 @@ pub(super) struct WordCallee {
 /// sites the bank serves touch a handful of distinct keys per run).
 pub(super) const WORD_CACHE_SLOTS: usize = 64;
 
+/// The hosted-call seam's persistent reentry memo: the resolution of
+/// the last scalar-callee hosted call, one entry beside the bank the
+/// seam shares with CALLS. The key is the same input triple the word
+/// cache keys on, and the fill happens only for a scalar callee word
+/// (a closure stages captures, so its calls stay on the full path),
+/// validated against the registry generation at every use — a hit
+/// answers exactly what the full path would, any install invalidates
+/// it, and traps never fill it. Consecutive reentries of one callee —
+/// the container combinators' per-element loop — read it instead of
+/// re-hashing the bank; the reentry frame itself needs no reuse state,
+/// since RET truncates the segment's len and never its storage, so the
+/// frame's chunks stay allocated between the calls of one loop and the
+/// rebuild writes straight into them.
+#[derive(Clone, Debug)]
+pub(super) struct HostedReentry {
+    pub(super) funcref: FuncRef,
+    pub(super) owner: Option<VersionIdx>,
+    pub(super) nargs: u8,
+    pub(super) stamp: u64,
+    pub(super) version: VersionIdx,
+    pub(super) func: u32,
+}
+
 /// A KSTR intern-row key: the pool's address (stable for its version's
 /// lifetime) and the loading fiber — each heap interns its own copy of a
 /// constant, so a cached id is only ever served against the fiber whose

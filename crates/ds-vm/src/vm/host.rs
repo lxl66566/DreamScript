@@ -115,8 +115,35 @@ impl Vm {
                 })
             },
         };
-        let (version, func_id) =
-            Self::resolve_word(&self.registry, &mut self.word_cache, funcref, owner, nargs)?;
+        // the persistent reentry frame's identity half: a scalar callee
+        // consecutive to the last one under the same install stamp reads
+        // the recorded resolution instead of probing the bank — a hit
+        // answers exactly what the full path would, so only the frame
+        // build below differs from a first call
+        let stamp = self.registry.generation();
+        let (version, func_id) = if captures.is_none()
+            && let Some(memo) = self.reentry.as_ref()
+            && memo.funcref == funcref
+            && memo.owner == owner
+            && memo.nargs == nargs
+            && memo.stamp == stamp
+        {
+            (memo.version, memo.func)
+        } else {
+            let resolved =
+                Self::resolve_word(&self.registry, &mut self.word_cache, funcref, owner, nargs)?;
+            if captures.is_none() {
+                self.reentry = Some(HostedReentry {
+                    funcref,
+                    owner,
+                    nargs,
+                    stamp,
+                    version: resolved.0,
+                    func: resolved.1,
+                });
+            }
+            resolved
+        };
         let target = &self.registry.pinned(version).functions()[func_id as usize];
         let frame_size = target.layout.frame_size() as usize;
         let base = self.stack.len();
@@ -127,11 +154,18 @@ impl Vm {
                 limit: self.limit,
             });
         }
-        self.stack.push(Word::Meta(FrameMetadata {
+        // the frame build grows the segment once and writes the metadata
+        // word and the staged arguments in place: the region's chunks
+        // persist across consecutive reentries (RET truncates the len,
+        // never the storage), so a word the callee never writes holds the
+        // region's previous occupant, the same recycled frame a CALL
+        // pushes.
+        self.stack.grow_to(needed);
+        self.stack[base] = Word::Meta(FrameMetadata {
             return_pc: CodePc(u32::MAX),
             frame_size: u32::try_from(frame_size).expect("frame span fits u32"),
             tail: TailChain::default(),
-        }));
+        });
         // the local-call hand-off: each Ref argument carries one count
         // into the frame (the callee's placement treats its params as
         // owned — returning one transfers that count with the answer,
@@ -151,10 +185,9 @@ impl Vm {
                 )?;
             }
         }
-        for &arg in args {
-            self.stack.push(Word::Slot(arg));
+        for (at, &arg) in args.iter().enumerate() {
+            self.stack[base + 1 + at] = Word::Slot(arg);
         }
-        self.stack.grow_to(needed);
         // the closure's capture block lands in the callee's leading local
         // slots — the CALLS copy-in discipline: one acquired count per
         // Ref capture, the body's own placement balancing it, while the

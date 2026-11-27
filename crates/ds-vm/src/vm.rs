@@ -358,6 +358,12 @@ pub struct Vm {
     /// registry generation. Fibers share the bank safely — the key names
     /// the callee alone, never per-fiber stack state.
     word_cache: Vec<Option<WordCallee>>,
+    /// The hosted-call seam's persistent reentry memo, one entry beside
+    /// the bank above: the last scalar-callee resolution, validated
+    /// against the registry generation at every use, so consecutive
+    /// reentries of one callee skip the bank probe. Like the bank, the
+    /// key names the callee alone, so fibers share the memo safely.
+    reentry: Option<HostedReentry>,
     /// The KSTR pool-const intern cache: per-(pool, fiber) object-id
     /// rows, keyed by the pool's address (stable for its version's
     /// lifetime) and the loading fiber. No claim is held — a hit
@@ -595,6 +601,7 @@ impl Vm {
             claims: vec![ClaimTable::default()],
             call_cache: vec![None; CALL_CACHE_SLOTS],
             word_cache: vec![None; WORD_CACHE_SLOTS],
+            reentry: None,
             kstr_cache: KstrRows::default(),
             hook_dirs: HookDirIndex::default(),
             hook_dirs_stamp: u64::MAX,

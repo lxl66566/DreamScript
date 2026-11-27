@@ -328,18 +328,19 @@ impl StackState<'_> {
             Word::Meta(m) => m,
             Word::Slot(_) => return Err(Trap::MetaWordCorrupt { fp }),
         };
+        if boundary != usize::MAX && self.callinfo.len() == boundary && meta.return_pc.0 == u32::MAX
+        {
+            // the reentry frame and everything above it leave the chain;
+            // the value rides the outcome, and no caller frame reads the
+            // overlay slot
+            self.stack.truncate(fp);
+            self.callinfo.pop();
+            return Ok(RetOutcome::Boundary(value));
+        }
         self.stack[fp + 1] = Word::Slot(value);
         if self.callinfo.len() == 1 {
             self.stack.truncate(fp + 2);
             return Ok(RetOutcome::Root(value));
-        }
-        if boundary != usize::MAX && self.callinfo.len() == boundary && meta.return_pc.0 == u32::MAX
-        {
-            // the reentry frame and everything above it leave the chain;
-            // the value rides the outcome
-            self.stack.truncate(fp);
-            self.callinfo.pop();
-            return Ok(RetOutcome::Boundary(value));
         }
         // the caller's entry answers the bounds checks (its version's code
         // length, its layout's frame span); the row is Copy, so no borrow
