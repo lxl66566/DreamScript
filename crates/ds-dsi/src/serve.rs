@@ -90,6 +90,11 @@ pub(super) fn serve(artifact: &PrefixDsi, tables: &ServedTables) -> ServedPrefix
     decls
         .inherent_impls
         .install_base(Arc::clone(&tables.inherent_impls));
+    // `sealed_traits` installs no base row, deliberately: the reserve
+    // pass re-derives it from the declaring text of every tree, served
+    // or fresh, so a served row would be dead weight. Every serve
+    // consumer reaches the tables through that reserve walk; a reader
+    // of the seal outside it answers an empty table.
     decls.served_defs = u32::try_from(artifact.package.defs.len()).expect("def count fits u32");
     decls.served_methods =
         u32::try_from(artifact.package.methods.len()).expect("method count fits u32");
