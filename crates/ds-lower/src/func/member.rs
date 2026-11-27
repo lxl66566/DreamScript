@@ -189,37 +189,6 @@ fn member_args(
     Some(args)
 }
 
-/// Whether a type names an application of a generic enum anywhere
-/// among its atoms, nested included: such a union's case tags are
-/// per-mint facts the lens derives per instantiation, and the plan does
-/// not prove an instance body's derived tags align with the entering
-/// site's own mint — the queued tag re-keying seam keeps this door.
-fn names_enum_application(universe: &ds_check::Universe, ty: Ty) -> bool {
-    let mut atoms: Vec<TypeId> = universe.members(ty).to_vec();
-    while let Some(atom) = atoms.pop() {
-        let Ok(decl) = universe.atom_decl(atom) else {
-            continue;
-        };
-        match decl.kind.clone() {
-            AtomKind::Apply(ctor, args) => {
-                if universe
-                    .atom_decl(ctor)
-                    .is_ok_and(|ctor| matches!(ctor.kind, AtomKind::Enum(_)))
-                {
-                    return true;
-                }
-                atoms.extend(
-                    args.iter()
-                        .flat_map(|&arg| universe.members(arg).iter().copied()),
-                );
-            },
-            AtomKind::Tuple(elements) => atoms.extend(elements),
-            _ => {},
-        }
-    }
-    false
-}
-
 /// A trait default dispatch site's solved arguments: the receiver for
 /// `Self`, then the impl's written trait arguments substituted through
 /// the head-versus-receiver solving — a concrete argument names itself,
@@ -335,15 +304,6 @@ pub(super) fn enter_member_site(
     let universe = found.types.universe();
     let concrete = !crate::types::has_variables(universe, recv);
     let (index, planned) = if concrete {
-        if names_enum_application(universe, recv) {
-            return Err(LowerError::unsupported(
-                call_span,
-                "a member dispatch over a generic enum's application",
-                "the per-shape instance body discriminates the receiver through case tags the \
-                 lens derives per mint, and the plan does not prove the body's tags align with \
-                 the entering site's own mint — the queued tag re-keying seam keeps this door",
-            ));
-        }
         let args = match &site {
             Site::Impl(head) => member_args(found, *head, recv, &generic.generics),
             Site::Default { tc, impl_site } => default_args(found, tc, *impl_site, recv),

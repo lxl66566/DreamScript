@@ -2,14 +2,15 @@
 //! to end: a payloaded case's shape is a per-instantiation fact the
 //! position's own application mints, so construction, payloaded arms,
 //! bare unit arms, and qualified spellings all read the application —
-//! free generic fns instantiate over the application's union shape
-//! (equal case layouts sharing one body), a nested application rides a
-//! generic fn's instance, and a generic impl over the head lands its
-//! payloaded arms. The doors that stay closed pin too: a multi-word
-//! tuple element over an application, a deinit-carrying case payload,
-//! an answer union's case arms over an application, the brace
-//! spellings on a generic payloaded case, and a bare case name with no
-//! application in its position.
+//! free generic fns and generic impl members instantiate per
+//! application, each body's tag tests naming its own application's case
+//! atoms (a bare-only enum's applications sharing one body), a nested
+//! application rides a generic fn's instance, and a member dispatch
+//! over an application receiver lands. The doors that stay closed pin
+//! too: a multi-word tuple element over an application, a deinit-carrying
+//! case payload, an answer union's case arms over an application, the
+//! brace spellings on a generic payloaded case, and a bare case name
+//! with no application in its position.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -171,41 +172,86 @@ fn an_application_constructs_discriminates_and_answers() {
     );
 }
 
-/// Two distinct generic enums whose cases span the same words share one
-/// generic fn instance: the shape key is the case layouts' word spans,
-/// not the atom — the struct-application door's twin.
+/// Two applications of one argument shape keep their own instances while
+/// their payloaded cases are distinct mints: the instance key is the
+/// union over the application's case atoms, so each body's tag tests
+/// name its own application's tags. One body shared between them tests
+/// the first application's payload tag alone, and the second
+/// application's payloaded value falls through the catchall-free chain
+/// into the first arm's section.
 #[test]
-fn equal_case_layouts_share_one_instance() {
+fn distinct_payloaded_applications_keep_their_own_instances() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
         "extern fn println (s: string) -> ()\n",
         "extern fn str_int (x: int) -> string\n",
-        "enum opt[t] {\n",
-        "  some(t)\n",
-        "  nada\n",
+        "enum keyed[t] {\n",
+        "  tiny\n",
+        "  big(t)\n",
         "}\n",
-        "enum alt[t] {\n",
-        "  hit(t)\n",
-        "  miss\n",
-        "}\n",
-        "fn peek[x] (o: x) -> int {\n",
-        "  match o {\n",
-        "    _ => 3\n",
+        "struct num { }\n",
+        "struct other { }\n",
+        "fn size[t] (x: keyed[t]) -> int {\n",
+        "  match x {\n",
+        "    tiny => 1\n",
+        "    big(_) => 2\n",
         "  }\n",
         "}\n",
         "fn main() -> int {\n",
-        "  const o: opt[int] = some(1)\n",
-        "  const a: alt[int] = hit(2)\n",
-        "  println(str_int(peek(o)))\n",
-        "  println(str_int(peek(a)))\n",
+        "  const k: keyed[num] = big(num { })\n",
+        "  const o: keyed[other] = big(other { })\n",
+        "  const t: keyed[other] = tiny\n",
+        "  println(str_int(size(k)))\n",
+        "  println(str_int(size(o)))\n",
+        "  println(str_int(size(t)))\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_clean("enum_own_mints", source);
+    let own = instances_of(&lowered, "size");
+    assert_eq!(
+        own.len(),
+        2,
+        "one instance per application's case atoms: {own:?}"
+    );
+    run_pins_continue(&lowered, "enum_own_mints", b"2\n2\n1\n" as &[u8]);
+}
+
+/// Equal case layouts share one instance while the case atoms agree: a
+/// bare-only generic enum's cases are the unit atoms every application
+/// shares, so its applications compile to one body across arguments. A
+/// payloaded enum's applications take one instance each, whatever the
+/// body names.
+#[test]
+fn equal_case_layouts_share_one_instance_while_the_case_atoms_agree() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "extern fn str_int (x: int) -> string\n",
+        "enum color[t] {\n",
+        "  red\n",
+        "  green\n",
+        "}\n",
+        "fn pick[v] (c: color[v]) -> int {\n",
+        "  match c {\n",
+        "    red => 1\n",
+        "    green => 2\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const a: color[int] = red\n",
+        "  const b: color[string] = green\n",
+        "  println(str_int(pick(a)))\n",
+        "  println(str_int(pick(b)))\n",
         "  0\n",
         "}\n",
     );
     let lowered = lower_clean("enum_share", source);
-    let peek = instances_of(&lowered, "peek");
-    assert_eq!(peek.len(), 1, "one instance per case layout: {peek:?}");
-    run_pins_continue(&lowered, "enum_share", b"3\n3\n" as &[u8]);
+    let pick = instances_of(&lowered, "pick");
+    assert_eq!(pick.len(), 1, "one instance per case layout: {pick:?}");
+    run_pins_continue(&lowered, "enum_share", b"1\n2\n" as &[u8]);
 }
 
 /// A run over an already-lowered module, used where the instances are
@@ -297,12 +343,7 @@ fn qualified_case_spellings_read_the_application() {
 /// A generic impl over the head lands its payloaded arms: the receiver
 /// `self: keyed[t]` lays out over the head's own application (the impl
 /// variable standing as the argument), the payload binder reads the
-/// region's Raw word, and the synthesized body lowers — while a call
-/// dispatching that body over an application receiver keeps its
-/// refusal: the per-shape instance would discriminate the receiver
-/// through case tags the lens derives per mint, and the plan does not
-/// prove the body's tags align with the entering site's own mint, so
-/// the queued tag re-keying seam keeps the door.
+/// region's Raw word, and the synthesized body lowers.
 #[test]
 fn a_generic_impl_lands_its_payloaded_arms() {
     let source = concat!(
@@ -342,38 +383,158 @@ fn a_generic_impl_lands_its_payloaded_arms() {
         Ok(FrameAnswer::one(Value::I64(5))),
         "the application constructs and discriminates over its own mint"
     );
-    lower_refuses(
-        "enum_impl_dispatch",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "trait show {\n",
-            "  fn show(self) -> string\n",
-            "}\n",
-            "enum keyed[t] {\n",
-            "  tiny\n",
-            "  big(t)\n",
-            "}\n",
-            "struct num: ~show { }\n",
-            "impl show for num {\n",
-            "  fn show(self) -> string { \"num\" }\n",
-            "}\n",
-            "impl[t: show] show for keyed[t] {\n",
-            "  fn show(self) -> string {\n",
-            "    match self {\n",
-            "      tiny => \"tiny\"\n",
-            "      big(p0) => \"big(${p0.show()})\"\n",
-            "    }\n",
-            "  }\n",
-            "}\n",
-            "fn main() -> int {\n",
-            "  const k: keyed[num] = big(num { })\n",
-            "  const s = k.show()\n",
-            "  0\n",
-            "}\n",
-        ),
-        "a member dispatch over a generic enum's application",
+}
+
+/// The per-shape instance names of one member body: the ONE body carries
+/// the bare mangled name, each instance a digest suffix.
+fn per_shape<'l>(lowered: &'l Lowered, member: &str) -> Vec<&'l str> {
+    instances_of(lowered, member)
+        .into_iter()
+        .filter(|name| name.contains('@'))
+        .collect()
+}
+
+/// A member dispatch over a generic enum's application reads the
+/// application's own case tags: the receiver keys the per-shape instance
+/// over its case atoms, so two applications of one argument shape each
+/// dispatch right, the unit arm rides the atom every application shares,
+/// and the payload binder's sibling call stages its own evidence.
+#[test]
+fn a_member_dispatch_over_an_application_reads_its_own_case_tags() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "enum keyed[t] {\n",
+        "  tiny\n",
+        "  big(t)\n",
+        "}\n",
+        "struct num: ~show { }\n",
+        "struct other: ~show { }\n",
+        "impl show for num {\n",
+        "  fn show(self) -> string { \"num\" }\n",
+        "}\n",
+        "impl show for other {\n",
+        "  fn show(self) -> string { \"other\" }\n",
+        "}\n",
+        "impl[t: show] show for keyed[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    match self {\n",
+        "      tiny => \"tiny\"\n",
+        "      big(p0) => \"big(${p0.show()})\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const k: keyed[num] = big(num { })\n",
+        "  const o: keyed[other] = big(other { })\n",
+        "  const t: keyed[num] = tiny\n",
+        "  println(k.show())\n",
+        "  println(o.show())\n",
+        "  println(t.show())\n",
+        "  0\n",
+        "}\n",
     );
+    let lowered = lower_clean("enum_impl_dispatch", source);
+    let bodies = per_shape(&lowered, "show#keyed[t]#show");
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one instance per application's case atoms: {bodies:?}"
+    );
+    run_pins_continue(
+        &lowered,
+        "enum_impl_dispatch",
+        b"big(num)\nbig(other)\ntiny\n" as &[u8],
+    );
+}
+
+/// An inherent member dispatches over an application the same way: the
+/// site's receiver keys the instance over the case atoms alone (the two
+/// applications share their argument shape) and the payload binder
+/// claims the region's words.
+#[test]
+fn an_inherent_member_dispatches_over_an_application() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "extern fn str_int (x: int) -> string\n",
+        "enum opt[t] {\n",
+        "  nada\n",
+        "  some(t)\n",
+        "}\n",
+        "struct num { }\n",
+        "struct other { }\n",
+        "impl[t] opt[t] {\n",
+        "  fn is_some(self) -> int {\n",
+        "    match self {\n",
+        "      some(_) => 1\n",
+        "      nada => 0\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const a: opt[num] = some(num { })\n",
+        "  const b: opt[other] = some(other { })\n",
+        "  const c: opt[other] = nada\n",
+        "  println(str_int(a.is_some()))\n",
+        "  println(str_int(b.is_some()))\n",
+        "  println(str_int(c.is_some()))\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_clean("enum_inherent_dispatch", source);
+    let bodies = per_shape(&lowered, "opt[t]#is_some");
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one instance per application's case atoms: {bodies:?}"
+    );
+    run_pins_continue(&lowered, "enum_inherent_dispatch", b"1\n1\n0\n" as &[u8]);
+}
+
+/// A variable-written receiver keeps the ONE body, and a bare-only
+/// application enters it soundly: its case atoms are the unit atoms every
+/// application shares, so the ONE body's tag tests read the entering
+/// site's own tags and no per-shape instance plans.
+#[test]
+fn a_bare_only_application_enters_the_one_body_through_evidence() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "extern fn println (s: string) -> ()\n",
+        "trait show {\n",
+        "  fn show(self) -> string\n",
+        "}\n",
+        "enum flag[t] {\n",
+        "  on\n",
+        "  off\n",
+        "}\n",
+        "impl[t] show for flag[t] {\n",
+        "  fn show(self) -> string {\n",
+        "    match self {\n",
+        "      on => \"on\"\n",
+        "      off => \"off\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+        "fn f[t: show] (x: t) -> string { x.show() }\n",
+        "fn main() -> int {\n",
+        "  const a: flag[int] = on\n",
+        "  const b: flag[string] = off\n",
+        "  println(f(a))\n",
+        "  println(f(b))\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_clean("enum_one_body", source);
+    let bodies = instances_of(&lowered, "show#flag[t]#show");
+    assert_eq!(bodies.len(), 1, "the ONE body alone serves: {bodies:?}");
+    run_pins_continue(&lowered, "enum_one_body", b"on\noff\n" as &[u8]);
 }
 
 /// An answer union over an application rides its word-member door: the

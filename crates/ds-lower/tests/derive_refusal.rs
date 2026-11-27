@@ -467,10 +467,10 @@ fn lift_mirror_lowers(source: &str) {
 /// door): a fields-carrying generic struct's impl checks clean and
 /// lowers — the receiver `self: pair[t]` lays out over the
 /// application's solved field signature (each part a Raw word), the
-/// parts dispatching through the bound's runtime evidence — while the
-/// generic enum's application keeps its refusal (an enum application's
-/// payloaded cases are per-instantiation facts no mint grows yet), the
-/// ONE body the seam lowers per impl never gaining an enum receiver.
+/// parts dispatching through the bound's runtime evidence — and a
+/// generic enum's application rides the same door, the member's `self:
+/// flag[t]` laying out as the tag word over the unit arms' shared case
+/// atoms.
 #[test]
 fn the_lifted_show_product_lowers_over_the_applied_receiver() {
     lift_mirror_lowers(concat!(
@@ -487,9 +487,6 @@ fn the_lifted_show_product_lowers_over_the_applied_receiver() {
         "}\n",
         "fn main() -> int { 0 }\n",
     ));
-    // the enum shape rides the same door: the member's `self:
-    // flag[t]` names an enum application laying out as the tag word,
-    // the unit arms resolving their shared case atoms
     lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",

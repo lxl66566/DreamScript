@@ -232,10 +232,14 @@ pub(crate) enum WordKey {
 /// with nothing (its binding sites claim its own hook); a tuple keys by
 /// its elements; a union by its members, each member by atom with its
 /// payload fields' (offset, span) pairs — tag dispatch and payload
-/// placement key on those. A type still naming a type variable refuses:
-/// the substitution resolved every recorded type of the body.
+/// placement key on those. A generic enum's application is one union
+/// over its own case atoms: a payloaded case's atom is the application's
+/// own mint and a bare case's the unit atom every application shares, so
+/// two applications share a body exactly while their case atoms agree.
+/// A type still naming a type variable refuses: the substitution
+/// resolved every recorded type of the body.
 /// One union member's key entry: the member's atom with its payload
-/// fields' (word offset, span) pairs, in claim order.
+/// fields' (offset, span) pairs, in claim order.
 pub(crate) type UnionMemberKey = (TypeId, Vec<(u8, Vec<SlotType>)>);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -251,11 +255,28 @@ pub(crate) enum ShapeKey {
     /// A union: one entry per member — the member's atom and its payload
     /// fields' (word offset, span) pairs, in claim order.
     Union(Vec<UnionMemberKey>),
-    /// A generic enum's application, keyed by its members' claimed
-    /// spans alone: the per-application case atoms erase, so equal
-    /// layouts share one body (a generic body can name no case of its
-    /// own variable, so no tag constant separates them).
-    UnionSpans(Vec<Vec<(u8, Vec<SlotType>)>>),
+}
+
+/// The key one union takes: each member's atom with its payload fields'
+/// (word offset, span) pairs, in claim order. A union-typed atom (a
+/// generic enum's application) and a union of several atoms key alike.
+fn union_key(union: &UnionShape) -> ShapeKey {
+    ShapeKey::Union(
+        union
+            .members
+            .iter()
+            .map(|member| (member.atom, member_key(member)))
+            .collect(),
+    )
+}
+
+/// One union member's payload fields as key entries.
+fn member_key(member: &MemberShape) -> Vec<(u8, Vec<SlotType>)> {
+    member
+        .fields
+        .iter()
+        .map(|field| (field.word, field.slots.clone()))
+        .collect()
 }
 
 /// The claim-band tags of the teardown establishment marker (see the
@@ -796,26 +817,7 @@ impl<'a> Shapes<'a> {
                         }
                         return Ok(ShapeKey::Tuple(keys));
                     },
-                    Shape::Union(u) => {
-                        // A generic enum's application is one atom whose
-                        // shape is a union — its minted case atoms are
-                        // per-application facts, so the key erases them:
-                        // equal member spans share one body, and a body
-                        // over its own variable can name no case, so no
-                        // tag constant the sharing could confuse
-                        return Ok(ShapeKey::UnionSpans(
-                            u.members
-                                .iter()
-                                .map(|member| {
-                                    member
-                                        .fields
-                                        .iter()
-                                        .map(|field| (field.word, field.slots.clone()))
-                                        .collect()
-                                })
-                                .collect(),
-                        ));
-                    },
+                    Shape::Union(u) => return Ok(union_key(u)),
                 }
             },
             _ => {},
@@ -826,22 +828,7 @@ impl<'a> Shapes<'a> {
                 "a multi-member type the shape layer did not lay out as a union",
             ));
         };
-        Ok(ShapeKey::Union(
-            union
-                .members
-                .iter()
-                .map(|member| {
-                    (
-                        member.atom,
-                        member
-                            .fields
-                            .iter()
-                            .map(|field| (field.word, field.slots.clone()))
-                            .collect(),
-                    )
-                })
-                .collect(),
-        ))
+        Ok(union_key(union))
     }
 
     /// The key one word takes: the erasures the instance table keys by.
@@ -913,23 +900,6 @@ impl<'a> Shapes<'a> {
                         out.push(',');
                     }
                     self.render_ty(&ShapeKey::Word(word.clone()), out);
-                }
-                out.push(')');
-            },
-            ShapeKey::UnionSpans(members) => {
-                out.push_str("union(");
-                for (at, fields) in members.iter().enumerate() {
-                    if at > 0 {
-                        out.push(',');
-                    }
-                    out.push('{');
-                    for (word, span) in fields {
-                        write!(out, "{word}:").expect("a String write");
-                        for slot in span {
-                            write!(out, "{slot:?};").expect("a String write");
-                        }
-                    }
-                    out.push('}');
                 }
                 out.push(')');
             },
