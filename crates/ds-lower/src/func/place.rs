@@ -183,23 +183,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         }
     }
 
-    /// Whether a checked binder's type is a bare struct span: its
-    /// runtime representation is its own field words, however many — a
-    /// one-word struct still binds and reads as a span, never as a
-    /// scalar word.
-    pub(super) fn struct_typed(&mut self, ty: Ty) -> bool {
+    /// Whether a checked binder's type carries a whole span — a bare
+    /// struct or tuple's fields, a union's tag-plus-region words, a
+    /// generic enum's application — so a field the binder claims binds
+    /// every word of the field's span, never its one leading word.
+    pub(super) fn span_typed(&mut self, ty: Ty) -> bool {
         match self.shapes.shape(ty) {
-            Ok(shape) => matches!(&*shape, Shape::Struct(_)),
+            Ok(shape) => !matches!(&*shape, Shape::Word(_)),
             Err(_) => false,
         }
-    }
-
-    /// Whether a checked binder's type carries a whole span — a bare
-    /// struct's field words, a union's tag-plus-region words, a generic
-    /// enum's application — so a field the binder claims binds every
-    /// word of the field's span, never its one leading word.
-    pub(super) fn span_typed(&mut self, ty: Ty) -> bool {
-        self.struct_typed(ty) || self.is_span_ty(ty)
     }
 
     // ---- statements ------------------------------------------------------------

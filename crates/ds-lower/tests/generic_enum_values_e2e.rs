@@ -6,11 +6,11 @@
 //! application, each body's tag tests naming its own application's case
 //! atoms (a bare-only enum's applications sharing one body), a nested
 //! application rides a generic fn's instance, and a member dispatch
-//! over an application receiver lands. The doors that stay closed pin
-//! too: a multi-word tuple element over an application, a deinit-carrying
-//! case payload, an answer union's case arms over an application, the
-//! brace spellings on a generic payloaded case, and a bare case name
-//! with no application in its position.
+//! over an application receiver lands, and a multi-word tuple element
+//! carries an application's whole span. The doors that stay closed pin
+//! too: a deinit-carrying case payload, an answer union's case arms over
+//! an application, the brace spellings on a generic payloaded case, and
+//! a bare case name with no application in its position.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -198,6 +198,10 @@ fn distinct_payloaded_applications_keep_their_own_instances() {
         "    big(_) => 2\n",
         "  }\n",
         "}\n",
+        "fn tuple_size[t] (p: (keyed[t], int)) -> int {\n",
+        "  const (x, n) = p\n",
+        "  match x { tiny => n + 1, big(_) => n + 2 }\n",
+        "}\n",
         "fn main() -> int {\n",
         "  const k: keyed[num] = big(num { })\n",
         "  const o: keyed[other] = big(other { })\n",
@@ -205,6 +209,8 @@ fn distinct_payloaded_applications_keep_their_own_instances() {
         "  println(str_int(size(k)))\n",
         "  println(str_int(size(o)))\n",
         "  println(str_int(size(t)))\n",
+        "  println(str_int(tuple_size((k, 1))))\n",
+        "  println(str_int(tuple_size((o, 2))))\n",
         "  0\n",
         "}\n",
     );
@@ -215,7 +221,13 @@ fn distinct_payloaded_applications_keep_their_own_instances() {
         2,
         "one instance per application's case atoms: {own:?}"
     );
-    run_pins_continue(&lowered, "enum_own_mints", b"2\n2\n1\n" as &[u8]);
+    let nested = instances_of(&lowered, "tuple_size");
+    assert_eq!(
+        nested.len(),
+        2,
+        "a tuple element keeps the application's case atoms in the key: {nested:?}"
+    );
+    run_pins_continue(&lowered, "enum_own_mints", b"2\n2\n1\n3\n4\n" as &[u8]);
 }
 
 /// Equal case layouts share one instance while the case atoms agree: a
@@ -598,11 +610,11 @@ fn an_answer_union_over_an_application_keeps_its_doors() {
     );
 }
 
-/// A multi-word tuple element over an application keeps its refusal:
-/// the tuple's one-word element slot cannot carry the union's span.
+/// A multi-word tuple element over an enum application carries the
+/// application's whole tag-and-region span through a generic instance.
 #[test]
-fn a_multi_word_tuple_element_over_an_application_refuses() {
-    lower_refuses(
+fn a_multi_word_tuple_element_over_an_application_runs_whole() {
+    run_pins(
         "enum_tuple_element",
         concat!(
             "tag int\n",
@@ -610,13 +622,14 @@ fn a_multi_word_tuple_element_over_an_application_refuses() {
             "  some(t)\n",
             "  nada\n",
             "}\n",
+            "fn widen[t] (x: t) -> (t, int) { (x, 1) }\n",
             "fn main() -> int {\n",
             "  const o: opt[int] = some(1)\n",
-            "  const t = (o, 1)\n",
-            "  0\n",
+            "  const (q, n) = widen(o)\n",
+            "  match q { some(v) => v + n - 2, nada => 1 }\n",
             "}\n",
         ),
-        "a multi-word tuple element",
+        b"",
     );
 }
 

@@ -7,8 +7,8 @@
 //! parameter and return, a `t | none` answer, a `var` binding over a
 //! variable, a captured two-word value inside an instance, a tail call
 //! into an instance), the sharing discipline as table pins, and the
-//! doors that stay closed as refusals (a generic fn value, a generic
-//! lambda value, a multi-word tuple element).
+//! doors that stay closed as refusals (a generic fn value and a generic
+//! lambda value), and whole-span tuple elements as positives.
 
 use ds_abi::Uop;
 use ds_check::analyze;
@@ -624,9 +624,8 @@ fn generic_values_keep_their_refusals() {
 }
 
 /// A self-entering recursion over a growing tuple shape refuses loudly:
-/// the tuple vocabulary keeps one word per element, so the third shape's
-/// element already spans two words — the belt in front of the
-/// instance-count cap that guards a shape family that never repeats.
+/// whole element spans eventually exceed the value-span width belt in
+/// front of the instance-count cap that guards a family never repeating.
 #[test]
 fn a_self_entering_recursion_over_a_growing_shape_refuses() {
     refuse(
@@ -642,30 +641,43 @@ fn a_self_entering_recursion_over_a_growing_shape_refuses() {
             "  0\n",
             "}\n",
         ),
-        "a multi-word tuple element",
+        "more than 255 payload words",
     );
 }
 
-/// A multi-word tuple element over a variable stays refused on its own:
-/// the tuple vocabulary is one word per element across the lowerer and
-/// the list natives, so the wider element keeps its seam named.
+/// A multi-word tuple element over a variable instantiates as one
+/// positional span: the struct and nested tuple cross the body whole,
+/// destructuring binds each element's span, and counted words drain.
 #[test]
-fn a_multi_word_tuple_element_over_a_variable_refuses() {
-    refuse(
-        "wide_element.ds",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct point { x: int, y: int }\n",
-            "extern fn println (s: string) -> ()\n",
-            "fn widen[t] (x: t) -> (t, int) { (x, 1) }\n",
-            "fn main() -> int {\n",
-            "  const p = point { x: 1, y: 2 }\n",
-            "  println(\"m\")\n",
-            "  const t = widen(p)\n",
-            "  0\n",
-            "}\n",
-        ),
-        "a multi-word tuple element",
+fn a_multi_word_tuple_element_over_a_variable_runs_whole() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct point { x: int, y: int }\n",
+        "extern fn println (s: string) -> ()\n",
+        "fn widen[t] (x: t) -> (t, (string, int)) { (x, (\"tail\", 1)) }\n",
+        "fn main() -> int {\n",
+        "  const p = point { x: 1, y: 2 }\n",
+        "  const (q, meta) = widen(p)\n",
+        "  const (label, n) = meta\n",
+        "  println(\"${q.x + q.y + n} ${label}\")\n",
+        "  println(if widen(p) == widen(p) { \"true\" } else { \"false\" })\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_clean("wide_element", source);
+    let widen = instances_of(&lowered, "widen");
+    assert_eq!(widen.len(), 1, "one point-shaped instance: {widen:?}");
+    let mut vm = run_of(&lowered);
+    assert_eq!(
+        vm.run("wide_element", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(vm.captured_output(), b"4 tail\ntrue\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
     );
 }

@@ -350,20 +350,19 @@ impl<'a> Types<'a> {
         }
     }
 
-    /// One tuple element under `subst`: a variable element becomes its
-    /// solved type's single member — a tuple element over a variable whose
-    /// solved type is a union has no one atom to take.
+    /// One tuple element under `subst`: substitute the element's singleton
+    /// type recursively, then keep its one atom. A solved union has no one
+    /// atom and keeps the tuple-product refusal.
     fn element_under(&mut self, subst: &Subst, element: TypeId) -> Result<TypeId, LowerError> {
-        if let Some(bound) = subst.get(element) {
-            let [only] = self.universe().members(bound) else {
-                return Err(unsubstituted());
-            };
-            return Ok(*only);
-        }
-        if subst.mentions_atom(self.universe(), element) {
+        let ty = self
+            .universe_mut()
+            .atom_ty(element)
+            .map_err(|_| unsubstituted())?;
+        let substituted = self.substitute(subst, ty)?;
+        let [only] = self.universe().members(substituted) else {
             return Err(unsubstituted());
-        }
-        Ok(element)
+        };
+        Ok(*only)
     }
 
     fn args_under(&mut self, subst: &Subst, args: &[Ty]) -> Result<Vec<Ty>, LowerError> {

@@ -580,9 +580,11 @@ impl FnLower<'_, '_, '_> {
                     return Err(mismatch("a tuple pattern's arity"));
                 }
                 let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
-                for (sub, addr) in pats.iter().zip(addrs.iter()) {
+                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+                for (sub, addrs) in pats.iter().zip(srcs) {
                     if Self::word_sub_kind(sub, "a tuple element test")? == ValueArmKind::Tested {
-                        self.emit_word_tests(sub, addr, fail)?;
+                        let addr = single(addrs, pattern_span(sub))?;
+                        self.emit_word_tests(sub, &addr, fail)?;
                     }
                 }
                 Ok(())
@@ -1401,13 +1403,12 @@ impl FnLower<'_, '_, '_> {
         }
     }
 
-    /// Binds one tuple pattern's elements to the tuple span's words:
-    /// one word per element, bound in place (aliases, the const
-    /// convention). A test position skips what the dispatch already
-    /// tested: literal elements bind nothing, an atom-named element is
-    /// a member test binding nothing, and an or-ladder element
-    /// binds its last alternative's binders (the alternatives bind the
-    /// same names on the same word) — the same resolution the checker's
+    /// Binds one tuple pattern's elements to their spans in the tuple's
+    /// words (aliases, the const convention). A test position skips what
+    /// the dispatch already tested: literal elements bind nothing, an
+    /// atom-named element is a member test binding nothing, and an
+    /// or-ladder element binds its last alternative's binders (the
+    /// alternatives bind the same names on the same spans) — the checker's
     /// pattern walk applies, so the two layers never disagree.
     /// Declaration positions bind every name and refuse literals: a
     /// declaration cannot fail a test.
@@ -1428,11 +1429,12 @@ impl FnLower<'_, '_, '_> {
         // words for a bare tuple, the member's claimed offsets for a
         // tuple member read out of a union region
         let addrs = self.word_addrs(&scrut.place, scrut.ty)?;
-        for (index, raw) in pats.iter().enumerate() {
-            let addr = addrs
-                .get(index)
-                .ok_or_else(|| mismatch("a tuple pattern's arity"))?;
-            let base = addr.slot;
+        let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+        for (raw, addrs) in pats.iter().zip(srcs) {
+            let base = addrs
+                .first()
+                .ok_or_else(|| mismatch("a tuple element's span"))?
+                .slot;
             let sub = match raw {
                 Pattern::Or { pats, .. } if arm => pats.last().map_or(raw, last_alt),
                 _ => raw,
@@ -1445,11 +1447,13 @@ impl FnLower<'_, '_, '_> {
                         // nothing binds
                         continue;
                     }
-                    self.binders.insert(*span, Place {
-                        base,
-                        shape: PlaceShape::Word(addr.slot_ty),
-                    });
-                    if let Some(fact) = self.binder_fact(*span)? {
+                    let fact = self.binder_fact(*span)?;
+                    let shape = match fact {
+                        Some(fact) if self.span_typed(fact.ty) => PlaceShape::Span(fact.ty),
+                        _ => PlaceShape::Word(addrs[0].slot_ty),
+                    };
+                    self.binders.insert(*span, Place { base, shape });
+                    if let Some(fact) = fact {
                         self.rc_bind_borrowed(*span, base, fact.ty)?;
                     }
                     self.scope_insert(&name.name, *span);

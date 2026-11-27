@@ -6,9 +6,9 @@
 //! shape (equal field spans sharing one body). The doors that stay
 //! closed pin too: a deinit-carrying constructor's application refuses
 //! at the hook's own seam, a self-containing application has no finite
-//! span, a multi-word tuple element over an application keeps its
-//! refusal, and a generic enum's payloaded cases and an ambiguous
-//! generic head arm refuse at the checker.
+//! span, and a generic enum's payloaded cases and an ambiguous generic
+//! head arm refuse at the checker. A multi-word tuple element carries an
+//! application's whole span.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -401,26 +401,28 @@ fn a_self_containing_application_refuses_at_the_depth_budget() {
     );
 }
 
-/// A multi-word tuple element over an application keeps its refusal: the
-/// tuple vocabulary stages one plain word per element, and the
-/// application's own span is wider.
+/// A multi-word tuple element over an application carries the
+/// application's solved field span through construction and destructuring.
 #[test]
-fn a_multi_word_tuple_element_over_an_application_refuses() {
-    lower_refuses(
-        "apply_tuple",
-        concat!(
-            "tag int\n",
-            "struct pair[t] {\n",
-            "  a: t\n",
-            "  b: t\n",
-            "}\n",
-            "fn main() -> int {\n",
-            "  const p: pair[int] = pair { a: 1, b: 2 }\n",
-            "  const t = (p, 1)\n",
-            "  0\n",
-            "}\n",
-        ),
-        "a multi-word tuple element",
+fn a_multi_word_tuple_element_over_an_application_runs_whole() {
+    let source = concat!(
+        "tag int\n",
+        "struct pair[t] {\n",
+        "  a: t\n",
+        "  b: t\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const p: pair[int] = pair { a: 1, b: 2 }\n",
+        "  const (q, n) = (p, 1)\n",
+        "  q.a + q.b + n - 4\n",
+        "}\n",
+    );
+    let lowered = lower_clean("apply_tuple", source);
+    let mut vm = run_of(&lowered);
+    assert_eq!(
+        vm.run("apply_tuple", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "the application element keeps both fields and its sibling"
     );
 }
 

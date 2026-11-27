@@ -1,12 +1,14 @@
 // Probe: anonymous tuples through params, returns, lets, and match
-// arms, over the frame word conventions — strings ride Ref, lists ride
-// one Ref, `()` rides the I64 unit word.
+// arms, over the frame word conventions — strings and lists ride Ref,
+// `()` rides the I64 unit word, and a struct or nested tuple rides its
+// whole positional span.
 
 tag int
 tag string
 tag bool
 
 struct list[t]
+struct point { x: int, y: int }
 
 extern fn println (s: string) -> ()
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
@@ -49,6 +51,10 @@ fn list_element() -> int {
   c.ok((x: int) => x).err((_: none) => 0 - 1) + n
 }
 
+fn wide_element(p: point) -> ((point, int), string) {
+  ((p, 3), "wide")
+}
+
 fn var_slots(t: (string, int)) -> bool {
   var (host, port) = t
   host = "db"
@@ -69,6 +75,10 @@ fn main() -> bool {
   println("unit ${unit_element()}")
   println("list ${list_element()}")
   println(if t == mk("host", 8080) { "eq" } else { "ne" })
+  const (inner, label) = wide_element(point { x: 20, y: 22 })
+  const (p, n) = inner
+  println("${label} ${p.x + p.y + n}")
+  println(if wide_element(point { x: 1, y: 2 }) == wide_element(point { x: 1, y: 2 }) { "wide eq" } else { "wide ne" })
   println("var ${var_slots(mk("db.local", 5432))}")
   pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432))
 }

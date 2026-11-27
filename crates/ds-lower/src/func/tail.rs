@@ -361,28 +361,18 @@ impl FnLower<'_, '_, '_> {
                 let target = self.temp_span(self.ret_ty)?;
                 let addrs = self.word_addrs(place, src_ty)?;
                 self.transfer_claim(target.base, place, src_ty)?;
-                if addrs.len() != s.fields.len() {
-                    return Err(mismatch("a tuple return's arity"));
+                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+                for (field, srcs) in s.fields.iter().zip(srcs) {
+                    self.store_field_span(target.base, field, srcs);
                 }
-                for (field, src_addr) in s.fields.iter().zip(addrs.iter()) {
-                    self.emit(Op::Mov {
-                        dst: Slot::body(target.base + field.word),
-                        src: Slot::body(src_addr.slot),
-                    });
-                    // a variable-typed element's declared word is Raw under
-                    // a counted instantiation, so the copy registration
-                    // covers both classifications (the RC ops check the
-                    // runtime kind)
-                    if matches!(field.slot(), SlotType::Ref | SlotType::Raw) {
-                        self.rc
-                            .copied(&mut self.code, target.base + field.word, src_addr.slot);
-                    }
-                }
-                let transferred: Vec<u8> = s.fields.iter().map(|f| target.base + f.word).collect();
+                let width = self.shapes.words(self.ret_ty)?.len();
+                let transferred: Vec<u8> = (0..width)
+                    .map(|offset| target.base + u8::try_from(offset).expect("span width fits u8"))
+                    .collect();
                 self.rc.exit(&mut self.code, &transferred);
                 self.emit(Op::RetSpan {
                     src: Slot::body(target.base),
-                    n: u8::try_from(s.fields.len()).expect("span width fits u8"),
+                    n: u8::try_from(width).expect("span width fits u8"),
                 });
                 Ok(())
             },
@@ -668,18 +658,9 @@ impl FnLower<'_, '_, '_> {
             },
             Shape::Tuple(s) => {
                 let addrs = self.word_addrs(&src.place, src.ty)?;
-                if addrs.len() != s.fields.len() {
-                    return Err(mismatch("a tuple write's arity"));
-                }
-                for (field, addr) in s.fields.iter().zip(addrs.iter()) {
-                    self.emit(Op::Mov {
-                        dst: Slot::body(dst.base + field.word),
-                        src: Slot::body(addr.slot),
-                    });
-                    if matches!(addr.slot_ty, SlotType::Ref | SlotType::Raw) {
-                        self.rc
-                            .copied(&mut self.code, dst.base + field.word, addr.slot);
-                    }
+                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+                for (field, srcs) in s.fields.iter().zip(srcs) {
+                    self.store_field_span(dst.base, field, srcs);
                 }
                 Ok(())
             },

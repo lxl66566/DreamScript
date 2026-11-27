@@ -185,9 +185,8 @@ fn a_tuple_member_binds_positionally_over_the_region() {
     assert_eq!(out, "7\n0\n7 z\n");
 }
 
-/// The widened surfaces refuse honestly: the field vocabulary beyond
-/// struct-typed fields, tuple spans over wider elements, and the
-/// one-word native seams.
+/// The widened surfaces refuse honestly: tuple fields over wider
+/// elements and deinit-carrying inline fields keep their named seams.
 #[test]
 fn the_refusal_openings_keep_their_honest_names() {
     // a tuple product over a union element: the inline-span vocabulary
@@ -206,21 +205,6 @@ fn the_refusal_openings_keep_their_honest_names() {
         ),
         "a struct payload field",
         "this field's shape stays outside the inline-span vocabulary",
-    );
-    // a tuple whose element type spans words: the tuple vocabulary keeps
-    // one word per element
-    refuses(
-        "refuse_tuple_element",
-        concat!(
-            "tag int\n",
-            "tag string\n",
-            "struct point { x: int, y: int }\n",
-            "fn take(t: (point, int)) -> int { 0 }\n",
-            "fn main() -> () { println(\"unreachable\") }\n",
-            "extern fn println (msg: string) -> ()\n",
-        ),
-        "a multi-word tuple element",
-        "tuple elements lower as one plain frame word",
     );
     // the wider map value opening the map value channel owns (map_set
     // stages the value's whole word span); its run pins live in

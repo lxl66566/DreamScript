@@ -25,9 +25,9 @@
 //! design, with the reboxing alternative rejected — and a struct-typed
 //! field claims its whole flattened word span (a multi-word field); a
 //! union-typed field claims the union's own tag-plus-region span, a
-//! tuple field one plain word per element (the tuple value
-//! vocabulary), and a heap-application field (`list[t]`, `map[k, v]`)
-//! its one Ref word — a member value stored into a union-typed field
+//! tuple field keeps one plain word per element, and a heap-application
+//! field (`list[t]`, `map[k, v]`) its one Ref word. Bare tuples place each
+//! element's whole span at consecutive offsets. A member value stored into a union-typed field
 //! re-spans through the same tag/zero/write construction the
 //! annotated-binding widen uses.
 //!
@@ -86,9 +86,8 @@ fn primitive_slot(name: &str) -> Option<SlotType> {
 
 /// One field of a value's span: the field's name (or `None` for a
 /// primitive member's own payload word), its consecutive word types, and
-/// the span offset its first word lives at. A field spans one word
-/// unless its type is itself a struct, whose whole inline span the field
-/// claims contiguously.
+/// the span offset its first word lives at. A field claims its whole
+/// inline span contiguously.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemberField {
     /// The declared field name; `None` marks a primitive member's payload.
@@ -114,7 +113,7 @@ impl MemberField {
 /// One payload field's word-type span: the field's consecutive word
 /// types, the claim input for a union region and the placement input for
 /// a bare struct. A struct-typed field carries its flattened multi-word
-/// span; every other field type is one word or refuses.
+/// span; tuple fields keep their one-word element boundary.
 struct PayloadField {
     /// The declared field name; `None` marks a positional payload word.
     name: Option<String>,
@@ -187,9 +186,8 @@ pub(crate) enum Shape {
     Word(SlotType),
     /// A bare struct: fields at consecutive words.
     Struct(StructShape),
-    /// An anonymous tuple: one positional word per element. The
-    /// fields carry `None` names and their `word` is the element
-    /// position; the shape never spans more words than elements.
+    /// An anonymous tuple: one positional span per element. The fields
+    /// carry `None` names and their `word` is the element's span offset.
     Tuple(StructShape),
     /// A tag+payload union span.
     Union(UnionShape),
@@ -250,8 +248,8 @@ pub(crate) enum ShapeKey {
     Struct(Vec<Vec<SlotType>>),
     /// A struct declaring a `deinit`: its own atom, unshared.
     DeinitStruct(TypeId),
-    /// A tuple: one entry per element.
-    Tuple(Vec<WordKey>),
+    /// A tuple: one recursively keyed entry per element.
+    Tuple(Vec<ShapeKey>),
     /// A union: one entry per member — the member's atom and its payload
     /// fields' (word offset, span) pairs, in claim order.
     Union(Vec<UnionMemberKey>),
@@ -773,53 +771,7 @@ impl<'a> Shapes<'a> {
         match self.universe.members(ty) {
             // the empty type never flows; it keys as its one inert word
             [] => return Ok(ShapeKey::Word(WordKey::Slot(SlotType::I64))),
-            [only] => {
-                // a deinit-carrying atom keys by its own identity: a
-                // nominal struct its atom, an application the applied
-                // atom — the hook each body claims is the struct's own
-                let deinit_def = self
-                    .analyzed
-                    .decls
-                    .defs_of_atoms
-                    .get(only)
-                    .copied()
-                    .or_else(
-                        || match self.universe.atom_decl(*only).ok().map(|d| &d.kind) {
-                            Some(ds_check::AtomKind::Apply(ctor, _)) => {
-                                self.analyzed.decls.defs_of_atoms.get(ctor).copied()
-                            },
-                            _ => None,
-                        },
-                    )
-                    .filter(|def| self.declared_deinits.contains(def));
-                if let Some(def) = deinit_def {
-                    let _ = def;
-                    return Ok(ShapeKey::DeinitStruct(*only));
-                }
-                match &*self.shape(ty)? {
-                    Shape::Word(slot) => {
-                        return self.word_key(*only, *slot).map(ShapeKey::Word);
-                    },
-                    Shape::Struct(s) => {
-                        return Ok(ShapeKey::Struct(
-                            s.fields.iter().map(|field| field.slots.clone()).collect(),
-                        ));
-                    },
-                    Shape::Tuple(s) => {
-                        let Ok(ds_check::AtomKind::Tuple(elements)) =
-                            self.universe.atom_decl(*only).map(|decl| decl.kind.clone())
-                        else {
-                            return Err(unsupported("an instance key", "a tuple type's atom"));
-                        };
-                        let mut keys = Vec::with_capacity(elements.len());
-                        for (element, field) in elements.iter().zip(s.fields.iter()) {
-                            keys.push(self.word_key(*element, field.slot())?);
-                        }
-                        return Ok(ShapeKey::Tuple(keys));
-                    },
-                    Shape::Union(u) => return Ok(union_key(u)),
-                }
-            },
+            [only] => return self.atom_key(*only),
             _ => {},
         }
         let Shape::Union(union) = &*self.shape(ty)? else {
@@ -829,6 +781,66 @@ impl<'a> Shapes<'a> {
             ));
         };
         Ok(union_key(union))
+    }
+
+    /// Whether one nominal atom or application's constructor declares a
+    /// deinit.
+    fn atom_declares_deinit(&self, atom: TypeId) -> bool {
+        let def = self
+            .analyzed
+            .decls
+            .defs_of_atoms
+            .get(&atom)
+            .copied()
+            .or_else(
+                || match self.universe.atom_decl(atom).ok().map(|decl| &decl.kind) {
+                    Some(ds_check::AtomKind::Apply(ctor, _)) => {
+                        self.analyzed.decls.defs_of_atoms.get(ctor).copied()
+                    },
+                    _ => None,
+                },
+            );
+        def.is_some_and(|def| self.declared_deinits.contains(&def))
+    }
+
+    /// The key one atom takes, recursively including every tuple element
+    /// whose span or nested tags affect the instantiated body.
+    fn atom_key(&mut self, atom: TypeId) -> Result<ShapeKey, LowerError> {
+        // A deinit-carrying atom keys by its own identity: the hook each
+        // body claims is the struct's own, including through an application.
+        if self.atom_declares_deinit(atom) {
+            return Ok(ShapeKey::DeinitStruct(atom));
+        }
+        let shape = self.atom_shape(atom)?;
+        match &*shape {
+            Shape::Word(slot) => self.word_key(atom, *slot).map(ShapeKey::Word),
+            Shape::Struct(s) => Ok(ShapeKey::Struct(
+                s.fields.iter().map(|field| field.slots.clone()).collect(),
+            )),
+            Shape::Tuple(s) => {
+                let Ok(ds_check::AtomKind::Tuple(elements)) =
+                    self.universe.atom_decl(atom).map(|decl| decl.kind.clone())
+                else {
+                    return Err(unsupported("an instance key", "a tuple type's atom"));
+                };
+                elements
+                    .iter()
+                    .zip(s.fields.iter())
+                    .map(|(&element, field)| {
+                        let element_shape = self.atom_shape(element)?;
+                        if matches!(&*element_shape, Shape::Word(_)) {
+                            // Keep the established one-word erasures,
+                            // including a fn element's heap Ref slot.
+                            self.word_key(element, field.slot()).map(ShapeKey::Word)
+                        } else {
+                            self.atom_key(element)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(ShapeKey::Tuple)
+            },
+            Shape::Union(u) => Ok(union_key(u)),
+        }
     }
 
     /// The key one word takes: the erasures the instance table keys by.
@@ -895,11 +907,11 @@ impl<'a> Shapes<'a> {
             },
             ShapeKey::Tuple(elements) => {
                 out.push_str("tuple(");
-                for (at, word) in elements.iter().enumerate() {
+                for (at, element) in elements.iter().enumerate() {
                     if at > 0 {
                         out.push(',');
                     }
-                    self.render_ty(&ShapeKey::Word(word.clone()), out);
+                    self.render_ty(element, out);
                 }
                 out.push(')');
             },
@@ -1084,32 +1096,32 @@ impl<'a> Shapes<'a> {
             },
             ds_check::AtomKind::Tuple(elements) => {
                 let mut fields = Vec::with_capacity(elements.len());
-                for (index, element) in elements.iter().enumerate() {
-                    // One plain frame word per element: struct, union, and
-                    // nested-tuple elements carry their own spans, and the
-                    // tuple vocabulary keeps one word per element until
-                    // those spans stage per element.
+                let mut cursor = 0usize;
+                for element in elements {
+                    if self.atom_declares_deinit(*element) {
+                        return Err(unsupported(
+                            "a deinit-carrying tuple element",
+                            "the tuple has no per-element deinit claim; per-span deinit claims \
+                             own the seam",
+                        ));
+                    }
                     let callable = matches!(
                         self.universe.atom_decl(*element).map(|decl| &decl.kind),
                         Ok(ds_check::AtomKind::FnSig(..))
                     );
                     let shape = self.atom_shape(*element)?;
-                    let Shape::Word(slot) = &*shape else {
-                        return Err(unsupported(
-                            "a multi-word tuple element",
-                            "tuple elements lower as one plain frame word; a wider element needs \
-                             its whole span staged per element, which tuple spans do not carry yet",
-                        ));
-                    };
-                    // a fn-typed element holds the closure Ref word: the
-                    // heap position the span's count traffic covers, a
-                    // non-capturing fn wrapping into its static closure
-                    // object at the literal's store
-                    let slot = if callable { SlotType::Ref } else { *slot };
+                    let mut slots = shape_words(&shape);
+                    // A fn-typed element holds the closure Ref word: the
+                    // heap position the span's count traffic covers.
+                    if callable {
+                        slots[0] = SlotType::Ref;
+                    }
+                    let word = word_of(cursor)?;
+                    cursor += slots.len();
                     fields.push(MemberField {
                         name: None,
-                        slots: vec![slot],
-                        word: word_of(index)?,
+                        slots,
+                        word,
                     });
                 }
                 Ok(Shape::Tuple(StructShape { fields }))
@@ -1319,13 +1331,10 @@ impl<'a> Shapes<'a> {
             ));
         }
         match expr {
-            // one plain frame word per element — the tuple value
-            // vocabulary: a wider element (a nested tuple, a struct, a
-            // union) stays outside, exactly as a tuple literal's element
-            // does, and the empty tuple `()` stays outside with it: the
-            // unit value is the frame's one canonical word, never a
-            // per-field spelling, so a `()`-typed field would span zero
-            // words
+            // Tuple fields keep the one-word element boundary until their
+            // union claims and field stores take whole element spans. The
+            // empty tuple stays outside: a `()`-typed field would span zero
+            // words.
             TypeExpr::Tuple(elements) => {
                 let [first, rest @ ..] = &elements[..] else {
                     return Ok(None);
@@ -1445,9 +1454,8 @@ impl<'a> Shapes<'a> {
                 let shape = self.union_shape(&members, depth + 1)?;
                 Ok(Some(shape_words(&shape)))
             },
-            // an aliased tuple: the same one-word-per-element rule the
-            // written tuple spelling takes, the empty tuple refusing on
-            // the same line so the alias is no side door around it
+            // An aliased tuple field keeps the written spelling's one-word
+            // element boundary; the empty tuple refuses on the same line.
             ds_check::AtomKind::Tuple(elements) => {
                 let [first, rest @ ..] = &elements[..] else {
                     return Ok(None);

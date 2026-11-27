@@ -684,14 +684,11 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.release_eq_words(&l, &r);
                 dst
             },
-            Shape::Tuple(s) => {
+            Shape::Tuple(_) => {
                 let fail = self.label();
                 let join = self.label();
                 let l = self.word_addrs(&lhs.place, lhs.ty)?;
                 let r = self.word_addrs(&rhs.place, rhs.ty)?;
-                if l.len() != s.fields.len() || r.len() != s.fields.len() {
-                    return Err(mismatch("a tuple equality's arity"));
-                }
                 let plan = self.eq_word_plan(lty)?;
                 self.emit_word_compares(&l, &r, &plan, fail)?;
                 let truth = self.pool(Constant::Bool(true));
@@ -995,9 +992,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// The per-word compare plan of one written field type: a bytes
     /// atom plans the content compare; a nested struct or tuple atom
     /// flattens its own fields' plans; a union flattens its whole span's
-    /// word kinds; a tuple type flattens its elements' plans (the
-    /// layout's one-word-per-element rule already refused a wider
-    /// element).
+    /// word kinds; a tuple type recursively flattens its elements' plans.
     pub(super) fn type_word_plan(&mut self, expr: &TypeExpr) -> Result<Vec<WordEq>, LowerError> {
         match expr {
             TypeExpr::Atom(id) => self.atom_word_plan(*id),

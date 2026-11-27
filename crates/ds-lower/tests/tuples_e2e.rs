@@ -1,16 +1,15 @@
 //! The anonymous-tuple surface end to end: construction, destructuring
 //! in bindings and match arms, tuple params, returns, and tail calls — every
-//! tuple is consecutive frame words (one plain word per element: strings and
-//! lists ride their Ref, `()` rides the I64 unit word), and destructuring is
-//! per-slot reads binding each element word in place. A destructuring `var`
+//! tuple is consecutive frame words (one positional span per element:
+//! strings and lists ride their Ref, `()` rides the I64 unit word), and
+//! destructuring binds each element span in place. A destructuring `var`
 //! binds each element its own re-storable slot (a fresh word the initializer
 //! copies into, so an assignment through an element re-stores its slot alone
 //! while the const convention aliases the tuple's words). The multi-word
 //! corners reject at the lowering boundary with their own notes: a union-typed
-//! element distributed the product into several tuple atoms, a struct or
-//! nested-tuple element spans several words, and a tuple arm in a member-test
-//! position resolves no member (the arm binds the member and destructures it
-//! in the body).
+//! element distributes the product into several tuple atoms, and a tuple arm
+//! in a member-test position resolves no member (the arm binds the member and
+//! destructures it in the body).
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -69,7 +68,7 @@ fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     );
     assert_eq!(
         vm.captured_output(),
-        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nvar true\n" as &[u8]
+        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nwide 45\nwide eq\nvar true\n" as &[u8]
     );
 }
 
@@ -112,16 +111,6 @@ fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
             "the product distributed into several tuple atoms",
         ),
         (
-            // a struct element spans several words
-            "struct pt { x: int }\nfn main() -> int { const t = (pt { x: 1 }, 2)\n 0 }",
-            "tuple elements lower as one plain frame word",
-        ),
-        (
-            // a nested-tuple element spans several words
-            "fn main() -> int { const t = ((1, 2), 3)\n 0 }",
-            "tuple elements lower as one plain frame word",
-        ),
-        (
             // a tuple arm in a member-test position resolves no member:
             // the arm binds the member and destructures in the body
             "fn pick() -> (int, int) | none { (1, 2) }\nfn main() -> int { match pick() { (a, b) \
@@ -149,6 +138,27 @@ fn multi_word_tuple_corners_reject_at_the_lowering_boundary() {
             "the rejection names its seam: {error}"
         );
     }
+}
+
+/// A deinit-carrying element keeps its refusal: the tuple owns no
+/// per-element hook claim.
+#[test]
+fn a_deinit_carrying_tuple_element_refuses() {
+    let Err(error) = lower_inline(concat!(
+        "extern fn println (s: string) -> ()\n",
+        "struct session: ~Copyable { x: int\n",
+        "  deinit { println(\"drop\") }\n",
+        "}\n",
+        "fn main() -> int { const t = (session { x: 1 }, 2)\n 0 }\n",
+    )) else {
+        panic!("the deinit-carrying tuple element lowers");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("a deinit-carrying tuple element"),
+        "the refusal names the missing claim: {error}"
+    );
 }
 
 /// The empty tuple `()` is the unit value — the frame's one canonical

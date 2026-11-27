@@ -263,11 +263,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         Ok(())
     }
 
-    /// One anonymous tuple `(e0, e1, ...)`: a fresh frame span, one word
-    /// per element, moved in evaluation order. Each element lowers
-    /// as a single word (the shape's one-word-per-element rule); a
-    /// union-typed element distributed the product into several tuple
-    /// atoms, which the boundary rejects — narrow the element first.
+    /// One anonymous tuple `(e0, e1, ...)`: a fresh frame span with each
+    /// element's whole word span moved in evaluation order. A union-typed
+    /// element distributed the product into several tuple atoms, which the
+    /// boundary rejects — narrow the element first.
     pub(super) fn tuple_literal(
         &mut self,
         items: &[Expr],
@@ -293,27 +292,20 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         for (index, item) in items.iter().enumerate() {
             let field = &s.fields[index];
             let v = self.value(item)?;
-            let addr = single(&self.word_addrs(&v.place, v.ty)?, item.span())?;
-            // a fn-typed element holds the closure Ref word: a proven
+            let mut addrs = self.word_addrs(&v.place, v.ty)?;
+            // A fn-typed element holds the closure Ref word: a proven
             // scalar fn value wraps into its static closure object, an
-            // unproven or Ref-classified word stages as itself — the
-            // runtime kind the element copy's own registration checks
-            let addr = if field.slot() == SlotType::Ref && addr.slot_ty == SlotType::Fn {
-                self.stage_heap_fn(&v, item.span())?
-            } else {
-                addr
-            };
-            self.emit(Op::Mov {
-                dst: Slot::body(target.base + field.word),
-                src: Slot::body(addr.slot),
-            });
-            // a variable-typed element's declared word is Raw under a
-            // counted instantiation, so the copy registration covers both
-            // classifications (the RC ops check the runtime kind)
-            if matches!(field.slot(), SlotType::Ref | SlotType::Raw) {
-                self.rc
-                    .copied(&mut self.code, target.base + field.word, addr.slot);
+            // unproven or Ref-classified word stages as itself.
+            if field.slot() == SlotType::Ref
+                && let [addr] = addrs.as_mut_slice()
+                && addr.slot_ty == SlotType::Fn
+            {
+                *addr = self.stage_heap_fn(&v, item.span())?;
             }
+            if addrs.len() != field.width() {
+                return Err(mismatch("a tuple element's span"));
+            }
+            self.store_field_span(target.base, field, &addrs);
         }
         Ok(target)
     }
