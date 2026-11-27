@@ -18,7 +18,14 @@ pub type row = map[string, string]
 // answered them — so a package wanting them declares its own externs
 // over this shape.
 /// The config record: an optional port field beside plain ones.
-pub struct config { host: string, port: int?, retries: int }
+pub struct config {
+  /// The host the record names.
+  host: string
+  /// The optional port; absent when the default serves.
+  port: int?
+  /// The retry budget beside the defaults.
+  retries: int
+}
 
 // An opaque response value. The fetch/consume externs that answered it
 // are gone — no native answered them — so a package wanting them

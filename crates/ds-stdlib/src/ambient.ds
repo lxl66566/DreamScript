@@ -665,11 +665,17 @@ pub struct box[t]
 /// float kept split.
 pub enum json {
   json_null
+  /// The `true`/`false` literal: the bool it spells.
   json_bool { value: bool }
+  /// The integer literal: the int it spells, exact.
   json_int { value: int }
+  /// The number literal: the float it spells.
   json_float { value: float }
+  /// The string literal: the decoded text.
   json_string { value: string }
+  /// The array: the decoded elements, in document order.
   json_array { items: list[json] }
+  /// The object: the decoded members, in document order.
   json_object { fields: map[string, json] }
 }
 
@@ -769,7 +775,14 @@ pub struct net_handle: ~Copyable {
 // only; the checker refuses calls elsewhere.
 /// One `fields` row: a declared name, its type as a type value,
 /// and its bare atom's name (empty for composite types).
-pub struct field { name: string, type: type, tag: string }
+pub struct field {
+  /// The field's or case's declared name.
+  name: string
+  /// The declared type, as a type value.
+  type: type
+  /// The bare atom's name; empty for composite types.
+  tag: string
+}
 /// A struct's fields or an enum's cases, one row each; comptime
 /// only.
 pub extern fn fields (t: type) -> list[field]

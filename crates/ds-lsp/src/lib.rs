@@ -113,11 +113,12 @@
 //!   poisoned parse answers nothing (broken code never reformats its neighbors), and one trimmed
 //!   edit covers the changed middle of the region alone, never the whole document.
 //! * `.dsi` hover serves three tiers: the checked type of the expression at the position, the `pub`
-//!   package declaration's signature line when the position names one, and — for a name one of the
-//!   package's imports selects that the session's package-free resolution left unknown — the linked
-//!   tier's line from the embedder's surface provider, the `.dsi` artifact a run of the same
-//!   package graph cached beside the dep's compiled module (the ambient path answers through the
-//!   ambient's own parse, never the provider).
+//!   package declaration's signature line with its `///` doc run when the position names one, and —
+//!   for a name one of the package's imports selects that the session's package-free resolution
+//!   left unknown — the linked tier's line with its doc run from the embedder's surface provider,
+//!   both read off the `.dsi` artifact a run of the same package graph cached beside the dep's
+//!   compiled module (the ambient path answers through the ambient's own parse, never the
+//!   provider).
 //! * Ambient stdlib names resolve (the ambient registers first), but the ambient file has no client
 //!   URI, so definitions pointing into it answer none.
 //! * Change and save notifications defer their diagnostics publish through a short trailing
@@ -167,6 +168,10 @@ struct HoverAnswer {
 pub struct LinkedSurface {
     /// Each exported definition's `.dsi` signature line, keyed by name.
     pub signatures: std::collections::HashMap<String, String>,
+    /// Each exported definition's `///` doc run, keyed by name — the
+    /// cached `.dsi`'s doc rows passed through. A name with no run
+    /// answers no doc, exactly as the artifact records.
+    pub docs: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// The embedder's linked-surface provider: one document's path and one
@@ -1028,6 +1033,9 @@ mod tests {
                 "pick".to_owned(),
                 "pub fn pick(n: int) -> int".to_owned(),
             )]),
+            docs: std::collections::HashMap::from([("pick".to_owned(), vec![
+                "The identity: the number back, unchanged.".to_owned(),
+            ])]),
         })
     }
 
@@ -1061,6 +1069,13 @@ mod tests {
             "{}",
             answer.contents
         );
+        assert!(
+            answer
+                .contents
+                .contains("The identity: the number back, unchanged."),
+            "the artifact's doc run answers beside the line: {}",
+            answer.contents
+        );
         // the selection in the import row answers the same line
         let answer = session
             .hover(Path::new("main.ds"), file, 0, 15)
@@ -1086,6 +1101,7 @@ mod tests {
                         "join".to_owned(),
                         "pub fn join(s: bogus) -> bogus".to_owned(),
                     )]),
+                    docs: std::collections::HashMap::new(),
                 })
             })
         }));

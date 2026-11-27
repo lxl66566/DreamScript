@@ -93,6 +93,12 @@ pub struct field {
 }
 ```
 
+- `name`: The field's or case's declared name.
+
+- `type`: The declared type, as a type value.
+
+- `tag`: The bare atom's name; empty for composite types.
+
 #### `file_handle`
 
 The linear file handle; the deinit closes it.
@@ -160,6 +166,14 @@ pub enum io_err {
 }
 ```
 
+- `not_found.path`: The io class for a missing path.
+
+- `permission_denied.path`: The io class for an access denial.
+
+- `already_exists.path`: The io class for an existing entry.
+
+- `io_other.msg`: The io floor: a failure no class discriminates, carrying the OS message.
+
 #### `json`
 
 The JSON value family: one case per grammar shape, int and
@@ -177,6 +191,18 @@ pub enum json {
 }
 ```
 
+- `json_bool.value`: The `true`/`false` literal: the bool it spells.
+
+- `json_int.value`: The integer literal: the int it spells, exact.
+
+- `json_float.value`: The number literal: the float it spells.
+
+- `json_string.value`: The string literal: the decoded text.
+
+- `json_array.items`: The array: the decoded elements, in document order.
+
+- `json_object.fields`: The object: the decoded members, in document order.
+
 #### `net_err`
 
 The net failure union the net natives answer: one class case per
@@ -191,6 +217,8 @@ pub enum net_err {
   net_other { msg: string }
 }
 ```
+
+- `net_other.msg`: The net floor: a failure no class discriminates, carrying the OS message.
 
 #### `never`
 
@@ -1485,6 +1513,12 @@ pub struct config {
   retries: int
 }
 ```
+
+- `host`: The host the record names.
+
+- `port`: The optional port; absent when the default serves.
+
+- `retries`: The retry budget beside the defaults.
 
 #### `datetime`
 

@@ -98,6 +98,14 @@ impl FileSpans {
         &self.name
     }
 
+    /// The file's current text: the bytes every span in the bundle
+    /// addresses, so a bundle consumer can read source-carrying data
+    /// (comment trivia) without the registry.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     /// The source length in bytes.
     #[must_use]
     pub const fn len(&self) -> u32 {

@@ -776,6 +776,7 @@ fn compile_text(
                 decls,
                 effect_defs,
                 effect_methods,
+                ..
             } = prefix;
             served_rows = Some((resolutions.len(), effect_defs, effect_methods));
             match imports {

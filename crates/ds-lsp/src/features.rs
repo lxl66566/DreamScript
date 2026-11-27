@@ -108,7 +108,8 @@ impl Session {
     /// registered member its use selects — the same line `ds info`
     /// prints for that declaration. A name one of the package's imports
     /// selects that resolution could not bind answers the linked tier's
-    /// line when the embedder serves that package's cached `.dsi`.
+    /// line with its doc run when the embedder serves that package's
+    /// cached `.dsi`.
     pub(super) fn hover(
         &mut self,
         path: &Path,
@@ -205,12 +206,12 @@ impl Session {
 
     /// The linked-name tier: a word one of the open documents' imports
     /// selects — the import-bound def the session's package-free
-    /// resolution left unknown — answers its `.dsi` signature line from
-    /// the embedder's surface provider, covering the word's range. No
-    /// doc run answers here: the linked tier reads the cached `.dsi`
-    /// alone, which carries no comments. A selection's alias binds the
-    /// name the way the checker's link pass would, so both spellings
-    /// serve; a word nothing selects answers nothing, exactly as before.
+    /// resolution left unknown — answers its `.dsi` signature line with
+    /// its `///` doc run from the embedder's surface provider, both read
+    /// off the cached artifact the provider serves, covering the word's
+    /// range. A selection's alias binds the name the way the checker's
+    /// link pass would, so both spellings serve; a word nothing selects
+    /// answers nothing, exactly as before.
     fn linked_surface(
         &mut self,
         path: &Path,
@@ -251,13 +252,12 @@ impl Session {
             }
         }
         let (package, selected) = hits.first()?;
-        let line = (self.linked)(path, package)?
-            .signatures
-            .get(selected)?
-            .clone();
+        let surface = (self.linked)(path, package)?;
+        let line = surface.signatures.get(selected)?.clone();
+        let doc = surface.docs.get(selected).cloned().unwrap_or_default();
         Some((
             line,
-            Vec::new(),
+            doc,
             convert::range(self.db.files(), Span::new(file, start, end)),
         ))
     }

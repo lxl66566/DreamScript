@@ -8,6 +8,7 @@ use ds_check::{
 };
 use ds_diag::Span;
 use ds_mod::Hash128;
+use ds_parse::{Item, ItemKind, Pattern, Vis};
 
 use super::*;
 
@@ -120,6 +121,7 @@ pub fn extract(
     let universe = universe_log(decls, &foreign, &mut names);
     let tables = decls_data(decls, &mut names);
     let instances = instance_rows_of(decls, &mut names);
+    let docs = doc_runs(analyzed);
     PrefixDsi {
         names: names.finish(),
         package: PackageData {
@@ -155,6 +157,67 @@ pub fn extract(
                 caps: row.caps,
             })
             .collect(),
+        docs,
+    }
+}
+
+/// The exported declarations' `///` doc runs: each `pub` top-level
+/// item's attached run, keyed by the raw def index the item's name span
+/// declares, in def order. The attachment rule is the parse layer's own
+/// (a plain `//` run and a run above an unslot comment position never
+/// ride), so the artifact carries exactly what a source rendering
+/// would spell.
+fn doc_runs(analyzed: &Analyzed) -> Vec<(u32, Vec<String>)> {
+    let mut def_of_name: HashMap<(u32, u32), u32> = HashMap::new();
+    for (index, def) in analyzed.package.defs().enumerate() {
+        let Ok(index) = u32::try_from(index) else {
+            break;
+        };
+        def_of_name.insert((def.span.file.as_u32(), def.span.start), index);
+    }
+    let mut out = Vec::new();
+    for tree in analyzed.asts.iter() {
+        for item in tree.blocks.iter().flat_map(|block| block.items.iter()) {
+            if !matches!(item.vis, Some(Vis::Pub(_))) {
+                continue;
+            }
+            let Some(name) = item_name_span(item) else {
+                continue;
+            };
+            let Some(&def) = def_of_name.get(&(name.file.as_u32(), name.start)) else {
+                continue;
+            };
+            let src = analyzed.span_files[item.span.file.as_u32() as usize].source();
+            let run: Vec<String> = item
+                .doc
+                .iter()
+                .map(|t| ds_parse::doc_body(src, t).to_owned())
+                .collect();
+            if !run.is_empty() {
+                out.push((def, run));
+            }
+        }
+    }
+    out.sort_by_key(|(def, _)| *def);
+    out
+}
+
+/// The name occurrence a top-level item declares, the span its
+/// namespace entry is collected under; kinds the def tables hold no
+/// row for (an impl, an import) answer `None`.
+fn item_name_span(item: &Item) -> Option<Span> {
+    match &item.kind {
+        ItemKind::Fn(f) | ItemKind::ExternFn(f) => Some(f.name.span),
+        ItemKind::Struct(s) => Some(s.name.span),
+        ItemKind::Enum(e) => Some(e.name.span),
+        ItemKind::Tag(t) => Some(t.name.span),
+        ItemKind::TypeAlias(a) => Some(a.name.span),
+        ItemKind::Trait(t) => Some(t.name.span),
+        ItemKind::Local(local) => match &local.pat {
+            Pattern::Binding { name, .. } => Some(name.span),
+            _ => None,
+        },
+        ItemKind::Import(_) | ItemKind::Impl(_) | ItemKind::Platform(_) => None,
     }
 }
 

@@ -1664,6 +1664,9 @@ async fn hover_answers_linked_names_over_the_wire() {
                 "pick".to_owned(),
                 "pub fn pick(n: int) -> int".to_owned(),
             )]),
+            docs: std::collections::HashMap::from([("pick".to_owned(), vec![
+                "The identity: the number back, unchanged.".to_owned(),
+            ])]),
         });
         let provider = std::sync::Arc::new(move |_doc: &std::path::Path, link: &str| {
             (link == "@lib").then(|| surface.clone())

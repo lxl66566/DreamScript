@@ -395,6 +395,7 @@ mod tests {
                 methods: Vec::new(),
                 method_index: Vec::new(),
             },
+            docs: Vec::new(),
             uses: vec![Vec::new()],
             universe: UniverseLog {
                 atoms: Vec::new(),

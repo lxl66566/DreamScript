@@ -57,6 +57,10 @@ pub struct ServedPrefix {
     pub effect_defs: Arc<[DefEffects]>,
     /// The served methods' solved rows, cloned by refcount the same way.
     pub effect_methods: Arc<[ServedMethodRow]>,
+    /// The payload's `///` doc runs passed through, keyed by raw def
+    /// index: the surface conversion's doc half, never consumed by the
+    /// analyze serve.
+    pub docs: Arc<[(u32, Vec<String>)]>,
 }
 
 /// The artifact's payload: everything one served run needs, all of it
@@ -84,6 +88,12 @@ pub struct PrefixDsi {
     pub effects: Vec<DefRowData>,
     /// The solved method rows, in registration order.
     pub method_rows: Vec<MethodRowData>,
+    /// The exported declarations' `///` doc runs, keyed by raw def
+    /// index (the collection space every serve reproduces): the
+    /// surface tier's text — the one channel a linked-tier hover
+    /// answers a doc from, the cached `.dsi` being the only source it
+    /// reads. Never consumed by the analyze serve.
+    pub docs: Vec<(u32, Vec<String>)>,
 }
 
 /// The namespace parts [`Package::add_file`] builds.

@@ -44,21 +44,57 @@ pub struct SurfaceBand {
 /// shares (`ds info`'s document, the LSP hover's one line).
 #[must_use]
 pub fn surface_lines(prefix: &ServedPrefix, band: SurfaceBand) -> Vec<(String, String)> {
+    let methods: Vec<_> = prefix.package.methods().enumerate().collect();
+    own_defs(prefix, band)
+        .into_iter()
+        .filter_map(|(index, def)| {
+            let id = DefId::from_raw(index);
+            line_of(prefix, id, def, &methods).map(|line| (def.name.clone(), line))
+        })
+        .collect()
+}
+
+/// The band's own `pub` definitions with their raw def indexes, in
+/// definition order: the walk every surface answer shares (the hover
+/// tier, the document, the doc runs).
+fn own_defs(prefix: &ServedPrefix, band: SurfaceBand) -> Vec<(u32, &ds_check::Def)> {
     let files: Vec<_> = prefix.package.files().collect();
     let Some(own) = files.get(band.leading..files.len().saturating_sub(band.trailing)) else {
         return Vec::new();
     };
-    let methods: Vec<_> = prefix.package.methods().enumerate().collect();
     prefix
         .package
         .defs()
         .enumerate()
         .filter(|(_, def)| own.contains(&def.span.file) && def.vis == Vis::Pub)
+        .map(|(index, def)| (u32::try_from(index).expect("def count fits u32"), def))
+        .collect()
+}
+
+/// The band's own `pub` definitions' `///` doc runs: each definition
+/// carrying one, as `(name, lines)` in definition order — the doc half
+/// the linked-tier hover serves beside the signature line, read off the
+/// cached `.dsi` alone.
+#[must_use]
+pub fn surface_docs(prefix: &ServedPrefix, band: SurfaceBand) -> Vec<(String, Vec<String>)> {
+    own_defs(prefix, band)
+        .into_iter()
         .filter_map(|(index, def)| {
-            let id = DefId::from_raw(u32::try_from(index).expect("def count fits u32"));
-            line_of(prefix, id, def, &methods).map(|line| (def.name.clone(), line))
+            let run = def_docs(prefix, index);
+            (!run.is_empty()).then(|| (def.name.clone(), run))
         })
         .collect()
+}
+
+/// The doc run one raw def index carries, empty when the artifact
+/// records none: the first row at the index (the payload's own table is
+/// sorted by index).
+fn def_docs(prefix: &ServedPrefix, def: u32) -> Vec<String> {
+    prefix
+        .docs
+        .binary_search_by_key(&def, |(row, _)| *row)
+        .map(|at| prefix.docs[at].1.clone())
+        .unwrap_or_default()
 }
 
 /// [`surface_lines`] as the document `ds info` prints: one line per
@@ -274,7 +310,9 @@ mod tests {
     use ds_diag::{FileId, Span};
     use ds_parse::{EnumPayload, FieldDecl, Ident};
 
-    use super::{SurfaceBand, member_surface, signature_line, surface_lines};
+    use super::{
+        SurfaceBand, def_docs, member_surface, signature_line, surface_docs, surface_lines,
+    };
     use crate::{
         DeclsData, DefData, EnumCaseData, EnumShapeData, FnSigData, GenericParamData,
         MethodDeclData, MethodOwnerData, PackageData, ParamSigData, PrefixDsi, StructShapeData,
@@ -360,6 +398,35 @@ mod tests {
             ds_fmt::signature::member(&mut out, text, &ast);
         }
         out
+    }
+
+    /// The doc runs ride the artifact keyed by their definitions and
+    /// answer per name: the `///` run a declaration carries renders,
+    /// a plain `//` run above the same declaration stays maintainer
+    /// notes (never a row), and an unexported declaration's run stays
+    /// out with the declaration.
+    #[test]
+    fn the_doc_runs_cross_the_artifact() {
+        const SRC: &str = concat!(
+            "struct carrier { }\n",
+            "// maintainer notes, never a doc\n",
+            "/// The identity: the carrier back, unchanged.\n",
+            "pub fn id(c: carrier) -> carrier {\nc\n}\n",
+            "/// A private helper's own line.\n",
+            "fn hidden() { }\n",
+        );
+        let prefix = served(&[("lib.ds", SRC)]);
+        assert_eq!(
+            surface_docs(&prefix, SurfaceBand::default()),
+            vec![("id".to_owned(), vec![
+                "The identity: the carrier back, unchanged.".to_owned()
+            ])],
+            "the exported declaration's doc run alone"
+        );
+        assert!(
+            def_docs(&prefix, 0).is_empty(),
+            "the unexported def carries no row"
+        );
     }
 
     /// The conversion answers the source rendering for the vocabulary
@@ -623,6 +690,7 @@ mod tests {
             instances: Vec::new(),
             effects: Vec::new(),
             method_rows: Vec::new(),
+            docs: Vec::new(),
         }
     }
 

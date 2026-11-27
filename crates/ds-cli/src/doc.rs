@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use ds_diag::{ErrorClass, ErrorCode, Files};
-use ds_parse::{Ast, Expr, ItemKind, Pattern, Trivia, Vis};
+use ds_parse::{Ast, EnumPayload, Expr, ItemKind, Pattern, StructMember, Trivia, Vis};
 
 /// The `ds doc` surface: an optional target, an `--errors` switch.
 #[derive(Debug, Args)]
@@ -69,12 +69,15 @@ pub fn doc(args: &DocArgs) -> Result<()> {
 }
 
 /// One rendered declaration: its family, its heading label, the `///`
-/// doc run attached to it, and its signature face.
+/// doc run attached to it, its signature face, and the member doc runs
+/// the parse layer attached below it (a struct's fields, an enum case's
+/// payload fields).
 struct Entry {
     family: Family,
     label: Option<String>,
     doc: Vec<String>,
     face: String,
+    members: Vec<(String, Vec<String>)>,
 }
 
 /// The surface families, in the reference's fixed section order (the
@@ -263,6 +266,7 @@ fn collect(out: &mut Vec<Entry>, src: &str, ast: &Ast) {
                     label: None,
                     doc,
                     face,
+                    members: Vec::new(),
                 });
             },
             ItemKind::Import(_) | ItemKind::Platform(_) => {},
@@ -270,11 +274,13 @@ fn collect(out: &mut Vec<Entry>, src: &str, ast: &Ast) {
             kind => {
                 ds_fmt::signature::item(&mut face, src, item);
                 let (family, label) = classify(kind);
+                let members = member_docs(src, kind);
                 out.push(Entry {
                     family,
                     label,
                     doc,
                     face,
+                    members,
                 });
             },
         }
@@ -316,6 +322,53 @@ fn doc_lines(src: &str, doc: &[Trivia]) -> Vec<String> {
         .collect()
 }
 
+/// The member doc slots one gated declaration carries: a struct's
+/// fields and an enum case's payload fields, each attached `///` run
+/// spelled `(label, lines)`. The label names the path the face's own
+/// line spells — the field's name, or `case.field` for a payload — so
+/// one list serves both payload shapes. Case names carry no doc slot in
+/// the parse layer, so a run above a bare case stays maintainer notes,
+/// and a payloaded case's run attaches to its first payload field,
+/// rendering under that field; a plain `//` run above any member never
+/// renders.
+fn member_docs(src: &str, kind: &ItemKind) -> Vec<(String, Vec<String>)> {
+    let run = |f: &ds_parse::FieldDecl| -> Option<Vec<String>> {
+        let lines: Vec<String> = f
+            .doc
+            .iter()
+            .map(|t| ds_parse::doc_body(src, t).to_owned())
+            .collect();
+        (!lines.is_empty()).then_some(lines)
+    };
+    match kind {
+        ItemKind::Struct(s) => s
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                StructMember::Field(f) => run(f).map(|lines| (f.name.name.clone(), lines)),
+                StructMember::Deinit { .. } => None,
+            })
+            .collect(),
+        ItemKind::Enum(e) => {
+            let mut out = Vec::new();
+            for case in &e.cases {
+                if let EnumPayload::Struct(fields) = &case.payload {
+                    for f in fields {
+                        if let Some(lines) = run(f) {
+                            out.push((format!("{}.{}", case.name.name, f.name.name), lines));
+                        }
+                    }
+                }
+            }
+            out
+        },
+        // Tags carry struct payloads too, but the parse layer attaches
+        // no doc slot under a tag's payload fields; an impl face renders
+        // member signatures only. Both stay empty here.
+        _ => Vec::new(),
+    }
+}
+
 /// One sorted entry list's markdown: a section title, a `###` heading per
 /// non-empty family, a `####` heading per labeled entry, the `///` doc
 /// run as plain lines, and the face in a `ds` fence. Deterministic by
@@ -352,6 +405,14 @@ fn render_section(out: &mut String, title: &str, entries: &[Entry]) {
             out.push_str("```ds\n");
             out.push_str(&entry.face);
             out.push_str("```\n");
+            for (label, lines) in &entry.members {
+                out.push('\n');
+                out.push_str("- `");
+                out.push_str(label);
+                out.push_str("`: ");
+                out.push_str(&lines.join(" "));
+                out.push('\n');
+            }
         }
     }
 }

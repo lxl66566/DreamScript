@@ -133,6 +133,7 @@ pub(super) fn serve(artifact: &PrefixDsi, tables: &ServedTables) -> ServedPrefix
         },
         effect_defs,
         effect_methods,
+        docs: Arc::from(artifact.docs.clone()),
     }
 }
 

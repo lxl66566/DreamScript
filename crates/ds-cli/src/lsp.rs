@@ -175,6 +175,9 @@ fn dep_surface(keys: &crate::package::GraphKeys, link: &str) -> Option<ds_lsp::L
         signatures: ds_dsi::surface::surface_lines(&prefix, band)
             .into_iter()
             .collect(),
+        docs: ds_dsi::surface::surface_docs(&prefix, band)
+            .into_iter()
+            .collect(),
     })
 }
 
