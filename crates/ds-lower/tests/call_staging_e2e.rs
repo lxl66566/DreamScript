@@ -220,7 +220,7 @@ fn a_shape_refusal_reports_at_the_observing_literal() {
             "}\n",
             "extern fn println (msg: string) -> ()\n",
         ),
-        "struct payload field",
+        "a tuple with a union-typed element",
         "outer { x: (1, 2) }",
     );
 }
@@ -238,7 +238,7 @@ fn a_shape_refusal_through_a_parameter_reports_at_the_parameter() {
             "fn main() -> () { println(\"unreachable\") }\n",
             "extern fn println (msg: string) -> ()\n",
         ),
-        "struct payload field",
+        "a tuple with a union-typed element",
         "o: outer",
     );
 }

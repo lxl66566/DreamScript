@@ -338,6 +338,38 @@ impl Bodies<'_> {
                         }
                         return self.call_def(func, Some(recv), args, trailing, span);
                     }
+                    // No member claims the name: the receiver's own
+                    // fn-typed field answers before the free fn — whose
+                    // first parameter cannot contain the receiver —
+                    // refuses the call as an extra argument. A free fn
+                    // that can take the receiver keeps winning.
+                    let recv_val = self.expr(recv, None);
+                    if recv_val.poisoned {
+                        for arg in args {
+                            self.expr(&arg.value, None);
+                        }
+                        if let Some(tail) = trailing {
+                            self.expr(tail, None);
+                        }
+                        return Val {
+                            ty: self.empty(),
+                            diverges: false,
+                            poisoned: true,
+                        };
+                    }
+                    if !self.free_fn_takes_receiver(func, recv_val.ty)
+                        && let Some(val) =
+                            self.field_call_site(callee, recv_val.ty, name, args, trailing, span)
+                    {
+                        if let Some(selection) = selection {
+                            self.selection_without_dispatch(
+                                selection,
+                                span,
+                                "a field call dispatches through no trait instance",
+                            );
+                        }
+                        return val;
+                    }
                 }
                 if let Some(selection) = selection {
                     self.selection_without_dispatch(

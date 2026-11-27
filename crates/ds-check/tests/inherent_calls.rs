@@ -819,6 +819,60 @@ fn a_field_call_answers_past_the_member_tiers() {
     assert_eq!(analyzed.package.method(*method).name, "f");
 }
 
+/// A same-named free fn never blocks the field tier: the free tier
+/// records before any receiver typing, and a free fn whose first
+/// parameter cannot contain the receiver would refuse the call as an
+/// extra argument — the receiver's own fn-typed field answers instead.
+/// A free fn that can take the receiver keeps winning.
+#[test]
+fn a_free_fn_that_cannot_take_the_receiver_leaves_the_field_tier() {
+    let field_answers = concat!(
+        "tag int\n",
+        "struct box { f: fn(int) -> int }\n",
+        "fn f(x: int) -> int { x * 10 }\n",
+        "fn main() -> int {\n",
+        "  const a = box { f: (x: int) => x + 1 }\n",
+        "  a.f(3)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (ast, analyzed) = analyze_source("field_vs_free.ds", field_answers);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the field tier answers past the same-named free fn: {}",
+        render(&analyzed)
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one field-call site")
+    };
+    assert!(
+        analyzed.checked.field_calls.contains(call),
+        "the field tier records the call the free fn cannot take"
+    );
+
+    let free_keeps = concat!(
+        "tag int\n",
+        "struct box { f: fn(int) -> int }\n",
+        "fn f(b: box, x: int) -> int { x * 10 }\n",
+        "fn main() -> int {\n",
+        "  const a = box { f: (x: int) => x + 1 }\n",
+        "  a.f(3)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (_ast, analyzed) = analyze_source("free_takes.ds", free_keeps);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the free fn that can take the receiver checks clean: {}",
+        render(&analyzed)
+    );
+    assert!(
+        analyzed.checked.field_calls.is_empty(),
+        "the free fn that takes the receiver keeps winning"
+    );
+}
+
 /// The field tier's misses keep the refused readings: a receiver naming
 /// no field of the dot name keeps the resolution-pass wording (the
 /// diagnostic moved to the check with the tier, the receiver's type

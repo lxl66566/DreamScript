@@ -208,9 +208,6 @@ pub(super) fn single(addrs: &[WordAddr], span: Span) -> Result<WordAddr, LowerEr
     Ok(only.clone())
 }
 
-/// The source words of one field inside a flattened address list: the
-/// addresses group by field in span order, each group's base word
-/// carrying the field's name.
 /// The per-field source slices of one member's ordered fields over a
 /// value's whole word addresses: a named field name-matches anywhere in
 /// the list (a bare struct's addresses carry their field names), a

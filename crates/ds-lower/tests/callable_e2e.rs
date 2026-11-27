@@ -721,6 +721,79 @@ fn apply(f: fn(int) -> int, v: int) -> int {{ f(v) }}
     );
 }
 
+/// A same-named free fn never blocks the field tier: a free fn whose
+/// first parameter cannot contain the receiver would refuse the dot
+/// call as an extra argument, so the receiver's own fn-typed field
+/// answers; a free fn that can take the receiver keeps winning.
+#[test]
+fn fn_typed_field_answers_past_a_same_named_free_fn() {
+    acceptance(
+        "fn_field_free_shadow",
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn f(x: int) -> int {{ x * 10 }}
+
+fn main() -> int {{
+  const a = box {{ f: (x: int) => x + 1 }}
+  println(\"field ${{a.f(3)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"field 4\n",
+    );
+    acceptance(
+        "fn_field_free_takes_receiver",
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn f(b: box, x: int) -> int {{ x * 10 }}
+
+fn main() -> int {{
+  const a = box {{ f: (x: int) => x + 1 }}
+  println(\"free ${{a.f(3)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"free 30\n",
+    );
+}
+
+/// A field call in tail position tails like a computed callee: the
+/// callee word's own proof decides the CALLT transfer against the
+/// in-place CALLS plus return, so the body's tail spelling lowers and
+/// answers like the value-position spelling.
+#[test]
+fn a_field_call_tails_through_the_computed_callee() {
+    acceptance(
+        "fn_field_tail",
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn one(x: int) -> int {{ x + 1 }}
+
+fn through(b: box, x: int) -> int {{
+  b.f(x)
+}}
+
+fn main() -> int {{
+  const a = box {{ f: one }}
+  through(a, 41)
+}}
+"
+        ),
+        Value::I64(42),
+        b"",
+    );
+}
+
 /// The field tier's refusals keep their homes: a receiver naming no
 /// field of the dot name keeps the resolution-pass wording (the
 /// diagnostic moved to the check with the tier, the receiver's type

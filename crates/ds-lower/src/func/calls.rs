@@ -1168,11 +1168,17 @@ impl FnLower<'_, '_, '_> {
         let target = if matches!(target, Callee::Builtin(native) if native.name == "box_take") {
             match moves.first() {
                 Some(&(_, slot)) if !self.rc.dies_at(slot) => {
-                    let def = self
-                        .analyzed
-                        .package
-                        .lookup_value("box_get")
-                        .expect("the box read is covered by the ambient");
+                    // the ambient's own member mapping names the read
+                    // native; a missing row is a corrupt ambient, never
+                    // a panic (DS2005 already guards the name against a
+                    // user declaration)
+                    let Some(def) = self.analyzed.package.lookup_value("box_get") else {
+                        return Err(LowerError::unsupported(
+                            callee_span,
+                            "the box read specialization",
+                            "the ambient declares no `box_get` for the surviving receiver's                              plain read",
+                        ));
+                    };
                     self.resolve_callee(def, callee_span, *span)?
                 },
                 _ => target,

@@ -58,7 +58,7 @@ fn a_return_over_an_unspannable_payload_member_refuses_at_the_tail_expression() 
     assert!(
         error
             .to_string()
-            .contains("a struct payload field is outside the M3 runtime contract"),
+            .contains("a tuple with a union-typed element is outside the M3 runtime contract"),
         "the seam is named: {error}"
     );
     // the tail expression `carrier(...)`, not the sentinel span over

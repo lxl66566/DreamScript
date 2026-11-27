@@ -75,6 +75,20 @@ fn var_wide_slots(t: ((point, int), string)) -> bool {
   before && p0.x == 20 && p0.y == 22 && m0 == 3 && q2.x == 2 && q2.y == 2 && n2 == 8 && label == "moved" && n0 == "wide"
 }
 
+// a wide var-destructure element carrying a nested string word: the
+// copy-in takes its own share, the re-store releases the replaced
+// value, and the source tuple keeps its words
+fn var_wide_ref_slots(t: ((string, int), int)) -> bool {
+  var (inner, n) = t
+  const (s0, k0) = inner
+  const before = s0 == "abc" && k0 == 1 && n == 2
+  inner = ("xyz", 9)
+  const (s1, k1) = inner
+  const (s2, k2) = t
+  const (s3, _) = s2
+  before && s1 == "xyz" && k1 == 9 && s3 == "abc" && k2 == 2
+}
+
 fn main() -> bool {
   const t = mk("host", 8080)
   const (name, port) = t
@@ -93,5 +107,6 @@ fn main() -> bool {
   println(if wide_element(point { x: 1, y: 2 }) == wide_element(point { x: 1, y: 2 }) { "wide eq" } else { "wide ne" })
   println("var ${var_slots(mk("db.local", 5432))}")
   println("varwide ${var_wide_slots(wide_element(point { x: 20, y: 22 }))}")
-  pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432)) && var_wide_slots(wide_element(point { x: 20, y: 22 }))
+  println("varref ${var_wide_ref_slots((("abc", 1), 2))}")
+  pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432)) && var_wide_slots(wide_element(point { x: 20, y: 22 })) && var_wide_ref_slots((("abc", 1), 2))
 }

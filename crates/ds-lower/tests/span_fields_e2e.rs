@@ -275,8 +275,9 @@ fn a_tuple_member_wide_element_flows_over_the_region() {
 /// hook of its own).
 #[test]
 fn the_refusal_openings_keep_their_honest_names() {
-    // a tuple product over a union element: the inline-span vocabulary
-    // refuses it (the literal forces the field's shape)
+    // a tuple product over a union element: the field's own refusal
+    // names the distributed product (the literal forces the field's
+    // shape), the same note the tuple value's construction keeps
     refuses(
         "refuse_union_field",
         concat!(
@@ -289,8 +290,8 @@ fn the_refusal_openings_keep_their_honest_names() {
             "}\n",
             "extern fn println (msg: string) -> ()\n",
         ),
-        "a struct payload field",
-        "this field's shape stays outside the inline-span vocabulary",
+        "a tuple with a union-typed element",
+        "the product distributed into several tuple atoms",
     );
     // the wider map value opening the map value channel owns (map_set
     // stages the value's whole word span); its run pins live in

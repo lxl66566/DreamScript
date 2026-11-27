@@ -60,6 +60,7 @@ fn the_box_face_builds_walks_and_dies() {
             "unbox 42\n",
             "taken move me\n",
             "kept 3 still 3\n",
+            "shared 5 held 5\n",
             "eq true true\n",
             "eqstr true\n",
             "eqnest true\n",

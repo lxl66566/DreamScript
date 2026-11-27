@@ -61,6 +61,12 @@ fn main() -> int {
   const kept = box[int](3)
   const copy = kept.unbox()
   println("kept ${copy} still ${kept.get()}")
+  // the shared-count unbox: a var holder shares the count, the dying
+  // receiver copies out, the holder keeps the value
+  var b = box[int](5)
+  var c = b
+  const taken_c = b.unbox()
+  println("shared ${taken_c} held ${c.get()}")
   // the structural equality descends into the held value
   println("eq ${box[int](5) == box[int](5)} ${box[int](5) != box[int](6)}")
   println("eqstr ${box[string]("a") == box[string]("a")}")

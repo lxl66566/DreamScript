@@ -1358,8 +1358,16 @@ impl<'a> Shapes<'a> {
                 };
                 let mut slots = Vec::new();
                 for element in std::iter::once(first).chain(rest) {
+                    // the union element names its own refusal instead of
+                    // the walk's generic outside-the-vocabulary sentence:
+                    // the product distributed into several tuple atoms,
+                    // the same note the tuple value's construction keeps
                     if matches!(element, TypeExpr::Union(..)) {
-                        return Ok(None);
+                        return Err(unsupported(
+                            "a tuple with a union-typed element",
+                            "the product distributed into several tuple atoms; narrow the element \
+                             through a match before the tuple",
+                        ));
                     }
                     match self.field_span(element, depth + 1)? {
                         Some(element_slots) => slots.extend(element_slots),

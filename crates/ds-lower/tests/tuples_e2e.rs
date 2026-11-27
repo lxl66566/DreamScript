@@ -69,7 +69,7 @@ fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     );
     assert_eq!(
         vm.captured_output(),
-        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nwide 45\nwide eq\nvar true\nvarwide true\n"
+        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nwide 45\nwide eq\nvar true\nvarwide true\nvarref true\n"
             as &[u8]
     );
 }

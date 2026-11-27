@@ -72,23 +72,38 @@ impl FnLower<'_, '_, '_> {
                                 && self.analyzed.decls.structs.contains_key(def))
                 )
             },
-            Expr::Field { recv, name, .. } => match self.res.get(name.span) {
-                Some(Res::Dot(DotRes::Free { func, .. })) => {
-                    self.extraction_def(*func).is_none() && !self.comptime_def(*func)
-                },
-                Some(Res::Dot(DotRes::Methods { candidates })) => matches!(
-                    self.resolve_method_dispatch(*call_span, name.span, Some(recv), candidates),
-                    Ok(TraitDispatch::Inherent { .. }
-                        | TraitDispatch::Static { .. }
-                        | TraitDispatch::Runtime { .. }
-                        | TraitDispatch::Foreign { .. }
-                        | TraitDispatch::InherentForeign { .. })
-                ),
-                Some(Res::Dot(DotRes::Static { candidates })) => matches!(
-                    self.resolve_method_dispatch(*call_span, name.span, None, candidates),
-                    Ok(TraitDispatch::Inherent { .. } | TraitDispatch::InherentForeign { .. })
-                ),
-                _ => false,
+            Expr::Field { recv, name, .. } => {
+                // The record, not the resolution tier, owns the routing:
+                // a same-named free fn leaves the tier at Free where the
+                // field tier answers. A field call is the computed-callee
+                // path, whose tail contract decides CALLT against the
+                // in-place CALLS plus return by the callee word's own
+                // proof, so it reports a transfer like a local binding's.
+                self.analyzed.checked.field_calls.contains(call_span)
+                    || match self.res.get(name.span) {
+                        Some(Res::Dot(DotRes::Free { func, .. })) => {
+                            self.extraction_def(*func).is_none() && !self.comptime_def(*func)
+                        },
+                        Some(Res::Dot(DotRes::Methods { candidates })) => matches!(
+                            self.resolve_method_dispatch(
+                                *call_span,
+                                name.span,
+                                Some(recv),
+                                candidates
+                            ),
+                            Ok(TraitDispatch::Inherent { .. }
+                                | TraitDispatch::Static { .. }
+                                | TraitDispatch::Runtime { .. }
+                                | TraitDispatch::Foreign { .. }
+                                | TraitDispatch::InherentForeign { .. })
+                        ),
+                        Some(Res::Dot(DotRes::Static { candidates })) => matches!(
+                            self.resolve_method_dispatch(*call_span, name.span, None, candidates),
+                            Ok(TraitDispatch::Inherent { .. }
+                                | TraitDispatch::InherentForeign { .. })
+                        ),
+                        _ => false,
+                    }
             },
             _ => false,
         }
