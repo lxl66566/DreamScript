@@ -823,6 +823,19 @@ impl Graph {
         artifact_pins_of(&self.artifacts)
     }
 
+    /// The memoized linked packages' compiled modules, in name order:
+    /// each demanded name at its recorded identity with its module — the
+    /// shared compiled-dep tier a build fills without a walk, since the
+    /// compile demanded every imported package's surfaces and the memo
+    /// holds exactly the demand set the walk would raise.
+    pub(crate) fn linked_modules(&self) -> Vec<(String, Hash128, Module)> {
+        self.linked
+            .borrow()
+            .iter()
+            .map(|(name, package)| (name.clone(), self.identities[name], package.module.clone()))
+            .collect()
+    }
+
     /// The graph's bindable artifacts: each resolved `[artifacts]`
     /// library whose bytes load and enumerate installs under its manifest
     /// name — the native module a bound extern's pool constant addresses

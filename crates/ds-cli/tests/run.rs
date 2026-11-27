@@ -429,7 +429,8 @@ fn foreign_callee_reports_the_missing_module() {
     assert!(!ok, "unresolved callee exits nonzero");
     assert_eq!(out, "");
     assert!(
-        err.contains("module `dep` is not installed"),
+        err.contains("the artifact `app` links `dep` at content hash")
+            && err.contains("no compiled module serves it"),
         "stderr: {err}"
     );
 }

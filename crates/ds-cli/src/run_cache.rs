@@ -1,16 +1,17 @@
 //! The script-mode dsmod caches behind `ds run <file.ds>`: the CLI-owned
 //! key folds, the mmap hit paths, and the temp-plus-rename writes, over
 //! the `$DS_CACHE` root ds-pkg resolves (the one authority the package
-//! store shares). Three artifact families share the root: the package
+//! store shares). Four artifact families share the root: the package
 //! root's own module, each linked dep member's compiled module, and the
 //! same member's checked prefix — its `.dsi`, written beside the dsmod
 //! under the same key so `ds info` and the LSP hover serve the surface a
 //! run of the same graph cached — the dep families keyed on the member's
 //! own link name and content identity over the same graph fold, so a
 //! warm package run serves the walk's dep demands from disk and compiles
-//! nothing in-process. None of the caches ever fails a run: a root that
-//! cannot resolve, an artifact that cannot be read or validated, and a
-//! write that cannot land all silently fall back to the in-process
+//! nothing in-process; and the shared dep tier over the graph-free fold, the compiled module any
+//! walk naming the member's own demand consumes, a bare built package artifact's links among them.
+//! None of the caches ever fails a run: a root that cannot resolve, an artifact that cannot be read
+//! or validated, and a write that cannot land all silently fall back to the in-process
 //! source pipeline.
 
 use std::{
@@ -53,6 +54,16 @@ const KEY_DOMAIN: &[u8] = b"ds-run-cache-v2";
 /// the root compile alone), so the two folds share components but never
 /// a domain.
 const DEP_KEY_DOMAIN: &[u8] = b"ds-dep-cache-v2";
+
+/// The shared dep fold's domain tag: the graph-free compiled-dep tier a
+/// bare built artifact's walk consumes. The graph-keyed dep fold pins
+/// every consuming graph's identities beside the member's own, so its
+/// artifacts answer that graph's warm re-runs alone; this tier folds
+/// only what the dep module's own bytes commit to, so any walk naming
+/// the member's `(name, identity)` demand consumes it — a built package
+/// artifact's links among them. The dep folds share components but
+/// never a domain, and neither answers the other's file.
+const SHARED_DEP_KEY_DOMAIN: &[u8] = b"ds-dep-shared-v1";
 
 /// The artifact-pin list's marker inside a fold: the dep list and the
 /// artifact list share the name-then-hash pair framing, so the marker
@@ -115,6 +126,33 @@ impl RunCache {
             &BTreeMap::new(),
             true,
         )
+    }
+
+    /// Resolves the cache for one bare built artifact's walk: the
+    /// shared dep tier only — no graph identities, no artifact pins, the
+    /// ambient identity the artifact's own `@std` dep row derives. The
+    /// walk's dep demands fold nothing but what the dep modules' own
+    /// bytes commit to, so any package run's or build's fill serves.
+    pub(crate) fn discover_shared(enabled: bool, ambient: Option<Hash128>) -> Self {
+        let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
+        let cache = Self {
+            root: enabled.then(ds_pkg::store::cache_root).flatten(),
+            ambient,
+            deps: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            debug,
+        };
+        if cache.debug && cache.root.is_none() {
+            eprintln!("ds run cache: off");
+        }
+        cache
+    }
+
+    /// Whether the handle reads and writes at all (the off switch and a
+    /// resolvable cache root both hold): a bare artifact walk without it
+    /// has no serve at all, and its miss names that.
+    pub(crate) fn enabled(&self) -> bool {
+        self.root.is_some()
     }
 
     /// Resolves the cache for one package run. `enabled` is the
@@ -263,6 +301,47 @@ impl RunCache {
         write_atomic(&artifact, &ds_mod::write(module));
     }
 
+    /// The compiled module one linked dep member's graph-free tier holds
+    /// for the demanded `(name, identity)`: the artifact any walk
+    /// consumes — a built package artifact's bare walk among them — under
+    /// the same header revalidation `lookup_dep` applies, so a served
+    /// module is exactly the `(name, source hash)` the demand names and
+    /// the loader's own link checks judge everything beyond it. `None`
+    /// is the miss every caller falls back from.
+    pub(crate) fn lookup_shared_dep(&self, name: &str, linked: Hash128) -> Option<Module> {
+        let root = self.root.as_ref()?;
+        let artifact = cache_path(root, TARGET_SEGMENT, self.shared_dep_key(name, linked));
+        let Ok(mapped) = read_artifact(&artifact) else {
+            return self.miss(Family::Shared, &artifact);
+        };
+        let module = mapped.module();
+        if module.name() != name || module.source_hash() != linked {
+            return self.miss(Family::Shared, &artifact);
+        }
+        self.report(Family::Shared, "hit", &artifact);
+        Some(mapped.into_module())
+    }
+
+    /// Writes one linked dep member's compiled module under the key
+    /// `lookup_shared_dep` reads, beside the graph-keyed artifact
+    /// `store_dep` writes: the same module twice, one per fold, so a
+    /// package run's cold compile serves both its own graph's warm
+    /// re-runs and any bare built artifact's walk. Every failure is
+    /// silent — the run already succeeded.
+    pub(crate) fn store_shared_dep(&self, name: &str, linked: Hash128, module: &Module) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        if module.name() != name || module.source_hash() != linked {
+            return;
+        }
+        let artifact = cache_path(root, TARGET_SEGMENT, self.shared_dep_key(name, linked));
+        if artifact_validates(&artifact, name, linked) {
+            return;
+        }
+        write_atomic(&artifact, &ds_mod::write(module));
+    }
+
     /// The cached `.dsi` beside one linked dep member's dsmod: the same
     /// dep fold key with the artifact extension, so the member's checked
     /// prefix — the surface `ds info` and the LSP hover serve — lands
@@ -366,45 +445,37 @@ impl RunCache {
         self.fold(DEP_KEY_DOMAIN, name, identity)
     }
 
+    /// The shared dep-member fold: the member's link name and content
+    /// identity over the ambient identity, the format version, and the
+    /// build identity — the components the dep module's own bytes commit
+    /// to, never the consuming graph's. The dep module's own link table
+    /// pins its transitive content and the walk's install-time checks
+    /// judge it, so a graph-free artifact can never serve a wrong world:
+    /// a demand it cannot honest-answer is a miss, and a served module
+    /// whose transitive links disagree with what the walk installs
+    /// refuses loudly naming both hashes.
+    fn shared_dep_key(&self, name: &str, identity: Hash128) -> Hash128 {
+        fold_components(
+            SHARED_DEP_KEY_DOMAIN,
+            name,
+            identity,
+            self.ambient,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
     /// One domain-tagged blake3-128 fold over the shared component set
     /// (see `key`'s component list).
     fn fold(&self, domain: &[u8], module_name: &str, source_hash: Hash128) -> Hash128 {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(domain);
-        fold_str(&mut hasher, module_name);
-        hasher.update(source_hash.as_bytes());
-        match self.ambient {
-            Some(ambient) => {
-                hasher.update(&[1]);
-                hasher.update(ambient.as_bytes());
-            },
-            None => {
-                hasher.update(&[0]);
-            },
-        }
-        // the dep identities the resolved graph pinned, each name
-        // framed around its hash so no two pairs splice; a plain
-        // script folds the empty list (see `key`'s doc)
-        hasher.update(&(self.deps.len() as u64).to_le_bytes());
-        for (name, content) in &self.deps {
-            fold_str(&mut hasher, name);
-            hasher.update(content.as_bytes());
-        }
-        // the resolved graph's artifact pins, each name framed around
-        // its hash over the list's own marker (a plain script folds the
-        // empty list; see `key`'s doc)
-        hasher.update(ARTIFACT_LIST_TAG);
-        hasher.update(&(self.artifacts.len() as u64).to_le_bytes());
-        for (name, hash) in &self.artifacts {
-            fold_str(&mut hasher, name);
-            hasher.update(hash.as_bytes());
-        }
-        hasher.update(&[FORMAT_VERSION]);
-        fold_str(&mut hasher, BUILD_ID);
-        let digest = hasher.finalize();
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&digest.as_bytes()[..16]);
-        Hash128::new(bytes)
+        fold_components(
+            domain,
+            module_name,
+            source_hash,
+            self.ambient,
+            &self.deps,
+            &self.artifacts,
+        )
     }
 
     /// Reports one lookup decision on stderr when the debug switch is
@@ -427,11 +498,15 @@ impl RunCache {
 }
 
 /// Which cache family one debug line names: the root fold's module
-/// tier or a linked dep member's — the two artifact families share the
+/// tier, a linked dep member's graph-keyed artifact, or the shared
+/// graph-free dep tier — the two artifact families share the
 /// root, and the line tells them apart.
 enum Family {
     Run,
     Dep,
+    /// The graph-free compiled-dep tier a bare built artifact's walk
+    /// consumes.
+    Shared,
 }
 
 impl Family {
@@ -440,6 +515,7 @@ impl Family {
         match self {
             Family::Run => "ds run cache",
             Family::Dep => "ds dep cache",
+            Family::Shared => "ds dep shared cache",
         }
     }
 }
@@ -449,6 +525,58 @@ impl Family {
 pub(crate) fn fold_str(hasher: &mut blake3::Hasher, text: &str) {
     hasher.update(&(text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
+}
+
+/// One domain-tagged blake3-128 fold over every input that changes the
+/// produced bytecode for one source text: the module name, the content
+/// identity, the ambient identity (the marker byte when none), the
+/// caller's dep identities and artifact pins (the graph fold's extra
+/// components; the shared dep fold passes both maps empty), the dsmod
+/// format version, and the build identity.
+fn fold_components(
+    domain: &[u8],
+    module_name: &str,
+    source_hash: Hash128,
+    ambient: Option<Hash128>,
+    deps: &BTreeMap<String, Hash128>,
+    artifacts: &BTreeMap<String, Hash128>,
+) -> Hash128 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    fold_str(&mut hasher, module_name);
+    hasher.update(source_hash.as_bytes());
+    match ambient {
+        Some(ambient) => {
+            hasher.update(&[1]);
+            hasher.update(ambient.as_bytes());
+        },
+        None => {
+            hasher.update(&[0]);
+        },
+    }
+    // the dep identities the resolved graph pinned, each name framed
+    // around its hash so no two pairs splice; a plain script folds the
+    // empty list (see `key`'s doc)
+    hasher.update(&(deps.len() as u64).to_le_bytes());
+    for (name, content) in deps {
+        fold_str(&mut hasher, name);
+        hasher.update(content.as_bytes());
+    }
+    // the resolved graph's artifact pins, each name framed around its
+    // hash over the list's own marker (a plain script folds the empty
+    // list; see `key`'s doc)
+    hasher.update(ARTIFACT_LIST_TAG);
+    hasher.update(&(artifacts.len() as u64).to_le_bytes());
+    for (name, hash) in artifacts {
+        fold_str(&mut hasher, name);
+        hasher.update(hash.as_bytes());
+    }
+    hasher.update(&[FORMAT_VERSION]);
+    fold_str(&mut hasher, BUILD_ID);
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Hash128::new(bytes)
 }
 
 /// Whether the artifact already under `path` validates as the module
@@ -644,6 +772,64 @@ mod tests {
             at(b"one").dep_key("@lib", member),
             at(b"one").key("@lib", member),
             "the dep fold never answers the root fold's domain"
+        );
+    }
+
+    /// The shared dep fold is graph-free: the member's own identity and
+    /// the ambient identity re-key it, the consuming graph's dep
+    /// identities and artifact pins do not, and its domain never
+    /// collides with the graph-keyed dep fold — the property a bare
+    /// built artifact's walk stands on, since any graph's fill must
+    /// serve it and a served artifact must never answer a foreign
+    /// member identity.
+    #[test]
+    fn the_shared_dep_fold_is_graph_free() {
+        let member = Hash128::compute(b"pub fn twice(n: int) -> int { 2 * n }");
+        let shared =
+            |identity: &[u8]| RunCache::discover_shared(false, Some(Hash128::compute(identity)));
+        assert_ne!(
+            shared(b"core").shared_dep_key("@lib", member),
+            shared(b"session").shared_dep_key("@lib", member),
+            "the ambient identity re-keys the shared fold"
+        );
+        assert_ne!(
+            shared(b"core").shared_dep_key("@lib", member),
+            shared(b"core").shared_dep_key("@lib", Hash128::compute(b"other")),
+            "the member's own identity re-keys the shared fold"
+        );
+        // the graphed handle's ambient is the merged identity (a graph
+        // with no `@std` declared, the package shape), so the graph-free
+        // twin carries the same one — the assertion below isolates the
+        // graph's own components, the ambient never the mover
+        let bare = RunCache::discover_shared(
+            false,
+            Some(super::ambient_identity(
+                &BTreeMap::from([
+                    ("@deep".to_owned(), Hash128::compute(b"one")),
+                    ("@other".to_owned(), Hash128::compute(b"two")),
+                ]),
+                false,
+            )),
+        );
+        let graphed = RunCache::discover_linked(
+            false,
+            false,
+            &BTreeMap::from([
+                ("@deep".to_owned(), Hash128::compute(b"one")),
+                ("@other".to_owned(), Hash128::compute(b"two")),
+            ]),
+            &BTreeMap::from([("math".to_owned(), Hash128::compute(b"pin"))]),
+            false,
+        );
+        assert_eq!(
+            bare.shared_dep_key("@lib", member),
+            graphed.shared_dep_key("@lib", member),
+            "the consuming graph's components never move the shared key"
+        );
+        assert_ne!(
+            bare.shared_dep_key("@lib", member),
+            graphed.dep_key("@lib", member),
+            "the shared fold never answers the graph-keyed dep fold's domain"
         );
     }
 

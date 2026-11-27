@@ -10,17 +10,23 @@
 //! and the dep-member dsmod artifacts, each linked package's own
 //! compiled module keyed on its content identity — serve the root and
 //! the walk's dep demands across runs under keys that fold the root's
-//! own member identity and the graph's dep identities.
+//! own member identity and the graph's dep identities. A built package
+//! artifact — the dsmod `ds build` wrote over a manifest root — runs
+//! the same way: its dep table is the resolution record, so the module
+//! installs through the same deps-first walk, every linked demand
+//! served from the shared compiled-dep tier the package runs and
+//! builds fill, and nothing recompiles.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Context, Error, Result, anyhow};
 use clap::Args;
 use ds_diag::{Files, human};
-use ds_mod::{Module, ReadError, read};
+use ds_mod::{Hash128, Module, ReadError, read};
 use ds_vm::{
     ArenaMisuse, ArenaPackError, FIBER_ROOT, FramePc, LoadError as VmLoadError, ModuleBuildError,
     ModuleRegistry, ReplEntry, StagedSite, Trap, Value, Vm,
@@ -28,7 +34,7 @@ use ds_vm::{
     platform::Platform,
 };
 
-use crate::{package, run_cache::RunCache, shutdown::ShutdownWatch, source};
+use crate::{ambient_dsmod, package, run_cache::RunCache, shutdown::ShutdownWatch, source};
 
 /// The CLI is the platform provider: every run installs the
 /// default `std` platform handler (console, fsys, net, time) into its
@@ -62,8 +68,9 @@ pub struct RunArgs {
     /// Compile without the stdlib ambient package member (source files only)
     #[arg(long)]
     no_ambient: bool,
-    /// Run .ds sources without consulting the script-mode caches (the
-    /// dsmod artifact and the checked-prefix `.dsi`)
+    /// Run without consulting the script-mode caches (the dsmod
+    /// artifact, the checked-prefix `.dsi`, and the dep tiers a package
+    /// run or a built artifact's walk serves from)
     #[arg(long)]
     no_cache: bool,
     /// Print a non-unit entry answer after a clean run (a unit answer
@@ -189,13 +196,145 @@ struct PreparedRun {
 /// user's own, outside the cache artifacts' write-once discipline, so the
 /// run reads its bytes and validates from those instead of mapping (a
 /// mapping's stability contract cannot name a file another process may
-/// rewrite under the run).
+/// rewrite under the run). A module with no link table installs alone;
+/// one with links is a built package artifact — its dep table is the
+/// resolution record — and installs through the same deps-first walk a
+/// package run takes.
 fn read_dsmod(args: &RunArgs) -> Result<PreparedRun> {
     let bytes = std::fs::read(&args.file)
         .map_err(|error| anyhow!("cannot open module `{}`: {error}", args.file.display()))?;
     let module =
         read(&bytes).map_err(|error| anyhow!("{}", render_read_error(&args.file, &error)))?;
-    install_module(module)
+    if module.deps().is_empty() {
+        install_module(module)
+    } else {
+        run_linked_artifact(args, module)
+    }
+}
+
+/// The merged ambient's content identity: the dep-table hash the writer
+/// records for the ambient over a graph that never resolved `@std`, the
+/// hash the checked-in ambient artifact serves under.
+fn merged_ambient_identity() -> Hash128 {
+    Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())
+}
+
+/// The ambient identity a bare artifact's shared-dep folds derive, read
+/// off the artifact's own `@std` dep row: the merged ambient's hash
+/// names a non-declaring graph (every member compiled over the merged
+/// ambient), the `@std` bundle's member identity a declaring graph (the
+/// shrunk core), and the row's absence a `--no-ambient` build. An
+/// entry-script build records the bundle identity too and derives the
+/// core here, a shape no bare walk fills or serves — the clause is
+/// package artifacts, and that miss names the fill.
+fn bare_ambient_identity(deps: &BTreeMap<String, Hash128>) -> Option<Hash128> {
+    match deps.get(ambient_dsmod::AMBIENT_MODULE_NAME) {
+        Some(hash) if *hash == merged_ambient_identity() => Some(*hash),
+        Some(_) => Some(Hash128::compute(ds_stdlib::AMBIENT_CORE_SOURCE.as_bytes())),
+        None => None,
+    }
+}
+
+/// A built package artifact's run: the dep table is the resolution
+/// record (each link's name and the content identity it pins), so the
+/// module installs through the same deps-first walk a package run
+/// takes, every linked demand served from the shared compiled-dep tier
+/// the package runs and builds fill — no manifest re-resolves, no
+/// source compiles. The walk's own checks judge every serve: the tier's
+/// header revalidation pins the demanded `(name, hash)`, the loader
+/// refuses one name at two hashes, and a served module whose own links
+/// disagree with the installed content refuses loudly naming both
+/// hashes. A bound extern cannot serve here — the `[artifacts]` pins a
+/// manifest carries never ride a bare artifact — and the install
+/// refuses at the pool validation naming the artifact.
+fn run_linked_artifact(args: &RunArgs, module: Module) -> Result<PreparedRun> {
+    let deps: BTreeMap<String, Hash128> = module
+        .deps()
+        .iter()
+        .map(|dep| (dep.name.clone(), dep.content_hash))
+        .collect();
+    let cache = RunCache::discover_shared(!args.no_cache, bare_ambient_identity(&deps));
+    let name = module.name().to_owned();
+    let functions: Vec<String> = module
+        .functions()
+        .iter()
+        .map(|function| function.name().to_owned())
+        .collect();
+    let mut registry = ModuleRegistry::new();
+    provide_platform(&mut registry);
+    let mut vm = Vm::new(registry);
+    // a demand nothing serves refuses through the stash out of the
+    // provider closure, the miss naming the linked hash and the fill
+    let failed = std::cell::RefCell::new(None);
+    let walk = vm.load(module, |dep, linked| {
+        if let Some(served) = cache.lookup_shared_dep(dep, linked) {
+            return Some(served);
+        }
+        match serve_linked_artifact_dep(&cache, dep, linked) {
+            Ok(Some(served)) => Some(served),
+            Ok(None) => {
+                *failed.borrow_mut() = Some(unserved_dep_error(&name, &cache, dep, linked));
+                None
+            },
+            Err(error) => {
+                *failed.borrow_mut() = Some(error);
+                None
+            },
+        }
+    });
+    if let Some(error) = failed.into_inner() {
+        return Err(error);
+    }
+    walk.map_err(|error| install_error(&name, functions.len(), &error))?;
+    Ok(PreparedRun {
+        vm,
+        name,
+        functions,
+    })
+}
+
+/// One bare artifact walk demand beyond the shared tier: the checked-in
+/// ambient answers the merged-ambient hash exactly, the identity its own
+/// bytes commit to, and anything else stays a miss — the walk's own
+/// validation, never a nearest match.
+fn serve_linked_artifact_dep(
+    cache: &RunCache,
+    dep: &str,
+    linked: Hash128,
+) -> Result<Option<Module>> {
+    if dep == ambient_dsmod::AMBIENT_MODULE_NAME && linked == merged_ambient_identity() {
+        let module =
+            ambient_dsmod::resident().context("the checked-in ambient artifact does not verify")?;
+        let served = (*module).clone();
+        cache.store_shared_dep(dep, linked, &served);
+        return Ok(Some(served));
+    }
+    Ok(None)
+}
+
+/// The bare walk's provider-miss refusal: a built artifact runs on the
+/// compiled-dep cache alone, so the miss names the linked hash beside
+/// where a fill comes from. A drifted ambient link names the hash this
+/// toolchain serves instead - that artifact never runs here, and the
+/// refusal says so.
+fn unserved_dep_error(name: &str, cache: &RunCache, dep: &str, linked: Hash128) -> Error {
+    let fill = if dep == ambient_dsmod::AMBIENT_MODULE_NAME && linked != merged_ambient_identity() {
+        format!(
+            "this toolchain's ambient serves at content hash {}; the artifact never runs on it, \
+             so rebuild against this toolchain",
+            merged_ambient_identity()
+        )
+    } else if cache.enabled() {
+        "run or build the package beside its manifest once under this toolchain to cache the \
+         linked members"
+            .to_owned()
+    } else {
+        "the caches are off (--no-cache), and a built artifact compiles nothing itself".to_owned()
+    };
+    anyhow!(
+        "the artifact `{name}` links `{dep}` at content hash {linked}, and no compiled module \
+         serves it; {fill}"
+    )
 }
 
 /// Installs one finished module into a fresh VM with the default std
@@ -350,6 +489,7 @@ fn install_package_root(
         match graph.serve(dep, dep_dsi) {
             Ok(Some(served)) => {
                 cache.store_dep(dep, linked, &served);
+                cache.store_shared_dep(dep, linked, &served);
                 Some(served)
             },
             Ok(None) => None,

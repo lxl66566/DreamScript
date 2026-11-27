@@ -14,8 +14,9 @@ use std::{
 };
 
 use ds_diag::FileId;
-use ds_mod::{Dep, Hash128};
+use ds_mod::{Dep, Hash128, Module, TargetClass, write as write_module};
 use ds_pkg::{Manifest, Package};
+use ds_vm::abi::{FrameLayout, SlotType};
 
 mod support;
 
@@ -334,7 +335,9 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     }
 
     // the cold run: the root misses, both linked members miss and
-    // compile in-process, and one artifact lands per compiled module
+    // compile in-process, and one artifact lands per compiled module —
+    // the graph-keyed artifact and the shared-tier copy each dep
+    // write, so the ambient and both members double
     let (ok, cold, err) = ds_debug(&cache, &["run", "--print-result", entry]);
     assert!(ok, "the cold package run succeeds (stderr: {err})");
     assert_eq!(cold, "hi\n42\n");
@@ -346,8 +349,8 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     );
     assert_eq!(
         run_artifacts(&cache).len(),
-        3,
-        "the root and both members land one artifact each"
+        6,
+        "the root and both members land one artifact each, shared tier beside"
     );
 
     // the warm run: the root serves and both members serve from disk —
@@ -369,7 +372,7 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     );
     assert_eq!(
         run_artifacts(&cache).len(),
-        3,
+        6,
         "the warm run writes nothing"
     );
 
@@ -426,8 +429,9 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
     );
     assert_eq!(
         run_artifacts(&cache).len(),
-        6,
-        "the repinned resolution lands its own three artifacts"
+        10,
+        "the repinned resolution re-keys the root, both graph dep members, and the moved member's \
+         shared artifact"
     );
 
     let (ok, warm_two, err) = ds_debug(&cache, &["run", "--print-result", entry]);
@@ -464,9 +468,228 @@ fn a_warm_package_run_serves_the_dep_members_from_the_cache() {
         2,
         "the original member artifacts remain: {err}"
     );
-    assert_eq!(run_artifacts(&cache).len(), 6, "nothing rewrites");
+    assert_eq!(run_artifacts(&cache).len(), 10, "nothing rewrites");
 
     fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A built package artifact runs through the walk on the shared
+/// compiled-dep tier: the package run and the build fill the tier, and
+/// the artifact's own dep table drives the same deps-first walk with
+/// every linked demand served warm — the store's bundles removed ahead
+/// of the artifact run, so nothing compiles and no source exists to
+/// compile, the debug observable naming the serve.
+#[test]
+fn a_built_artifact_runs_through_the_walk_on_the_shared_dep_tier() {
+    let (work, lib_id) = fixtures("barewalk");
+    let root = write_root(&work, &root_manifest(lib_id, false), ROOT_SOURCE);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let cache = test_cache();
+
+    // the cold package run compiles the graph and fills both dep tiers
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
+    assert!(ok, "the package run exits 0 (stderr: {err})");
+    assert_eq!(out, "hi\n42\n");
+
+    let out_path = work.join("app.dsmod");
+    let (ok, _, err) = ds(&[
+        "build",
+        entry,
+        "--out",
+        out_path.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the package build exits 0 (stderr: {err})");
+
+    // the bundles leave the store: the artifact run serves compiled
+    // modules alone, no bundle decodes, no source compiles
+    let pkg_dir = cache.join("pkg");
+    for row in fs::read_dir(&pkg_dir)
+        .expect("the store segment reads")
+        .flatten()
+    {
+        if row.path().extension().is_some_and(|ext| ext == "pkg") {
+            fs::remove_file(row.path()).expect("the bundle removes");
+        }
+    }
+
+    let artifact = out_path.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds_debug(&cache, &["run", "--print-result", artifact]);
+    assert!(ok, "the built artifact runs (stderr: {err})");
+    assert_eq!(out, "hi\n42\n", "the walk serves the linked graph");
+    assert_eq!(
+        err.matches("ds dep shared cache: hit").count(),
+        3,
+        "the walk serves @std, @lib, and @deep from the shared tier: {err}"
+    );
+    assert!(
+        !err.contains("ds dep cache: hit"),
+        "the graph-keyed tier never answers a bare artifact's walk: {err}"
+    );
+
+    // the second run re-serves the same three
+    let (ok, out, _) = ds_debug(&cache, &["run", "--print-result", artifact]);
+    assert!(ok);
+    assert_eq!(out, "hi\n42\n");
+    assert_eq!(
+        err.matches("ds dep shared cache: hit").count(),
+        3,
+        "the same three re-serve: {err}"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// An edited dep re-keys the bare artifact walk: the edit moves the
+/// demanded dep's own member bytes, so the rebuilt artifact's link for
+/// it re-keys and the new content serves, while the old artifact's own
+/// world stays cached under its own identities and keeps running. The
+/// re-keying rides on the dep rows' member identities — an edit deeper
+/// in the graph that leaves the demanded member's bytes unmoved keeps
+/// the row, and is outside this test's claim.
+#[test]
+fn an_edited_dep_rekeys_the_bare_artifact_walk() {
+    let (work, lib_id) = fixtures("barewalk-rekey");
+    let root = write_root(&work, &root_manifest(lib_id, false), ROOT_SOURCE);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+
+    let (ok, out, err) = ds(&["run", "--print-result", entry]);
+    assert!(ok, "the cold run exits 0 (stderr: {err})");
+    assert_eq!(out, "hi\n42\n");
+
+    let old_artifact = work.join("old.dsmod");
+    let (ok, _, err) = ds(&[
+        "build",
+        entry,
+        "--out",
+        old_artifact.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the build exits 0 (stderr: {err})");
+
+    // the edit: @lib's own member bytes move as a version bump and the
+    // root repins, so the moved member identity re-keys every tier the
+    // walk names
+    let lib_member_v2 = LIB_MEMBER.replace("base() + n", "base() + n + 1");
+    let deep_id = bundle_identity(&deep_manifest(), &[("deep.ds", DEEP_MEMBER)]);
+    let lib_manifest_v2 = format!(
+        "name = \"@lib\"\nversion = \"1.3.0\"\n\n[deps]\n@deep = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{deep_id}\" }}\n"
+    );
+    let lib_id_v2 = bundle_identity(&lib_manifest_v2, &[("helper.ds", &lib_member_v2)]);
+    let lib_dir = work.join("lib2");
+    write_pkg(&lib_dir, &lib_manifest_v2, &[("helper.ds", &lib_member_v2)]);
+    let (ok, _, err) = ds(&["save", lib_dir.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "ds save {} exits 0 (stderr: {err})", lib_dir.display());
+    let root_v2_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@lib = {{ ver = \"1.3.0\", hash = \
+         \"blake3:{lib_id_v2}\" }}\n"
+    );
+    let root_v2 = write_root(&work, &root_v2_manifest, ROOT_SOURCE);
+    let entry_v2 = root_v2.join("app.ds");
+    let entry_v2 = entry_v2.to_str().expect("temp path is UTF-8");
+
+    // the new content serves through the walk, never the stale
+    let (ok, out, err) = ds(&["run", "--print-result", entry_v2]);
+    assert!(ok, "the repinned run exits 0 (stderr: {err})");
+    assert_eq!(out, "hi\n43\n", "the edited dep answers");
+
+    let new_artifact = work.join("new.dsmod");
+    let (ok, _, err) = ds(&[
+        "build",
+        entry_v2,
+        "--out",
+        new_artifact.to_str().expect("temp path is UTF-8"),
+    ]);
+    assert!(ok, "the rebuild exits 0 (stderr: {err})");
+
+    let artifact = new_artifact.to_str().expect("temp path is UTF-8");
+    let (ok, out, _) = ds(&["run", "--print-result", artifact]);
+    assert!(ok, "the rebuilt artifact runs (stderr: {err})");
+    assert_eq!(out, "hi\n43\n", "the rebuilt artifact pins the new content");
+
+    // the old artifact's world remains cached under its own identities
+    let old = old_artifact.to_str().expect("temp path is UTF-8");
+    let (ok, out, err) = ds(&["run", "--print-result", old]);
+    assert!(ok, "the old artifact keeps its own world (stderr: {err})");
+    assert_eq!(out, "hi\n42\n");
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// A bare artifact's links judge against what serves: a drifted
+/// ambient hash refuses naming both hashes, and a member hash nothing
+/// compiled refuses naming the fill.
+#[test]
+fn a_bare_artifacts_drifted_links_refuse_loudly() {
+    let work = temp_dir("barewalk-drift");
+
+    // the drifted ambient: a dep row the toolchain's ambient cannot
+    // answer, the refusal naming both hashes
+    let drifted = drift_module();
+    let path = work.join("drifted.dsmod");
+    fs::write(&path, &drifted).expect("the drifted artifact writes");
+    let (ok, _, err) = ds(&["run", path.to_str().expect("temp path is UTF-8")]);
+    assert!(!ok, "a drifted ambient link refuses");
+    assert!(
+        err.contains("links `@std` at content hash")
+            && err.contains("no compiled module serves it")
+            && err.contains(&Hash128::compute(b"drifted").to_string())
+            && err.contains(&ds_stdlib_hash().to_string()),
+        "the refusal names the linked hash beside the toolchain's own: {err}"
+    );
+
+    // an uncached member: the miss names where a fill comes from
+    let uncached = uncached_member_module();
+    let path = work.join("uncached.dsmod");
+    fs::write(&path, &uncached).expect("the uncached artifact writes");
+    let (ok, _, err) = ds(&["run", path.to_str().expect("temp path is UTF-8")]);
+    assert!(!ok, "an uncached member link refuses");
+    assert!(
+        err.contains("run or build the package beside its manifest once"),
+        "the miss names the fill: {err}"
+    );
+
+    fs::remove_dir_all(&work).expect("the temp tree removes");
+}
+
+/// The merged ambient's content identity, the hash the checked-in
+/// artifact serves under.
+fn ds_stdlib_hash() -> Hash128 {
+    Hash128::compute(ds_stdlib::AMBIENT_SOURCE.as_bytes())
+}
+
+/// One trivial module with one dep row: the walk refuses at the link
+/// demand before any entry resolves.
+fn drift_module() -> Vec<u8> {
+    link_refusal_module("drifted", "@std", Hash128::compute(b"drifted"))
+}
+
+/// One trivial module linking a member nothing compiled.
+fn uncached_member_module() -> Vec<u8> {
+    link_refusal_module("uncached", "@lib", Hash128::compute(b"never compiled"))
+}
+
+/// One main that halts beside one dep row the walk must demand.
+fn link_refusal_module(name: &str, dep: &str, linked: Hash128) -> Vec<u8> {
+    let main = ds_mod::Function::new(
+        "main",
+        FrameLayout::new(vec![SlotType::I64], 0, 0).expect("valid fixture layout"),
+        vec![],
+        vec![
+            ds_vm::abi::uop::Uop::Funcf { frame_slots: 1 },
+            ds_vm::abi::uop::Uop::Halt { slot: 0 },
+        ],
+    )
+    .expect("valid function");
+    let module = Module::new(
+        name,
+        TargetClass::Bytecode,
+        Hash128::compute(name.as_bytes()),
+    )
+    .with_dep(dep, linked)
+    .with_function(main);
+    write_module(&module)
 }
 
 /// The missing dep no provider serves: without a registry the refusal

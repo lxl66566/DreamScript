@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use crate::{package, source};
+use crate::{package, run_cache::RunCache, source};
 
 /// The `ds build` surface: one source file, one output module.
 #[derive(Debug, Args)]
@@ -39,7 +39,11 @@ pub struct BuildArgs {
 /// module value in debug builds instead.
 pub fn build(args: &BuildArgs) -> Result<()> {
     let compiled = match package::open(&args.file, args.no_ambient)? {
-        Some(graph) => build_root(&args.file, &graph, args.no_ambient, false),
+        Some(graph) => {
+            let compiled = build_root(&args.file, &graph, args.no_ambient, false)?;
+            fill_shared_dep_tier(&graph, args.no_ambient);
+            Ok(compiled)
+        },
         // the bare-specifier switch: a manifest-free source builds over
         // the implicit `@std` graph, the same resolution its run takes
         None if !args.no_ambient => {
@@ -81,6 +85,21 @@ fn build_root(
         script,
     );
     package::compile_root(file, graph, script, Some(&linked), None)
+}
+
+/// Fills the shared compiled-dep tier from the graph's memoized linked
+/// packages after a manifest build: every imported package's module the
+/// compile demanded, stored under the graph-free fold a bare built
+/// artifact's walk consumes, so `ds build` then `ds run app.dsmod` is
+/// self-contained under one compiler build. The entry-script build's
+/// session shape writes nothing — no bare walk derives that shape, the
+/// artifacts would be dead files.
+fn fill_shared_dep_tier(graph: &package::Graph, no_ambient: bool) {
+    let pins = graph.artifact_pins();
+    let cache = RunCache::discover_linked(true, no_ambient, graph.identities(), &pins, false);
+    for (name, identity, module) in graph.linked_modules() {
+        cache.store_shared_dep(&name, identity, &module);
+    }
 }
 
 /// Debug-build check that the writer emitted bytes its own reader returns as

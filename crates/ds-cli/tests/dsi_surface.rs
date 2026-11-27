@@ -166,8 +166,8 @@ fn a_package_run_caches_the_dep_dsi_beside_its_dsmod() {
     let dsis = of_ext("dsi");
     assert_eq!(
         dsmods.len(),
-        2,
-        "the root's and the dep's dsmod: {dsmods:?}"
+        3,
+        "the root's, the dep's, and the dep's shared-tier dsmod: {dsmods:?}"
     );
     assert_eq!(dsis.len(), 1, "exactly the dep's .dsi lands: {dsis:?}");
     let dsi = dsis[0];

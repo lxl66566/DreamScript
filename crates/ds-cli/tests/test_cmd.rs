@@ -251,8 +251,8 @@ fn a_warm_run_serves_the_cache_and_answers_the_cold_summaries() {
     );
     assert_eq!(
         artifacts(&cache).len(),
-        2,
-        "the composed root and the dep member both land"
+        3,
+        "the composed root and the dep member both land, the shared copy beside"
     );
 
     // the full parent run over the cold cache: the pinned summary
@@ -274,7 +274,7 @@ fn a_warm_run_serves_the_cache_and_answers_the_cold_summaries() {
         warm_err.contains("ds run cache: hit"),
         "the composed root serves from disk: {warm_err}"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the hit path writes nothing");
+    assert_eq!(artifacts(&cache).len(), 3, "the hit path writes nothing");
 
     // the full parent run over the warm cache: the summaries match the
     // cold run's, wall times aside
@@ -302,8 +302,8 @@ fn an_edit_between_runs_rekeys_the_verdict() {
     assert!(ok, "the first run passes (stderr: {err})");
     assert_eq!(
         artifacts(&cache).len(),
-        2,
-        "the composed root and the dep member land"
+        3,
+        "the composed root and the dep member land, the shared copy beside"
     );
 
     // the dep's content moves: the composed test asserts the old
@@ -321,8 +321,8 @@ fn an_edit_between_runs_rekeys_the_verdict() {
     );
     assert_eq!(
         artifacts(&cache).len(),
-        4,
-        "the moved graph compiles and lands its own keys"
+        6,
+        "the moved graph compiles and lands its own keys, shared copies beside"
     );
 
     // the dep's content restores: the original keys' artifacts are
@@ -333,7 +333,7 @@ fn an_edit_between_runs_rekeys_the_verdict() {
     assert!(ok, "the restored dep passes (stderr: {err})");
     assert_eq!(
         artifacts(&cache).len(),
-        4,
+        6,
         "the restored keys serve the standing artifacts"
     );
 
@@ -353,7 +353,7 @@ fn an_edit_between_runs_rekeys_the_verdict() {
         err.contains("ds run cache: miss"),
         "the sibling edit re-keys the composed root: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 5, "only the re-keyed root lands");
+    assert_eq!(artifacts(&cache).len(), 7, "only the re-keyed root lands");
     let _ = fs::remove_dir_all(&cache);
 }
 
@@ -396,7 +396,11 @@ fn the_reentry_serves_the_keys_a_run_composes() {
         err.contains("ds dep cache: miss"),
         "the walk compiles @std: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the probe and @std land");
+    assert_eq!(
+        artifacts(&cache).len(),
+        3,
+        "the probe, @std, and the shared copy land"
+    );
 
     // the re-entry serves both tiers from the run's keys and writes
     // nothing
@@ -410,7 +414,7 @@ fn the_reentry_serves_the_keys_a_run_composes() {
         err.contains("ds dep cache: hit"),
         "the re-entry serves the run's @std: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the served path writes nothing");
+    assert_eq!(artifacts(&cache).len(), 3, "the served path writes nothing");
     let _ = fs::remove_dir_all(&cache);
 
     // the reverse order answers the same: the re-entry lands, the run
@@ -422,7 +426,11 @@ fn the_reentry_serves_the_keys_a_run_composes() {
         err.contains("ds run cache: miss"),
         "the re-entry compiles: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the re-entry lands both tiers");
+    assert_eq!(
+        artifacts(&cache).len(),
+        3,
+        "the re-entry lands both tiers and the shared copy"
+    );
     let (ok, _, err) = ds_at(&cache, &["run", &probe_arg]);
     assert!(ok, "the probe run passes (stderr: {err})");
     assert!(
@@ -433,7 +441,7 @@ fn the_reentry_serves_the_keys_a_run_composes() {
         err.contains("ds dep cache: hit"),
         "the run serves the re-entry's @std: {err}"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the served path writes nothing");
+    assert_eq!(artifacts(&cache).len(), 3, "the served path writes nothing");
     let _ = fs::remove_dir_all(&cache);
 }
 
@@ -453,8 +461,8 @@ fn an_edit_to_the_test_file_rekeys_the_entry() {
     assert!(ok, "the cold re-entry passes (stderr: {err})");
     assert_eq!(
         artifacts(&cache).len(),
-        2,
-        "the composed root and the dep member land"
+        3,
+        "the composed root and the dep member land, the shared copy beside"
     );
 
     // the edited test dies where the old one passed, so a stale serve
@@ -480,7 +488,7 @@ fn an_edit_to_the_test_file_rekeys_the_entry() {
         combined.contains("the stale artifact served"),
         "the fresh compile answers the edited die: {combined}"
     );
-    assert_eq!(artifacts(&cache).len(), 3, "only the re-keyed root lands");
+    assert_eq!(artifacts(&cache).len(), 4, "only the re-keyed root lands");
     let _ = fs::remove_dir_all(&cache);
 }
 
@@ -510,7 +518,7 @@ fn no_cache_runs_the_tests_and_writes_nothing() {
     // warm cache consults and writes nothing
     let (ok, warm_out, _) = ds_at(&cache, &["test", &root_arg]);
     assert!(ok, "the cached run passes");
-    assert_eq!(artifacts(&cache).len(), 2, "the cached run fills");
+    assert_eq!(artifacts(&cache).len(), 3, "the cached run fills");
     let (ok, _, bypass_err) = ds_at(&cache, &[
         "test",
         &root_arg,
@@ -529,7 +537,7 @@ fn no_cache_runs_the_tests_and_writes_nothing() {
     );
     assert_eq!(
         artifacts(&cache).len(),
-        2,
+        3,
         "the bypass writes nothing over a warm cache"
     );
 
@@ -541,6 +549,6 @@ fn no_cache_runs_the_tests_and_writes_nothing() {
         normalized(&bypass_out),
         "the flag leaves the summaries alone"
     );
-    assert_eq!(artifacts(&cache).len(), 2, "the bypass writes nothing");
+    assert_eq!(artifacts(&cache).len(), 3, "the bypass writes nothing");
     let _ = fs::remove_dir_all(&cache);
 }

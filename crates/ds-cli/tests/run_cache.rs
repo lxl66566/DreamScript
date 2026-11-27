@@ -468,7 +468,8 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
 /// one entry — the package stem at the bundle's member identity, the
 /// composed fold the implicit resolution resolves — in both the
 /// script-cache artifact and `ds build`'s output, the cold run writes
-/// the `@std` dep member's dsmod beside the root's, the warm run
+/// the `@std` dep member's dsmod beside the root's (the shared-tier
+/// copy beside both), the warm run
 /// serves both families from disk (the debug markers proving the walk
 /// never compiled), and the checked-in merged ambient dsmod carries
 /// another identity than the bundle's (the walk refuses the stale
@@ -486,8 +487,8 @@ fn both_writers_record_the_dep_list_a_walk_resolves() {
     let written = artifacts(&cache);
     assert_eq!(
         written.len(),
-        2,
-        "the root's and the @std dep member's artifacts land: {written:?}"
+        3,
+        "the root's, the @std dep member's, and the shared-tier artifacts land: {written:?}"
     );
     let module = written
         .iter()
