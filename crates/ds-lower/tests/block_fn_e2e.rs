@@ -1,4 +1,4 @@
-//! Block-local `fn` lowering (ruled 2026-11-27): a `fn` declaration
+//! Block-local `fn` lowering: a `fn` declaration
 //! inside any block plans and lowers along the lambda path — one
 //! synthesized function at the declaration's own span, the statement
 //! binding the declaration's name like a const aliasing its callable

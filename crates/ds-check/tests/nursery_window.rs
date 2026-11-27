@@ -58,7 +58,7 @@ fn the_nursery_block_types_as_the_collected_answers_list() {
          }.list_len()\n}\n",
         "pub fn f() -> list[page] {\n  nursery {\n    for i in 0..3 {\n      spawn { page { url: \
          \"u\" } }\n    }\n  }\n}\n",
-        "pub fn f() -> list[()] {\n  nursery {\n    spawn { cancel(timeout) }\n  }\n}\n",
+        "pub fn f() -> list[()] {\n  nursery {\n    spawn { cancel(net_err::timeout) }\n  }\n}\n",
         "pub fn f() -> list[()] {\n  nursery {\n    println(\"no spawns at all\")\n  }\n}\n",
     ] {
         assert_eq!(check(source), Vec::<String>::new(), "{source} checks clean");
@@ -83,7 +83,7 @@ fn cancel_arms_inside_a_spawned_body_never_answer() {
         check(concat!(
             "pub fn fetch(u: string) -> page | net_err {\n",
             "  if u == \"x\" {\n",
-            "    timeout\n",
+            "    net_err::timeout\n",
             "  } else {\n",
             "    page { url: u }\n",
             "  }\n",
@@ -93,8 +93,8 @@ fn cancel_arms_inside_a_spawned_body_never_answer() {
             "    for u in urls {\n",
             "      spawn {\n",
             "        match fetch(u) {\n",
-            "          timeout => cancel(timeout)\n",
-            "          refused => cancel(refused)\n",
+            "          timeout => cancel(net_err::timeout)\n",
+            "          refused => cancel(net_err::refused)\n",
             "          p => p\n",
             "        }\n",
             "      }\n",
@@ -110,7 +110,7 @@ fn cancel_arms_inside_a_spawned_body_never_answer() {
         check(concat!(
             "pub fn f() -> list[int] {\n",
             "  nursery {\n",
-            "    spawn { cancel(timeout) }\n",
+            "    spawn { cancel(net_err::timeout) }\n",
             "    spawn { 1 }\n",
             "  }\n",
             "}\n",

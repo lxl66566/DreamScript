@@ -572,7 +572,7 @@ where
         decls.current_file = Some(ast.file);
         for block in &ast.blocks {
             for item in &block.items {
-                reserve_item(package, item, &mut decls);
+                reserve_item(package, item, &mut decls, &mut diags);
             }
         }
     }

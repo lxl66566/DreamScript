@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     pub(super) fn bind_params(&mut self, params: &[Param]) -> Result<(), LowerError> {
         for param in params {
             use ds_parse::ParamMode;

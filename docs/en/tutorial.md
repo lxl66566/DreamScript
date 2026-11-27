@@ -156,7 +156,7 @@ fn parse_age(s: string) -> int | parse_error {
   }
 }
 
-type fetch_err = timeout | refused | parse_error
+type fetch_err = net_err::timeout | net_err::refused | parse_error
 fn retryable(e: fetch_err) -> bool {
   match e {
     timeout | refused => true,    // or-pattern over the transient members
@@ -451,8 +451,8 @@ A bound extern calls the installed library: `extern "math" fn ds_add(left: int, 
 Concurrency is stackful VM fibers in mandatory nurseries: `spawn` exists only inside a `nursery` block, whose scope exit joins children, has the first failure cancel siblings, and unions child errors out at the boundary, a payloaded member riding its whole value out and extracting like any union value. The block's value is the children's answers collected in spawn order — one list element per `spawn`, each the spawned body's own answer — and a spawned body may not hold a `mut` window over a binding that outlives the block. Code is blocking-style with no colors and no `await`, tail calls stay guaranteed per fiber, and bare detach requires an explicit root nursery or supervisor.
 
 ```ts
-type fetch_err = timeout | refused
-fn fetch_body(url: string) -> string | fetch_err { refused }
+type fetch_err = net_err::timeout | net_err::refused
+fn fetch_body(url: string) -> string | fetch_err { net_err::refused }
 fn fetch_all(urls: list[string]) -> list[string] | fetch_err {
   nursery {
     for url in urls {

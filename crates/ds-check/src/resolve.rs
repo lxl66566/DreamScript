@@ -103,8 +103,11 @@ pub enum DefKind {
     Enum,
     /// A unit tag.
     Tag,
-    /// A case minted by an enum block: a member of the tag
-    /// namespace like a tag, constructed per its payload.
+    /// A case minted by an enum block: a member of its enum's
+    /// case set, constructed per its payload. The label claims no
+    /// entry of the package's shared type namespace — its def lives
+    /// in the case namespace, so a struct, trait, or alias of the
+    /// same label coexists beside it.
     Case,
     /// A trait.
     Trait,
@@ -113,13 +116,17 @@ pub enum DefKind {
 }
 
 impl DefKind {
-    /// Whether the kind declares into the type namespace; the rest
-    /// declare into the value namespace.
+    /// Whether the kind declares into the package's shared type
+    /// namespace; the rest declare into the value namespace or, for a
+    /// case, the case namespace beside it. Cases left the shared
+    /// namespace: a bare case label resolves
+    /// type-directed in arms and `is` tests, and every other spelling
+    /// rides the qualified `enum::case` form.
     #[must_use]
     pub const fn in_type_namespace(self) -> bool {
         matches!(
             self,
-            Self::Struct | Self::Enum | Self::Tag | Self::Case | Self::Trait | Self::TypeAlias
+            Self::Struct | Self::Enum | Self::Tag | Self::Trait | Self::TypeAlias
         )
     }
 

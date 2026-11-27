@@ -347,44 +347,41 @@ impl Bodies<'_> {
         // per-instance markers; an expansion walk's concrete projections
         // land in the instance tables under the walked fn's key, so two
         // instances of one loop never share a projection.
-        let (copies, per_instance) = match &self.instance {
-            Some(run) => {
-                let (fields, tags) = match projection {
-                    Projection::Written(fields, tags) => (fields, tags),
-                    Projection::PerInstance(_) => {
-                        return Val {
-                            ty: unit,
-                            diverges: false,
-                            poisoned: true,
-                        };
-                    },
-                };
-                let copies = fields.len();
-                self.comptime_instance_loops.insert(
-                    (run.def, Rc::clone(&run.args), span),
-                    ComptimeLoop {
-                        fields,
-                        tags,
-                        per_instance: None,
-                        binder: name.span,
-                    },
-                );
-                (copies, None)
-            },
-            None => {
-                let (fields, tags, marker) = match projection {
-                    Projection::Written(fields, tags) => (fields, tags, None),
-                    Projection::PerInstance(variable) => (Vec::new(), Vec::new(), Some(variable)),
-                };
-                let copies = fields.len();
-                self.comptime_loops.insert(span, ComptimeLoop {
+        let (copies, per_instance) = if let Some(run) = &self.instance {
+            let (fields, tags) = match projection {
+                Projection::Written(fields, tags) => (fields, tags),
+                Projection::PerInstance(_) => {
+                    return Val {
+                        ty: unit,
+                        diverges: false,
+                        poisoned: true,
+                    };
+                },
+            };
+            let copies = fields.len();
+            self.comptime_instance_loops.insert(
+                (run.def, Rc::clone(&run.args), span),
+                ComptimeLoop {
                     fields,
                     tags,
-                    per_instance: marker,
+                    per_instance: None,
                     binder: name.span,
-                });
-                (copies, marker)
-            },
+                },
+            );
+            (copies, None)
+        } else {
+            let (fields, tags, marker) = match projection {
+                Projection::Written(fields, tags) => (fields, tags, None),
+                Projection::PerInstance(variable) => (Vec::new(), Vec::new(), Some(variable)),
+            };
+            let copies = fields.len();
+            self.comptime_loops.insert(span, ComptimeLoop {
+                fields,
+                tags,
+                per_instance: marker,
+                binder: name.span,
+            });
+            (copies, marker)
         };
         if per_instance.is_some() {
             return Val {
@@ -503,10 +500,9 @@ impl Bodies<'_> {
             return None;
         };
         let named = single_path_ident(peel_paren(callee));
-        let builtin = named
-            .and_then(|head| self.res.get(head.span))
-            .map(|res| matches!(res, Res::Def(def) if self.package.def(*def).name == "fields"))
-            .unwrap_or(false);
+        let builtin = named.and_then(|head| self.res.get(head.span)).is_some_and(
+            |res| matches!(res, Res::Def(def) if self.package.def(*def).name == "fields"),
+        );
         if !builtin || args.len() != 1 || trailing.is_some() {
             self.error(
                 ErrorCode::InferenceFailed,
@@ -555,22 +551,21 @@ impl Bodies<'_> {
             }
             return self.project_loop_atom(ty, only.span);
         }
-        let def = match self.res.get(only.span) {
-            Some(Res::Def(def)) => *def,
+        let def = if let Some(Res::Def(def)) = self.res.get(only.span) {
+            *def
+        } else {
             // An unresolved non-variable name (the resolver kept quiet
             // for the seam's arguments) refuses here.
-            _ => {
-                self.error(
-                    ErrorCode::InferenceFailed,
-                    format!(
-                        "`{}` names no declared type for the comptime loop to walk",
-                        only.name
-                    ),
-                    only.span,
-                    "not a declared type",
-                );
-                return None;
-            },
+            self.error(
+                ErrorCode::InferenceFailed,
+                format!(
+                    "`{}` names no declared type for the comptime loop to walk",
+                    only.name
+                ),
+                only.span,
+                "not a declared type",
+            );
+            return None;
         };
         let Some(shape) = self.decls.structs.get(&def) else {
             self.error(
@@ -680,7 +675,7 @@ impl Bodies<'_> {
             );
             return None;
         }
-        let Some(def) = self.decls.defs_of_atoms.get(&only).copied() else {
+        let Some(def) = self.decls.defs_of_atoms.get(only).copied() else {
             self.error(
                 ErrorCode::InferenceFailed,
                 "the comptime loop walks a struct's fields; this type names no declared struct"
@@ -1057,6 +1052,7 @@ impl Bodies<'_> {
             return false;
         };
         self.type_def_of(&only.name)
+            .or_else(|| self.case_def_of(&only.name))
             .is_some_and(|def| matches!(self.package.def(def).kind, DefKind::Tag | DefKind::Case))
     }
 }

@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// A lambda value: the synthesized module function plus its word.
     /// A non-capturing lambda mints the copyable scalar FuncRef into a Fn
     /// slot (KCONST over the pool's same-module FuncRef, resolved through

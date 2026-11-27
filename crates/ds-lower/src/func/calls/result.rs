@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a> FnLower<'a, '_, '_> {
+impl FnLower<'_, '_, '_> {
     /// A fallible or checked native's result span: neither platform span
     /// carries a source-level return type, so a tail call rejects, and a
     /// value-position call re-spans through its shape's dedicated path.
@@ -991,8 +991,8 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         let answer: Vec<TypeId> = success_members.iter().map(|member| member.atom).collect();
         let (success, payload_words): (SuccessShape, Vec<SlotType>) =
-            match success_members.as_slice() {
-                [only] => match only.fields.as_slice() {
+            if let [only] = success_members.as_slice() {
+                match only.fields.as_slice() {
                     // a bare member: the unit value or a bare tag over the
                     // span's inert payload word
                     [] => (SuccessShape::Bare { atom: only.atom }, vec![SlotType::I64]),
@@ -1006,24 +1006,23 @@ impl<'a> FnLower<'a, '_, '_> {
                             .flat_map(|field| field.slots.iter().copied())
                             .collect(),
                     ),
-                },
+                }
+            } else {
                 // a multi-atom answer: the winner's own tagged span crosses
                 // verbatim, admitted when its tag-and-region layout equals
                 // the result union's (the same atoms claiming the same
                 // region words in the same order)
-                _ => {
-                    let element = self.shapes.members_shape(&answer, 0)?;
-                    if shape_words(&element) != u.words {
-                        return Err(LowerError::unsupported(
-                            no_span(), // re-pointed at the call site
-                            "a deadline answer's span",
-                            "the answer union's own span disagrees with the call's result union; \
-                             the verbatim hand-back needs the winner's tag-and-region layout to \
-                             equal the result's, and a member the winner does not carry widened it",
-                        ));
-                    }
-                    (SuccessShape::Adopt, u.words.clone())
-                },
+                let element = self.shapes.members_shape(&answer, 0)?;
+                if shape_words(&element) != u.words {
+                    return Err(LowerError::unsupported(
+                        no_span(), // re-pointed at the call site
+                        "a deadline answer's span",
+                        "the answer union's own span disagrees with the call's result union; the \
+                         verbatim hand-back needs the winner's tag-and-region layout to equal the \
+                         result's, and a member the winner does not carry widened it",
+                    ));
+                }
+                (SuccessShape::Adopt, u.words.clone())
             };
         self.classed_native_union(
             native,

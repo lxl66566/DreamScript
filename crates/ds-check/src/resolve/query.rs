@@ -159,11 +159,37 @@ impl Package {
         })
     }
 
-    /// Whether either namespace declares the name — the sentinel checks
+    /// The definition of a case-namespace name, if any: the growth
+    /// tier answers first, the shared base below. Cases live outside
+    /// the shared type namespace; only this lookup (and the file-scoped
+    /// one below) answers them.
+    #[must_use]
+    pub fn lookup_case(&self, name: &str) -> Option<DefId> {
+        self.case_names.get(name).copied().or_else(|| {
+            self.base
+                .as_deref()
+                .and_then(|base| base.case_names.get(name).copied())
+        })
+    }
+
+    /// The case declaration a name carries for ONE FILE's uses: the
+    /// file's own tag-family shadow beats the first declaration per
+    /// label, mirroring [`Self::lookup_type_in`].
+    #[must_use]
+    pub fn lookup_case_in(&self, file: ds_diag::FileId, name: &str) -> Option<DefId> {
+        if let Some(shadow) = self.file_tags.get(&file).and_then(|tags| tags.get(name)) {
+            return Some(*shadow);
+        }
+        self.lookup_case(name)
+    }
+
+    /// Whether any namespace declares the name — the sentinel checks
     /// (`none`, `self`) that must not shadow universe spellings.
     #[must_use]
     pub fn declares(&self, name: &str) -> bool {
-        self.lookup_type(name).is_some() || self.lookup_value(name).is_some()
+        self.lookup_type(name).is_some()
+            || self.lookup_value(name).is_some()
+            || self.lookup_case(name).is_some()
     }
 
     /// The namespace-agnostic lookup: the type declaration when the name

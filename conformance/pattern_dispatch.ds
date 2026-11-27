@@ -41,7 +41,7 @@ fn show_rev(s: sw) -> () {
 // B: an or-pattern of unit tags is one member set binding nothing (the
 // transient members ride the ambient's net_err cases)
 tag ready
-type outcome = timeout | refused | ready
+type outcome = net_err::timeout | net_err::refused | ready
 
 fn brief(e: outcome) -> () {
   match e {

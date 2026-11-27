@@ -1,5 +1,5 @@
 //! End-to-end through the `ds` binary over the real ambient: the owning
-//! container round and its residuals. The tree fixture builds a
+//! container face and its refusals. The tree fixture builds a
 //! two-child tree declared through `box`, walks it, instantiates a
 //! generic fn per held shape, unboxes at the last share (the container
 //! freeing) and over a surviving holder (a copy), compares and shows
@@ -13,7 +13,7 @@
 
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -31,13 +31,13 @@ fn fixture(name: &str) -> PathBuf {
 
 /// Runs the command, removes the working directory, answers the process
 /// output.
-fn run(command: &mut Command, dir: &PathBuf) -> Output {
+fn run(command: &mut Command, dir: &Path) -> Output {
     let out = command.output().expect("the binary runs");
     let _ = fs::remove_dir_all(dir);
     out
 }
 
-fn ds_in(dir: &PathBuf) -> Command {
+fn ds_in(dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.env("DS_CACHE", dir.join("cache"));
     command

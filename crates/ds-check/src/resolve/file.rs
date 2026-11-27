@@ -642,6 +642,7 @@ impl FileResolver<'_> {
             .package
             .lookup_value(&name.name)
             .or_else(|| self.package.lookup_type_in(self.file, &name.name))
+            .or_else(|| self.package.lookup_case_in(self.file, &name.name))
         {
             self.def_use(name.span, def);
         } else if let Some(def) = self.import_binding(&name.name) {
@@ -694,10 +695,10 @@ impl FileResolver<'_> {
     /// the value positions follow.
     fn import_type_binding(&self, name: &str) -> Option<DefId> {
         let def = self.import_binding(name)?;
-        self.package
-            .def(def)
-            .kind
-            .in_type_namespace()
+        // a linked enum's cases cross as selections beside it: the kind
+        // reads the case namespace, not the shared type namespace
+        (self.package.def(def).kind.in_type_namespace()
+            || self.package.def(def).kind == DefKind::Case)
             .then_some(def)
     }
 
@@ -711,7 +712,14 @@ impl FileResolver<'_> {
             self.uses.push((name.span, Res::Local { bind }));
             return;
         }
-        let type_def = self.package.lookup_type_in(self.file, &name.name);
+        // the construction door keeps its case reading: a payloaded
+        // case constructs by call form (the bare-value spellings went
+        // qualified with the namespace exit, the cross-spelling
+        // refusals riding this door)
+        let type_def = self
+            .package
+            .lookup_type_in(self.file, &name.name)
+            .or_else(|| self.package.lookup_case_in(self.file, &name.name));
         match (self.package.lookup_value(&name.name), type_def) {
             (Some(value), Some(ty)) => {
                 // A tag family declaration yields to the value:
@@ -908,6 +916,7 @@ impl FileResolver<'_> {
                 if let Some(def) = self
                     .package
                     .lookup_type(&only.name)
+                    .or_else(|| self.package.lookup_case(&only.name))
                     .or_else(|| self.import_type_binding(&only.name))
                 {
                     self.def_use(only.span, def);
@@ -1444,6 +1453,12 @@ impl FileResolver<'_> {
                     with: "Self".to_owned(),
                 }),
             );
+        } else if let Some(def) = self.package.lookup_case_in(self.file, &name.name) {
+            // a case label keeps its type-side reading (the directed
+            // annotations, unions, and `is` tests ride it); it claims no
+            // entry of the shared type namespace, so a declaration of
+            // the same label coexists beside it
+            self.def_use(name.span, def);
         } else if let Some(def) = self.import_type_binding(&name.name) {
             // a linked type's selection: the sentinels above keep
             // their readings before any imported spelling
@@ -1531,6 +1546,7 @@ impl FileResolver<'_> {
         }
         self.package
             .lookup_type_in(self.file, &name.name)
+            .or_else(|| self.package.lookup_case_in(self.file, &name.name))
             .or_else(|| self.import_type_binding(&name.name))
             .filter(|&def| self.package.def(def).kind.is_constructor())
             .map_or(ArmTag::Binding, ArmTag::Def)
@@ -1552,6 +1568,7 @@ impl FileResolver<'_> {
                 if let Some(def) = self
                     .package
                     .lookup_type_in(self.file, &only.name)
+                    .or_else(|| self.package.lookup_case_in(self.file, &only.name))
                     .or_else(|| self.import_type_binding(&only.name))
                 {
                     self.def_use(only.span, def);
@@ -1658,9 +1675,13 @@ impl FileResolver<'_> {
         }
         let head_file = self.package.def(head_def).span.file;
         self.def_use(head.span, head_def);
+        // the tail reads the head's declaring file's case namespace
+        // first, a tag-family label's type entry second: cases claim no
+        // entry of the shared type namespace
         if let Some(label_def) = self
             .package
-            .lookup_type_in(head_file, &tail.name)
+            .lookup_case_in(head_file, &tail.name)
+            .or_else(|| self.package.lookup_type_in(head_file, &tail.name))
             .filter(|&d| matches!(self.package.def(d).kind, DefKind::Tag | DefKind::Case))
         {
             self.def_use(tail.span, label_def);

@@ -102,3 +102,30 @@ fn the_propagation_refuses_outside_the_return_union() {
         "the refusal names both unions: {rendered}"
     );
 }
+
+/// The taxonomy's namespace exit end to end: a user `struct not_found`
+/// and its own trait declare beside the ambient enums (the labels claim
+/// no entry of the shared type namespace), the brace construction and
+/// the trait dispatch run through the ambient serve, and the qualified
+/// spellings carry the ambient's members in the match arms wherever
+/// both families answer for one label. The absent path's stat failure
+/// lands on the ambient class and extracts through the handler chain.
+#[test]
+fn the_taxonomy_labels_host_user_declarations_beside_the_enums() {
+    let dir = workdir("coexistence");
+    let out = run(ds_in(&dir)
+        .arg("run")
+        .arg(fixture("taxonomy_label_coexistence.ds")));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        text(&out.stdout),
+        concat!(
+            "app.cfg\n",
+            "user struct\n",
+            "missing coexistence_absent/probe.txt\n",
+            "done\n",
+        ),
+        "the coexistence probe answers its own declaration and the ambient's class"
+    );
+}

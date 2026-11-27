@@ -371,8 +371,8 @@ fn ufcs_unresolved_lists_tiers_in_order() {
         Some(Res::Dot(DotRes::Field)) => {},
         other => panic!("the field-tier marker expected: {other:?}"),
     }
-    // The checker's refusal keeps the wording, F3's tier note, and the
-    // nearest candidate.
+    // The checker's refusal keeps the wording, the tier-order note, and
+    // the nearest candidate.
     let mut files = Files::new();
     let id = files.add_source("t.ds", source);
     let ast = parse(&files, id).expect("parses");

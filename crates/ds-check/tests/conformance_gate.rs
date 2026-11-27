@@ -1399,7 +1399,7 @@ const TAG_RESOLUTION_AMBIENT: &str = concat!(
     "  reset\n",
     "  net_other { msg: string }\n",
     "}\n",
-    "pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out\n",
+    "pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | io_err::timed_out\n",
 );
 
 /// tag_resolution.ds: the tag re-key beside the ambient's own `timeout`

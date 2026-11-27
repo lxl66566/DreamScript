@@ -48,10 +48,10 @@ fn fetch_all(urls: list[url]) -> list[page] | net_err {
       spawn {
         match fetch_body(url) {
           timeout => cancel(net_err::timeout)
-          refused => cancel(refused)
-          addr_in_use => cancel(addr_in_use)
-          reset => cancel(reset)
-          net_other { msg } => cancel(net_other(msg: msg))
+          refused => cancel(net_err::refused)
+          addr_in_use => cancel(net_err::addr_in_use)
+          reset => cancel(net_err::reset)
+          net_other { msg } => cancel(net_err::net_other(msg: msg))
           p => p
         }
       }
@@ -70,16 +70,16 @@ fn with_retry(n: int, url: url) -> page | net_err {
         last = net_err::timeout
       }
       refused => {
-        last = refused
+        last = net_err::refused
       }
       addr_in_use => {
-        last = addr_in_use
+        last = net_err::addr_in_use
       }
       reset => {
-        last = reset
+        last = net_err::reset
       }
       net_other { msg } => {
-        last = net_other(msg: msg)
+        last = net_err::net_other(msg: msg)
       }
       p => {
         done = p

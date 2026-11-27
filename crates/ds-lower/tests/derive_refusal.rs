@@ -584,8 +584,8 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
     // uncalled synthesized member plans nothing (the uncalled generic
     // member is inert exactly like an uncalled free generic fn), and
     // the first site entering it meets the abstract `set` member's own
-    // refusal — the door the family's product meets, no longer forced
-    // by a declaration nobody calls
+    // refusal — the door the family's product meets, and a declaration
+    // nobody calls alone forces nothing
     lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",

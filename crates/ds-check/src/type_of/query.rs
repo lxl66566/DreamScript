@@ -37,6 +37,16 @@ impl Bodies<'_> {
         }
     }
 
+    /// The case def a case label carries for the walking file: the case
+    /// namespace, the file's own tag-family shadow first. Cases claim no
+    /// entry of the shared type namespace.
+    pub(super) fn case_def_of(&self, name: &str) -> Option<DefId> {
+        match self.file {
+            Some(file) => self.package.lookup_case_in(file, name),
+            None => self.package.lookup_case(name),
+        }
+    }
+
     /// A nursery block: the body checks in a fresh scope over the
     /// block's own nursery scope entry, every `spawn` inside it records
     /// its body's answer, and the block's value is the collected
@@ -302,9 +312,14 @@ impl Bodies<'_> {
         }
         let mut atoms = Vec::with_capacity(shape.cases.len());
         let mut unminted = false;
+        // the case labels are the enum's own written members: they
+        // resolve under the enum's declaring file through the case
+        // namespace, never the use site's shadow map
+        let decl_file = self.file;
+        self.file = Some(self.package.def(enum_def).span.file);
         for (name, ..) in &shape.cases {
             match self
-                .type_def_of(name)
+                .case_def_of(name)
                 .or_else(|| self.decls.foreign_type(name))
                 .and_then(|def| self.decls.atoms.get(&def).copied())
             {
@@ -312,6 +327,7 @@ impl Bodies<'_> {
                 None => unminted = true,
             }
         }
+        self.file = decl_file;
         Some((only, atoms, unminted))
     }
 

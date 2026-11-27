@@ -170,15 +170,47 @@ impl Universe {
 
     /// Declares a struct by reserving its identity; the field
     /// signature follows via [`Universe::set_struct_fields`], so recursive
-    /// shapes can reference the returned id.
+    /// shapes can reference the returned id. The name-keyed form a
+    /// linked type's install reuses.
     pub fn declare_struct(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Reserved)
     }
 
     /// Declares an enum by reserving its identity; the case signature
-    /// follows via [`Universe::set_enum_cases`].
+    /// follows via [`Universe::set_enum_cases`]. The name-keyed form a
+    /// linked type's install reuses.
     pub fn declare_enum(&mut self, name: &str) -> Result<TypeId, Error> {
         self.declare_atom(name, AtomKind::Reserved)
+    }
+
+    /// Mints one struct atom per declaring declaration, same
+    /// first-holder name rule as [`Universe::mint_tag`]: a local struct
+    /// of a label a case atom (or any other declaration) already holds
+    /// mints beside it instead of refusing, its identity its declaring
+    /// declaration's own.
+    pub fn mint_struct(&mut self, label: &str) -> TypeId {
+        self.mint_reserved(label)
+    }
+
+    /// Mints one enum-head atom per declaring declaration, same
+    /// first-holder name rule as [`Universe::mint_tag`].
+    pub fn mint_enum(&mut self, label: &str) -> TypeId {
+        self.mint_reserved(label)
+    }
+
+    /// The shared reserved-shape mint: the atom stays `Reserved` until
+    /// its shape pass fills it, the name index keeping the FIRST holder
+    /// of a label.
+    fn mint_reserved(&mut self, label: &str) -> TypeId {
+        let id = TypeId::from_raw(narrow(self.atoms.len()));
+        self.atom_names.entry(label.to_owned()).or_insert(id);
+        self.atoms.push(AtomDecl {
+            name: label.to_owned(),
+            kind: AtomKind::Reserved,
+        });
+        self.atom_tys.push(None);
+        self.full_ty = None;
+        id
     }
 
     fn declare_atom(&mut self, name: &str, kind: AtomKind) -> Result<TypeId, Error> {
@@ -222,7 +254,9 @@ impl Universe {
     }
 
     /// Declares a trait; member atoms follow via
-    /// [`Universe::impl_trait`].
+    /// [`Universe::impl_trait`]. The name-keyed form a linked trait's
+    /// install reuses; the trait registry shares one label space with
+    /// the atoms, so a label either registry holds refuses.
     pub fn declare_trait(&mut self, name: &str) -> Result<TraitId, Error> {
         if self.atom_names.contains_key(name) || self.trait_names.contains_key(name) {
             return Err(Error::DuplicateName(name.to_owned()));

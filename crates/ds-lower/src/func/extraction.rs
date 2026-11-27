@@ -575,7 +575,8 @@ impl FnLower<'_, '_, '_> {
                     // file-owned extern predating the retirement keeps
                     // routing to the primitive.
                     AmbientExtern::Die | AmbientExtern::Panic => {
-                        sig.params.len() == 1 && (sig.generics.len() == 1 || self.is_never_ret(sig))
+                        sig.params.len() == 1
+                            && (sig.generics.len() == 1 || Self::is_never_ret(sig))
                     },
                     AmbientExtern::Max | AmbientExtern::Min => {
                         sig.generics.len() == 1 && sig.params.len() == 2
@@ -586,7 +587,7 @@ impl FnLower<'_, '_, '_> {
 
     /// Whether the signature's written return is the bare `never` type:
     /// the zero-case enum's name, no type arguments, no union.
-    fn is_never_ret(&self, sig: &ds_check::decls::FnSig) -> bool {
+    fn is_never_ret(sig: &ds_check::decls::FnSig) -> bool {
         match &sig.ret {
             Some(Type::Path { path, args, .. }) => {
                 args.is_empty() && path.segments.len() == 1 && path.segments[0].name == "never"

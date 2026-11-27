@@ -73,7 +73,10 @@ fn int_and_float_members_plain_call_while_generic_sites_stage_comparators() {
     let mut primitive_calls = 0;
     for function in functions {
         for (pc, word) in function.code().iter().enumerate() {
-            let Inst::Uop(uop) = Inst::decode(pc as u32, *word).expect("valid instruction") else {
+            let Inst::Uop(uop) =
+                Inst::decode(u32::try_from(pc).expect("program length fits u32"), *word)
+                    .expect("valid instruction")
+            else {
                 continue;
             };
             match uop {

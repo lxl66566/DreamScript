@@ -62,7 +62,7 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// tag rows, the written loop nested inside a per-instance copy (3
 /// fields x the pair's sum 3), and the per-instance loops nested in
 /// each other (2 copies x the pair's sum 3). The dispatch rows pin the
-/// dispatch-in-copy residuals: the copy-local generic call plans its
+/// dispatch inside a copy: the copy-local generic call plans its
 /// instance at the copy site (3+4), the concrete trait call stages per
 /// copy (`tt`), the bound-receiver trait call rides the frame's
 /// runtime evidence slot (`t,t,`), the inherent member call lowers its

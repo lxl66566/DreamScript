@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// Allocates body slots, returning the base.
     pub(super) fn alloc(&mut self, words: &[SlotType]) -> Result<u8, LowerError> {
         let base = self.slots.len();

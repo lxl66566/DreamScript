@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl<'a> FnLower<'a, '_, '_> {
     /// One bare member value of a generic enum's application: the
     /// checked type is the application itself, so the temp spans its
     /// whole union — the case's tag minted at the tag word, the dead
@@ -395,6 +395,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             .analyzed
             .package
             .lookup(name)
+            .or_else(|| self.analyzed.package.lookup_case(name))
             .or_else(|| self.analyzed.decls.foreign_type(name))?;
         self.analyzed.decls.atoms.get(&def).copied()
     }

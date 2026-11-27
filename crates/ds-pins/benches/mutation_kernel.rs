@@ -9,7 +9,7 @@
 //!
 //! Reproduce: `cargo bench -p ds-pins --bench mutation_kernel`; the
 //! quoted numbers are the median Ir of the recorded runs. Measured
-//! 2026-11-27 over main at e70b668c (the pre-value-semantics natives)
+//! over main at e70b668c (the pre-value-semantics natives)
 //! and the copy-before-write landing: median 287,304,565 Ir before,
 //! 326,394,832 Ir after over three passes per side (within-side spread
 //! under 0.01%) — a 1.136x instruction tax on the mutation path, the
@@ -89,7 +89,7 @@ fn compiled(name: &str, source: &str) -> Module {
         "{name} does not check clean: {:?}",
         analyzed.checked.diags
     );
-    let effects = ds_check::effects_of(&asts, &ds_stdlib::declared_rows(), world_caps());
+    let effects = ds_check::effects_of(&asts, ds_stdlib::declared_rows(), world_caps());
     assert!(
         ds_check::check_platform(&asts, &effects).is_empty(),
         "{name} fails the platform check"

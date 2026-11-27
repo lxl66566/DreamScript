@@ -810,6 +810,7 @@ mod tests {
     /// package's own compile shape, and the bundle's core member pairs
     /// with the driver face beside them.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn the_split_composes_the_package_and_core_namespaces() {
         let mut files = ds_diag::Files::new();
         let core = files.add_source(AMBIENT_FILE, AMBIENT_CORE_SOURCE);

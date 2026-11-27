@@ -405,6 +405,7 @@ impl InstanceEnv {
     /// trait no instance implements reads as no rows. Rows a link merge
     /// shadowed stay out: the winner is the only instance the solved
     /// tables carry for the overlapped head.
+    #[must_use]
     pub fn of_trait(&self, trait_id: TraitId) -> Vec<InstanceId> {
         self.by_trait
             .get(&trait_id)
@@ -601,7 +602,9 @@ impl InstanceEnv {
                 conditions: &per_branch[i].0,
             };
             for (index, inst) in self.instances.iter().enumerate() {
-                if !self.shadowed.contains(&(index as u32))
+                if !self
+                    .shadowed
+                    .contains(&u32::try_from(index).expect("instance count fits u32"))
                     && inst.trait_id == decl.trait_id
                     && inst.name == decl.name
                     && let Some(outcome) = overlap_error(
@@ -797,8 +800,12 @@ impl InstanceEnv {
         for i in 0..self.instances.len() {
             for j in (i + 1)..self.instances.len() {
                 if i < served && j < served
-                    || self.shadowed.contains(&(i as u32))
-                    || self.shadowed.contains(&(j as u32))
+                    || self
+                        .shadowed
+                        .contains(&u32::try_from(i).expect("instance count fits u32"))
+                    || self
+                        .shadowed
+                        .contains(&u32::try_from(j).expect("instance count fits u32"))
                     || self.instances[i].name != self.instances[j].name
                 {
                     continue;

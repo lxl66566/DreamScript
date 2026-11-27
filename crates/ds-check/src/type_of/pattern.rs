@@ -592,7 +592,9 @@ impl Bodies<'_> {
     fn pattern_path_atom(&mut self, path: &Path, scrut: Ty) -> Option<TypeId> {
         match path.segments.as_slice() {
             [only] => self.unit_pattern_atom(&only.name).or_else(|| {
-                let def = self.type_def_of(&only.name)?;
+                let def = self
+                    .type_def_of(&only.name)
+                    .or_else(|| self.case_def_of(&only.name))?;
                 self.applied_case_atom(def, scrut, only.span)
                     .map(|(_, atom)| atom)
             }),
@@ -621,7 +623,7 @@ impl Bodies<'_> {
                     let enum_file = self.package.def(def).span.file;
                     let case_def = self
                         .package
-                        .lookup_type_in(enum_file, &case_name)
+                        .lookup_case_in(enum_file, &case_name)
                         .or_else(|| self.decls.foreign_type(&case_name))?;
                     let atom = match self.decls.atoms.get(&case_def).copied() {
                         Some(atom) => {
@@ -731,6 +733,7 @@ impl Bodies<'_> {
         }
         let def = self
             .type_def_of(name)
+            .or_else(|| self.case_def_of(name))
             .or_else(|| self.decls.foreign_type(name))?;
         self.decls.atoms.get(&def).copied()
     }

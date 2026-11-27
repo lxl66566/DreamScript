@@ -623,7 +623,7 @@ mod tests {
             &checked.bundle.decls,
             &analyzed.analyzed.decls
         ));
-        assert!(std::sync::Arc::ptr_eq(
+        assert!(std::rc::Rc::ptr_eq(
             &checked.bundle.checked,
             &analyzed.analyzed.checked
         ));

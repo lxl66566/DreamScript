@@ -127,8 +127,13 @@ impl Bodies<'_> {
                     self.solve_reported = true;
                     return None;
                 }
+                // a case label keeps its type-side reading (the directed
+                // annotations, unions, and `is` tests ride it); only the
+                // shared type NAMESPACE exited, so a struct of the same
+                // label still wins its own entry here
                 let def = self
                     .type_def_of(&only.name)
+                    .or_else(|| self.case_def_of(&only.name))
                     .or_else(|| self.decls.foreign_type(&only.name))?;
                 if !args.is_empty() {
                     if let Err(mismatch) =
@@ -181,7 +186,7 @@ impl Bodies<'_> {
                         let mut union: Option<Ty> = None;
                         for (name, ..) in &shape.cases {
                             let case_def = self
-                                .type_def_of(name)
+                                .case_def_of(name)
                                 .or_else(|| self.decls.foreign_type(name));
                             let case_def = case_def?;
                             let atom = self.decls.atoms.get(&case_def).copied()?;

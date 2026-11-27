@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// The Ref-typed body words of one value: where a value of `ty` at
     /// `base` carries heap references (the words the RC pass tracks).
     pub(super) fn ref_words(&mut self, base: u8, ty: Ty) -> Result<Vec<u8>, LowerError> {

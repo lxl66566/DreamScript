@@ -441,7 +441,7 @@ impl WordSolver<'_> {
             // the name index the linked install filled answers
             let case_def = self
                 .package
-                .lookup_type(name)
+                .lookup_case(name)
                 .or_else(|| self.decls.foreign_type(name))?;
             covered.push(self.decls.atoms.get(&case_def).copied()?);
         }
@@ -598,7 +598,12 @@ impl WordSolver<'_> {
         in_union: bool,
         stack: &mut Vec<crate::DefId>,
     ) -> Option<TypeWord> {
-        let def = self.package.lookup_type(name)?;
+        // a union body's case member rides the case namespace; every
+        // other name stays in the shared type namespace
+        let def = self
+            .package
+            .lookup_type(name)
+            .or_else(|| in_union.then(|| self.package.lookup_case(name)).flatten())?;
         match self.package.def(def).kind {
             crate::DefKind::TypeAlias => {
                 if stack.contains(&def) {

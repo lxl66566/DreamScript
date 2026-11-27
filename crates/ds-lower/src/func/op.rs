@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// Binary operators: typed uops for scalars, short-circuit chains for
     /// `&&`/`||`, memberwise chains for structural `==`, and the
     /// concat call for string `+`.

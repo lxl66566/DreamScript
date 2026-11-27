@@ -59,7 +59,7 @@ pub(in crate::func) enum SuccessShape {
     Adopt,
 }
 
-impl<'a> FnLower<'a, '_, '_> {
+impl FnLower<'_, '_, '_> {
     /// The argument order one native-routed member call stages: the
     /// receiver first, the written arguments behind it — an
     /// `element_first` member's native takes the receiver at its
@@ -67,7 +67,6 @@ impl<'a> FnLower<'a, '_, '_> {
     /// the free spelling's own order, its evidence word naming the
     /// element's instance).
     fn member_native_args<'x>(
-        &self,
         recv: &'x Expr,
         args: &'x [CallArg],
         member: NativeMember,
@@ -111,22 +110,28 @@ impl<'a> FnLower<'a, '_, '_> {
         // A minted case constructor takes named arguments; named
         // arguments on functions are outside the lowered surface. A
         // payloaded tag constructs through the same call form.
+        // the label span answers for the bare and the qualified
+        // `type::label` spellings alike (the resolver records the def at
+        // the tail segment)
         let case_ctor = match callee.as_ref() {
-            Expr::Path { span, .. } => match self.res.get(*span) {
-                Some(Res::Def(def)) => {
-                    if let Some(case) = self.analyzed.decls.cases.get(def)
-                        && !matches!(case.payload, EnumPayload::None)
-                    {
-                        Some(*def)
-                    } else if self.analyzed.package.def(*def).kind == ds_check::DefKind::Tag
-                        && self.analyzed.decls.structs.contains_key(def)
-                    {
-                        Some(*def)
-                    } else {
-                        None
-                    }
-                },
-                _ => None,
+            Expr::Path { path, .. } => {
+                let label = path.segments.last().map(|segment| segment.span);
+                match label.and_then(|span| self.res.get(span)) {
+                    Some(Res::Def(def)) => {
+                        if let Some(case) = self.analyzed.decls.cases.get(def)
+                            && !matches!(case.payload, EnumPayload::None)
+                        {
+                            Some(*def)
+                        } else if self.analyzed.package.def(*def).kind == ds_check::DefKind::Tag
+                            && self.analyzed.decls.structs.contains_key(def)
+                        {
+                            Some(*def)
+                        } else {
+                            None
+                        }
+                    },
+                    _ => None,
+                }
             },
             _ => None,
         };
@@ -144,21 +149,20 @@ impl<'a> FnLower<'a, '_, '_> {
         // below; the type-application constructors keep their own route.
         let callee_fn_typed = self
             .val(callee.span())
-            .map(|val| fn_sig_of(self.universe(), val.ty).is_some())
-            .unwrap_or(false);
+            .is_ok_and(|val| fn_sig_of(self.universe(), val.ty).is_some());
         // A generic-application constructor `list[t]()`: the
         // bracketed callee head resolved in the type namespace.
-        if let Expr::Index { recv, .. } = &**callee {
-            if !callee_fn_typed {
-                return self.ctor_call(recv, args, *span);
-            }
+        if let Expr::Index { recv, .. } = &**callee
+            && !callee_fn_typed
+        {
+            return self.ctor_call(recv, args, *span);
         }
         // The map constructor `map[k, v]()`: the two-argument
         // application of the map struct.
-        if let Expr::MapApply { .. } = &**callee {
-            if !callee_fn_typed {
-                return self.map_ctor_call(args);
-            }
+        if let Expr::MapApply { .. } = &**callee
+            && !callee_fn_typed
+        {
+            return self.map_ctor_call(args);
         }
         // A bodiless ambient collection member (`xs.get(i)`, `xs.push(x)`,
         // `xs.concat(ys)`, `m.get(k)`, `m.set(k, v)`) routes to its native
@@ -186,7 +190,7 @@ impl<'a> FnLower<'a, '_, '_> {
             // call is the indirect call of the fn-typed field's word, the
             // written arguments alone. The receiver is no argument (a
             // field holds a plain callable, unlike a method member), and
-            // the field read's word is the heap-closure round's Ref, so
+            // the field read's word holds the heap closure's Ref, so
             // the computed-callee path binds it through the temporary
             // before the arguments stage.
             if self.analyzed.checked.field_calls.contains(&call_span) {
@@ -236,7 +240,7 @@ impl<'a> FnLower<'a, '_, '_> {
                             (
                                 Some(member.def),
                                 name.span,
-                                self.member_native_args(recv, args, member),
+                                Self::member_native_args(recv, args, member),
                                 None,
                             )
                         } else if self.sort_member_site(call_span) {
@@ -278,7 +282,7 @@ impl<'a> FnLower<'a, '_, '_> {
                         (
                             Some(member.def),
                             name.span,
-                            self.member_native_args(recv, args, member),
+                            Self::member_native_args(recv, args, member),
                             None,
                         )
                     } else if self.sort_member_site(call_span) {
@@ -937,15 +941,15 @@ impl<'a> FnLower<'a, '_, '_> {
                     }
                     // a diverging argument never hands its answer to
                     // the staging temp: the call's own exit ends the path
-                    if !self.diverges_at(arg.span()) {
+                    if self.diverges_at(arg.span()) {
+                        arg_val
+                    } else {
                         let temp = self.temp_span(param_ty)?;
                         self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
                         TypedPlace {
                             place: temp,
                             ty: param_ty,
                         }
-                    } else {
-                        arg_val
                     }
                 },
                 _ => arg_val,
@@ -1672,8 +1676,8 @@ impl<'a> FnLower<'a, '_, '_> {
     /// The computed callee: the callee expression evaluates first and
     /// its word binds through the temporary, the arguments staging after
     /// it (argument evaluation may itself call), the indirect call
-    /// reading the word like any binding's. The heap-closure round's
-    /// vocabulary rides along: a fn-typed field read, a subscript read,
+    /// reading the word like any binding's. The heap-closure vocabulary
+    /// rides along: a fn-typed field read, a subscript read,
     /// or a call result hands the callee word over — a scalar Fn word or
     /// the closure Ref word CALLS reads through.
     fn computed_callee_call(
@@ -1708,7 +1712,7 @@ impl<'a> FnLower<'a, '_, '_> {
             ty,
             &params,
             ret,
-            word,
+            &word,
             None,
             callee.span(),
             &arg_exprs,
@@ -1755,7 +1759,7 @@ impl<'a> FnLower<'a, '_, '_> {
             ty,
             &params,
             ret,
-            word,
+            &word,
             Some(bind),
             callee_span,
             arg_exprs,
@@ -1776,12 +1780,13 @@ impl<'a> FnLower<'a, '_, '_> {
     /// FuncRef, and every unprovable word (a closure's Ref, a
     /// callable-defaulted parameter, an unproven alias) keeps the
     /// in-place CALLS plus return.
+    #[allow(clippy::too_many_arguments)]
     fn calls_word(
         &mut self,
         ty: Ty,
         params: &[Ty],
         ret: Ty,
-        word: WordAddr,
+        word: &WordAddr,
         bind: Option<Span>,
         callee_span: Span,
         arg_exprs: &[&Expr],
@@ -1917,15 +1922,15 @@ impl<'a> FnLower<'a, '_, '_> {
                              contract of its own; the deinit arc owns the seam",
                         ));
                     }
-                    if !self.diverges_at(arg.span()) {
+                    if self.diverges_at(arg.span()) {
+                        arg_val
+                    } else {
                         let temp = self.temp_span(param_ty)?;
                         self.widen_into(&temp, param_ty, &arg_val, arg.span())?;
                         TypedPlace {
                             place: temp,
                             ty: param_ty,
                         }
-                    } else {
-                        arg_val
                     }
                 },
                 _ => arg_val,

@@ -600,6 +600,7 @@ mod tests {
                 ],
                 type_names: Vec::new(),
                 value_names: Vec::new(),
+                case_names: Vec::new(),
                 methods: vec![MethodDeclData {
                     name: "speak".to_owned(),
                     owner: MethodOwnerData::Trait(6),

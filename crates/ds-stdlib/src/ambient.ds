@@ -518,10 +518,10 @@ impl[t] chan[t] {
   fn recv (self) -> t
   /// Sends under a deadline: the deposited unit, or timed_out at
   /// the cut.
-  fn send_deadline (self, nanos: int, x: t) -> () | timed_out
+  fn send_deadline (self, nanos: int, x: t) -> () | io_err::timed_out
   /// Receives under a deadline: the head element, or timed_out at
   /// the cut.
-  fn recv_deadline (self, nanos: int) -> t | timed_out
+  fn recv_deadline (self, nanos: int) -> t | io_err::timed_out
 }
 
 // The arena face (the read-side aliasing container): every member
@@ -829,8 +829,8 @@ extern fn chan_recv[t] (ch: chan[t]) -> t
 // class span, so the union re-spans at the call exactly the timer
 // race's. A wider element answer refuses at the seam's one-word
 // adoption (the timer race's own boundary).
-extern fn chan_send_deadline[t] (ch: chan[t], nanos: int, x: t) -> () | timed_out
-extern fn chan_recv_deadline[t] (ch: chan[t], nanos: int) -> t | timed_out
+extern fn chan_send_deadline[t] (ch: chan[t], nanos: int, x: t) -> () | io_err::timed_out
+extern fn chan_recv_deadline[t] (ch: chan[t], nanos: int) -> t | io_err::timed_out
 // The arena's native face: the construction is the type application
 // `arena[t]()` (the element type never reaches the code, every arena
 // one Ref word), so `arena_new` stays a private seam like `list_new`'s,
@@ -1186,7 +1186,7 @@ pub extern fn sleep (nanos: int) -> ()
 // spins past its deadline until the shutdown guard owns it.
 /// Races the callable against the deadline: its answer, or
 /// timed_out when the deadline cuts first.
-pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | timed_out
+pub extern fn timeout[t] (nanos: int, thunk: fn() -> t) -> t | io_err::timed_out
 // The local offset read (the datetime face's one world touch): the
 // host's local UTC offset for the timestamp, seconds east of UTC
 // (west negative) — seconds, not the clock pair's nanoseconds, the

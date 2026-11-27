@@ -1486,6 +1486,7 @@ mod tests {
             vec![("speak".to_owned(), DefId::from_raw(0))],
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         );
 
         let park = Park::<ServedEffectNames>::new();
@@ -1689,6 +1690,7 @@ mod tests {
             }],
             Vec::new(),
             vec![("speak".to_owned(), DefId::from_raw(0))],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );

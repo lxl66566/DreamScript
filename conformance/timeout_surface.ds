@@ -43,7 +43,7 @@ fn raced() -> list[int] {
   }
 }
 
-fn helper() -> int | timed_out {
+fn helper() -> int | io_err::timed_out {
   timeout(500000000, napper)?
 }
 

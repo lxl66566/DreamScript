@@ -518,56 +518,6 @@ pub(super) fn type_spans(ty: &Type, out: &mut std::collections::HashSet<Span>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use ds_diag::FileId;
-
-    use super::{Mint, Span};
-
-    /// A length-1 item span is fully forbidden (the whole-span row
-    /// `Mint::new` inserts), so the candidate space holds nothing: the
-    /// search must degrade to the item's first byte rather than cycle
-    /// its one rejected candidate forever. Real derives never mint over
-    /// a declaration shorter than the derive's own spelling, so only
-    /// this hand-built mint reaches the bound.
-    #[test]
-    fn a_fully_covered_item_span_degrades_instead_of_looping() {
-        let mut mint = Mint {
-            file: FileId::new(0),
-            start: 7,
-            next: 7,
-            end: 7,
-            len: 1,
-            forbidden: [Span::new(FileId::new(0), 7, 8)].into_iter().collect(),
-        };
-        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
-        // a follow-up mint answers the same fallback, never a later byte
-        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
-    }
-
-    /// The ordinary mint walks the item's bytes in order, skipping the
-    /// forbidden rows: the first free subspan answers and the next call
-    /// continues from where the last one spent.
-    #[test]
-    fn the_mint_spends_free_spans_in_order() {
-        let file = FileId::new(0);
-        let mut mint = Mint {
-            file,
-            start: 3,
-            next: 3,
-            end: 9,
-            len: 1,
-            forbidden: [Span::new(file, 5, 6), Span::new(file, 7, 8)]
-                .into_iter()
-                .collect(),
-        };
-        assert_eq!(mint.span(), Span::new(file, 3, 4));
-        assert_eq!(mint.span(), Span::new(file, 4, 5));
-        assert_eq!(mint.span(), Span::new(file, 6, 7));
-        assert_eq!(mint.span(), Span::new(file, 8, 9));
-    }
-}
-
 /// One enum payload's element types with their names and spans. A tuple
 /// element is named by its case; a struct payload names its fields.
 pub(super) fn payload_parts<'a>(
@@ -1116,4 +1066,54 @@ pub(super) const SEED: &str = "d0";
 pub(super) fn doc_seed_local(mint: &mut Mint) -> Stmt {
     let init = doc_seed(mint);
     local(mint, SEED, init, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_diag::FileId;
+
+    use super::{Mint, Span};
+
+    /// A length-1 item span is fully forbidden (the whole-span row
+    /// `Mint::new` inserts), so the candidate space holds nothing: the
+    /// search must degrade to the item's first byte rather than cycle
+    /// its one rejected candidate forever. Real derives never mint over
+    /// a declaration shorter than the derive's own spelling, so only
+    /// this hand-built mint reaches the bound.
+    #[test]
+    fn a_fully_covered_item_span_degrades_instead_of_looping() {
+        let mut mint = Mint {
+            file: FileId::new(0),
+            start: 7,
+            next: 7,
+            end: 7,
+            len: 1,
+            forbidden: [Span::new(FileId::new(0), 7, 8)].into_iter().collect(),
+        };
+        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
+        // a follow-up mint answers the same fallback, never a later byte
+        assert_eq!(mint.span(), Span::new(FileId::new(0), 7, 8));
+    }
+
+    /// The ordinary mint walks the item's bytes in order, skipping the
+    /// forbidden rows: the first free subspan answers and the next call
+    /// continues from where the last one spent.
+    #[test]
+    fn the_mint_spends_free_spans_in_order() {
+        let file = FileId::new(0);
+        let mut mint = Mint {
+            file,
+            start: 3,
+            next: 3,
+            end: 9,
+            len: 1,
+            forbidden: [Span::new(file, 5, 6), Span::new(file, 7, 8)]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(mint.span(), Span::new(file, 3, 4));
+        assert_eq!(mint.span(), Span::new(file, 4, 5));
+        assert_eq!(mint.span(), Span::new(file, 6, 7));
+        assert_eq!(mint.span(), Span::new(file, 8, 9));
+    }
 }

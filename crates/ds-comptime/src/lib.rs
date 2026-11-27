@@ -1231,6 +1231,7 @@ impl<'a> Reflection<'a> {
                         .analyzed
                         .package
                         .lookup_type(name)
+                        .or_else(|| self.analyzed.package.lookup_case(name))
                         .filter(|&d| self.analyzed.package.def(d).span == *span)
                         .or_else(|| self.analyzed.decls.foreign_type(name))?;
                     let atom = self.analyzed.decls.atoms.get(&case_def).copied()?;

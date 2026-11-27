@@ -690,7 +690,7 @@ impl TypeFact {
                 .find_map(|(case, info)| {
                     (info.enum_def == def && package.def(*case).name == *name).then_some(*case)
                 })
-                .or_else(|| package.lookup_type(name))?;
+                .or_else(|| package.lookup_case(name))?;
             out.push(TypeCase {
                 name: name.clone(),
                 payload: solver.case_payload(case_def)?,

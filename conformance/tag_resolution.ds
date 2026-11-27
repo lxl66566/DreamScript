@@ -48,7 +48,7 @@ fn read_class(e: io_err) -> string {
   }
 }
 
-fn fn_tag_call() -> int | timed_out {
+fn fn_tag_call() -> int | io_err::timed_out {
   // the call form always means the fn, never the ambient's tag
   timeout(500000000, () => 4)
 }
@@ -97,9 +97,10 @@ fn qualified_timeout() -> net_err {
 }
 
 fn undirected() -> io_err {
-  // the undirected bare label resolves the case's own def, the payload
-  // classes keeping the call form their construction door
-  const bare = timed_out
+  // the undirected position spells the qualified label (the case
+  // namespace owns the label; no bare namespace reading remains), the
+  // payload classes keeping the call form their construction door
+  const bare = io_err::timed_out
   bare
 }
 

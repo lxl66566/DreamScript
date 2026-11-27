@@ -325,6 +325,11 @@ pub struct PlaceStore {
     pub steps: Vec<PlaceStep>,
 }
 
+/// The per-instance `for comptime` expansions' per-copy records, keyed
+/// by the walked fn's definition, the solved arguments, the copy path,
+/// and the entering site's span.
+pub type ComptimeInstanceRecords = FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>;
+
 /// The result of one package check: diagnostics in walk order plus the
 /// memoized type of every top-level binding.
 #[derive(Clone, Default)]
@@ -456,7 +461,7 @@ pub struct Checked {
     /// walk a loop over the fn's own type variable; each entering
     /// site's re-walk of the fn body under its own substitution lands
     /// its copies' facts here.
-    pub comptime_instance_records: FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    pub comptime_instance_records: ComptimeInstanceRecords,
     /// The projected fields of every per-instance expansion, keyed by
     /// the walked fn's definition, the solved arguments, and the loop's
     /// own span.
@@ -517,9 +522,9 @@ mod solve;
 /// supplies source text for machine-readable suggestions.
 #[must_use]
 pub fn type_check(files: &Files, asts: &[Ast]) -> Checked {
-    // The bundle built above is the arc's only holder, so this moves the
+    // The bundle built above is the rc's only holder, so this moves the
     // tables out instead of cloning them.
-    Arc::unwrap_or_clone(analyze(files, asts).checked)
+    Rc::unwrap_or_clone(analyze(files, asts).checked)
 }
 
 /// The full bidirectional check bundled with the tables later passes read:
@@ -633,7 +638,7 @@ pub fn analyze_resolved(
         resolutions,
         decls: Rc::new(decls),
         artifacts,
-        checked: Arc::new(checked),
+        checked: Rc::new(checked),
         resolve_diag_count,
         span_files: span_files_of(files),
     }
@@ -808,7 +813,7 @@ fn analyze_served_over(
         resolutions: tables.into(),
         decls: Rc::new(decls),
         artifacts,
-        checked: Arc::new(checked),
+        checked: Rc::new(checked),
         resolve_diag_count,
         span_files: span_files_of(files),
     }
@@ -860,8 +865,7 @@ where
     let mut hole_show_dispatches: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut comptime_records: FxHashMap<(Vec<u32>, Span), CopyRecords> = FxHashMap::default();
     let mut comptime_loops: FxHashMap<Span, ComptimeLoop> = FxHashMap::default();
-    let mut instance_records: FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords> =
-        FxHashMap::default();
+    let mut instance_records: ComptimeInstanceRecords = FxHashMap::default();
     let mut instance_loops: FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop> =
         FxHashMap::default();
     let mut comptime_sites: FxHashMap<Span, (DefId, Vec<Ty>)> = FxHashMap::default();
@@ -1151,7 +1155,7 @@ fn expand_comptime_instances(
     def_types: &FxHashMap<DefId, Ty>,
     comptime_loops: &mut FxHashMap<Span, ComptimeLoop>,
     sites: &mut FxHashMap<Span, (DefId, Vec<Ty>)>,
-    instance_records: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    instance_records: &mut ComptimeInstanceRecords,
     instance_loops: &mut FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
     self_fns: &mut FxHashSet<Span>,
 ) -> Vec<Diagnostic> {
@@ -1379,7 +1383,7 @@ pub struct Analyzed {
     /// The typed result: diagnostics (resolve classes merged ahead of the
     /// declaration and body classes, like [`analyze`]), top-level types,
     /// binder facts, per-expression types.
-    pub checked: Arc<Checked>,
+    pub checked: Rc<Checked>,
     /// Per registered file, the span facts (name, text, line index) the
     /// bundle's spans resolve against, indexed by raw file id. The trees'
     /// byte offsets mean nothing without it, so the bundle carries it:
@@ -1498,7 +1502,7 @@ struct Bodies<'a> {
     /// The per-instance expansions' per-copy records; the phase-1 walk
     /// never writes them (its copies are written-loop copies), so an
     /// empty table rides every construction but the expansion walks.
-    comptime_instance_records: &'a mut FxHashMap<(DefId, Rc<Vec<Ty>>, Vec<u32>, Span), CopyRecords>,
+    comptime_instance_records: &'a mut ComptimeInstanceRecords,
     /// The per-instance expansions' projected fields, same keying.
     comptime_instance_loops: &'a mut FxHashMap<(DefId, Rc<Vec<Ty>>, Span), ComptimeLoop>,
     /// Every solved free-fn call site: the callee definition and the

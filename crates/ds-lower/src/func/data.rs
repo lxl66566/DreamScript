@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// `x.f`: the member payload word, addressed through the receiver's
     /// checked (possibly refined) type.
     pub(super) fn field_access(&mut self, e: &Expr, static_ty: Ty) -> Result<Place, LowerError> {

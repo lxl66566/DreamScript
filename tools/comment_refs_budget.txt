@@ -7,8 +7,8 @@
 # removes the words lowers its line in the same change.
 
 landed 70
-retired 153
-per-the 52
-the-record 37
-the-contract 24
-round 269
+retired 167
+per-the 53
+the-record 47
+the-contract 25
+round 278

@@ -39,6 +39,12 @@ pub struct Package {
     pub(super) defs: Vec<Def>,
     pub(super) type_names: FxHashMap<String, DefId>,
     pub(super) value_names: FxHashMap<String, DefId>,
+    /// The case namespace: an enum block's minted case defs. Cases
+    /// claim no entry of the shared type namespace, so a struct or
+    /// trait of the same label coexists beside them; the first
+    /// declaration per label owns this table, a cross-file tag-family
+    /// shadow the [`Package::file_tags`] map.
+    pub(super) case_names: FxHashMap<String, DefId>,
     pub(super) methods: Vec<MethodDecl>,
     pub(super) method_index: FxHashMap<String, Vec<MethodId>>,
     /// The import-bound functions, keyed by their def: the
@@ -126,6 +132,8 @@ pub struct PackageBase {
     pub(super) type_names: FxHashMap<String, DefId>,
     /// The value namespace: name to definition.
     pub(super) value_names: FxHashMap<String, DefId>,
+    /// The case namespace: an enum block's minted case defs.
+    pub(super) case_names: FxHashMap<String, DefId>,
     /// The registered methods, in registration order.
     pub(super) methods: Vec<MethodDecl>,
     /// The method-name index: name to candidates.
@@ -143,6 +151,7 @@ impl PackageBase {
         defs: Vec<Def>,
         type_names: Vec<(String, DefId)>,
         value_names: Vec<(String, DefId)>,
+        case_names: Vec<(String, DefId)>,
         methods: Vec<MethodDecl>,
         method_index: Vec<(String, Vec<MethodId>)>,
     ) -> Self {
@@ -151,6 +160,7 @@ impl PackageBase {
             defs,
             type_names: type_names.into_iter().collect(),
             value_names: value_names.into_iter().collect(),
+            case_names: case_names.into_iter().collect(),
             methods,
             method_index: method_index.into_iter().collect(),
         }
@@ -169,6 +179,7 @@ impl PartialEq for Package {
             && self.files().eq(other.files())
             && self.namespace_eq(other, Self::type_names_of)
             && self.namespace_eq(other, Self::value_names_of)
+            && self.namespace_eq(other, Self::case_names_of)
             && self.method_index_eq(other)
     }
 }
@@ -196,6 +207,14 @@ impl Package {
         (
             &pkg.value_names,
             pkg.base.as_deref().map(|base| &base.value_names),
+        )
+    }
+
+    /// The case namespace's growth tier and base tier.
+    fn case_names_of(pkg: &Self) -> NamespaceTiers<'_> {
+        (
+            &pkg.case_names,
+            pkg.base.as_deref().map(|base| &base.case_names),
         )
     }
 
@@ -1256,8 +1275,21 @@ impl Package {
         vis: Vis,
         diags: &mut Vec<Diagnostic>,
     ) -> DefId {
-        let existing =
-            if kind.in_type_namespace() { self.lookup_type(name) } else { self.lookup_value(name) };
+        // A case reads its own namespace first and a TAG declaration
+        // beside it second: the two tag families still refuse or shadow
+        // each other per label ("within one module a label names at most
+        // one tag declaration"), while a struct, enum, trait, alias, or
+        // value of the label coexists. A tag reads both namespaces the
+        // same way, the case-first order keeping the families symmetric.
+        let existing = match kind {
+            DefKind::Case => self.lookup_case(name).or_else(|| {
+                self.lookup_type(name)
+                    .filter(|&d| matches!(self.def(d).kind, DefKind::Tag))
+            }),
+            DefKind::Tag => self.lookup_type(name).or_else(|| self.lookup_case(name)),
+            _ if kind.in_type_namespace() => self.lookup_type(name),
+            _ => self.lookup_value(name),
+        };
         if let Some(first) = existing {
             // Within one module a label names at most one tag
             // declaration: the file's own shadow is the duplicate the
@@ -1326,10 +1358,16 @@ impl Package {
             vis,
             span,
         });
-        if kind.in_type_namespace() {
-            self.type_names.insert(name.to_owned(), id);
-        } else {
-            self.value_names.insert(name.to_owned(), id);
+        match kind {
+            DefKind::Case => {
+                self.case_names.insert(name.to_owned(), id);
+            },
+            _ if kind.in_type_namespace() => {
+                self.type_names.insert(name.to_owned(), id);
+            },
+            _ => {
+                self.value_names.insert(name.to_owned(), id);
+            },
         }
         id
     }

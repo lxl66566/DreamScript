@@ -6,7 +6,9 @@
 //! identities.
 
 use std::{
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -5433,10 +5435,11 @@ const LAYER_CELL: &str = concat!(
 fn layer_root_manifest(deps: &[&str]) -> String {
     let mut manifest = "name = \"app\"\nversion = \"0.1.0\"\n".to_owned();
     for dep in deps {
-        manifest.push_str(&format!(
+        let _ = write!(
+            manifest,
             "\n[deps.{dep}]\npath = \"../{}\"\n",
             dep.trim_start_matches('@')
-        ));
+        );
     }
     manifest
 }
@@ -5445,10 +5448,11 @@ fn layer_root_manifest(deps: &[&str]) -> String {
 fn write_layer_pkg(work: &Path, name: &str, deps: &[&str], member: &str) {
     let mut manifest = format!("name = \"{name}\"\nversion = \"1.0.0\"\n");
     for dep in deps {
-        manifest.push_str(&format!(
+        let _ = write!(
+            manifest,
             "\n[deps.{dep}]\npath = \"../{}\"\n",
             dep.trim_start_matches('@')
-        ));
+        );
     }
     let dir = work.join(name.trim_start_matches('@'));
     write_pkg(&dir, &manifest, &[(

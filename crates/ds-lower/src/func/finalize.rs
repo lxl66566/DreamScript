@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// Renders the symbolic buffer: the placed sequence (uops plus the RC
     /// ops at their walk positions) and the module body carry the same
     /// words — the RC ops ride the 0xE major beside the uops, and the VM

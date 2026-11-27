@@ -26,10 +26,10 @@ fn fetch_all(urls: list[string]) -> int | net_err {
       spawn {
         match fetch_body(u) {
           timeout => cancel(net_err::timeout)
-          refused => cancel(refused)
-          addr_in_use => cancel(addr_in_use)
-          reset => cancel(reset)
-          net_other { msg } => cancel(net_other(msg: msg))
+          refused => cancel(net_err::refused)
+          addr_in_use => cancel(net_err::addr_in_use)
+          reset => cancel(net_err::reset)
+          net_other { msg } => cancel(net_err::net_other(msg: msg))
           body => body
         }
       }

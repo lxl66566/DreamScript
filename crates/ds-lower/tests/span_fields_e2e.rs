@@ -268,7 +268,8 @@ fn a_tuple_member_wide_element_flows_over_the_region() {
     assert_eq!(out, "6\n-1\n7 z\n");
 }
 
-/// The refusals slice 7 does not lift keep their honest names: a union
+/// The refusals the whole-span layout does not lift keep their honest
+/// names: a union
 /// element inside a tuple field (the product distributes) and a
 /// deinit-carrying element in every inline position (the span claims no
 /// hook of its own).

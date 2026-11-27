@@ -600,6 +600,12 @@ pub(super) fn package_base(artifact: &PrefixDsi) -> Result<PackageBase, PrefixDs
             .iter()
             .map(|(name, id)| (name.clone(), DefId::from_raw(*id)))
             .collect(),
+        artifact
+            .package
+            .case_names
+            .iter()
+            .map(|(name, id)| (name.clone(), DefId::from_raw(*id)))
+            .collect(),
         methods,
         artifact
             .package

@@ -535,8 +535,11 @@ pub fn visible_at(
                 continue;
             }
             // A local hides a package value declaration of the same name;
-            // a type-namespace declaration stays visible.
-            if !def.kind.in_type_namespace() && local_names.contains(&def.name) {
+            // a type-namespace or case declaration stays visible.
+            if !def.kind.in_type_namespace()
+                && !matches!(def.kind, DefKind::Case)
+                && local_names.contains(&def.name)
+            {
                 continue;
             }
             out.push(ScopeEntry {

@@ -47,7 +47,6 @@ use super::*;
 /// The forward walker. One instance covers one package; top-level
 /// bindings' states persist across items so a value consumed in one item
 /// and used in another is still a move.
-
 pub(super) struct Lin<'a> {
     pub(super) package: &'a Package,
     pub(super) decls: &'a Decls,

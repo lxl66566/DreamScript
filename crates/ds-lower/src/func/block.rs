@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// Lowers one block's statements, returning the block's value.
     pub(super) fn block_value(&mut self, block: &BlockExpr) -> Result<TypedPlace, LowerError> {
         let bracket = self.rc.staging_bracket();
@@ -497,52 +497,48 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .first()
                 .ok_or_else(|| mismatch("a tuple element's span"))?
                 .slot;
-            let place = match &*self.shapes.shape(fact.ty)? {
-                Shape::Word(slot) => {
-                    if *slot != field.slot() {
-                        return Err(mismatch("a var destructuring element word"));
-                    }
-                    let target = self.temp_word(*slot)?;
+            let place = if let Shape::Word(slot) = &*self.shapes.shape(fact.ty)? {
+                if *slot != field.slot() {
+                    return Err(mismatch("a var destructuring element word"));
+                }
+                let target = self.temp_word(*slot)?;
+                self.emit(Op::Mov {
+                    dst: Slot::body(target),
+                    src: Slot::body(base),
+                });
+                if src[0].slot_ty == SlotType::Ref {
+                    self.rc.copied(&mut self.code, target, base);
+                }
+                Place {
+                    base: target,
+                    shape: PlaceShape::Word(*slot),
+                }
+            } else {
+                // a wide element owns a fresh slot span: the element's
+                // words copy in word for word, so an assignment
+                // re-stores the span alone while the source tuple
+                // keeps its words
+                let words = self.shapes.words(fact.ty)?;
+                if words.len() != src.len()
+                    || words.iter().zip(src.iter()).any(|(w, a)| *w != a.slot_ty)
+                {
+                    return Err(mismatch("a var destructuring element word"));
+                }
+                let target = self.temp_span(fact.ty)?;
+                for (offset, addr) in src.iter().enumerate() {
+                    let word = target.base + u8::try_from(offset).expect("element span fits u8");
                     self.emit(Op::Mov {
-                        dst: Slot::body(target),
-                        src: Slot::body(base),
+                        dst: Slot::body(word),
+                        src: Slot::body(addr.slot),
                     });
-                    if src[0].slot_ty == SlotType::Ref {
-                        self.rc.copied(&mut self.code, target, base);
+                    if addr.slot_ty == SlotType::Ref {
+                        self.rc.copied(&mut self.code, word, addr.slot);
                     }
-                    Place {
-                        base: target,
-                        shape: PlaceShape::Word(*slot),
-                    }
-                },
-                _ => {
-                    // a wide element owns a fresh slot span: the element's
-                    // words copy in word for word, so an assignment
-                    // re-stores the span alone while the source tuple
-                    // keeps its words
-                    let words = self.shapes.words(fact.ty)?;
-                    if words.len() != src.len()
-                        || words.iter().zip(src.iter()).any(|(w, a)| *w != a.slot_ty)
-                    {
-                        return Err(mismatch("a var destructuring element word"));
-                    }
-                    let target = self.temp_span(fact.ty)?;
-                    for (offset, addr) in src.iter().enumerate() {
-                        let word =
-                            target.base + u8::try_from(offset).expect("element span fits u8");
-                        self.emit(Op::Mov {
-                            dst: Slot::body(word),
-                            src: Slot::body(addr.slot),
-                        });
-                        if addr.slot_ty == SlotType::Ref {
-                            self.rc.copied(&mut self.code, word, addr.slot);
-                        }
-                    }
-                    Place {
-                        base: target.base,
-                        shape: PlaceShape::Span(fact.ty),
-                    }
-                },
+                }
+                Place {
+                    base: target.base,
+                    shape: PlaceShape::Span(fact.ty),
+                }
             };
             self.binders.insert(*span, place.clone());
             self.rc_bind(*span, &place, fact.ty)?;

@@ -97,6 +97,9 @@ pub struct PackageData {
     pub type_names: Vec<(String, u32)>,
     /// The value namespace: name to definition index.
     pub value_names: Vec<(String, u32)>,
+    /// The case namespace: an enum block's minted case defs, name to
+    /// definition index.
+    pub case_names: Vec<(String, u32)>,
     /// The registered methods, in registration order.
     pub methods: Vec<MethodDeclData>,
     /// The method-name index: name to candidate indexes.

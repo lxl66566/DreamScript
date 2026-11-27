@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// The runtime words of `ty`'s value inside `place`. A refined
     /// single-atom use of a union span addresses only that member's
     /// payload words.

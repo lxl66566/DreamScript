@@ -221,14 +221,14 @@ fn json_number (text: string, at: int) -> json_step | parse_err {
   const token = substring(text, at, end).unwrap_or("")
   if has_dot_or_exp(token) {
     const f = map_err(parse_float(token), (e: parse_err) => parse_err(pos: at + e.pos))?
-    json_step { value: json_float(value: f), next: end }
+    json_step { value: json::json_float(value: f), next: end }
   } else {
     match parse_int(token) {
       parse_err => {
         const f = map_err(parse_float(token), (e: parse_err) => parse_err(pos: at + e.pos))?
-        json_step { value: json_float(value: f), next: end }
+        json_step { value: json::json_float(value: f), next: end }
       }
-      n => json_step { value: json_int(value: n), next: end }
+      n => json_step { value: json::json_int(value: n), next: end }
     }
   }
 }
@@ -262,7 +262,7 @@ fn json_array_body (text: string, at: int, depth: int) -> json_step | parse_err 
       i = json_ws(text, after + 1)
     } else { return parse_err(pos: after) }
   }
-  json_step { value: json_array(items: items), next: i }
+  json_step { value: json::json_array(items: items), next: i }
 }
 
 fn json_object_body (text: string, at: int, depth: int) -> json_step | parse_err {
@@ -293,7 +293,7 @@ fn json_object_body (text: string, at: int, depth: int) -> json_step | parse_err
       i = json_ws(text, after + 1)
     } else { return parse_err(pos: after) }
   }
-  json_step { value: json_object(fields: fields), next: i }
+  json_step { value: json::json_object(fields: fields), next: i }
 }
 
 fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
@@ -307,11 +307,11 @@ fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
   else if c == '"' {
     const s = json_string_body(text, i + 1)
     if s is parse_err { return s }
-    json_step { value: json_string(value: s.value), next: s.next }
+    json_step { value: json::json_string(value: s.value), next: s.next }
   }
-  else if c == 't' { json_word(text, i, "true", json_bool(value: true)) }
-  else if c == 'f' { json_word(text, i, "false", json_bool(value: false)) }
-  else if c == 'n' { json_word(text, i, "null", json_null) }
+  else if c == 't' { json_word(text, i, "true", json::json_bool(value: true)) }
+  else if c == 'f' { json_word(text, i, "false", json::json_bool(value: false)) }
+  else if c == 'n' { json_word(text, i, "null", json::json_null) }
   else if c == '-' || is_digit(c) {
     const step = json_number(text, i)
     step
@@ -385,7 +385,7 @@ fn to_json_array (items: list[json], at: int, acc: list[string]) -> list[string]
       a.push(",")
       ()
     }
-    const elem = list_get(items, at).unwrap_or(json_null)
+    const elem = list_get(items, at).unwrap_or(json::json_null)
     to_json_array(items, at + 1, to_json_parts(elem, a))
   }
 }
@@ -406,7 +406,7 @@ fn to_json_object (keys: list[string], at: int, fields: map[string, json], acc: 
     key.push("\"")
     key = to_json_string(k, key)
     key.push(":")
-    const v = map_get(fields, k).unwrap_or(json_null)
+    const v = map_get(fields, k).unwrap_or(json::json_null)
     to_json_object(keys, at + 1, fields, to_json_parts(v, key))
   }
 }
@@ -587,7 +587,7 @@ pub fn json_as_bytes (v: json) -> bytes | parse_err {
   var out = list[byte]()
   var i = 0
   while i < list_len(items) {
-    const b = json_as_byte(list_get(items, i).unwrap_or(json_null))
+    const b = json_as_byte(list_get(items, i).unwrap_or(json::json_null))
     if b is parse_err { return b }
     out.push(b)
     i += 1
@@ -601,22 +601,22 @@ pub fn json_as_bytes (v: json) -> bytes | parse_err {
 // back — one construction per value the case vocabulary alone cannot
 // spell from these widths.
 /// The byte as a json number.
-pub fn json_of_byte (b: byte) -> json { json_int(value: int_of_byte(b)) }
+pub fn json_of_byte (b: byte) -> json { json::json_int(value: int_of_byte(b)) }
 
 /// The u32 as a json number.
-pub fn json_of_u32 (v: u32) -> json { json_int(value: int_of_u32(v)) }
+pub fn json_of_u32 (v: u32) -> json { json::json_int(value: int_of_u32(v)) }
 
 /// The char as its one-character json string.
-pub fn json_of_char (c: char) -> json { json_string(value: "$c") }
+pub fn json_of_char (c: char) -> json { json::json_string(value: "$c") }
 
 /// The payload as the json array of numbers the reader takes
 /// back.
 pub fn json_of_bytes (b: bytes) -> json {
   var items = list[json]()
   for e in byte_list(b) {
-    items.push(json_int(value: int_of_byte(e)))
+    items.push(json::json_int(value: int_of_byte(e)))
   }
-  json_array(items: items)
+  json::json_array(items: items)
 }
 
 
@@ -629,7 +629,7 @@ pub fn json_of_bytes (b: bytes) -> json {
 /// The json driver's seed: the empty document.
 impl json {
   /// The empty document: json_null.
-  fn default() -> json { json_null }
+  fn default() -> json { json::json_null }
 }
 
 /// The json driver's decode half over this file's typed readers.
@@ -661,13 +661,13 @@ impl decoder for json {
 /// The json driver's encode half over this file's constructions.
 impl encoder for json {
   /// Encodes one bool into the document.
-  fn enc_bool (self, value: bool) -> json { json_bool(value: value) }
+  fn enc_bool (self, value: bool) -> json { json::json_bool(value: value) }
   /// Encodes one int into the document.
-  fn enc_int (self, value: int) -> json { json_int(value: value) }
+  fn enc_int (self, value: int) -> json { json::json_int(value: value) }
   /// Encodes one float into the document.
-  fn enc_float (self, value: float) -> json { json_float(value: value) }
+  fn enc_float (self, value: float) -> json { json::json_float(value: value) }
   /// Encodes one string into the document.
-  fn enc_string (self, value: string) -> json { json_string(value: value) }
+  fn enc_string (self, value: string) -> json { json::json_string(value: value) }
   /// Encodes one byte into the document.
   fn enc_byte (self, value: byte) -> json { json_of_byte(value) }
   /// Encodes one u32 into the document.
@@ -677,7 +677,7 @@ impl encoder for json {
   /// Encodes one bytes value into the document.
   fn enc_bytes (self, value: bytes) -> json { json_of_bytes(value) }
   /// Encodes the array of values into the document.
-  fn enc_array (self, items: list[json]) -> json { json_array(items: items) }
+  fn enc_array (self, items: list[json]) -> json { json::json_array(items: items) }
   /// Encodes the object of members into the document.
-  fn enc_object (self, fields: map[string, json]) -> json { json_object(fields: fields) }
+  fn enc_object (self, fields: map[string, json]) -> json { json::json_object(fields: fields) }
 }

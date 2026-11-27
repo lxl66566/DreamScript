@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// One interpolating string: a STRCAT chain over its parts; a hole
     /// is `str(e)` — printable primitives route through their str
     /// natives, a string passes its Ref word through, and an

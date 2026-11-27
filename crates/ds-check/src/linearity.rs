@@ -10,6 +10,7 @@
 //! honor on every path — early return, panic, and cancellation included.
 use std::{
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -121,7 +122,7 @@ where
     } = crate::type_of::analyze(files, asts);
     let lin = linearity_check(&expanded, &package, &resolutions, &decls, &checked);
     // The bundle's refcount is one here, so the unwrap moves the tables.
-    (Arc::unwrap_or_clone(checked), lin)
+    (Rc::unwrap_or_clone(checked), lin)
 }
 
 /// Runs the affine pass over a package whose bidirectional check already

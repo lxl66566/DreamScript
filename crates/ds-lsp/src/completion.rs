@@ -287,7 +287,6 @@ pub(crate) fn type_namespace(kind: ScopeKind) -> bool {
         ScopeKind::Struct
             | ScopeKind::Enum
             | ScopeKind::Tag
-            | ScopeKind::Case
             | ScopeKind::Trait
             | ScopeKind::TypeAlias
     )

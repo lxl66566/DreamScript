@@ -28,6 +28,7 @@ impl Bodies<'_> {
         let Some(def) = self
             .package
             .lookup_type(&only.name)
+            .or_else(|| self.case_def_of(&only.name))
             .or_else(|| self.decls.foreign_type(&only.name))
         else {
             return Val {

@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     /// One assignment `x = e` / `x op= e`: the place is a single-segment
     /// path to a `var` local (the checker rejects every other place), the
     /// right side evaluates first, then re-stores the binder's slots. A

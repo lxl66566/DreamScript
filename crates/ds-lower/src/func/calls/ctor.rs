@@ -500,8 +500,8 @@ impl<'a> FnLower<'a, '_, '_> {
                 .shapes
                 .box_element(elem)
                 .ok_or_else(|| mismatch("the box constructor's element type"))?;
-            let held = self.value(&value.value)?;
-            let claim = self.deinit_claim(held.ty, value.value.span())?;
+            let incoming = self.value(&value.value)?;
+            let claim = self.deinit_claim(incoming.ty, value.value.span())?;
             if claim.is_some() {
                 return Err(LowerError::unsupported(
                     value.value.span(),
@@ -510,18 +510,18 @@ impl<'a> FnLower<'a, '_, '_> {
                      firing position; per-span deinit claims own the seam",
                 ));
             }
-            let mut held = held;
-            if held.ty != elem {
+            let mut incoming = incoming;
+            if incoming.ty != elem {
                 let temp = self.temp_span(elem)?;
-                self.widen_into(&temp, elem, &held, value.value.span())?;
-                held = TypedPlace {
+                self.widen_into(&temp, elem, &incoming, value.value.span())?;
+                incoming = TypedPlace {
                     place: temp,
                     ty: elem,
                 };
             }
             let elem_slots: Vec<SlotType> = self.shapes.words(elem)?.to_vec();
             self.overlay_site(&elem_slots, &[SlotType::Ref]);
-            let addrs = self.word_addrs(&held.place, held.ty)?;
+            let addrs = self.word_addrs(&incoming.place, incoming.ty)?;
             for (index, word) in addrs.iter().enumerate() {
                 let at = u8::try_from(index).expect("the element span fits the overlay");
                 self.emit(Op::Mov {

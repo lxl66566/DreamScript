@@ -648,15 +648,7 @@ impl FnLower<'_, '_, '_> {
                 }
                 Ok(())
             },
-            Shape::Struct(s) => {
-                let addrs = self.word_addrs(&src.place, src.ty)?;
-                let srcs = ordered_field_srcs(&addrs, &s.fields)?;
-                for (field, srcs) in s.fields.iter().zip(srcs) {
-                    self.store_field_span(dst.base, field, srcs);
-                }
-                Ok(())
-            },
-            Shape::Tuple(s) => {
+            Shape::Struct(s) | Shape::Tuple(s) => {
                 let addrs = self.word_addrs(&src.place, src.ty)?;
                 let srcs = ordered_field_srcs(&addrs, &s.fields)?;
                 for (field, srcs) in s.fields.iter().zip(srcs) {

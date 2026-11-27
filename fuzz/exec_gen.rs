@@ -2221,7 +2221,11 @@ fn linked_surface(
         None,
     )];
     for case in ["quiet", "loud", "tagged"] {
-        let def = lib.package.lookup_type(case).expect("the case registers");
+        let def = lib
+            .package
+            .lookup_type(case)
+            .or_else(|| lib.package.lookup_case(case))
+            .expect("the case registers");
         let fact = Arc::clone(facts.get(&def).expect("the case's fact carries"));
         entries.push(entry(case, def, ForeignKind::Type, None, Some(fact), None));
     }

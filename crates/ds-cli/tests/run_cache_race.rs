@@ -298,7 +298,7 @@ fn concurrent_runs_over_one_shared_cache_match_the_golden() {
         }
         let count = COUNTS[round % COUNTS.len()];
         let source = round / COUNTS.len() % SOURCES.len();
-        if round / (COUNTS.len() * SOURCES.len()) % 2 == 0 {
+        if (round / (COUNTS.len() * SOURCES.len())).is_multiple_of(2) {
             let _ = fs::remove_file(&artifact_for_source[source]);
         }
         let mut children = Vec::with_capacity(count);

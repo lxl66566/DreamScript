@@ -383,12 +383,11 @@ impl Session {
                 .map(|id| package.method(*id).span)
                 .collect(),
             // A field call's name is the receiver's field label, a
-            // declaration the value-namespace tables never hold.
-            Res::Dot(DotRes::Field) => Vec::new(),
-            // The handler forms and a bare module alias name no
-            // definition behind them (the alias's members are the
-            // cross-package scope round's).
-            Res::Handler | Res::Module(_) => Vec::new(),
+            // declaration the value-namespace tables never hold. The
+            // handler forms and a bare module alias name no definition
+            // behind them (the alias's members are the cross-package
+            // scope round's).
+            Res::Dot(DotRes::Field) | Res::Handler | Res::Module(_) => Vec::new(),
         };
         let files = self.db.files();
         Ok(targets

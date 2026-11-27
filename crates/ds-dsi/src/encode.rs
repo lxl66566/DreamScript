@@ -44,6 +44,7 @@ pub fn extract(
 
     let mut type_names = Vec::new();
     let mut value_names = Vec::new();
+    let mut case_names = Vec::new();
     let defs: Vec<DefData> = package
         .defs()
         .enumerate()
@@ -64,6 +65,9 @@ pub fn extract(
             }
             if package.lookup_value(&def.name) == Some(id) {
                 value_names.push((def.name.clone(), id.index()));
+            }
+            if package.lookup_case(&def.name) == Some(id) {
+                case_names.push((def.name.clone(), id.index()));
             }
             Some(DefData {
                 name: def.name.clone(),
@@ -123,6 +127,7 @@ pub fn extract(
             defs,
             type_names,
             value_names,
+            case_names,
             methods,
             method_index,
         },

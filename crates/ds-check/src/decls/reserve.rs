@@ -118,7 +118,23 @@ pub(super) fn type_def_for_use(package: &Package, decls: &Decls, name: &str) -> 
     }
 }
 
-pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
+/// The case def a case label carries for the walk's current file: the
+/// case namespace, the file's own tag-family shadow first. Cases claim
+/// no entry of the shared type namespace, so only this lookup answers
+/// them.
+pub(super) fn case_def_for_use(package: &Package, decls: &Decls, name: &str) -> Option<DefId> {
+    match decls.current_file {
+        Some(file) => package.lookup_case_in(file, name),
+        None => package.lookup_case(name),
+    }
+}
+
+pub(super) fn reserve_item(
+    package: &Package,
+    item: &Item,
+    decls: &mut Decls,
+    diags: &mut Vec<Diagnostic>,
+) {
     // Locals and impl fns declare no single package def: a local
     // registers one entry per pattern binder, an impl fn registers its
     // method signature by registration span — both bypass the item-name
@@ -175,16 +191,18 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             }
         },
         ItemKind::Struct(s) => {
-            if let Ok(id) = decls.universe.declare_struct(&s.name.name) {
-                decls.atoms.insert(def, id);
-                decls.defs_of_atoms.insert(id, def);
-                if !is_served(decls, def) {
-                    decls.structs.insert(def, StructShape {
-                        params: s.generics.iter().map(GenericParam::from).collect(),
-                        fields: struct_fields_ast(&s.members),
-                        linear: s.supers.iter().any(linear_marker),
-                    });
-                }
+            // the per-declaration mint: a struct of a label a case atom
+            // (or any other declaration) holds shares the name index's
+            // first entry instead of refusing
+            let id = decls.universe.mint_struct(&s.name.name);
+            decls.atoms.insert(def, id);
+            decls.defs_of_atoms.insert(id, def);
+            if !is_served(decls, def) {
+                decls.structs.insert(def, StructShape {
+                    params: s.generics.iter().map(GenericParam::from).collect(),
+                    fields: struct_fields_ast(&s.members),
+                    linear: s.supers.iter().any(linear_marker),
+                });
             }
         },
         ItemKind::Enum(e) => {
@@ -199,16 +217,15 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             // generic enum keeps the opaque nominal atom with its case
             // signature, its unit cases minting below (a unit word
             // carries no substitution) while payloaded case shapes stay
-            // per-instantiation facts.
-            let declared = if generic {
-                decls.universe.declare_enum(&e.name.name).map(|id| {
-                    decls.atoms.insert(def, id);
-                    decls.defs_of_atoms.insert(id, def);
-                })
-            } else {
-                Ok(())
-            };
-            if declared.is_ok() && !is_served(decls, def) {
+            // per-instantiation facts. A generic head's mint is the
+            // per-declaration form: a label a case atom or any other
+            // declaration holds shares the name index's first entry.
+            if generic {
+                let id = decls.universe.mint_enum(&e.name.name);
+                decls.atoms.insert(def, id);
+                decls.defs_of_atoms.insert(id, def);
+            }
+            if !is_served(decls, def) {
                 decls.enums.insert(def, EnumShape {
                     params: e.generics.iter().map(GenericParam::from).collect(),
                     cases: e
@@ -230,8 +247,9 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             for case in &e.cases {
                 // The def's name span proves this item owns the def; a
                 // cross-file same-label case resolves through its own
-                // file's shadow entry first.
-                let Some(case_def) = type_def_for_use(package, decls, &case.name.name)
+                // file's shadow entry first, the case namespace the
+                // only namespace carrying case defs.
+                let Some(case_def) = case_def_for_use(package, decls, &case.name.name)
                     .filter(|&d| package.def(d).span == case.name.span)
                 else {
                     continue;
@@ -281,7 +299,26 @@ pub(super) fn reserve_item(package: &Package, item: &Item, decls: &mut Decls) {
             );
         },
         ItemKind::Trait(t) => {
-            if let Ok(id) = decls.universe.declare_trait(&t.name.name) {
+            // the trait registry shares one label space with the atoms,
+            // so a label a case atom (or any other declaration) holds
+            // refuses loudly here — the shared type namespace does not
+            // answer for it
+            let Ok(id) = decls.universe.declare_trait(&t.name.name) else {
+                let held = t.name.name.clone();
+                let mut diag = Diagnostic::error(
+                    ErrorCode::DuplicateDefinition,
+                    format!("`{held}` is already defined"),
+                )
+                .with_primary(t.name.span, "redefined here");
+                if let Some(atom) = decls.universe.atom_by_name(&held)
+                    && let Some(holder) = decls.defs_of_atoms.get(&atom)
+                {
+                    diag = diag.with_secondary(package.def(*holder).span, "first defined here");
+                }
+                diags.push(diag);
+                return;
+            };
+            {
                 decls.traits.insert(def, id);
                 // The origin attribute records beside the trait id: the
                 // seal's span is the declaring name occurrence, the

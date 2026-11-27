@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl FnLower<'_, '_, '_> {
     pub(super) fn value(&mut self, e: &Expr) -> Result<TypedPlace, LowerError> {
         let enclosing = std::mem::replace(&mut self.cur_span, e.span());
         let out = self.value_node(e).map_err(|err| err.respanned(e.span()));

@@ -925,7 +925,7 @@ Races the callable against the deadline: its answer, or
 timed_out when the deadline cuts first.
 
 ```ds
-pub extern fn timeout[t](nanos: int, thunk: fn() -> t) -> t | timed_out
+pub extern fn timeout[t](nanos: int, thunk: fn() -> t) -> t | io_err::timed_out
 ```
 
 #### `total_compare`
@@ -1393,8 +1393,8 @@ The channel's member tier.
 impl[t] chan[t] {
   fn send(self, x: t) -> ()
   fn recv(self) -> t
-  fn send_deadline(self, nanos: int, x: t) -> () | timed_out
-  fn recv_deadline(self, nanos: int) -> t | timed_out
+  fn send_deadline(self, nanos: int, x: t) -> () | io_err::timed_out
+  fn recv_deadline(self, nanos: int) -> t | io_err::timed_out
 }
 ```
 

@@ -999,6 +999,7 @@ impl FnLower<'_, '_, '_> {
             .analyzed
             .package
             .lookup_type(name)
+            .or_else(|| self.analyzed.package.lookup_case(name))
             .or_else(|| self.analyzed.decls.foreign_type(name))?;
         self.analyzed.decls.atoms.get(&def).copied()
     }

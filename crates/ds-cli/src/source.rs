@@ -640,7 +640,11 @@ pub fn compile_linked(
 /// The compile pipeline over source text (`compile` after its read):
 /// `allow_serve` switches the ambient dsmod splice off, the fresh
 /// lowering baseline the artifact gates compare against.
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+#[allow(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn compile_text(
     inputs: &Inputs<'_>,
     sources: &[(String, String)],

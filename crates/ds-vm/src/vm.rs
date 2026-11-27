@@ -1744,8 +1744,9 @@ mod tests {
         let reused = vm.open_fresh_nursery();
         assert_eq!(reused, nursery, "the consumed slot is the reuse target");
         assert!(!vm.nurseries[nursery.index()].cancelled);
-        assert!(vm.nurseries[nursery.index()].children.is_empty());
-        assert!(vm.nurseries[nursery.index()].outcomes.is_empty());
+        assert_eq!(vm.nurseries[nursery.index()].children, [] as [FiberId; 0]);
+        assert_eq!(vm.nurseries[nursery.index()].outcomes, []
+            as [Option<ChildOutcome>; 0]);
         // and a trap against the slot's current occupant names its own
         // nursery link alone — no nursery stands cancelled
         vm.trap_child(recycled, &Trap::DivideByZero);

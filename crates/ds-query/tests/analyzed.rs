@@ -134,7 +134,7 @@ fn memo_hits_share_every_payload() {
         &second.analyzed.resolutions
     ));
     assert!(Rc::ptr_eq(&first.analyzed.decls, &second.analyzed.decls));
-    assert!(Arc::ptr_eq(
+    assert!(Rc::ptr_eq(
         &first.analyzed.checked,
         &second.analyzed.checked
     ));

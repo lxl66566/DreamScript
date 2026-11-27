@@ -9,7 +9,7 @@
 //!
 //! Reproduce: `cargo bench -p ds-pins --bench reentry_kernel`; the
 //! quoted numbers are the median Ir of the recorded runs. Measured
-//! 2026-11-27 over the pre-reentry tree (the word-keyed cache's seam,
+//! over the pre-reentry tree (the word-keyed cache's seam,
 //! the per-word push build) and the persistent-reentry landing (the
 //! single-entry memo beside the bank, one growth plus in-place writes
 //! for the frame, RET's boundary arm skipping the dead overlay write):

@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<'a> FnLower<'a, '_, '_> {
+impl FnLower<'_, '_, '_> {
     /// Stages one generic call's evidence words: the receiver's
     /// builtin instance — one statically-resolved instance reference,
     /// an i64 pool constant — staged on the overlay after the real

@@ -1,8 +1,8 @@
-//! The enum-block declaration story: cases mint into the tag
-//! namespace like standalone tags, the enum name is the union of its
-//! cases, construction is fixed per declaration with cross-spellings as
-//! structured checker errors, and qualified case paths test the case's
-//! own atom.
+//! The enum-block declaration story: cases mint into the case
+//! namespace beside the shared type namespace like standalone tags, the
+//! enum name is the union of its cases, construction is fixed per
+//! declaration with cross-spellings as structured checker errors, and
+//! qualified case paths test the case's own atom.
 
 use ds_check::type_check;
 use ds_diag::Files;
@@ -39,9 +39,11 @@ fn codes(source: &str) -> Vec<(&'static str, String)> {
 }
 
 #[test]
-fn cases_mint_into_the_tag_namespace_like_tags() {
+fn cases_mint_beside_the_type_namespace_like_tags() {
     // A union alias over enum-minted atoms behaves exactly like one over
     // standalone tags and structs: construction, narrowing, matching.
+    // The case labels claim no entry of the shared type namespace, so a
+    // struct, trait, or fn of the same label coexists beside them.
     clean(concat!(
         "tag int\n",
         "tag string\n",
@@ -85,12 +87,14 @@ fn the_enum_name_is_the_union_of_its_cases() {
 #[test]
 fn construction_forms_check_clean_per_declaration() {
     // struct = brace form; payload case = call form (named or
-    // positional); bare case = bare.
+    // positional); a bare unit case rides the qualified spelling (the
+    // value positions left the namespace), the construction doors
+    // keeping their bare readings.
     clean(concat!(
         "tag int\n",
         "enum e { a, b { x: int }, c(int) }\n",
         "struct s { y: int }\n",
-        "const v1 = a\n",
+        "const v1 = e::a\n",
         "const v2 = b(x: 1)\n",
         "const v3 = c(2)\n",
         "const v4 = s { y: 3 }\n",

@@ -664,7 +664,19 @@ impl Visit for Walker<'_> {
             // type-directed work), so the member name stays plain. The
             // keyed spelling walks its bracketed constant like an index.
             Expr::Field { name, .. } => self.value_use(name),
-            Expr::FieldKey { .. } | Expr::Index { .. } => {},
+            Expr::FieldKey { .. }
+            | Expr::Index { .. }
+            | Expr::Lambda { .. }
+            | Expr::MapApply { .. }
+            | Expr::List { .. }
+            | Expr::Tuple { .. }
+            | Expr::Paren { .. }
+            | Expr::Str { .. }
+            | Expr::FnType { .. }
+            // a conversion placeholder's span is rejected source, not a
+            // token
+            | Expr::Invalid(_)
+            | Expr::Block(_) => {},
             Expr::Try { span, expr } => self.between(expr.span().end, span.end, "?", Tok::Operator),
             Expr::Unary { span, op, expr } => self.between(
                 span.start,
@@ -721,17 +733,6 @@ impl Visit for Walker<'_> {
             Expr::Nursery { span, .. } => self.keyword(span.start, "nursery"),
             Expr::Spawn { span, .. } => self.keyword(span.start, "spawn"),
             Expr::Defer { span, .. } => self.keyword(span.start, "defer"),
-            Expr::Lambda { .. }
-            | Expr::MapApply { .. }
-            | Expr::List { .. }
-            | Expr::Tuple { .. }
-            | Expr::Paren { .. }
-            | Expr::Str { .. }
-            | Expr::FnType { .. }
-            // a conversion placeholder's span is rejected source, not a
-            // token
-            | Expr::Invalid(_)
-            | Expr::Block(_) => {},
         }
     }
 

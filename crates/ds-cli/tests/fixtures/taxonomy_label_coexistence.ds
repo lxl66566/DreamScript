@@ -1,0 +1,36 @@
+// purpose: the failure taxonomy's namespace exit through the real
+// ambient — the enums' case labels claim no entry of the shared type
+// namespace, so a user struct and trait of the same labels declare
+// beside them and run (the brace construction over the user struct,
+// the trait impl's head resolving through the trait namespace, the
+// dot call answering its member), and the qualified spellings carry
+// the ambient's members in the match arms wherever both families
+// answer for one label. The script runs with the fixture's directory
+// as the working directory.
+
+struct not_found { path: string }
+
+trait named_thing {
+  fn why(self) -> string
+}
+
+impl named_thing for not_found {
+  fn why(self) -> string { "user struct" }
+}
+
+fn classify(e: io_err) -> string {
+  match e {
+    io_err::not_found { path } => "missing ${path}"
+    io_err::timed_out => "slow"
+    other => "io floor"
+  }
+}
+
+fn main() -> () {
+  const mine = not_found { path: "app.cfg" }
+  println(mine.path)
+  println(mine.why())
+  const size = file_size("coexistence_absent/probe.txt")
+  println(size.ok((n: int) => "size ${n}").err((e: io_err) => classify(e)))
+  println("done")
+}

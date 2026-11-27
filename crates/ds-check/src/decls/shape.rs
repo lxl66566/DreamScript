@@ -56,7 +56,7 @@ pub(super) fn shape_item(
                 // payloads), so a minted payload case IS a struct atom for
                 // the set algebra and the lowerer.
                 for case in &e.cases {
-                    let Some(case_def) = type_def_for_use(package, decls, &case.name.name)
+                    let Some(case_def) = case_def_for_use(package, decls, &case.name.name)
                         .filter(|&d| package.def(d).span == case.name.span)
                     else {
                         continue

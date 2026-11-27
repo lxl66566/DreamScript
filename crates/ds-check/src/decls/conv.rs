@@ -148,23 +148,22 @@ pub(super) fn conv_expr(
                 // the surface spelling carries, the same reading the
                 // checker's own fn-type solve takes
                 let bare;
-                let written = match param.ty.as_ref() {
-                    Some(ty) => ty,
-                    None => {
-                        bare = Type::Path {
+                let written = if let Some(ty) = param.ty.as_ref() {
+                    ty
+                } else {
+                    bare = Type::Path {
+                        span: param.span,
+                        path: ds_parse::Path {
                             span: param.span,
-                            path: ds_parse::Path {
+                            segments: vec![Ident {
                                 span: param.span,
-                                segments: vec![Ident {
-                                    span: param.span,
-                                    name: param.name.name.clone(),
-                                }],
-                            },
-                            args: Vec::new(),
-                            delim: Delim::Bracket,
-                        };
-                        &bare
-                    },
+                                name: param.name.name.clone(),
+                            }],
+                        },
+                        args: Vec::new(),
+                        delim: Delim::Bracket,
+                    };
+                    &bare
                 };
                 let expr = conv_expr(package, written, decls, diags)?;
                 param_tys.push(decls.universe.solve(&expr).ok()?);
@@ -223,7 +222,10 @@ pub(super) fn path_expr(
     // field would silently drop out of its declaration's universe
     // atom, a shape both this module's own lowering and the export
     // walk's link fact read.
-    let Some(def) = package.lookup_type(&name.name) else {
+    let Some(def) = package
+        .lookup_type(&name.name)
+        .or_else(|| package.lookup_case(&name.name))
+    else {
         let def = package
             .foreign()
             .iter()
@@ -292,7 +294,7 @@ pub(super) fn enum_case_union(
     }
     let mut union: Option<TypeExpr> = None;
     for (name, ..) in cases {
-        let atom = type_def_for_use(package, decls, name)
+        let atom = case_def_for_use(package, decls, name)
             .or_else(|| decls.foreign_type(name))
             .and_then(|def| decls.atoms.get(&def).copied())?;
         let expr = TypeExpr::Atom(atom);
@@ -307,7 +309,8 @@ pub(super) fn enum_case_union(
 /// The atom a single-segment type path names as a CONSTRUCTOR: declared
 /// atoms only (aliases and traits are sets, not constructors).
 pub(super) fn atom_of_path(package: &Package, name: &Ident, decls: &mut Decls) -> Option<TypeId> {
-    let def = type_def_for_use(package, decls, &name.name)?;
+    let def = type_def_for_use(package, decls, &name.name)
+        .or_else(|| case_def_for_use(package, decls, &name.name))?;
     if decls.atoms.get(&def).is_none() && package.foreign().contains_key(&def) {
         // A written type naming a linked declaration shapes ahead of the
         // link install (an impl head, an annotation the local namespace
@@ -469,7 +472,7 @@ fn derive_apply_enum_cases(
     let mut derived_all = true;
     for (name, span, payload) in &shape.cases {
         let Some(case_def) =
-            type_def_for_use(package, decls, name).filter(|&d| package.def(d).span == *span)
+            case_def_for_use(package, decls, name).filter(|&d| package.def(d).span == *span)
         else {
             derived_all = false;
             continue;

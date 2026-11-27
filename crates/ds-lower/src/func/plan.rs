@@ -1530,7 +1530,7 @@ pub(super) fn loop_copy_count(
 /// The plan-side dispatch reads over the active copy view: a
 /// copy-local site's records are per-copy facts the body-wide tables
 /// never hold.
-fn copy_trait_call<'a>(found: &Discovery<'a, '_>, span: Span) -> Option<TraitCall> {
+fn copy_trait_call(found: &Discovery<'_, '_>, span: Span) -> Option<TraitCall> {
     copy_record_at(
         &found.analyzed.checked,
         found.comptime_instance.as_deref(),
@@ -1572,7 +1572,7 @@ fn copy_hole_show(found: &Discovery<'_, '_>, span: Span) -> Option<MethodId> {
 
 /// Whether the checker routed one dot-call onto the member tier: a
 /// trait or inherent dispatch record answers at the call span (the
-/// copy's own record inside a copy). The F3 free-tier fallback reads
+/// copy's own record inside a copy). The free-tier fallback reads
 /// the same test, so a routed dot-call never plans a free fn body.
 pub(super) fn member_routed(found: &Discovery<'_, '_>, call_span: Span) -> bool {
     copy_trait_call(found, call_span).is_some() || copy_inherent_call(found, call_span).is_some()

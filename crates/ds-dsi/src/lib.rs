@@ -391,6 +391,7 @@ mod tests {
                 defs: Vec::new(),
                 type_names: Vec::new(),
                 value_names: Vec::new(),
+                case_names: Vec::new(),
                 methods: Vec::new(),
                 method_index: Vec::new(),
             },

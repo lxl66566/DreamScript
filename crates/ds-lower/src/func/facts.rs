@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
+impl<'a> FnLower<'a, '_, '_> {
     /// The registry as this lowering reads it: the analyzed package's
     /// own outside every instantiation, the discovery's copy while one
     /// lowered (the substituted types minted there).
@@ -37,15 +37,15 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         if self.comptime_path.is_empty() {
             return None;
         }
-        if let Some(scope) = &self.comptime_instance {
-            if let Some(rec) = self.analyzed.checked.comptime_instance_records.get(&(
+        if let Some(scope) = &self.comptime_instance
+            && let Some(rec) = self.analyzed.checked.comptime_instance_records.get(&(
                 scope.0,
                 Rc::clone(&scope.1),
                 self.comptime_path.clone(),
                 span,
-            )) {
-                return Some(rec);
-            }
+            ))
+        {
+            return Some(rec);
         }
         self.analyzed
             .checked
@@ -150,15 +150,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     pub(super) fn val(&self, span: Span) -> Result<Val, LowerError> {
-        let val = if !self.comptime_path.is_empty() {
-            self.copy_val(span).ok_or_else(|| {
-                LowerError::unsupported(
-                    span,
-                    "an expression",
-                    "it has no checked type in the active copy",
-                )
-            })?
-        } else {
+        let val = if self.comptime_path.is_empty() {
             self.analyzed
                 .checked
                 .expr_types
@@ -167,6 +159,14 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 .ok_or_else(|| {
                     LowerError::unsupported(span, "an expression", "it has no checked type")
                 })?
+        } else {
+            self.copy_val(span).ok_or_else(|| {
+                LowerError::unsupported(
+                    span,
+                    "an expression",
+                    "it has no checked type in the active copy",
+                )
+            })?
         };
         let ty = self
             .shapes
