@@ -1,0 +1,31 @@
+// The label precedence face: a user struct of an ambient case label
+// coexists with it. Directed positions (an `is` test, a bare match
+// arm) over an `io_err` value read the label as the enum's case, the
+// payload narrowing included; undirected positions (the construction,
+// the field read) keep the user struct's reading.
+struct not_found { path: string }
+
+fn read_path(s: not_found) -> string { s.path }
+
+fn narrow(e: io_err) -> string {
+  if e is not_found {
+    "missing ${e.path}"
+  } else {
+    "clear"
+  }
+}
+
+fn arm(e: io_err) -> string {
+  match e {
+    not_found { path } => "bare ${path}"
+    other => "floor"
+  }
+}
+
+fn main() -> () {
+  println(read_path(not_found { path: "app.cfg" }))
+  println(narrow(io_err::not_found(path: "q")))
+  println(narrow(io_err::timed_out))
+  println(arm(io_err::not_found(path: "y")))
+  println(arm(io_err::timed_out))
+}

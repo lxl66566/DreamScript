@@ -154,6 +154,11 @@ pub struct proc_handle: ~Copyable { id: int }
 
 The io failure union the fsys natives answer: one class case per
 failure kind, the path classes carrying the path they failed on.
+The class labels stay type-directed: an `is` test or a bare match
+arm over a value of this union reads the label as this enum's own
+case even when a user type of the same label is in scope, while an
+undirected position (a construction, an annotation) keeps the user
+type's reading, and the qualified spelling names the case exactly.
 
 ```ds
 pub enum io_err {

@@ -254,14 +254,45 @@ pub(super) fn reserve_item(
                 else {
                     continue;
                 };
-                let atom = match &case.payload {
-                    EnumPayload::None => Some(declare_unit_name(decls, &case.name.name)),
-                    // the re-keyed mint: the declaring case's own atom,
-                    // never a name lookup; a payloaded case named `none`
-                    // claims no atom
-                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => (!generic
-                        && case.name.name != "none")
-                        .then(|| decls.universe.mint_payload_tag(&case.name.name)),
+                // The trait registry shares one label space with the
+                // atoms: a case minting beside a trait of the same
+                // label refuses loudly (the reverse order refuses at
+                // the trait's own declaration gate) and skips the mint
+                // an atom under the trait's label would corrupt every
+                // solve the trait's member set answers.
+                let claims_atom = match &case.payload {
+                    EnumPayload::None => true,
+                    EnumPayload::Tuple(_) | EnumPayload::Struct(_) => {
+                        !generic && case.name.name != "none"
+                    },
+                };
+                let mut trait_clash = false;
+                if claims_atom && let Some(trait_id) = decls.universe.trait_by_name(&case.name.name)
+                {
+                    let mut diag = Diagnostic::error(
+                        ErrorCode::DuplicateDefinition,
+                        format!("`{}` is already defined", case.name.name),
+                    )
+                    .with_primary(case.name.span, "redefined here");
+                    if let Some((holder, _)) = decls.traits.iter().find(|&(_, id)| *id == trait_id)
+                    {
+                        diag = diag.with_secondary(package.def(*holder).span, "first defined here");
+                    }
+                    diags.push(diag);
+                    trait_clash = true;
+                }
+                let atom = if trait_clash {
+                    None
+                } else {
+                    match &case.payload {
+                        EnumPayload::None => Some(declare_unit_name(decls, &case.name.name)),
+                        // the re-keyed mint: the declaring case's own atom,
+                        // never a name lookup; a payloaded case named `none`
+                        // claims no atom
+                        EnumPayload::Tuple(_) | EnumPayload::Struct(_) => (!generic
+                            && case.name.name != "none")
+                            .then(|| decls.universe.mint_payload_tag(&case.name.name)),
+                    }
                 };
                 if let Some(id) = atom {
                     decls.atoms.insert(case_def, id);

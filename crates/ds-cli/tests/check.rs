@@ -500,3 +500,58 @@ fn a_false_condition_skips_the_std_selection_validation() {
         "the held selection validates: {stderr}"
     );
 }
+
+/// A user type and a same-label case answer the same clean check in
+/// either declaration order: the struct mint goes per-declaration and
+/// the case's def lives in the case namespace, so swapping the two
+/// declaring files' positions in the `ds check` command keeps every
+/// reading — the struct's own brace construction, the qualified case
+/// path, and the bare label's arm — unchanged.
+#[test]
+fn a_user_type_and_a_case_keep_either_declaration_order() {
+    let user_type = concat!(
+        "pub struct not_found { path: string }\n",
+        "pub fn mk_s() -> not_found {\n",
+        "  not_found { path: \"s\" }\n",
+        "}\n",
+    );
+    let cases = concat!(
+        "pub enum perr { not_found { path: string }, halt }\n",
+        "pub fn mk_e() -> perr {\n",
+        "  perr::not_found(path: \"e\")\n",
+        "}\n",
+    );
+    let entry = concat!(
+        "fn main() -> () {\n",
+        "  const s = mk_s()\n",
+        "  println(s.path)\n",
+        "  const e = mk_e()\n",
+        "  match e {\n",
+        "    perr::not_found { path } => println(\"case ${path}\")\n",
+        "    perr::halt => println(\"halt\")\n",
+        "  }\n",
+        "  const t = not_found { path: \"bare-in-entry\" }\n",
+        "  println(t.path)\n",
+        "}\n",
+    );
+    for (first, second) in [(user_type, cases), (cases, user_type)] {
+        let dir = support::guarded_dir("ds-cli-check-order-");
+        let a = dir.join("a.ds");
+        let b = dir.join("b.ds");
+        let entry_path = dir.join("z.ds");
+        fs::write(&a, first).expect("the temp source writes");
+        fs::write(&b, second).expect("the temp source writes");
+        fs::write(&entry_path, entry).expect("the temp source writes");
+        let out = ds_check(&[
+            "check",
+            a.to_str().expect("temp path is UTF-8"),
+            b.to_str().expect("temp path is UTF-8"),
+            entry_path.to_str().expect("temp path is UTF-8"),
+        ]);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(out.status.code(), Some(0), "either declaration order");
+        assert_eq!(out.stdout, [] as [u8; 0], "either declaration order");
+        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+        assert_eq!(stderr, "", "the declaration order changes nothing");
+    }
+}

@@ -199,3 +199,52 @@ fn the_payloaded_qualified_label_constructs_and_matches() {
     ));
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+/// The directed label keeps the case reading beside a same-label user
+/// type: the is-test (its narrowing included) and the bare struct arm
+/// over an `io_err` value answer the case atom, while the undirected
+/// value positions keep the user struct's reading — its construction
+/// and its field read.
+#[test]
+fn a_user_struct_of_a_case_label_loses_the_directed_reading_and_keeps_the_undirected_one() {
+    let diags = check_user(concat!(
+        "struct not_found { path: string }\n",
+        "fn show(s: not_found) -> string { s.path }\n",
+        "fn narrow(e: io_err) -> string {\n",
+        "  if e is not_found {\n",
+        "    \"missing ${e.path}\"\n",
+        "  } else {\n",
+        "    \"clear\"\n",
+        "  }\n",
+        "}\n",
+        "fn arm(e: io_err) -> string {\n",
+        "  match e {\n",
+        "    not_found { path } => \"bare ${path}\"\n",
+        "    other => \"floor\"\n",
+        "  }\n",
+        "}\n",
+        "const kept = show(not_found { path: \"x\" })\n",
+        "const a = narrow(io_err::not_found(path: \"q\"))\n",
+        "const b = arm(io_err::not_found(path: \"y\"))\n",
+    ));
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// The directed position's fall-through stays loud: a label the
+/// expected union does not carry resolves through its own declaration
+/// and refuses unknown-member at the value-position test, never the
+/// constant-false story.
+#[test]
+fn a_directed_label_outside_the_union_refuses_unknown_member() {
+    let diags = check_user(concat!(
+        "fn probe(e: io_err) -> bool {\n",
+        "  e is timeout\n",
+        "}\n",
+    ));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("DS2045") && d.contains("names no member")),
+        "{diags:?}"
+    );
+}

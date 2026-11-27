@@ -149,12 +149,14 @@ impl Bodies<'_> {
             },
             Pattern::Struct { span, path, fields } => {
                 let Some(atom) = self.pattern_path_atom(path, scrut) else {
-                    self.error(
-                        ErrorCode::UnresolvedName,
-                        format!("pattern `{}` names no declared atom", path.text()),
-                        *span,
-                        "unknown pattern",
-                    );
+                    if !self.take_pattern_label_reported() {
+                        self.error(
+                            ErrorCode::UnresolvedName,
+                            format!("pattern `{}` names no declared atom", path.text()),
+                            *span,
+                            "unknown pattern",
+                        );
+                    }
                     return;
                 };
                 let Some(shape) = self.struct_shape_of(atom).cloned() else {
@@ -591,13 +593,25 @@ impl Bodies<'_> {
 
     fn pattern_path_atom(&mut self, path: &Path, scrut: Ty) -> Option<TypeId> {
         match path.segments.as_slice() {
-            [only] => self.unit_pattern_atom(&only.name).or_else(|| {
-                let def = self
-                    .type_def_of(&only.name)
-                    .or_else(|| self.case_def_of(&only.name))?;
-                self.applied_case_atom(def, scrut, only.span)
-                    .map(|(_, atom)| atom)
-            }),
+            [only] => {
+                // the directed label: the scrutinee's own member
+                // carrying the label is the atom — a same-label user
+                // type loses the arm's reading to the position's
+                // direction — while an operand carrying no such member
+                // keeps the declaration reading
+                match self.directed_arm_atom(&only.name, only.span, scrut) {
+                    DirectedAnswer::Member(atom) => return Some(atom),
+                    DirectedAnswer::Refused => return None,
+                    DirectedAnswer::Undirected => {},
+                }
+                self.unit_pattern_atom(&only.name).or_else(|| {
+                    let def = self
+                        .type_def_of(&only.name)
+                        .or_else(|| self.case_def_of(&only.name))?;
+                    self.applied_case_atom(def, scrut, only.span)
+                        .map(|(_, atom)| atom)
+                })
+            },
             [head, tail] => {
                 let def = self
                     .type_def_of(&head.name)
@@ -727,6 +741,57 @@ impl Bodies<'_> {
     /// predeclared `none`, or a type-namespace constructor's atom —
     /// aliases and traits carry none, so those names bind instead. The
     /// declaring file's own shadowing tag declaration answers first.
+    /// The directed arm label over the scrutinee: one member carrying
+    /// the label answers `Member(atom)`, recorded for the lowering;
+    /// several refuse ambiguous and answer `Refused` (a refused arm,
+    /// never a fallback to the declaration reading); none answers
+    /// `Undirected`, leaving the arm to the declaration reading.
+    fn directed_arm_atom(&mut self, name: &str, span: Span, scrut: Ty) -> DirectedAnswer<TypeId> {
+        let labeled: Vec<TypeId> = self
+            .decls
+            .universe
+            .members(scrut)
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == name)
+            })
+            .collect();
+        match labeled.as_slice() {
+            [one] => {
+                self.record_directed_tag(span, *one);
+                DirectedAnswer::Member(*one)
+            },
+            [] => DirectedAnswer::Undirected,
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the arm label `{}` matches several members of `{}` [F9.5]; qualify which \
+                         declaration you mean",
+                        name,
+                        self.decls.universe.render(scrut)
+                    ),
+                )
+                .with_primary(span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                self.pattern_label_reported = true;
+                DirectedAnswer::Refused
+            },
+        }
+    }
+
     fn unit_pattern_atom(&self, name: &str) -> Option<TypeId> {
         if name == "none" && !self.package.declares("none") {
             return Some(TypeId::NONE);

@@ -849,9 +849,23 @@ impl Bodies<'_> {
                 };
                 // The test type solved once at its own site; a re-solve
                 // here only feeds the narrowing, so a repeated refusal
-                // is dropped instead of reported twice.
+                // is dropped instead of reported twice. The directed
+                // label keeps the is-test's own precedence: the
+                // binder's union carrying the case atom is the
+                // narrowed set, never the same-label user type's.
                 let before = self.diags.len();
-                let solved = self.solve_here(ty);
+                let operand = self
+                    .refined
+                    .get(bind)
+                    .copied()
+                    .or_else(|| self.locals.get(bind).map(|b| b.ty));
+                let solved = match operand.map_or(DirectedAnswer::Undirected, |operand| {
+                    self.directed_test_label(ty, operand)
+                }) {
+                    DirectedAnswer::Member(answer) => Some(answer),
+                    DirectedAnswer::Refused => None,
+                    DirectedAnswer::Undirected => self.solve_here(ty),
+                };
                 self.diags.truncate(before);
                 let Some(solved) = solved else { return };
                 out.push(Narrow {
@@ -902,12 +916,20 @@ impl Bodies<'_> {
     /// a condition-position refinement).
     pub(super) fn is_expr(&mut self, expr: &Expr, ty: &Type, span: Span) -> Val {
         let operand = self.expr(expr, None);
-        let Some(solved) = self.solve_here(ty).or_else(|| {
-            // the directed test label: an undeclared
-            // single-segment label probes the operand's own
-            // members before the solve refusal
-            self.is_test_label_probe(ty, operand.ty)
-        }) else {
+        let solved = match self.directed_test_label(ty, operand.ty) {
+            // the position is directed: the operand's own member
+            // carrying the label answers (or the ambiguity refuses) —
+            // a same-label user type never takes the reading back
+            DirectedAnswer::Member(answer) => Some(answer),
+            DirectedAnswer::Refused => None,
+            DirectedAnswer::Undirected => self.solve_here(ty).or_else(|| {
+                // the directed test label: an undeclared
+                // single-segment label probes the operand's own
+                // members before the solve refusal
+                self.is_test_label_probe(ty, operand.ty)
+            }),
+        };
+        let Some(solved) = solved else {
             if !self.take_solve_reported() {
                 self.error(
                     ErrorCode::TypeMismatch,
@@ -977,6 +999,72 @@ impl Bodies<'_> {
             ty: self.bool_ty(),
             diverges: false,
             poisoned: false,
+        }
+    }
+
+    /// The directed test label's answer when the operand's own union
+    /// carries the label: one member carrying it is the test's set — a
+    /// same-label user type loses the reading to the position's
+    /// direction — several report the ambiguity naming both
+    /// declarations (a refused position, never a fallback), none
+    /// leaves the position undirected (`Undirected` keeps the solve
+    /// and the undeclared-label probe's own order).
+    fn directed_test_label(&mut self, ty: &Type, operand: Ty) -> DirectedAnswer<Ty> {
+        let Type::Path { path, args, .. } = ty else {
+            return DirectedAnswer::Undirected;
+        };
+        if !args.is_empty() {
+            return DirectedAnswer::Undirected;
+        }
+        let [only] = path.segments.as_slice() else {
+            return DirectedAnswer::Undirected;
+        };
+        if only.name == "none" && !self.package.declares("none") {
+            return DirectedAnswer::Undirected;
+        }
+        let labeled: Vec<TypeId> = self
+            .decls
+            .universe
+            .members(operand)
+            .iter()
+            .copied()
+            .filter(|&atom| {
+                self.decls
+                    .universe
+                    .atom_decl(atom)
+                    .is_ok_and(|decl| decl.name == only.name)
+            })
+            .collect();
+        match labeled.as_slice() {
+            [one] => self
+                .decls
+                .universe
+                .atom_ty(*one)
+                .map_or(DirectedAnswer::Undirected, DirectedAnswer::Member),
+            [] => DirectedAnswer::Undirected,
+            many => {
+                let mut diag = Diagnostic::error(
+                    ErrorCode::AmbiguousTagMember,
+                    format!(
+                        "the tested label `{}` matches several members of `{}` [F9.5]; qualify \
+                         which declaration you mean",
+                        only.name,
+                        self.decls.universe.render(operand)
+                    ),
+                )
+                .with_primary(only.span, "ambiguous member");
+                for atom in many {
+                    if let Some(decl) = self.decls.defs_of_atoms.get(atom) {
+                        diag = diag.with_secondary(
+                            self.package.def(*decl).span,
+                            "one declaration of the label",
+                        );
+                    }
+                }
+                self.diags.push(diag);
+                self.solve_reported = true;
+                DirectedAnswer::Refused
+            },
         }
     }
 

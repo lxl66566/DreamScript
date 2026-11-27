@@ -73,6 +73,34 @@ fn the_error_box_face_runs_through_the_ambient() {
     );
 }
 
+/// The label precedence doors: a user `struct not_found` beside the
+/// ambient taxonomy coexists with it — a directed position (an `is`
+/// test, a bare match arm) over an `io_err` value reads the label as
+/// the enum's case, the payload narrowing included, while an
+/// undirected position (the construction, the field read) keeps the
+/// user struct's reading.
+#[test]
+fn the_directed_label_reads_the_case_beside_the_user_type() {
+    let dir = workdir("label-precedence");
+    let out = run(ds_in(&dir)
+        .arg("run")
+        .arg(fixture("label_precedence_face.ds")));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        text(&out.stdout),
+        concat!(
+            "app.cfg\n",
+            "missing q\n",
+            "clear\n",
+            "bare y\n",
+            "floor\n",
+            "",
+        ),
+        "the label precedence face's golden stdout drifted"
+    );
+}
+
 /// The containment check is unchanged: a `?` whose operand carries
 /// `io_err` against a return union naming only `box_err` refuses — no
 /// implicit widening valve opens, the conversion is the only way in.

@@ -212,6 +212,53 @@ fn write_root(work: &Path, manifest: &str, source: &str) -> PathBuf {
     root
 }
 
+/// A local case label refuses a linked type registration of the same
+/// label: the selection names the local shadow (the loud behavior the
+/// shared type namespace gave every label before the case namespace's
+/// exit), never a silent coexistence.
+#[test]
+fn a_local_case_label_refuses_a_linked_type_of_the_same_label() {
+    let work = temp_dir("case-shadow");
+    let wide = work.join("wide");
+    let manifest = "name = \"@wide\"\nversion = \"1.0.0\"\n".to_owned();
+    let member = concat!(
+        "pub struct gadget { n: int }\n",
+        "pub fn use_gadget(g: gadget) -> int {\n",
+        "g.n\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "0\n",
+        "}\n",
+    );
+    let members = [("a.ds", member)];
+    write_pkg(&wide, &manifest, &members);
+    let (ok, _, err) = ds(&["save", wide.to_str().expect("temp path is UTF-8")]);
+    assert!(ok, "the bundle installs (stderr: {err})");
+    let wide_id = bundle_identity(&manifest, &members);
+    let root_manifest = format!(
+        "name = \"app\"\nversion = \"0.1.0\"\n\n[deps]\n@wide = {{ ver = \"1.0.0\", hash = \
+         \"blake3:{wide_id}\" }}\n"
+    );
+    let source = concat!(
+        "import @wide (gadget)\n",
+        "\n",
+        "enum my_err { gadget, halt }\n",
+        "\n",
+        "fn main() -> int {\n",
+        "0\n",
+        "}\n",
+    );
+    let root = write_root(&work, &root_manifest, source);
+    let entry = root.join("app.ds");
+    let entry = entry.to_str().expect("temp path is UTF-8");
+    let (ok, _, err) = ds(&["run", "--print-result", entry]);
+    assert!(!ok, "the local case label refuses the linked registration");
+    assert!(
+        err.contains("the local declaration would shadow the linked type"),
+        "{err}"
+    );
+}
+
 /// The happy-path pair the fixture assertions share: the run prints and
 /// exits clean over the resolved graph, and the built artifact's link
 /// table pins the ambient and the middle package at the identities the

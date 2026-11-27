@@ -38,6 +38,16 @@ fn codes(source: &str) -> Vec<(&'static str, String)> {
         .collect()
 }
 
+/// Checks a two-file source, returning every diagnostic.
+fn diags_across(first: &str, second: &str) -> Vec<ds_diag::Diagnostic> {
+    let mut files = Files::new();
+    let a = files.add_source("a.ds", first);
+    let b = files.add_source("b.ds", second);
+    let a_ast = parse(&files, a).unwrap_or_else(|d| panic!("parses: {d:?}"));
+    let b_ast = parse(&files, b).unwrap_or_else(|d| panic!("parses: {d:?}"));
+    type_check(&files, &[a_ast, b_ast]).diags
+}
+
 #[test]
 fn cases_mint_beside_the_type_namespace_like_tags() {
     // A union alias over enum-minted atoms behaves exactly like one over
@@ -87,9 +97,10 @@ fn the_enum_name_is_the_union_of_its_cases() {
 #[test]
 fn construction_forms_check_clean_per_declaration() {
     // struct = brace form; payload case = call form (named or
-    // positional); a bare unit case rides the qualified spelling (the
-    // value positions left the namespace), the construction doors
-    // keeping their bare readings.
+    // positional); a unit case value resolves in both the bare label
+    // and the qualified spelling (the corpus spells its value
+    // positions qualified), the construction doors keeping their
+    // bare readings.
     clean(concat!(
         "tag int\n",
         "enum e { a, b { x: int }, c(int) }\n",
@@ -387,4 +398,52 @@ fn a_tuple_payload_on_a_tag_refuses() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].0, "DS2041", "{found:?}");
     assert!(found[0].1.contains("named fields"), "{found:?}");
+}
+
+/// The trait registry shares one label space with the atoms, so a case
+/// of a trait's label refuses DS2005 in both declaration orders — the
+/// trait's own gate when the case mints first, the case mint's gate
+/// when the trait reserves first — over the unit and the payload mint
+/// alike. A minted atom under a trait's label would corrupt every
+/// solve the trait's member set answers.
+#[test]
+fn a_case_of_a_trait_label_refuses_in_both_orders() {
+    for source in [
+        "tag int\nenum e { clash, halt }\ntrait clash { fn m(self) -> int }\n",
+        "tag int\ntrait clash { fn m(self) -> int }\nenum e { clash, halt }\n",
+        "tag int\nenum e { clash { n: int }, halt }\ntrait clash { fn m(self) -> int }\n",
+        "tag int\ntrait clash { fn m(self) -> int }\nenum e { clash { n: int }, halt }\n",
+    ] {
+        let found = codes(source);
+        assert_eq!(
+            found.len(),
+            1,
+            "{source}: the refusal stands alone: {found:?}"
+        );
+        assert_eq!(found[0].0, "DS2005", "{source}: {found:?}");
+        assert!(
+            found[0].1.contains("`clash` is already defined"),
+            "{found:?}"
+        );
+    }
+}
+
+/// The same refusal across files, both orders: the trait gate reads
+/// the whole universe, never one file's slice.
+#[test]
+fn a_case_of_a_trait_label_refuses_across_files() {
+    for (first, second) in [
+        (
+            "pub trait clash { fn m(self) }\n",
+            "pub enum e { clash, halt }\n",
+        ),
+        (
+            "pub enum e { clash, halt }\n",
+            "pub trait clash { fn m(self) }\n",
+        ),
+    ] {
+        let found = diags_across(first, second);
+        assert_eq!(found.len(), 1, "{first}|{second}: stands alone: {found:?}");
+        assert_eq!(found[0].code.as_str(), "DS2005", "{found:?}");
+    }
 }

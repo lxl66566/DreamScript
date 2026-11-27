@@ -732,8 +732,13 @@ impl Package {
                     // collision and mis-shape every use.
                     let reserved_ok =
                         matches!(entry.ty.as_deref(), Some(crate::import::TypeFact::Case(_)));
+                    // A local case label blocks the registration like
+                    // a local type: the case namespace sits beside the
+                    // shared type namespace, so the type lookup alone
+                    // would let a linked type silently shadow it.
                     let free = (reserved_ok || (entry.name != "none" && entry.name != "type"))
                         && self.lookup_type(&entry.name).is_none()
+                        && self.lookup_case(&entry.name).is_none()
                         && !self.foreign_type_defs.contains_key(&entry.name);
                     if let (Some(kind), true) = (kind, free) {
                         let def = DefId::from_raw(
@@ -913,6 +918,7 @@ impl Package {
                                 fact.enum_name
                             )
                         } else if self.lookup_type(&entry.name).is_some()
+                            || self.lookup_case(&entry.name).is_some()
                             || (!matches!(
                                 entry.ty.as_deref(),
                                 Some(crate::import::TypeFact::Case(_))

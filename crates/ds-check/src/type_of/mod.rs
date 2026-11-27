@@ -143,6 +143,21 @@ struct Narrow {
     ty: Ty,
 }
 
+/// The directed label's answer over a set-bearing operand: once a
+/// member carries the label the position's direction stands either way,
+/// so the refusal and the hit both hold, and a label no member carries
+/// leaves the position to the undirected solve.
+enum DirectedAnswer<T> {
+    /// No member carries the label: the undirected solve takes the
+    /// position.
+    Undirected,
+    /// Several members carry it: the position refuses, the ambiguity
+    /// already reported.
+    Refused,
+    /// The one member carrying the label.
+    Member(T),
+}
+
 /// The outcome of one interpolation hole's `show` proof: dispatched
 /// (the solved instance records at the hole's own span), refused (no
 /// candidate serves, the diagnostic answers), or reported (an
