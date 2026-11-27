@@ -380,6 +380,25 @@ pub(super) fn resolve_rows(
                     .declare_struct(name)
                     .map_err(|_| drift(format!("the linked opaque `{name}` refuses to replay")))?
             },
+            MintData::FnSig { params, ret } => {
+                let mut solved = Vec::with_capacity(params.len());
+                for &index in params {
+                    solved.push(tys.get(index as usize).copied().ok_or_else(|| {
+                        drift(format!(
+                            "a mint names the intern set {index} before it lands"
+                        ))
+                    })?);
+                }
+                let ret_ty = tys.get(*ret as usize).copied().ok_or_else(|| {
+                    drift(format!(
+                        "a mint names the intern set {} before it lands",
+                        *ret
+                    ))
+                })?;
+                universe
+                    .fn_atom(&solved, ret_ty)
+                    .map_err(|_| drift("a minted fn-signature atom refuses to replay".to_owned()))?
+            },
         };
         // The mint log is one contiguous tail of the generation's atom
         // space, so every landing must sit one constant shift off the

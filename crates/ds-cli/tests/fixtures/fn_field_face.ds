@@ -1,0 +1,29 @@
+// purpose: fn-typed fields and payloads through `ds run`: a struct
+// field declared without ever being called, the dot-call through the
+// field, the field read as a value into an indirect call, and a
+// fn-typed element inside an enum case's positional payload — every
+// door the DSI shape-phase mint has to carry.
+
+struct handler {
+  f: fn(int) -> int,
+  n: int
+}
+
+enum held {
+  pair(fn(int) -> int, int)
+}
+
+fn apply(g: fn(int) -> int, x: int) -> int {
+  g(x)
+}
+
+fn main() -> int {
+  const silent = handler { f: (x: int) => x + 1, n: 3 }
+  const v = handler { f: (x: int) => x * 2, n: 10 }
+  const h = pair((x: int) => x + 1, 20)
+  const called = match h {
+    pair(f, n) => f(n)
+  }
+  println("dot ${v.f(v.n)} indirect ${apply(silent.f, 1)} payload ${called}")
+  0
+}

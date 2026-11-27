@@ -169,3 +169,89 @@ fn the_served_prefix_installs_the_solved_records() {
         "the inherent bounds must install identically"
     );
 }
+
+/// One atom's served identity: the name, the kind's shape face, and the
+/// fn-signature face where the atom carries one.
+fn atom_faces(decls: &ds_check::Decls) -> Vec<String> {
+    let universe = &decls.universe;
+    (0..universe.atom_count())
+        .map(|index| {
+            let id = ds_check::TypeId::from_raw(index);
+            let decl = universe.atom_decl(id).expect("every id has a decl");
+            let kind = match &decl.kind {
+                ds_check::AtomKind::Unit => "unit",
+                ds_check::AtomKind::Reserved => "reserved",
+                ds_check::AtomKind::Struct(fields) => {
+                    return format!("{} {} struct {}", index, decl.name, fields.len());
+                },
+                ds_check::AtomKind::Enum(cases) => {
+                    return format!("{} {} enum {}", index, decl.name, cases.len());
+                },
+                ds_check::AtomKind::Tuple(elements) => {
+                    return format!("{} {} tuple {}", index, decl.name, elements.len());
+                },
+                ds_check::AtomKind::Apply(..) => "apply",
+                ds_check::AtomKind::FnSig(..) => "fnsig",
+            };
+            let face = universe.fn_sig(id).map_or_else(
+                || kind.to_owned(),
+                |(params, ret)| {
+                    format!(
+                        "fn({}) -> {}",
+                        params
+                            .iter()
+                            .map(|ty| universe.render(*ty))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        universe.render(ret)
+                    )
+                },
+            );
+            format!("{} {} {}", index, decl.name, face)
+        })
+        .collect()
+}
+
+/// A fn-typed struct field and a fn-typed case payload mint
+/// fn-signature atoms in the shape phase: the mint log carries them as
+/// solved parameter and return sets, the serve replays them through the
+/// same hash-consing, and the served universe's atoms answer the fresh
+/// pass's ids, names, and signatures — the DSI shape-phase mint the
+/// CLI-facing encode walks for every clean program declaring a
+/// fn-typed field.
+#[test]
+fn a_fn_typed_field_serves_through_the_mint_log() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct handler {\n",
+        "  f: fn(int) -> int,\n",
+        "  n: int\n",
+        "}\n",
+        "enum held {\n",
+        "  solo(fn(int) -> string, int)\n",
+        "}\n",
+    );
+    let fresh = fresh(source);
+    let served = served(source);
+    let fresh_faces = atom_faces(&fresh);
+    let served_faces = atom_faces(&served);
+    // the fn-signature atom's structural name is its own signature
+    // face, so the entry spells the sig twice
+    assert!(
+        fresh_faces
+            .iter()
+            .any(|face| face.contains(" fn(int) -> int fn(int) -> int")),
+        "the fresh pass mints the fn-signature atom: {fresh_faces:?}"
+    );
+    assert!(
+        fresh_faces
+            .iter()
+            .any(|face| face.contains(" fn(int) -> string fn(int) -> string")),
+        "the fresh pass mints the payload's fn-signature atom: {fresh_faces:?}"
+    );
+    assert_eq!(
+        served_faces, fresh_faces,
+        "the served universe must replay every shape-phase mint identically"
+    );
+}

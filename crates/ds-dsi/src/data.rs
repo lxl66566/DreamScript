@@ -293,6 +293,19 @@ pub enum MintData {
     /// the serve reserves the name and every value use keeps the
     /// local spelling's own refusals.
     Reserved(AtomRef),
+    /// A minted fn-signature atom: the structural atom one
+    /// solved `fn(..) -> ..` field or member type names — hash-consed
+    /// over its solved parameter and return sets (raw intern indices,
+    /// validated against the sets table like an application's
+    /// arguments). The parameters' sets always intern before any set
+    /// naming the signature atom itself (a set can only reference an
+    /// existing atom), so the replay reads them already landed.
+    FnSig {
+        /// The solved parameter sets, in position order.
+        params: Vec<u32>,
+        /// The solved return set.
+        ret: u32,
+    },
 }
 
 /// One solved generic inherent bound: the solved head and one condition

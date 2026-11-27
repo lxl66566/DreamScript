@@ -1241,11 +1241,20 @@ impl<'a> Shapes<'a> {
                              own the seam",
                         ));
                     }
+                    let callable = matches!(
+                        self.universe.atom_decl(*element).map(|decl| &decl.kind),
+                        Ok(ds_check::AtomKind::FnSig(..))
+                    );
                     let shape = self.atom_shape(*element)?;
-                    out.push(PayloadField {
-                        name: None,
-                        slots: shape_words(&shape),
-                    });
+                    let mut slots = shape_words(&shape);
+                    // A fn-typed element holds the closure Ref word: the
+                    // heap position the span's count traffic covers, the
+                    // same word the value layout and the field-span walk
+                    // carry for the element.
+                    if callable {
+                        slots[0] = SlotType::Ref;
+                    }
+                    out.push(PayloadField { name: None, slots });
                 }
                 Ok(out)
             },

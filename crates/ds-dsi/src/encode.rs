@@ -402,10 +402,11 @@ pub(super) fn universe_log(
                     ctor: names.atom(universe, *ctor),
                     args: args.iter().map(|ty| ty.index()).collect(),
                 },
-                AtomKind::Reserved
-                | AtomKind::Struct(_)
-                | AtomKind::Enum(_)
-                | AtomKind::FnSig(..) => {
+                AtomKind::FnSig(params, ret) => MintData::FnSig {
+                    params: params.iter().map(|ty| ty.index()).collect(),
+                    ret: ret.index(),
+                },
+                AtomKind::Reserved | AtomKind::Struct(_) | AtomKind::Enum(_) => {
                     panic!("a shape-phase mint is a variable or structural atom")
                 },
             };
