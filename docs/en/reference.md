@@ -1424,9 +1424,9 @@ The channel's member tier.
 
 ```ds
 impl[t] chan[t] {
-  fn send(self, x: t) -> ()
+  fn send(self, move x: t) -> ()
   fn recv(self) -> t
-  fn send_deadline(self, nanos: int, x: t) -> () | io_err::timed_out
+  fn send_deadline(self, nanos: int, move x: t) -> () | io_err::timed_out
   fn recv_deadline(self, nanos: int) -> t | io_err::timed_out
 }
 ```

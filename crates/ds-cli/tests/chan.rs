@@ -26,7 +26,9 @@
 //!   timer race over a parked deadline send) keeping its deinit and leaving the queue clean — and a
 //!   wider element crossing both faces: the deadline send's staged payload, the deadline recv's ok
 //!   answer (the buffered read and the win door, the whole span under the ok discriminant).
-//! - lowering refusals: a deinit-carrying payload refuses at the send's staging, before any run.
+//! - the lifted deinit seam: a deinit-carrying payload stages with its hook fact — delivery fires
+//!   at the receiving binding's death, a never-delivered buffered element at the channel's own
+//!   death door, a deadline-cut sender at the wait's loss.
 
 use std::{env, fs, path::PathBuf, process::Command};
 
@@ -419,9 +421,13 @@ fn main() -> int {
     );
 }
 
+/// The lifted refusal: a deinit-carrying payload stages with its hook
+/// fact — the claim spends at the send (the hook fact rides the minted
+/// stamp into the channel) — and the delivered element's hook fires at
+/// the receiving binding's death, exactly once.
 #[test]
-fn a_deinit_carrying_payload_refuses_at_lowering() {
-    let (status, _stdout, stderr) = run_source(
+fn a_deinit_carrying_payload_delivers_and_fires_at_the_receivers_death() {
+    let (status, stdout, stderr) = run_source(
         r#"struct held: ~Copyable {
   id: int
   deinit { println("freed ${self.id}") }
@@ -431,14 +437,76 @@ fn main() -> int {
   const ch = chan[held](1)
   const h = held { id: 1 }
   ch.send(h)
+  const got = ch.recv()
+  println("got ${got.id}")
   0
 }
 "#,
     );
-    assert!(!status.success(), "a deinit-carrying payload refuses");
+    assert!(status.success(), "the run traps: {stderr}");
+    assert_eq!(
+        stdout, "got 1\nfreed 1\n",
+        "the hook fired once, at the receiver's death"
+    );
+}
+
+/// The never-delivered death: the buffered element's hook fires at the
+/// channel's own death door — the sender's claim spent at the send, the
+/// buffer holding only its edge count, the fact firing before those
+/// counts release.
+#[test]
+fn a_never_delivered_element_fires_at_the_channels_death() {
+    let (status, stdout, stderr) = run_source(
+        r#"struct held: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn main() -> int {
+  const ch = chan[held](1)
+  const h = held { id: 2 }
+  ch.send(h)
+  println("sent")
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the run traps: {stderr}");
+    assert_eq!(
+        stdout, "freed 2\nsent\n",
+        "the channel binding's last use is the send, so its death door runs at the send's flush"
+    );
+}
+
+/// The deadline-cut sender: the wheel answers `timed_out`, the wake's
+/// deregistration queues the losing entry's hook fact, and the sender's
+/// own next call boundary fires it — the losing value's death never
+/// lost to the stale queue entry.
+#[test]
+fn a_deadline_cut_sender_fires_the_kept_hook() {
+    let (status, stdout, stderr) = run_source(
+        r#"struct held: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn main() -> int {
+  const ch = chan[held](1)
+  const fill = held { id: 1 }
+  const late = held { id: 9 }
+  ch.send(fill)
+  ch.send_deadline(50_000_000, late).err((_: timed_out) => 0)
+  println("after")
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the run traps: {stderr}");
+    assert!(stdout.contains("after"), "the run completes: {stdout}");
     assert!(
-        stderr.contains("deinit-carrying"),
-        "the refusal names the claim seam: {stderr}"
+        stdout.contains("freed 1") && stdout.contains("freed 9"),
+        "both deaths fire: the delivered filler at its receiver, the deadline loser at the wait's \
+         loss: {stdout}"
     );
 }
 
@@ -691,9 +759,12 @@ fn main() -> int {
     );
 }
 
+/// The deadline twin's lift: a deinit-carrying payload stages with its
+/// hook fact through `send_deadline` too — the delivered element fires
+/// at the receiving binding's death.
 #[test]
-fn a_deinit_carrying_payload_refuses_at_the_send_deadlines_staging() {
-    let (status, _stdout, stderr) = run_source(
+fn a_deinit_carrying_payload_delivers_through_the_deadline_send() {
+    let (status, stdout, stderr) = run_source(
         r#"struct held: ~Copyable {
   id: int
   deinit { println("freed ${self.id}") }
@@ -703,13 +774,15 @@ fn main() -> int {
   const ch = chan[held](1)
   const h = held { id: 1 }
   ch.send_deadline(500000000, h).err((e) => 0)
+  const got = ch.recv()
+  println("got ${got.id}")
   0
 }
 "#,
     );
-    assert!(!status.success(), "a deinit-carrying payload refuses");
-    assert!(
-        stderr.contains("deinit-carrying"),
-        "the refusal names the claim seam: {stderr}"
+    assert!(status.success(), "the run traps: {stderr}");
+    assert_eq!(
+        stdout, "got 1\nfreed 1\n",
+        "the hook fired once, at the receiver's death"
     );
 }

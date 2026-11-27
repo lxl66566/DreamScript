@@ -200,6 +200,9 @@ impl FnLower<'_, '_, '_> {
         });
         let staged = self.shapes.words(ty)?;
         let width = u8::try_from(staged.len()).expect("span width fits u8");
+        // the channel hook fact stamps this index: the send's staging
+        // hands it to the channel native beside the payload span
+        let func = index;
         // the claim decs every Ref word of the span at the value's death
         let refs: Vec<u8> = staged
             .iter()
@@ -209,6 +212,7 @@ impl FnLower<'_, '_, '_> {
             .collect();
         Ok(Some(Hook {
             pool,
+            func,
             width,
             refs: refs.into(),
         }))

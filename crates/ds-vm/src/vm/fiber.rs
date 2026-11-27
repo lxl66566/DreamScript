@@ -253,8 +253,7 @@ impl Vm {
             // detached child's) fire their deinits here, at their last
             // door
             let recycled = FiberId(u32::try_from(slot).expect("slot fits u32"));
-            self.fire_teardown_hooks(recycled, &[]);
-            self.drain_claims(recycled);
+            self.teardown_fiber(recycled, &[]);
             self.reclaim_fiber_kstr_rows(recycled);
         }
         let fiber = &mut self.pool[slot];
@@ -598,8 +597,7 @@ impl Vm {
         // first (the parked-IO cancellation discipline): the reactor
         // never reports into a released slot
         self.cancel_wait(fiber);
-        self.fire_teardown_hooks(fiber, &[]);
-        self.drain_claims(fiber);
+        self.teardown_fiber(fiber, &[]);
         self.reclaim_fiber_kstr_rows(fiber);
         let slot = &mut self.pool[fiber.index()];
         slot.callinfo.clear();
@@ -881,8 +879,7 @@ impl Vm {
         // kept frames' hooks first (teardown walks frames running deinits),
         // then the death walk releases the claims — the
         // cancel-cut door
-        self.fire_teardown_hooks(self.current, &[]);
-        self.drain_claims(self.current);
+        self.teardown_fiber(self.current, &[]);
         let cut = self.current;
         let end = self.die_current(Value::Tag(PLATFORM_CANCELLED), ChildOutcome::Cancelled);
         // the cut scope dies with the cut: every open nursery the cut fiber

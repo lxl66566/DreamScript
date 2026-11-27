@@ -710,6 +710,13 @@ impl FnLower<'_, '_, '_> {
         // after the CALL
         self.rc.native_open();
         let mut consts: Vec<(usize, ScalarConst)> = Vec::new();
+        // the one element slot's deinit claim when the call is a channel
+        // send: the claim spends at the send, its hook fact riding the
+        // minted stamp (the element slot is unique per send)
+        let mut chan_claim: Option<(Hook, Span)> = None;
+        // the claim payload's first staged word (its base): set inside the
+        // staging loop, read by the moves loop
+        let mut claim_base_at: Option<usize> = None;
         for (index, arg) in arg_exprs.iter().enumerate() {
             let param_ty = param_types
                 .as_ref()
@@ -775,24 +782,30 @@ impl FnLower<'_, '_, '_> {
                 }
             }
             let deinit = self.deinit_claim(arg_val.ty, arg.span())?;
-            if deinit.is_some() {
-                // A channel payload names its own refusal seam: the buffer's
-                // edge retention owns counts, never claims, so the payload's
-                // hook has no door at either wait-ending edge — a buffered
-                // element the channel never delivers dies at the send with
-                // the sender's claim spent, and a parked sender cut with
-                // its span queued fires no hook either way
-                if let Some((slot, _)) = element_slot
-                    && slot == index
-                    && matches!(target, Callee::Builtin(native) if native.name == "chan_send" || native.name == "chan_send_deadline")
-                {
-                    return Err(LowerError::unsupported(
-                        arg.span(),
-                        "a deinit-carrying channel payload",
-                        "the payload's hook has no claim inside the channel's edge retention; \
-                         per-span deinit claims own the seam",
-                    ));
+            // A deinit-carrying channel payload stages with its hook fact:
+            // the claim spends AT the send (the band clears, the hook fact
+            // rides the minted stamp into the channel) and the channel's
+            // own doors fire the fact at whichever wait-ending edge ends
+            // the element's wait — delivery hands the claim to the
+            // receiver as today, a loss door fires the kept fact as the
+            // buffer's own. The buffer still owns edge counts, never
+            // claims: the fact is code identity beside the counts, no
+            // ledger row.
+            chan_claim = if deinit.is_some()
+                && matches!(element_slot, Some((slot, _)) if slot == index)
+                && matches!(
+                    &target,
+                    Callee::Builtin(native)
+                        if native.name == "chan_send" || native.name == "chan_send_deadline"
+                ) {
+                match &deinit {
+                    Some(claim) => Some((claim.hook.clone(), arg.span())),
+                    None => unreachable!("the claim exists"),
                 }
+            } else {
+                None
+            };
+            if deinit.is_some() {
                 // An arena element names its own refusal seam: the slot's
                 // edge retention owns counts exactly a channel buffer's,
                 // so the element's hook has no door at the remove or the
@@ -808,10 +821,13 @@ impl FnLower<'_, '_, '_> {
                          per-span deinit claims own the seam",
                     ));
                 }
-                if matches!(
-                    target,
-                    Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }
-                ) {
+                if chan_claim.is_none()
+                    && !matches!(element_slot, Some((slot, _)) if slot == index)
+                    && matches!(
+                        target,
+                        Callee::Builtin(_) | Callee::Generic(_) | Callee::Bound { .. }
+                    )
+                {
                     return Err(LowerError::unsupported(
                         arg.span(),
                         "a deinit-carrying argument",
@@ -843,6 +859,22 @@ impl FnLower<'_, '_, '_> {
                 // family, and the staged words must be the whole
                 // span the channel carries
                 let channel_ty = self.element_slot_ty(&target, receiver_ty);
+                // a claim payload never widens: the claim anchors the
+                // source's own words, and a re-span into an anonymous temp
+                // would strand it behind a clean check (unreachable today —
+                // a union member carries no deinit — but the guard keeps
+                // the staging honest if that lifts)
+                if chan_claim.is_some()
+                    && channel_ty
+                        .is_some_and(|ty| ty != arg_val.ty && !self.diverges_at(arg.span()))
+                {
+                    return Err(LowerError::unsupported(
+                        arg.span(),
+                        "a deinit-carrying channel payload",
+                        "the payload's element span re-spans into a staging temp no claim \
+                         contract covers",
+                    ));
+                }
                 if let Some(channel_ty) =
                     channel_ty.filter(|ty| *ty != arg_val.ty && !self.diverges_at(arg.span()))
                 {
@@ -853,7 +885,8 @@ impl FnLower<'_, '_, '_> {
                         ty: channel_ty,
                     };
                 }
-                arg_val = self.stage_heap_element(arg_val, arg.span(), what)?;
+                arg_val =
+                    self.stage_heap_element(arg_val, arg.span(), what, chan_claim.is_some())?;
             }
             // a map_set's key stages exactly one word: the probe
             // resolution and the row index hash whole words, so a wider
@@ -970,6 +1003,11 @@ impl FnLower<'_, '_, '_> {
                 counted.push(false);
                 word_arg.push(index);
             } else {
+                // the claim payload's first staged word is the claim's
+                // anchor: the moves loop spends the claim there
+                if chan_claim.is_some() {
+                    claim_base_at = Some(staged.len());
+                }
                 let addrs = self
                     .word_addrs(&arg_val.place, arg_val.ty)
                     .map_err(|err| err.respanned(arg.span()))?;
@@ -1064,6 +1102,31 @@ impl FnLower<'_, '_, '_> {
             counted.push(false);
             word_arg.push(usize::MAX);
         }
+        // the channel hook fact's stamp: a deinit-carrying payload
+        // stages two trailing words — the payload's `$deinit`
+        // function-table index, then the reserved stamp tag — so the
+        // send's last staged word decides the staging's shape (nothing
+        // else writes the stamp tag, and a payload without a claim
+        // stages no stamp at all)
+        if let Some((hook, _)) = chan_claim.as_ref() {
+            self.guard_staged_count(staged.len() + 2)?;
+            let at = staged.len();
+            staged.push(SlotType::I64);
+            staged.push(SlotType::Tag);
+            counted.push(false);
+            counted.push(false);
+            word_arg.push(usize::MAX);
+            word_arg.push(usize::MAX);
+            let kidx = self.pool(Constant::I64(i64::from(hook.func)));
+            self.emit(Op::Kimm {
+                dst: Slot::overlay(u8::try_from(at).expect("overlay word fits u8")),
+                kidx,
+            });
+            self.emit(Op::TagNew {
+                dst: Slot::overlay(u8::try_from(at + 1).expect("overlay word fits u8")),
+                tag: ds_abi::native::CHAN_HOOK_STAMP,
+            });
+        }
         self.guard_staged_count(staged.len())?;
         // the literal arguments' constant loads land on their overlay
         // words at the staging position, in staged order
@@ -1091,19 +1154,29 @@ impl FnLower<'_, '_, '_> {
             let consumes = word_arg
                 .get(index)
                 .is_some_and(|&arg| consuming.get(arg).copied().unwrap_or(false));
-            // a staged Ref: a local callee's borrow parameter owns the
-            // handed word (forward on the source's death, dup otherwise);
-            // a native is a transient borrow window that never dups. A
-            // tail-position staging abandons only when the frame's tail
-            // transfer really ends the program (the root frame's named
-            // corner); a non-root frame lowers its native tail call in
-            // place below, so its staged borrows stay pending for the
-            // post-call flush. A callable-defaulted closure word is a
-            // borrow window against every callee kind: the callee reads it
-            // (CALLS never consumes) and never owns its count, and a
-            // closure-staging tail lowers in place below, so its flush
-            // always has a post-call position
-            if counted[index] {
+            // the channel payload's claim spends at the send whatever the
+            // base word's kind: a scalar-word deinit struct anchors its
+            // hook on an I64 base word, no Ref count of its own — the
+            // band clears here and the span's decs defer bare to the
+            // flush (the hook fact rides the minted stamp, never this
+            // frame)
+            if claim_base_at == Some(index) {
+                let (hook, _) = chan_claim.as_ref().expect("the claim base stages");
+                self.rc.staged_chan_send(&mut self.code, slot, hook);
+            } else if counted[index] {
+                // a staged Ref: a local callee's borrow parameter owns the
+                // handed word (forward on the source's death, dup
+                // otherwise); a native is a transient borrow window that
+                // never dups. A tail-position staging abandons only when
+                // the frame's tail transfer really ends the program (the
+                // root frame's named corner); a non-root frame lowers its
+                // native tail call in place below, so its staged borrows
+                // stay pending for the post-call flush. A
+                // callable-defaulted closure word is a borrow window
+                // against every callee kind: the callee reads it (CALLS
+                // never consumes) and never owns its count, and a
+                // closure-staging tail lowers in place below, so its
+                // flush always has a post-call position
                 if defaulted.contains(&index) {
                     self.rc.staged_native(slot, false);
                 } else if window_answer && word_arg.get(index) == Some(&0) {

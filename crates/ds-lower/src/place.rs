@@ -109,6 +109,11 @@ use super::func::Op;
 pub(crate) struct Hook {
     /// The pool index of the `Constant::FuncRef` naming the deinit.
     pub(crate) pool: u16,
+    /// The function-table index of the synthesized `$deinit` body: the
+    /// channel hook fact's identity — the send's staging hands it to the
+    /// channel native, whose loss doors fire it where no frame drop
+    /// shape exists.
+    pub(crate) func: u32,
     /// How many words the dying value spans; the hook stages them all.
     pub(crate) width: u8,
     /// Offsets of the span's `Ref` words from the claim's base word.
@@ -163,6 +168,13 @@ struct Window {
     /// at one call so the count dies exactly once.
     deferred: Vec<u8>,
     seen: HashSet<u8>,
+    /// Body words whose plain count dec fires at this window's flush
+    /// with no drop shape of their own: a channel send's staged payload
+    /// span — the claim spent at the staging (the hook fact rides into
+    /// the channel), the frame's counts still dying after the CALL
+    /// returns. The root's tail transfer abandons them like the
+    /// deferred deaths.
+    bare_decs: Vec<u8>,
 }
 
 /// The checker's affine facts one package's lowerings share: the
@@ -958,6 +970,35 @@ impl Placement {
         self.stage_native(src, false, false);
     }
 
+    /// One deinit-carrying channel payload's claim span staged for a
+    /// channel send, `base` the claim's base body word: the claim spends
+    /// AT the send — the establishment band clears and the owned entry
+    /// leaves (this frame's doors never fire the hook; the hook fact
+    /// rides into the channel as the minted stamp) — while the span's
+    /// counts keep the send's own flush discipline: a bare `RcDec` per
+    /// `Ref` word deferred to the window's flush, after the CALL has
+    /// handed the span over. The value dies here either way: delivered,
+    /// the receiver's own registration owns the hook from now; parked,
+    /// the queue entry carries the fact its loss doors fire.
+    pub(crate) fn staged_chan_send(&mut self, code: &mut Vec<Op>, base: u8, hook: &Hook) {
+        let Some(owned) = self.owned.remove(&base) else {
+            return;
+        };
+        if let Some(band) = owned.band {
+            Self::emit_band(code, band, false);
+        }
+        self.transit(base);
+        self.forwarded.insert(base);
+        if let Some(window) = self.windows.last_mut() {
+            for &offset in hook.refs.iter() {
+                let word = base + offset;
+                if window.seen.insert(word) {
+                    window.bare_decs.push(word);
+                }
+            }
+        }
+    }
+
     /// The shared staging front: pins the word in the innermost window's
     /// reader set; `own` marks whether the window's flush owns a dying
     /// source's dec.
@@ -1039,6 +1080,11 @@ impl Placement {
                 self.drop_word(code, word);
             }
         }
+        for word in window.bare_decs {
+            code.push(Op::RcDec {
+                src: super::func::Slot::body(word),
+            });
+        }
     }
 
     /// The frame's tail transfer flushed its borrow window: the staged
@@ -1057,6 +1103,8 @@ impl Placement {
         for word in window.deferred {
             self.owned.remove(&word);
         }
+        // the bare decs abandon with the transfer: the root's native tail
+        // ends the program, where the heap dies whole
     }
 
     /// The central drop: a deinit claim stages the value's whole
@@ -1360,6 +1408,7 @@ mod tests {
     fn hook(pool: u16, width: u8, refs: &[u8]) -> Hook {
         Hook {
             pool,
+            func: 9,
             width,
             refs: Rc::from(refs),
         }

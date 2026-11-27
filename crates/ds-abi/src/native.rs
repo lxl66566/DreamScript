@@ -31,6 +31,10 @@ use crate::{BuiltinInstance, SlotType, Staging};
 /// The success discriminant of every fallible native's result span: the top of the reservation. One
 /// shared value disambiguates nothing, since the caller knows which native it called.
 pub const PLATFORM_IO_OK: u8 = u8::MAX;
+/// The channel hook fact's stamp: the trailing word a deinit-carrying channel send stages after
+/// its payload span (the hook's function-table index rides the word before it). Nothing else
+/// writes the value, so the send's last staged word decides the staging's shape.
+pub const CHAN_HOOK_STAMP: u8 = u8::MAX - 1;
 /// The parse reader's failure discriminant; the payload word carries the position it gave up at.
 pub const PLATFORM_PARSE_ERR: u8 = u8::MAX - 3;
 /// The predeclared `none` atom's tag id: every checked read's miss answer and every optional

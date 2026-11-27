@@ -15,6 +15,7 @@ impl Objects {
             live: 0,
             pending: VecDeque::new(),
             scratch: DeathScratch::default(),
+            fires: Vec::new(),
         }
     }
 
@@ -35,6 +36,42 @@ impl Objects {
     #[must_use]
     pub(crate) fn queued(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Whether channel element deaths wait on this store for a fire door.
+    #[must_use]
+    pub(crate) fn fires_pending(&self) -> bool {
+        !self.fires.is_empty()
+    }
+
+    /// Takes every queued channel fire: the drive doors' input. The
+    /// cascade queued the deaths its own walk observed; the door fires
+    /// each hook under a hosted drive and releases its held edge counts
+    /// after the hook returns.
+    pub(crate) fn take_fires(&mut self) -> Vec<ChanFire> {
+        std::mem::take(&mut self.fires)
+    }
+
+    /// Whether any standing hook fact names `row`: the install sweep's
+    /// judge, so a hot swap never reuses a version row a buffered
+    /// element's fact still pins.
+    #[must_use]
+    pub(crate) fn names_version(&self, row: VersionIdx) -> bool {
+        self.fires.iter().any(|fire| fire.hook.version == row)
+            || self.table.iter().any(|slot| match slot {
+                Slot::Live(header) => match self.heap.payload::<Object>(*header) {
+                    Object::Chan(data) => {
+                        data.hooks
+                            .iter()
+                            .any(|hook| hook.as_ref().is_some_and(|h| h.version == row))
+                            || data.senders.iter().any(|sender| {
+                                sender.hook.as_ref().is_some_and(|h| h.version == row)
+                            })
+                    },
+                    _ => false,
+                },
+                Slot::Free(_) => false,
+            })
     }
 
     /// Acquires one count for a stored `Ref` word, routing by the word's
@@ -258,7 +295,52 @@ impl Objects {
                     }
                     Vec::new()
                 },
-                Object::Chan(data) => std::mem::take(&mut data.elems).into(),
+                Object::Chan(data) => {
+                    // fact-carrying elements and parked-sender facts hold
+                    // back from the cascade: their hooks fire under a
+                    // hosted drive the cascade cannot host, each fire
+                    // releasing its held edge counts after the hook
+                    // returns (the fire-before-release door order). The
+                    // fact-free elements dec exactly as before.
+                    let stride = data.stride.max(1);
+                    let hooks = std::mem::take(&mut data.hooks);
+                    let elems: Vec<Value> = std::mem::take(&mut data.elems).into();
+                    if hooks.is_empty() {
+                        elems
+                    } else {
+                        let mut released: Vec<Value> = Vec::new();
+                        for (index, words) in elems.chunks(stride).enumerate() {
+                            match hooks.get(index).cloned().flatten() {
+                                Some(hook) => {
+                                    let held: Vec<Value> = words
+                                        .iter()
+                                        .filter(|word| matches!(word, Value::Ref(_)))
+                                        .copied()
+                                        .collect();
+                                    self.fires.push(ChanFire {
+                                        hook,
+                                        words: words.to_vec(),
+                                        held,
+                                    });
+                                },
+                                None => released.extend_from_slice(words),
+                            }
+                        }
+                        // the queue entries' facts die with the channel:
+                        // their words ride no count (the parked frames
+                        // kept their own), so only the fact queues
+                        for sender in data.senders.drain(..) {
+                            if let Some(hook) = sender.hook {
+                                self.fires.push(ChanFire {
+                                    hook,
+                                    words: sender.payload,
+                                    held: Vec::new(),
+                                });
+                            }
+                        }
+                        released
+                    }
+                },
                 Object::Arena(data) => {
                     // the live element words leave the payload before it
                     // dies, one owned count per `Ref` word exactly like a

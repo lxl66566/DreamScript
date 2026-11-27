@@ -661,6 +661,12 @@ impl<'a> Heaps<'a> {
         self.store_shared(arena)?.arena_len(arena.id())
     }
 
+    /// Whether `word` names a live object on its own heap: the fire
+    /// doors' staleness gate.
+    pub(crate) fn word_live(&mut self, word: RefId) -> Result<bool, Trap> {
+        Ok(self.store(word)?.payload_of(word.id()).is_some())
+    }
+
     /// Whether channel `chan`'s buffer has room for one more payload
     /// element (the word count against the element stride), routed as a
     /// shared read.
@@ -676,8 +682,13 @@ impl<'a> Heaps<'a> {
     /// `chan`'s buffer tail, routed: the mutation lands on the
     /// channel's store and each `Ref` payload word's edge count on the
     /// word's own heap (the pending funnel draining here).
-    pub(crate) fn chan_deposit(&mut self, chan: RefId, words: &[Value]) -> Result<(), Trap> {
-        self.store(chan)?.chan_deposit(chan.id(), words)?;
+    pub(crate) fn chan_deposit(
+        &mut self,
+        chan: RefId,
+        words: &[Value],
+        hook: Option<ChanHook>,
+    ) -> Result<(), Trap> {
+        self.store(chan)?.chan_deposit(chan.id(), words, hook)?;
         self.settle(chan.fiber())
     }
 
@@ -698,14 +709,43 @@ impl<'a> Heaps<'a> {
         chan: RefId,
         fiber: FiberId,
         payload: Vec<Value>,
+        hook: Option<ChanHook>,
     ) -> Result<(), Trap> {
         let store = self.store(chan)?;
         match store.payload_chan_mut(chan.id())? {
             Some(data) => {
-                data.senders.push_back(ChanSender { fiber, payload });
+                data.senders.push_back(ChanSender {
+                    fiber,
+                    payload,
+                    hook,
+                });
                 Ok(())
             },
             None => Err(Trap::UnknownObject { obj: chan.id() }),
+        }
+    }
+
+    /// Takes every sender entry `fiber` parked on channel `chan` (its
+    /// staged spans ride no count; whoever cut the fiber released its
+    /// counts) — the cut door's sweep, which fires each entry's hook
+    /// fact before the drain releases the frame's counts. A dead
+    /// channel answers empty.
+    pub(crate) fn chan_take_sender_of(
+        &mut self,
+        chan: RefId,
+        fiber: FiberId,
+    ) -> Result<Vec<ChanSender>, Trap> {
+        let store = self.store(chan)?;
+        match store.payload_chan_mut(chan.id())? {
+            Some(data) => {
+                let (taken, rest): (Vec<ChanSender>, Vec<ChanSender>) = data
+                    .senders
+                    .drain(..)
+                    .partition(|sender| sender.fiber == fiber);
+                data.senders.extend(rest);
+                Ok(taken)
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -757,28 +797,32 @@ impl<'a> Heaps<'a> {
     /// deregistration. The sender queue's staged span drops with the
     /// entry (its counts the parked frame's own); the entries behind it
     /// shift up, so a later peer still pairs in park order and no
-    /// stale head can swallow a wake. Answers whether an entry went.
+    /// stale head can swallow a wake. Answers the removed sender entries
+    /// — a timed-out send's entry carries its hook fact out, the wake
+    /// door queuing its fire (the span rode no count; its death is the
+    /// sender's own flush, so the hook must fire at the wait's loss).
     pub(crate) fn chan_remove_waiter(
         &mut self,
         chan: RefId,
         fiber: FiberId,
         sender: bool,
-    ) -> Result<bool, Trap> {
+    ) -> Result<Vec<ChanSender>, Trap> {
         let store = self.store(chan)?;
         match store.payload_chan_mut(chan.id())? {
             Some(data) => {
-                let len = |data: &ChanData| {
-                    if sender { data.senders.len() } else { data.receivers.len() }
-                };
-                let before = len(data);
                 if sender {
-                    data.senders.retain(|waiter| waiter.fiber != fiber);
+                    let (removed, rest): (Vec<ChanSender>, Vec<ChanSender>) = data
+                        .senders
+                        .drain(..)
+                        .partition(|waiter| waiter.fiber == fiber);
+                    data.senders.extend(rest);
+                    Ok(removed)
                 } else {
                     data.receivers.retain(|&waiter| waiter != fiber);
+                    Ok(Vec::new())
                 }
-                Ok(len(data) != before)
             },
-            None => Err(Trap::UnknownObject { obj: chan.id() }),
+            None => Ok(Vec::new()),
         }
     }
 

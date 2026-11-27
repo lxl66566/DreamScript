@@ -1406,6 +1406,14 @@ impl Vm {
                     OP_CALL => {
                         let callee = ConstIdx(fd);
                         let nargs = fa;
+                        // the channel fires' dispatch boundary: a loss
+                        // door's or a cascade's queued hook fires under
+                        // its hosted drive before the next call enters
+                        // (never inside a teardown drive — its door's own
+                        // second pass drains them)
+                        if !self.teardown_drive && self.chan_fires_pending() {
+                            self.drain_chan_fires().map_err(|e| (e, pc))?;
+                        }
                         let caller = CallerAt {
                             func: std::ptr::from_ref(f) as usize,
                             row: active.version,
@@ -1637,8 +1645,19 @@ impl Vm {
                                     // the channel step runs in place of
                                     // the body; a park pops the frame
                                     // exactly the net tail park would
+                                    let module = self
+                                        .registry
+                                        .module_id(self.registry.pinned(active.version).name())
+                                        .unwrap_or(u32::MAX);
                                     match self
-                                        .chan_step(channel, fp, &f.layout, nargs)
+                                        .chan_step(
+                                            channel,
+                                            fp,
+                                            &f.layout,
+                                            nargs,
+                                            active.version,
+                                            module,
+                                        )
                                         .map_err(|e| (e, pc))?
                                     {
                                         ChanStep::Answer(result) => result,
@@ -2827,6 +2846,13 @@ impl Vm {
                         // frames stay for backtrace)
                         if self.reentry_live(boundary) {
                             return Err((Trap::ReentrancyRefused, pc));
+                        }
+                        // the fires' boundary beside the call's: a queued
+                        // hook fires before the program ends (never inside
+                        // a teardown drive — its door's own second pass
+                        // drains them)
+                        if !self.teardown_drive && self.chan_fires_pending() {
+                            self.drain_chan_fires().map_err(|e| (e, pc))?;
                         }
                         match self.complete_current(value) {
                             Some((a, at)) => {

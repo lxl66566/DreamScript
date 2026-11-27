@@ -432,7 +432,7 @@ impl Vm {
             claims: self.claims[FIBER_ROOT.index()].reading(),
             nurseries: self.nursery_states(),
         });
-        self.fire_teardown_hooks_past(FIBER_ROOT, &[], Some(&pre.claims), Some(&pre.parked));
+        self.fire_teardown_hooks_past(FIBER_ROOT, &[], Some(&pre.claims), Some(&pre.parked), false);
         self.claims[FIBER_ROOT.index()].release_since(&pre.claims);
         self.release_line_nurseries(&pre.nurseries);
         let root = &mut self.pool[FIBER_ROOT.index()];
@@ -476,8 +476,7 @@ impl Vm {
         // an in-flight submission's wait dies with the session: no wake
         // may deliver past the scope exit
         self.cancel_wait(FIBER_ROOT);
-        self.fire_teardown_hooks(FIBER_ROOT, &[]);
-        self.drain_claims(FIBER_ROOT);
+        self.teardown_fiber(FIBER_ROOT, &[]);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();
         root.callinfo.clear();

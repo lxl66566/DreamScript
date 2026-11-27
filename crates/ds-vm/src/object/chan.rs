@@ -12,6 +12,7 @@ impl Objects {
             cap,
             elems: VecDeque::new(),
             stride: 0,
+            hooks: VecDeque::new(),
             senders: VecDeque::new(),
             receivers: VecDeque::new(),
         }))
@@ -33,7 +34,16 @@ impl Objects {
     /// [`Trap::UnknownObject`] when the reference names no channel;
     /// [`Trap::ElementStride`] when the staged span's width disagrees
     /// with the stride the first deposit fixed.
-    pub fn chan_deposit(&mut self, obj: u32, words: &[Value]) -> Result<(), Trap> {
+    /// `hook` — the element's deinit hook fact when its payload carries
+    /// one: the fact row rides the FIFO beside the element's words (the
+    /// row deque pads to the element count at the first fact deposit, so
+    /// the rows stay in lockstep with the buffer's elements).
+    pub(crate) fn chan_deposit(
+        &mut self,
+        obj: u32,
+        words: &[Value],
+        hook: Option<ChanHook>,
+    ) -> Result<(), Trap> {
         let header = self.header_of(obj)?;
         if !matches!(self.heap.payload::<Object>(header), Object::Chan(_)) {
             return Err(Trap::UnknownObject { obj });
@@ -65,6 +75,17 @@ impl Objects {
                 if data.stride == 0 {
                     data.stride = words.len();
                 }
+                if hook.is_some() || !data.hooks.is_empty() {
+                    // pad the row deque back to the pre-deposit element
+                    // count, so the rows stay one-per-element from the
+                    // first fact deposit on
+                    let elements = data.elems.len() / data.stride.max(1);
+                    let rows = data.hooks.len();
+                    for _ in rows..elements {
+                        data.hooks.push_front(None);
+                    }
+                    data.hooks.push_back(hook);
+                }
                 data.elems.extend(words);
                 Ok(())
             },
@@ -89,11 +110,19 @@ impl Objects {
         match self.heap.payload_mut::<Object>(header) {
             // stride 0 names the never-deposited channel, whose buffer
             // is empty; the one-word element rides the allocation-free
-            // arm, a wider one its span
+            // arm, a wider one its span. The element's fact row pops with
+            // it: a delivery discards the fact (the receiver's own
+            // registration owns the hook from there), the loss doors
+            // having taken theirs from the fires queue.
             Object::Chan(data) => Ok(match data.stride {
-                0 | 1 => data.elems.pop_front().map(ChanPop::One),
-                stride => (data.elems.len() >= stride)
-                    .then(|| ChanPop::Span(data.elems.drain(..stride).collect())),
+                0 | 1 => {
+                    let _ = data.hooks.pop_front();
+                    data.elems.pop_front().map(ChanPop::One)
+                },
+                stride => (data.elems.len() >= stride).then(|| {
+                    let _ = data.hooks.pop_front();
+                    ChanPop::Span(data.elems.drain(..stride).collect())
+                }),
             }),
             _ => Err(Trap::UnknownObject { obj }),
         }

@@ -55,16 +55,21 @@ impl<'a> FnLower<'a, '_, '_> {
         }
     }
 
+    /// `allow_claim` admits a deinit-carrying element through the
+    /// channel's slot: the send's staging mints the hook fact (the
+    /// claim spends at the send, the channel's doors fire it), while
+    /// the list/map/arena slots keep the edge-retention refusal.
     pub(in crate::func) fn stage_heap_element(
         &mut self,
         val: TypedPlace,
         span: Span,
         what: &'static str,
+        allow_claim: bool,
     ) -> Result<TypedPlace, LowerError> {
         match &*self.shapes.shape(val.ty)? {
             Shape::Struct(_) => {
                 // the list's edge retention owns counts, never claims
-                if self.deinit_hook(val.ty, span)?.is_some() {
+                if !allow_claim && self.deinit_hook(val.ty, span)?.is_some() {
                     return Err(LowerError::unsupported(
                         span,
                         what,
@@ -327,7 +332,7 @@ impl<'a> FnLower<'a, '_, '_> {
         span: Span,
     ) -> Result<(), LowerError> {
         let staged_val =
-            self.stage_heap_element(item_val.clone(), span, "a list literal element")?;
+            self.stage_heap_element(item_val.clone(), span, "a list literal element", false)?;
         let push = crate::native::lookup("list_push")
             .expect("the list surface is covered by the native table");
         let mut staged = vec![SlotType::Ref];

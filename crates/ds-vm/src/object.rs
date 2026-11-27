@@ -65,6 +65,7 @@ use crate::{
     claims::ClaimTable,
     fiber::{Fiber, FiberId},
     loader::StagedSite,
+    module::VersionIdx,
     value::{FuncRef, RefId, Value},
     vm::Trap,
 };
@@ -208,6 +209,45 @@ pub(crate) struct CellData {
 /// head sender — so a wake needs no reactor interest and no deadline:
 /// the waking fiber is the parked one's resumer, and the executor's
 /// run queue carries the hand-off.
+/// One buffered or queued element's deinit hook fact: the payload's
+/// synthesized `$deinit` (the sending module's function-table index, the
+/// module id resolving it, the version row pinning the body) plus the
+/// span width the hook stages. The fact is code identity beside the
+/// buffer's edge counts — it owns no count and no ledger row (edge
+/// retention owns counts, never claims) — and it fires at whichever
+/// door ends the element's wait in a loss: the cut-sender teardown, the
+/// deadline wake, the channel's own death. A delivery discards it (the
+/// receiver's adopted ledger row owns the hook from there).
+#[derive(Clone, Debug)]
+pub(crate) struct ChanHook {
+    /// The version row the hook's body declares in: the fire drive's
+    /// owner (the sweep judges the rows facts name, so a hot swap never
+    /// reuses one a standing fact pins).
+    pub(crate) version: VersionIdx,
+    /// The sending module's install id: the hook resolves through it.
+    pub(crate) module: u32,
+    /// The hook's function-table index in the sending module.
+    pub(crate) func: u32,
+    /// The payload span's word count (the hook's parameter count).
+    pub(crate) width: u8,
+}
+
+/// One element whose wait ended with no receiver: the span's words (an
+/// edge count per `Ref` word held back from the cascade) plus the fact
+/// to fire before those counts release. The store-level queue holds the
+/// deaths a cascade observed (no drive lives inside the cascade); the
+/// VM's doors drain it under a hosted drive.
+#[derive(Debug)]
+pub(crate) struct ChanFire {
+    /// The fact to fire.
+    pub(crate) hook: ChanHook,
+    /// The element's whole word span, still live.
+    pub(crate) words: Vec<Value>,
+    /// The span's `Ref` words whose edge counts this fire owns: dec'd
+    /// after the hook returns (the fire-before-release door order).
+    pub(crate) held: Vec<Value>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ChanData {
     /// The bound (`chan_new`'s capacity; zero is the rendezvous bound —
@@ -223,6 +263,12 @@ pub(crate) struct ChanData {
     /// fact, so a drained channel keeps trapping a disagreeing width).
     /// The list element stride's exact sibling.
     pub(crate) stride: usize,
+    /// The buffered elements' hook facts, one row per buffered element
+    /// in FIFO lockstep with `elems` (`None` where no fact rides; rows
+    /// exist only from the first fact-carrying deposit, padded back to
+    /// the element count at that deposit). Empty for channels whose
+    /// payload never carried a claim — the scalar hot path pays nothing.
+    pub(crate) hooks: VecDeque<Option<ChanHook>>,
     /// The parked senders in park order, each with its staged payload
     /// span (the frame keeps the counts; the entry is a borrow).
     pub(crate) senders: VecDeque<ChanSender>,
@@ -270,6 +316,10 @@ pub(crate) struct ChanSender {
     /// The payload's whole word span staged at park time (each word's
     /// count stays the parked frame's).
     pub(crate) payload: Vec<Value>,
+    /// The payload's hook fact when its type carries a deinit: minted at
+    /// the send's staging, fired by the entry's loss doors (the cut
+    /// sweep, the deadline wake, the channel's death).
+    pub(crate) hook: Option<ChanHook>,
 }
 
 /// One popped channel element: the one-word element answers without
@@ -432,6 +482,10 @@ pub struct Objects {
     live: usize,
     pending: VecDeque<ForeignOp>,
     scratch: DeathScratch,
+    /// The channel element deaths the cascade observed: their hooks fire
+    /// under a hosted drive (the cascade has none), each fire releasing
+    /// its held edge counts after the hook returns.
+    fires: Vec<ChanFire>,
 }
 
 // SAFETY: the store's raw pointers (the table's block headers, the death
@@ -1390,10 +1444,11 @@ mod tests {
         // the first deposit fixes the two-word stride and takes the
         // buffer's edge count per Ref word
         objects
-            .chan_deposit(chan, &[
-                Value::I64(1),
-                Value::Ref(RefId::new(FIBER_ROOT, text)),
-            ])
+            .chan_deposit(
+                chan,
+                &[Value::I64(1), Value::Ref(RefId::new(FIBER_ROOT, text))],
+                None,
+            )
             .expect("the first deposit fixes the stride");
         assert_eq!(
             objects.rc_at(text),
@@ -1402,7 +1457,7 @@ mod tests {
         );
         // a disagreeing width refuses before any count moves
         assert_eq!(
-            objects.chan_deposit(chan, &[Value::I64(9)]),
+            objects.chan_deposit(chan, &[Value::I64(9)], None),
             Err(Trap::ElementStride {
                 obj: chan,
                 stride: 2,
@@ -1427,7 +1482,7 @@ mod tests {
         // the stride survives the drain: a narrower element still refuses
         assert_eq!(objects.chan_pop(chan), Ok(None));
         assert_eq!(
-            objects.chan_deposit(chan, &[Value::I64(4)]),
+            objects.chan_deposit(chan, &[Value::I64(4)], None),
             Err(Trap::ElementStride {
                 obj: chan,
                 stride: 2,
@@ -1437,7 +1492,7 @@ mod tests {
         // the one-word element rides the allocation-free pop arm
         let one = objects.alloc_chan(1);
         objects
-            .chan_deposit(one, &[Value::I64(5)])
+            .chan_deposit(one, &[Value::I64(5)], None)
             .expect("a one-word channel takes its own stride");
         assert_eq!(objects.chan_pop(one), Ok(Some(ChanPop::One(Value::I64(5)))));
         objects
@@ -1445,10 +1500,11 @@ mod tests {
             .expect("the drained one-word channel drops");
         // the death cascade decs one count per stored Ref word
         objects
-            .chan_deposit(chan, &[
-                Value::I64(2),
-                Value::Ref(RefId::new(FIBER_ROOT, text)),
-            ])
+            .chan_deposit(
+                chan,
+                &[Value::I64(2), Value::Ref(RefId::new(FIBER_ROOT, text))],
+                None,
+            )
             .expect("the same stride deposits again");
         assert_eq!(objects.rc_at(text), Ok(2));
         objects.dec(chan).expect("the channel's owner drops");

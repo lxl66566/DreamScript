@@ -588,13 +588,18 @@ impl list[int] {
 /// The channel's member tier.
 impl[t] chan[t] {
   /// Deposits one element, parking the sender on a full buffer;
-  /// answers unit.
-  fn send (self, x: t) -> ()
+  /// answers unit. The payload is the consuming hand-off: the send
+  /// spends the element's death (a deinit-carrying payload's hook fact
+  /// rides the minted stamp into the channel, whose doors fire it at
+  /// whichever wait-ending edge loses the element).
+  fn send (self, move x: t) -> ()
   /// Takes the head element, parking the receiver on empty.
   fn recv (self) -> t
   /// Sends under a deadline: the deposited unit, or timed_out at
-  /// the cut.
-  fn send_deadline (self, nanos: int, x: t) -> () | io_err::timed_out
+  /// Sends under a deadline: the deposited unit, or timed_out at
+  /// the cut (the losing payload's death rides the same consuming
+  /// hand-off).
+  fn send_deadline (self, nanos: int, move x: t) -> () | io_err::timed_out
   /// Receives under a deadline: the head element, or timed_out at
   /// the cut.
   fn recv_deadline (self, nanos: int) -> t | io_err::timed_out
@@ -916,14 +921,14 @@ extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 // `chan_send`/`chan_recv` the private seams behind the member spellings
 // above.
 extern fn chan_new[t] (cap: int) -> chan[t]
-extern fn chan_send[t] (ch: chan[t], x: t) -> ()
+extern fn chan_send[t] (ch: chan[t], move x: t) -> ()
 extern fn chan_recv[t] (ch: chan[t]) -> t
 // The deadline twins behind the member spellings above: the winner
 // rides the ok discriminant, the deadline-cut loser the `timed_out`
 // class span, so the union re-spans at the call exactly the timer
 // race's. A wider element answer refuses at the seam's one-word
 // adoption (the timer race's own boundary).
-extern fn chan_send_deadline[t] (ch: chan[t], nanos: int, x: t) -> () | io_err::timed_out
+extern fn chan_send_deadline[t] (ch: chan[t], nanos: int, move x: t) -> () | io_err::timed_out
 extern fn chan_recv_deadline[t] (ch: chan[t], nanos: int) -> t | io_err::timed_out
 // The arena's native face: the construction is the type application
 // `arena[t]()` (the element type never reaches the code, every arena

@@ -331,10 +331,11 @@ fn a_deinit_argument_in_tail_position_refuses() {
     );
 }
 
-/// A deinit value staged into a native call refuses: the native borrows
-/// its staged words with no drop position of their own, so the value's
-/// hook would never run inside the call — the value's death stays its
-/// own binding's.
+/// A deinit value staged into a native call refuses: an element slot's
+/// edge retention owns counts with no claim for the hook (the channel
+/// seam alone lifts it), while every other native borrows its staged
+/// words with no drop position of their own — either way the value's
+/// death stays its own binding's.
 #[test]
 fn a_deinit_value_staged_into_a_native_call_refuses() {
     refused(
@@ -346,7 +347,7 @@ fn a_deinit_value_staged_into_a_native_call_refuses() {
             "  0\n",
             "}\n",
         )),
-        "a native call borrows staged words with no drop position of their own",
+        "a deinit-carrying element's hook has no claim inside the list's edge retention",
     );
 }
 

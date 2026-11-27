@@ -67,8 +67,12 @@ impl FnLower<'_, '_, '_> {
                         // the value evaluates, then the `set` member call
                         // stages — the exact code `xs.set(i, v)` takes
                         let value = self.value(right)?;
-                        let value =
-                            self.stage_heap_element(value, *span, "a subscript store element")?;
+                        let value = self.stage_heap_element(
+                            value,
+                            *span,
+                            "a subscript store element",
+                            false,
+                        )?;
                         if self.deinit_claim(value.ty, *span)?.is_some() {
                             return Err(LowerError::unsupported(
                                 *span,

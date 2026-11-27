@@ -1,6 +1,8 @@
 //! Channel steps: the send and receive fast paths, rendezvous parking, and
 //! the deadline and wake seams.
 
+use ds_abi::native::CHAN_HOOK_STAMP;
+
 use super::*;
 
 impl Vm {
@@ -29,6 +31,8 @@ impl Vm {
         fp: usize,
         caller: &FrameLayout,
         nargs: u8,
+        version: VersionIdx,
+        module: u32,
     ) -> Result<ChanStep, Trap> {
         match channel {
             ChannelNative::New => {
@@ -55,6 +59,8 @@ impl Vm {
                         .collect::<Result<Vec<_>, Trap>>()?
                 };
                 let here = self.current;
+                let (payload, hook) =
+                    self.chan_hook_stamp(payload, version, module, fp, caller, nargs)?;
                 // a zero-bound channel's only room is a live parked
                 // receiver: the deposit takes the hand-off's edge counts
                 // and the release hands the element straight over, the
@@ -62,10 +68,14 @@ impl Vm {
                 // sender parks, its staged span the rendezvous's other
                 // door
                 if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
-                    self.heaps().chan_park_sender(chan, here, payload)?;
+                    self.heaps()
+                        .chan_park_sender(chan, here, payload, hook.clone())?;
+                    if hook.is_some() {
+                        self.chan_leases.push((chan, here));
+                    }
                     return Ok(ChanStep::Park(None));
                 }
-                self.heaps().chan_deposit(chan, &payload)?;
+                self.heaps().chan_deposit(chan, &payload, hook)?;
                 self.chan_release(chan)?;
                 Ok(ChanStep::Answer(NativeResult::Word(Value::I64(0))))
             },
@@ -87,7 +97,9 @@ impl Vm {
                         self.heaps().chan_park_receiver(chan, here)?;
                         return Ok(ChanStep::Park(None));
                     };
-                    self.heaps().chan_deposit(chan, &sender.payload)?;
+                    self.drop_chan_lease(chan, sender.fiber);
+                    self.heaps()
+                        .chan_deposit(chan, &sender.payload, sender.hook)?;
                     let elem = self
                         .heaps()
                         .chan_pop(chan)?
@@ -108,6 +120,8 @@ impl Vm {
                     .map(|index| control_word(&self.stack, fp, caller, index))
                     .collect::<Result<Vec<_>, Trap>>()?;
                 let here = self.current;
+                let (payload, hook) =
+                    self.chan_hook_stamp(payload, version, module, fp, caller, nargs)?;
                 if !self.heaps().chan_room(chan)? && !self.chan_live_receiver(chan)? {
                     // the deadline bounds only the wait: a full channel
                     // beside a past deadline answers the failure span at once,
@@ -115,14 +129,18 @@ impl Vm {
                     if nanos <= 0 {
                         return Ok(ChanStep::Answer(timeout_failure_span()));
                     }
-                    self.heaps().chan_park_sender(chan, here, payload)?;
+                    self.heaps()
+                        .chan_park_sender(chan, here, payload, hook.clone())?;
+                    if hook.is_some() {
+                        self.chan_leases.push((chan, here));
+                    }
                     return Ok(ChanStep::Park(Some(WorldWait::chan_deadline(
                         chan,
                         true,
                         Instant::now() + Duration::from_nanos(nanos.cast_unsigned()),
                     ))));
                 }
-                self.heaps().chan_deposit(chan, &payload)?;
+                self.heaps().chan_deposit(chan, &payload, hook)?;
                 self.chan_release(chan)?;
                 Ok(ChanStep::Answer(ok_tagged(Value::I64(0))))
             },
@@ -144,7 +162,9 @@ impl Vm {
                             Instant::now() + Duration::from_nanos(nanos.cast_unsigned()),
                         ))));
                     };
-                    self.heaps().chan_deposit(chan, &sender.payload)?;
+                    self.drop_chan_lease(chan, sender.fiber);
+                    self.heaps()
+                        .chan_deposit(chan, &sender.payload, sender.hook)?;
                     let elem = self
                         .heaps()
                         .chan_pop(chan)?
@@ -184,7 +204,14 @@ impl Vm {
         caller: &FrameLayout,
         nargs: u8,
     ) -> Result<ChanOutcome, Trap> {
-        match self.chan_step(channel, fp, caller, nargs)? {
+        // the sending function's module: the hook fact resolves its
+        // stamped `$deinit` index through it (the deinit is the payload
+        // struct's own synthesized function in the sending module's plan)
+        let module = self
+            .registry
+            .module_id(self.registry.pinned(active.version).name())
+            .unwrap_or(u32::MAX);
+        match self.chan_step(channel, fp, caller, nargs, active.version, module)? {
             ChanStep::Answer(result) => {
                 overlay_native(result, &mut self.stack, caller, fp)?;
                 Ok(ChanOutcome::Answered)
@@ -265,8 +292,14 @@ impl Vm {
                         .get(sender.fiber.index())
                         .is_some_and(|f| f.state == FiberState::WorldParked)
                     {
+                        self.drop_chan_lease(chan, sender.fiber);
                         return Ok(Some(sender));
                     }
+                    // a stale entry whose sender is gone: its loss door
+                    // already took the fact — but a hand-assembled tangle
+                    // can leave one queued, so the fact queues here rather
+                    // than dropping with the entry
+                    self.queue_sender_fire(sender);
                 },
             }
         }
@@ -322,7 +355,9 @@ impl Vm {
             {
                 continue;
             }
-            self.heaps().chan_deposit(chan, &sender.payload)?;
+            self.drop_chan_lease(chan, sender.fiber);
+            self.heaps()
+                .chan_deposit(chan, &sender.payload, sender.hook)?;
             self.wake_chan_waiter(sender.fiber, NativeResult::Word(Value::I64(0)));
             return Ok(());
         }
@@ -347,6 +382,142 @@ impl Vm {
     /// — and its win answer rides the two-word ok span its parked call
     /// site overlays (the plain waiter's one-word answer would leave the
     /// span's payload word stale at the site).
+    /// The send's trailing stamp read: a deinit-carrying payload stages
+    /// its `$deinit` function-table index then the reserved stamp tag
+    /// after the payload span, so the last staged word decides the
+    /// staging's shape — the mint point of the channel hook fact (code
+    /// identity beside the buffer's edge counts; no count, no ledger
+    /// row). The stamp words strip off the payload span the doors read.
+    fn chan_hook_stamp(
+        &mut self,
+        mut payload: Vec<Value>,
+        version: VersionIdx,
+        module: u32,
+        fp: usize,
+        caller: &FrameLayout,
+        nargs: u8,
+    ) -> Result<(Vec<Value>, Option<ChanHook>), Trap> {
+        let stamp = control_word(&self.stack, fp, caller, usize::from(nargs) - 1)?;
+        let hook = match stamp {
+            Value::Tag(tag) if tag == CHAN_HOOK_STAMP => {
+                let idx = control_i64(&self.stack, fp, caller, usize::from(nargs) - 2)?;
+                payload.pop();
+                let func = u32::try_from(idx).map_err(|_| Trap::UnknownObject { obj: 0 })?;
+                payload.pop();
+                Some(ChanHook {
+                    version,
+                    module,
+                    func,
+                    width: u8::try_from(payload.len())
+                        .map_err(|_| Trap::UnknownObject { obj: 0 })?,
+                })
+            },
+            _ => None,
+        };
+        Ok((payload, hook))
+    }
+
+    /// Drops the fact lease one fiber's entry held on `chan`: a delivery
+    /// took the entry, and the fact dies with it — the receiver's own
+    /// registration owns the hook from here.
+    fn drop_chan_lease(&mut self, chan: RefId, fiber: FiberId) {
+        self.chan_leases
+            .retain(|&(lease, owner)| !(lease == chan && owner == fiber));
+    }
+
+    /// Queues one entry's fact as a fire with no held counts (the
+    /// staged span rode none): the stale-entry skip's and the deadline
+    /// wake's loss shape.
+    pub(crate) fn queue_sender_fire(&mut self, sender: ChanSender) {
+        if let Some(hook) = sender.hook {
+            self.chan_fires.push(ChanFire {
+                hook,
+                words: sender.payload,
+                held: Vec::new(),
+            });
+        }
+    }
+
+    /// The cut door's sweep: every entry the dying fiber parked on some
+    /// channel, taken with its fact. The sweep runs before the frame
+    /// hooks (the queued span is the innermost value's death) and before
+    /// the drain releases the frame's counts, so the hook's objects
+    /// still live.
+    pub(crate) fn sweep_chan_leases(&mut self, fiber: FiberId) -> Vec<ChanFire> {
+        let mut fires = Vec::new();
+        let leases = std::mem::take(&mut self.chan_leases);
+        for (chan, owner) in leases {
+            if owner != fiber {
+                self.chan_leases.push((chan, owner));
+                continue;
+            }
+            let Ok(taken) = self.heaps().chan_take_sender_of(chan, fiber) else {
+                continue; // a dead channel: the lease row drops with it
+            };
+            for sender in taken {
+                if let Some(hook) = sender.hook {
+                    fires.push(ChanFire {
+                        hook,
+                        words: sender.payload,
+                        held: Vec::new(),
+                    });
+                }
+            }
+        }
+        fires
+    }
+
+    /// Whether any channel fire waits: the dispatch boundaries' one
+    /// check — the VM's loss-door queue plus the current store's
+    /// cascade-observed deaths.
+    pub(crate) fn chan_fires_pending(&self) -> bool {
+        !self.chan_fires.is_empty() || self.objects.fires_pending()
+    }
+
+    /// The dying fiber's store-cascade fires, taken for a door.
+    pub(crate) fn take_store_fires(&mut self, fiber: FiberId) -> Vec<ChanFire> {
+        if fiber == self.current && self.ctx_live {
+            self.objects.take_fires()
+        } else {
+            self.pool[fiber.index()].objects.take_fires()
+        }
+    }
+
+    /// Fires every waiting channel hook: each hook drives under the fire
+    /// flag — a hook must return to its fire door (parking, dying,
+    /// trapping, or a raised cancel flag refuses with
+    /// `Trap::ReentrancyRefused`, its effects standing, the fire
+    /// consumed) — then releases the fire's held edge counts through the
+    /// funnels, the fire-before-release door order. A stale queue fire
+    /// (dead span words, no held counts) skips silently.
+    pub(crate) fn drain_chan_fires(&mut self) -> Result<(), Trap> {
+        let mut fires = std::mem::take(&mut self.chan_fires);
+        fires.extend(self.objects.take_fires());
+        for fire in fires {
+            if (fire.held.is_empty() && !self.fire_words_live(&fire.words))
+                || fire.words.len() != usize::from(fire.hook.width)
+            {
+                // a stale queue fire (dead span words) or a corrupted
+                // fact: fires nothing
+                continue;
+            }
+            self.teardown_drive = true;
+            let hook_result = self.call_hosted_in(
+                Value::Fn(FuncRef::new(fire.hook.module, fire.hook.func)),
+                &fire.words,
+                Some(fire.hook.version),
+            );
+            self.teardown_drive = false;
+            hook_result?;
+            for word in &fire.held {
+                if let Value::Ref(id) = word {
+                    self.heaps().dec_edge(*id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn wake_chan_waiter(&mut self, fiber: FiberId, result: NativeResult) {
         if self
             .pool

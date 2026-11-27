@@ -111,7 +111,17 @@ impl Vm {
                 // so no stale entry lingers and no later peer pairs with
                 // a cut fiber
                 if let WorldWait::ChanDeadline { chan, sender, .. } = &entry.wait {
-                    let _ = self.heaps().chan_remove_waiter(*chan, fiber, *sender);
+                    // the wait's loss door: the removed send entry's hook
+                    // fact queues a fire (the span rode no count; its
+                    // death is the sender's own flush, so the hook must
+                    // fire here at the loss, not at a pairing skip)
+                    for removed in self
+                        .heaps()
+                        .chan_remove_waiter(*chan, fiber, *sender)
+                        .unwrap_or_default()
+                    {
+                        self.queue_sender_fire(removed);
+                    }
                 }
                 self.release_wait_resources(&entry.wait);
                 if let Some(handle) = entry.handle
@@ -377,7 +387,16 @@ impl Vm {
         // the win doors wake through `wake_chan_waiter`, which drops the
         // row before this arm could ever see a woken fiber.
         if let WorldWait::ChanDeadline { chan, sender, .. } = &entry.wait {
-            let _ = self.heaps().chan_remove_waiter(*chan, fiber, *sender);
+            // the wheel's loss door: the removed send entry's hook fact
+            // queues a fire — the losing span rode no count, so its hook
+            // must fire at the wait's loss, not drop with the entry
+            for removed in self
+                .heaps()
+                .chan_remove_waiter(*chan, fiber, *sender)
+                .unwrap_or_default()
+            {
+                self.queue_sender_fire(removed);
+            }
             self.finish_wait_with(token, Wake::Answer(timeout_failure_span()));
             return;
         }

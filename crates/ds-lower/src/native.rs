@@ -90,8 +90,8 @@ mod tests {
         assert_eq!(COMPTIME_MODULE_NAME, ds_vm::comptime::COMPTIME_MODULE);
     }
 
-    /// The tag ceiling sits at the reserved run's floor, and the claim band's pair sits inside the
-    /// run: a module mint can never alias a span discriminant.
+    /// The tag ceiling sits at the reserved run's floor, and the claim band's pair and the hook
+    /// stamp sit inside the run: a module mint can never alias a span discriminant or the stamp.
     #[test]
     fn the_tag_ceiling_covers_the_reserved_run() {
         assert_eq!(crate::shape::FIRST_RESERVED_TAG, UTF8_ERR);
@@ -101,6 +101,10 @@ mod tests {
                 "the mint ceiling must cover every reserved tag"
             );
             assert!(crate::shape::CLAIM_BAND_CLEAR < NURSERY_BOUNDARY_ERR);
+            assert!(
+                ds_abi::native::CHAN_HOOK_STAMP >= crate::shape::FIRST_RESERVED_TAG,
+                "the hook stamp sits inside the reserved run"
+            );
         }
     }
 

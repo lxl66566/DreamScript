@@ -471,12 +471,14 @@ impl Vm {
     pub(super) fn sweep_versions(&mut self) -> Vec<usize> {
         let named = |row: VersionIdx| {
             self.callinfo.iter().any(|frame| frame.module == row)
+                || self.chan_fires.iter().any(|fire| fire.hook.version == row)
                 || self.pool.iter().any(|fiber| {
                     fiber.callinfo.iter().any(|frame| frame.module == row)
                         || fiber
                             .resume
                             .as_ref()
                             .is_some_and(|resume| resume.version == row)
+                        || fiber.objects.names_version(row)
                 })
         };
         self.registry.retire_detached_rows(named)

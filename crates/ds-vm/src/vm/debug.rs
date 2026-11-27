@@ -377,8 +377,7 @@ impl Vm {
         // leaking to the VM's drop) — and a trapped root's abandoned
         // nurseries die with it here, their never-entered children
         // releasing their rows and slots the same way
-        self.fire_teardown_hooks(FIBER_ROOT, &[]);
-        self.drain_claims(FIBER_ROOT);
+        self.teardown_fiber(FIBER_ROOT, &[]);
         self.release_owned_nurseries(FIBER_ROOT);
         let root = &mut self.pool[FIBER_ROOT.index()];
         root.segment.clear();

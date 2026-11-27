@@ -4,15 +4,6 @@
 use super::*;
 
 impl Vm {
-    /// The teardown drain walk: every claim the fiber's frames own,
-    /// released, routed to each word's own heap — the one channel for
-    /// cross-heap count mutation on a death. A bogus word (a
-    /// hand-assembled release without an acquire) errors and is ignored:
-    /// the walk releases what the store knows.
-    pub(crate) fn drain_claims(&mut self, fiber: FiberId) {
-        self.drain_claims_except(fiber, &[]);
-    }
-
     /// [`Self::drain_claims`] holding `held` back — a word about to ride
     /// its recorded outcome to a delivery keeps its claim. The claims are
     /// taken before any dec runs, so both doors ride the walk's no-ledger
@@ -68,7 +59,7 @@ impl Vm {
     /// the nursery and never surfaces a user-hook failure, exactly the
     /// death walk's bogus-word honesty.
     pub(crate) fn fire_teardown_hooks(&mut self, fiber: FiberId, held: &[RefId]) {
-        self.fire_teardown_hooks_past(fiber, held, None, None);
+        self.fire_teardown_hooks_past(fiber, held, None, None, true);
     }
 
     /// [`Self::fire_teardown_hooks`] with the REPL rollback's partial
@@ -86,6 +77,7 @@ impl Vm {
         held: &[RefId],
         pre: Option<&ClaimReading>,
         parked: Option<&[Word]>,
+        chan_sweep: bool,
     ) {
         if self.teardown_drive {
             // a door inside a teardown drive never starts a second pass.
@@ -94,7 +86,44 @@ impl Vm {
             // exotic switch tangle — the outer pass remains the only walker
             return;
         }
-        let drives = self.collect_teardown_drives(fiber, held, pre, parked);
+        let mut drives: Vec<(VersionIdx, FuncRef, Vec<Value>, Vec<Value>)> = Vec::new();
+        // the cut sweep's queue fires go first: the queued span is the
+        // innermost value's death, and its hook reads objects the drain
+        // has not released yet
+        if chan_sweep {
+            for fire in self.sweep_chan_leases(fiber) {
+                drives.push((
+                    fire.hook.version,
+                    FuncRef::new(fire.hook.module, fire.hook.func),
+                    fire.words,
+                    Vec::new(),
+                ));
+            }
+        }
+        drives.extend(
+            self.collect_teardown_drives(fiber, held, pre, parked)
+                .into_iter()
+                .map(|(row, callee, words)| (row, callee, words, Vec::new())),
+        );
+        // the pending fires: the loss doors that could not drive (the
+        // deadline wake's deregistration) and the cascade deaths the
+        // doors have not drained — each releasing its held edge counts
+        // after its hook returns
+        let mut pending = std::mem::take(&mut self.chan_fires);
+        pending.extend(self.take_store_fires(fiber));
+        for fire in pending {
+            if (fire.held.is_empty() && !self.fire_words_live(&fire.words))
+                || fire.words.len() != usize::from(fire.hook.width)
+            {
+                continue;
+            }
+            drives.push((
+                fire.hook.version,
+                FuncRef::new(fire.hook.module, fire.hook.func),
+                fire.words,
+                fire.held,
+            ));
+        }
         if drives.is_empty() {
             return;
         }
@@ -110,12 +139,19 @@ impl Vm {
             self.ctx_live = true;
         }
         self.teardown_drive = true;
-        for (row, callee, words) in drives {
+        for (row, callee, words, release) in drives {
             if self
                 .call_hosted_in(Value::Fn(callee), &words, Some(row))
                 .is_err()
             {
                 break;
+            }
+            for word in &release {
+                if let Value::Ref(id) = word
+                    && self.heaps().dec_edge(*id).is_err()
+                {
+                    break;
+                }
             }
         }
         self.teardown_drive = false;
@@ -361,6 +397,31 @@ impl Vm {
         let sites = hook_sites(pinned, func, own_id);
         self.hook_dirs.insert(key, Arc::clone(&sites));
         sites
+    }
+
+    /// Whether every `Ref` word still names a live object: the fire
+    /// doors' staleness gate (a stale queue entry whose sender's drain
+    /// already freed the span fires nothing).
+    pub(crate) fn fire_words_live(&mut self, words: &[Value]) -> bool {
+        words.iter().all(|word| match word {
+            Value::Ref(id) => self.heaps().word_live(*id).unwrap_or(false),
+            _ => true,
+        })
+    }
+
+    /// One death door's full teardown: the lease sweep and the frame
+    /// hooks fire under the hosted drive (the cut sender's queued fact
+    /// first — the innermost value's death, its objects alive before the
+    /// drain releases the frame's counts), then the drain walks the
+    /// claims, then a second pass fires what the drain's cascades queued
+    /// (the bands are cleared, so no frame claim can fire twice; the
+    /// leases are taken, so the sweep answers empty). Every hook must
+    /// return to its driver; a refusal's effects stand and the remaining
+    /// claims drain unfired.
+    pub(crate) fn teardown_fiber(&mut self, fiber: FiberId, held: &[RefId]) {
+        self.fire_teardown_hooks(fiber, held);
+        self.drain_claims_except(fiber, held);
+        self.fire_teardown_hooks(fiber, held);
     }
 
     /// A value crossing to the host from the drive-ended fiber: its

@@ -369,8 +369,7 @@ impl Vm {
         held: &[RefId],
         joiner: Option<FiberId>,
     ) {
-        self.fire_teardown_hooks(child, held);
-        self.drain_claims_except(child, held);
+        self.teardown_fiber(child, held);
         for &word in held {
             self.claims[child.index()].release(word);
             if let Some(target) = joiner {

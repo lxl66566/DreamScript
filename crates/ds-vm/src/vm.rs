@@ -84,7 +84,7 @@ use crate::{
         PLATFORM_NONE, TimerNative,
     },
     nursery::{ChildOutcome, JoinOutcome, Nursery, NurseryId, NurseryState, Race},
-    object::{ChanPop, ChanSender, Heaps, Objects},
+    object::{ChanFire, ChanHook, ChanPop, ChanSender, Heaps, Objects},
     program::{Const, ConstFuncRef, ConstKind},
     reactor::Reactor,
     sched::{SchedState, WaitEntry, Wake, WorldWait},
@@ -387,6 +387,17 @@ pub struct Vm {
     /// hook must not re-enter the nursery — the cut would kill the very
     /// fiber whose death walk is driving the hook).
     teardown_drive: bool,
+    /// Channel hook facts whose firing waits for a drive: queue entries a
+    /// loss door took (the deadline wake's deregistration) and cascade
+    /// deaths not yet drained. Each fire runs the hook under a hosted
+    /// drive — a hook must return to its fire door — then releases the
+    /// fire's held edge counts.
+    chan_fires: Vec<ChanFire>,
+    /// The channel-sender fact leases: which channels hold which parked
+    /// senders' facts (the cut door's sweep input; the install sweep's
+    /// judge set). Rows drop when the entry leaves its queue (delivery,
+    /// deregistration, sweep) and skip dead channels lazily.
+    chan_leases: Vec<(RefId, FiberId)>,
     /// The reused capture staging buffer for CALLS copy-ins (per-call
     /// `to_vec` copies are gone; a borrow of this buffer lives only
     /// within one dispatch arm or hosted call, never across a reentry).
@@ -606,6 +617,8 @@ impl Vm {
             hook_dirs: HookDirIndex::default(),
             hook_dirs_stamp: u64::MAX,
             teardown_drive: false,
+            chan_fires: Vec::new(),
+            chan_leases: Vec::new(),
             calls_staging: CaptureStaging::new(),
             repl_pre: None,
             repl_park: None,
