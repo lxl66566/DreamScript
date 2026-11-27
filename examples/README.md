@@ -35,7 +35,7 @@ Runnable programs, one surface each, all gated end to end by `crates/ds-cli/test
 
 ## Concurrency
 
-- `race.ds` — the @std `firstof`/`interleave` race combinators: a caller-built thunk list racing through the bounded channel, the arrival-order answers after the join-all boundary, and the `sum` fold over reduce's hosted callable.
+- `race.ds` — the @std `firstof`/`interleave` race members over the thunk list: a caller-built thunk list racing through the bounded channel, the arrival-order answers after the join-all boundary, and the `sum` fold over reduce's hosted callable.
 - `nursery.ds` — spawn fan-out inside a nursery: the ordered join, the first failure cancelling the in-flight sibling, and the child error unioning out at the boundary.
 
 ## Packages

@@ -759,3 +759,32 @@ fn a_local_generic_lambda_refuses_at_its_binding() {
         "a generic lambda value",
     );
 }
+
+/// A bodied member's own generic clause: the checker solves the clause at
+/// the call site like a free fn's (the receiver binding the impl head,
+/// the arguments the clause), but the lowering's member-instance
+/// planning binds only the impl head's variables — the plan's discovery
+/// keys the instance and the site by the receiver alone and reads no
+/// per-site record of the clause's solved shapes, so the clause's
+/// variable still names itself inside the body's recorded types and the
+/// instance key refuses (DS4009). The member spellings of `fold`/`zip`
+/// wait on this seam; the free spellings stay
+/// the serving surface meanwhile.
+#[test]
+fn a_members_own_generic_clause_over_a_bodied_member_refuses_at_the_instance_key() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "extern fn println (s: string) -> ()\n",
+        "impl[t] list[t] {\n",
+        "  fn fold[r] (self, init: r, f: fn(r, t) -> r) -> r {\n",
+        "    init\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  [1, 2].fold(0, (a: int, x: int) => a + x)\n",
+        "}\n",
+    );
+    refuses_with(source, "an instance key");
+}

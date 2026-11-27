@@ -363,7 +363,8 @@ fn pub_import_selects_the_reexported_surface_through_the_middle_package() {
 
 #[test]
 fn race_combinators_answer_in_arrival_order() {
-    // the @std race pair over the plan-time mint seam: firstof and
+    // the @std race pair on the list-of-thunks receiver's member tier
+    // (the fn-signature head binding its element variable): firstof and
     // interleave compose as ambient members — the caller-built thunk
     // list (non-capturing scalar lambdas) feeding one delivery channel
     // bound to the race's size, one spawned child per thunk receiving

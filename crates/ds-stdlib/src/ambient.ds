@@ -490,6 +490,47 @@ impl[r] list[list[r]] {
   }
 }
 
+// The race pair's member tier: the @std race combinators over the
+// list-of-thunks receiver, one spawned child per element calling it —
+// the whole walk one linear scan (a fn-typed collection element holds
+// the closure Ref word, so capturing lambdas and wrapped named fns
+// both inhabit it; the child's CALLS dispatches the word's runtime
+// kind). The empty race parks the zero-bound answers channel with no
+// fiber left to serve it, the stall guard answering the honest
+// deadlock; the thunk's answer type rides the channel's element
+// stride, so a wider answer crosses whole.
+/// The thunk-list race pair: the first arrival and the arrival-order
+/// collection.
+impl[t] list[fn() -> t] {
+  /// Races the thunks in spawned children, answering the first
+  /// arrival.
+  fn firstof (self) -> t {
+    const answers = chan[t](self.len())
+    nursery {
+      for x in self {
+        spawn { answers.send(x()) }
+      }
+    }
+    answers.recv()
+  }
+  /// The raced thunks' answers, in arrival order.
+  fn interleave (self) -> list[t] {
+    const answers = chan[t](self.len())
+    nursery {
+      for x in self {
+        spawn { answers.send(x()) }
+      }
+    }
+    var out = list[t]()
+    var j = 0
+    while j < self.len() {
+      out = out.concat([answers.recv()])
+      j += 1
+    }
+    out
+  }
+}
+
 // The int list's own total, the reduce seam's specialized member: the
 // hosted add folds the list from zero.
 /// The int list's own total.

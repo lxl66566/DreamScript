@@ -1426,6 +1426,13 @@ impl[t] chan[t] {
 }
 ```
 
+The thunk-list race pair: the first arrival and the arrival-order
+collection.
+
+```ds
+impl[t] list[fn() -> t] { fn firstof(self) -> t, fn interleave(self) -> list[t] }
+```
+
 The list's member tier.
 
 ```ds
@@ -1639,15 +1646,6 @@ to four digits; no zone designator.
 pub fn datetime_str(t: datetime) -> string
 ```
 
-#### `firstof`
-
-Races the thunks in spawned children, answering the first
-arrival.
-
-```ds
-pub fn firstof[t](thunks: list[fn() -> t]) -> t
-```
-
 #### `fold`
 
 Folds the list over the initial value through the step
@@ -1664,14 +1662,6 @@ its sign.
 
 ```ds
 pub fn hex(n: int) -> string
-```
-
-#### `interleave`
-
-Races the thunks, collecting their answers in arrival order.
-
-```ds
-pub fn interleave[t](thunks: list[fn() -> t]) -> list[t]
 ```
 
 #### `join`

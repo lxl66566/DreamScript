@@ -1081,8 +1081,8 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
 
 #[test]
 fn a_fn_signature_head_binds_from_the_receiver_s_signature_parts() {
-    // `show for list[fn() -> t]`: a concrete fn-typed head no longer
-    // declares beside the signature head — the fn-typed position unifies
+    // `show for list[fn() -> t]`: a concrete fn-typed head declares
+    // beside the signature head — the fn-typed position unifies
     // part for part (the overlap probe's witness the fn(int) atom) — and
     // the signature head alone serves a `list[fn() -> string]` receiver,
     // its variable bound from the signature's return.
@@ -1141,7 +1141,7 @@ fn the_signature_head_unifies_parameters_and_return_part_for_part() {
     let recv_atom = universe.apply_atom(list, &[recv_part]).unwrap();
     let head = universe.atom_ty(head_atom).unwrap();
     let recv = universe.atom_ty(recv_atom).unwrap();
-    let subst = ds_check::instance_solve::pattern_substitution(&mut universe, head, recv)
+    let subst = ds_check::instance_solve::pattern_substitution(&universe, head, recv)
         .expect("the signature head unifies");
     assert_eq!(subst.len(), 1, "the one variable binds");
     assert_eq!(subst[0].0, t);
@@ -1151,7 +1151,7 @@ fn the_signature_head_unifies_parameters_and_return_part_for_part() {
     let other_atom = universe.apply_atom(list, &[other_part]).unwrap();
     let other = universe.atom_ty(other_atom).unwrap();
     assert!(
-        ds_check::instance_solve::pattern_substitution(&mut universe, head, other).is_none(),
+        ds_check::instance_solve::pattern_substitution(&universe, head, other).is_none(),
         "a parameter mismatch refuses the head"
     );
 }

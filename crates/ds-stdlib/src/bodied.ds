@@ -81,35 +81,9 @@
 // The FP combinators still in the free tier (the ones whose member
 // move waits on their own seams: zip and fold need a member's own
 // generic body instantiating per shape — the H3.5 round's own, item
-// 140 — and firstof/interleave's receivers are list[fn() -> t], a
-// head no impl spells yet).
-/// Races the thunks in spawned children, answering the first
-/// arrival.
-pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
-  const answers = chan[t](thunks.len())
-  nursery {
-    for x in thunks {
-      spawn { answers.send(x()) }
-    }
-  }
-  answers.recv()
-}
-/// Races the thunks, collecting their answers in arrival order.
-pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
-  const answers = chan[t](thunks.len())
-  nursery {
-    for x in thunks {
-      spawn { answers.send(x()) }
-    }
-  }
-  var out = list[t]()
-  var j = 0
-  while j < thunks.len() {
-    out = out.concat([answers.recv()])
-    j += 1
-  }
-  out
-}
+// 140 — while the race pair moved beside the list's member tiers, the
+// list[fn() -> t] receiver head binding its element variable through
+// the fn signature's return).
 /// Folds the list over the initial value through the step
 /// lambda.
 pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
