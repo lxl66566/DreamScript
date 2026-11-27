@@ -1,7 +1,9 @@
 //! The span rework's width flips, end to end: a struct-typed field
 //! carries its whole inline word span through construction, binding,
 //! calls, returns, union writes, match arms, and equality — the emitted
-//! layouts show the real widths and the values survive every hop.
+//! layouts show the real widths and the values survive every hop. A
+//! tuple-typed field and a union's tuple member claim their elements'
+//! whole spans the same way.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -185,8 +187,91 @@ fn a_tuple_member_binds_positionally_over_the_region() {
     assert_eq!(out, "7\n0\n7 z\n");
 }
 
-/// The widened surfaces refuse honestly: tuple fields over wider
-/// elements and deinit-carrying inline fields keep their named seams.
+/// A tuple-typed field claims its elements' whole spans: construction
+/// stores the pair into the struct's own layout, the field read hands
+/// the whole tuple out, equality crosses every word, a `var` over the
+/// struct re-stores the field's span, and a nested tuple field nests
+/// the same way.
+#[test]
+fn a_tuple_typed_field_flows_its_whole_span() {
+    let out = runs(
+        "tuple_field",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct box { pos: (int, int), label: string }\n",
+            "struct deep { nest: ((string, int), int) }\n",
+            "fn shift(v: (int, int)) -> (int, int) {\n",
+            "  const (a, b) = v\n",
+            "  (a + 1, b)\n",
+            "}\n",
+            "fn label_of(b: box) -> string { b.label }\n",
+            "fn main() -> () {\n",
+            "  const b = box { pos: shift((1, 2)), label: \"b\" }\n",
+            "  const (x, y) = b.pos\n",
+            "  println(\"${x} ${y} ${label_of(b)}\")\n",
+            "  const p = box { pos: (5, 6), label: \"p\" }\n",
+            "  println(if p.pos == (5, 6) { \"eq\" } else { \"ne\" })\n",
+            "  var v = p\n",
+            "  v = box { pos: (7, 8), label: \"q\" }\n",
+            "  const (vx, vy) = v.pos\n",
+            "  println(\"${vx} ${vy}\")\n",
+            "  const d = deep { nest: ((\"a\", 1), 2) }\n",
+            "  const outer = d.nest\n",
+            "  const (inner, m) = outer\n",
+            "  const (s, n) = inner\n",
+            "  println(\"${s}${n}${m}\")\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(out, "2 2 b\neq\n7 8\na12\n");
+}
+
+/// A union tuple member over a wide element: the element's whole span
+/// claims one region span, the widening construction writes it, the
+/// member binder destructures positionally, and the pass-through
+/// return re-spans it.
+#[test]
+fn a_tuple_member_wide_element_flows_over_the_region() {
+    let out = runs(
+        "tuple_member_wide",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag miss\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct point { x: int, y: int }\n",
+            "fn area(v: (point, int) | miss) -> int {\n",
+            "  match v {\n",
+            "    miss => 0 - 1,\n",
+            "    other => {\n",
+            "      const (p, k) = other\n",
+            "      p.x + p.y + k\n",
+            "    },\n",
+            "  }\n",
+            "}\n",
+            "fn passthru(v: (point, string) | miss) -> (point, string) | miss { v }\n",
+            "fn main() -> () {\n",
+            "  println(\"${area((point { x: 1, y: 2 }, 3))}\")\n",
+            "  println(\"${area(miss)}\")\n",
+            "  match passthru((point { x: 7, y: 0 }, \"z\")) {\n",
+            "    miss => println(\"m\"),\n",
+            "    other => {\n",
+            "      const (q, s) = other\n",
+            "      println(\"${q.x + q.y} ${s}\")\n",
+            "    },\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+    assert_eq!(out, "6\n-1\n7 z\n");
+}
+
+/// The refusals slice 7 does not lift keep their honest names: a union
+/// element inside a tuple field (the product distributes) and a
+/// deinit-carrying element in every inline position (the span claims no
+/// hook of its own).
 #[test]
 fn the_refusal_openings_keep_their_honest_names() {
     // a tuple product over a union element: the inline-span vocabulary
@@ -227,6 +312,45 @@ fn the_refusal_openings_keep_their_honest_names() {
             "}\n",
         ),
         "a struct payload field",
+        "per-span deinit claims own the seam",
+    );
+    // a deinit-carrying element inside a tuple field: the tuple's own
+    // element walk names the field's missing inline claim
+    refuses(
+        "refuse_deinit_tuple_field",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "trait Copyable { }\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct session: ~Copyable { user: string\n",
+            "  deinit { println(\"freed ${self.user}\") }\n",
+            "}\n",
+            "struct holder { inner: (session, int) }\n",
+            "fn main() -> () {\n",
+            "  const h = holder { inner: (session { user: \"u\" }, 1) }\n",
+            "}\n",
+        ),
+        "a struct payload field",
+        "per-span deinit claims own the seam",
+    );
+    // a deinit-carrying element inside a union's tuple member: the
+    // payload region owns no per-element hook claim
+    refuses(
+        "refuse_deinit_tuple_member",
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "tag miss\n",
+            "trait Copyable { }\n",
+            "extern fn println (msg: string) -> ()\n",
+            "struct session: ~Copyable { user: string\n",
+            "  deinit { println(\"freed ${self.user}\") }\n",
+            "}\n",
+            "fn sink(v: (session, int) | miss) -> int { 0 }\n",
+            "fn main() -> int { sink(miss) }\n",
+        ),
+        "a deinit-carrying tuple element",
         "per-span deinit claims own the seam",
     );
 }

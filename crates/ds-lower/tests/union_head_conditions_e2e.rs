@@ -605,14 +605,13 @@ fn a_struct_over_variable_member_lays_out_its_reserved_word() {
     );
 }
 
-/// A substitution that widens a tuple element past one word keeps its
-/// refusal at the source's own shape: the tuple value vocabulary is
-/// one plain word per element, so a struct-element instantiation (even
-/// a part-less struct, whose shape is a span, not a word) refuses
-/// before the member write — the member's Raw claim would pair against
-/// a wider element the tuple vocabulary cannot spell.
+/// A substitution that widens a tuple member's element lowers through
+/// the instance: the substituted member lays the elements' whole spans
+/// into the payload region (a part-less struct element rides its one
+/// reserved word inside the span), so the member dispatch writes and
+/// the call answers through the per-shape body.
 #[test]
-fn a_multiword_element_substitution_refuses_at_the_sources_shape() {
+fn a_multiword_element_substitution_lowers_through_the_instance() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
@@ -636,10 +635,27 @@ fn a_multiword_element_substitution_refuses_at_the_sources_shape() {
         "  0\n",
         "}\n",
     );
-    refuse_lowering(
-        "multiword_element_substitution.ds",
-        source,
-        "a multi-word tuple member element is outside the M3 runtime contract",
+    let mut files = Files::new();
+    let id = files.add_source("multiword_element_substitution.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = check_clean("multiword_element_substitution.ds", source);
+    let lowered = lower(
+        "multiword_element_substitution",
+        Hash128::compute(source.as_bytes()),
+        &asts,
+        &analyzed,
+    )
+    .expect("the widened tuple member lowers");
+    let mut vm = run_lowered(&lowered, source);
+    assert_eq!(
+        vm.run("multiword_element_substitution", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(
+        vm.captured_output(),
+        b"x\n" as &[u8],
+        "the widened tuple member answers through the instance"
     );
 }
 

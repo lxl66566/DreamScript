@@ -25,7 +25,7 @@
 //! design, with the reboxing alternative rejected — and a struct-typed
 //! field claims its whole flattened word span (a multi-word field); a
 //! union-typed field claims the union's own tag-plus-region span, a
-//! tuple field keeps one plain word per element, and a heap-application
+//! tuple field its elements' whole spans, and a heap-application
 //! field (`list[t]`, `map[k, v]`) its one Ref word. Bare tuples place each
 //! element's whole span at consecutive offsets. A member value stored into a union-typed field
 //! re-spans through the same tag/zero/write construction the
@@ -113,7 +113,7 @@ impl MemberField {
 /// One payload field's word-type span: the field's consecutive word
 /// types, the claim input for a union region and the placement input for
 /// a bare struct. A struct-typed field carries its flattened multi-word
-/// span; tuple fields keep their one-word element boundary.
+/// span; a tuple field's element carries its own whole span.
 struct PayloadField {
     /// The declared field name; `None` marks a positional payload word.
     name: Option<String>,
@@ -423,8 +423,8 @@ impl<'a> Shapes<'a> {
     /// The word span of a solved field type: the same vocabulary the
     /// written field types take, read over the type's own members. A
     /// struct-typed field carries its whole flattened span, a union its
-    /// own tag-plus-region span, and a tuple one plain word per
-    /// element.
+    /// own tag-plus-region span, and a tuple its elements' whole
+    /// spans.
     fn ty_field_span(&mut self, ty: Ty, depth: usize) -> Result<Option<Vec<SlotType>>, LowerError> {
         const SPAN_DEPTH_LIMIT: usize = 32;
         if depth >= SPAN_DEPTH_LIMIT {
@@ -1178,7 +1178,7 @@ impl<'a> Shapes<'a> {
     /// tags carry no payload; primitives carry their own word; struct
     /// members carry their declared fields, a struct-typed field carrying
     /// its whole flattened span; a tuple member carries one positional
-    /// word per element. A field type the inline-span vocabulary cannot
+    /// span per element. A field type the inline-span vocabulary cannot
     /// spell refuses.
     fn payload_fields(
         &mut self,
@@ -1228,19 +1228,24 @@ impl<'a> Shapes<'a> {
                 .collect(),
             // A tuple member's positional slots claim the region like a
             // struct member's fields — one span per element, no word
-            // shared among them; the gather walks them positionally.
+            // shared among them; the gather walks them positionally. A
+            // struct, nested tuple, or generic-application element claims
+            // its whole span as one positional claim.
             ds_check::AtomKind::Tuple(elements) => {
                 let mut out = Vec::with_capacity(elements.len());
                 for element in elements {
-                    let shape = self.atom_shape(*element)?;
-                    let Shape::Word(slot) = &*shape else {
+                    if self.atom_declares_deinit(*element) {
                         return Err(unsupported(
-                            "a multi-word tuple member element",
-                            "tuple elements lower as one plain frame word; a wider element needs \
-                             its whole span staged per element, which tuple spans do not carry yet",
+                            "a deinit-carrying tuple element",
+                            "the tuple has no per-element deinit claim; per-span deinit claims \
+                             own the seam",
                         ));
-                    };
-                    out.push(PayloadField::word(None, *slot));
+                    }
+                    let shape = self.atom_shape(*element)?;
+                    out.push(PayloadField {
+                        name: None,
+                        slots: shape_words(&shape),
+                    });
                 }
                 Ok(out)
             },
@@ -1311,9 +1316,9 @@ impl<'a> Shapes<'a> {
 
     /// The word span of a written field type: a primitive or unit one
     /// word, a type variable's Raw word, a struct's whole flattened
-    /// inline span (its fields' spans concatenated), a tuple's one plain
-    /// word per element, a union's own tag-plus-region span, and a heap
-    /// application's one Ref word. `None` is the shared refusal: any
+    /// inline span (its fields' spans concatenated), a tuple's elements'
+    /// whole spans at consecutive words, a union's own tag-plus-region
+    /// span, and a heap application's one Ref word. `None` is the shared refusal: any
     /// other shape stays outside the inline-span vocabulary. `depth`
     /// bounds the recursion — a cyclic field type has no finite span,
     /// and the budget refuses it typed instead of recursing.
@@ -1331,19 +1336,25 @@ impl<'a> Shapes<'a> {
             ));
         }
         match expr {
-            // Tuple fields keep the one-word element boundary until their
-            // union claims and field stores take whole element spans. The
-            // empty tuple stays outside: a `()`-typed field would span zero
-            // words.
+            // A tuple field claims its elements' whole spans at
+            // consecutive words, the same layout the bare tuple value
+            // carries. A union element keeps its refusal: the product
+            // distributes over the union, so the solved field type is a
+            // union of tuple atoms and no inline tuple layout exists. The
+            // empty tuple stays outside: a `()`-typed field would span
+            // zero words.
             TypeExpr::Tuple(elements) => {
                 let [first, rest @ ..] = &elements[..] else {
                     return Ok(None);
                 };
-                let mut slots = Vec::with_capacity(1 + rest.len());
+                let mut slots = Vec::new();
                 for element in std::iter::once(first).chain(rest) {
-                    match self.field_span(element, depth + 1)?.as_deref() {
-                        Some([only]) => slots.push(*only),
-                        _ => return Ok(None),
+                    if matches!(element, TypeExpr::Union(..)) {
+                        return Ok(None);
+                    }
+                    match self.field_span(element, depth + 1)? {
+                        Some(element_slots) => slots.extend(element_slots),
+                        None => return Ok(None),
                     }
                 }
                 Ok(Some(slots))
@@ -1454,18 +1465,19 @@ impl<'a> Shapes<'a> {
                 let shape = self.union_shape(&members, depth + 1)?;
                 Ok(Some(shape_words(&shape)))
             },
-            // An aliased tuple field keeps the written spelling's one-word
-            // element boundary; the empty tuple refuses on the same line.
+            // An aliased tuple field claims its elements' whole spans, the
+            // same walk the written spelling takes — a struct element's
+            // deinit refusal and the fn element's closure Ref word ride
+            // their own arms; the empty tuple refuses on the same line.
             ds_check::AtomKind::Tuple(elements) => {
                 let [first, rest @ ..] = &elements[..] else {
                     return Ok(None);
                 };
-                let mut slots = Vec::with_capacity(1 + rest.len());
+                let mut slots = Vec::new();
                 for element in std::iter::once(first).chain(rest) {
-                    let shape = self.atom_shape(*element)?;
-                    match &*shape {
-                        Shape::Word(slot) => slots.push(*slot),
-                        _ => return Ok(None),
+                    match self.atom_field_span(*element, depth + 1)? {
+                        Some(element_slots) => slots.extend(element_slots),
+                        None => return Ok(None),
                     }
                 }
                 Ok(Some(slots))

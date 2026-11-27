@@ -681,3 +681,54 @@ fn a_multi_word_tuple_element_over_a_variable_runs_whole() {
         vm.objects().len()
     );
 }
+/// A tuple-typed field and a `var` destructuring over a wide element
+/// lower inside an instance: the substituted application lays its tuple
+/// field out over the elements' whole spans, the body destructures the
+/// field, and the `var` destructuring's wide element binds its own
+/// re-storable slot span (the substituted types carry the real word
+/// kinds the ONE Raw-word body refuses).
+#[test]
+fn tuple_fields_and_var_wide_elements_lower_inside_an_instance() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct point { x: int, y: int }\n",
+        "extern fn println (s: string) -> ()\n",
+        "extern fn str_int (x: int) -> string\n",
+        "struct holder[t] {\n",
+        "  pair: (t, int)\n",
+        "}\n",
+        "fn first_of[x] (h: holder[x]) -> x {\n",
+        "  const (a, _) = h.pair\n",
+        "  a\n",
+        "}\n",
+        "fn swap_head[x] (src: (x, int), next: x) -> x {\n",
+        "  var (a, k) = src\n",
+        "  a = next\n",
+        "  a\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const h: holder[point] = holder { pair: (point { x: 1, y: 2 }, 5) }\n",
+        "  const p = first_of(h)\n",
+        "  println(str_int(p.x + p.y))\n",
+        "  const q = swap_head((point { x: 3, y: 4 }, 6), point { x: 9, y: 9 })\n",
+        "  println(str_int(q.x))\n",
+        "  0\n",
+        "}\n",
+    );
+    let lowered = lower_clean("tuple_fields_instance", source);
+    let first = instances_of(&lowered, "first_of");
+    assert_eq!(first.len(), 1, "one holder[point] instance: {first:?}");
+    let mut vm = run_of(&lowered);
+    assert_eq!(
+        vm.run("tuple_fields_instance", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns its declared int"
+    );
+    assert_eq!(vm.captured_output(), b"3\n9\n");
+    assert!(
+        vm.objects().is_empty(),
+        "the heap drains when the run ends ({} live)",
+        vm.objects().len()
+    );
+}

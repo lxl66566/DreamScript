@@ -3,9 +3,9 @@
 //! tuple is consecutive frame words (one positional span per element:
 //! strings and lists ride their Ref, `()` rides the I64 unit word), and
 //! destructuring binds each element span in place. A destructuring `var`
-//! binds each element its own re-storable slot (a fresh word the initializer
-//! copies into, so an assignment through an element re-stores its slot alone
-//! while the const convention aliases the tuple's words). The multi-word
+//! binds each element its own re-storable slot span (a fresh span the
+//! initializer copies into, so an assignment through an element re-stores
+//! its slot alone while the const convention aliases the tuple's words). The multi-word
 //! corners reject at the lowering boundary with their own notes: a union-typed
 //! element distributes the product into several tuple atoms, and a tuple arm
 //! in a member-test position resolves no member (the arm binds the member and
@@ -58,8 +58,9 @@ fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     // every leg of the fixture: the annotated and inferred constructions,
     // let and match-arm destructuring, the 1-tuple, the unit element, the
     // list element, structural ==, the tail call returning a pair, and
-    // the per-element var slots (assignment through an element re-stores
-    // its slot while the const aliases still read the source)
+    // the per-element var slots, over scalars and over wide elements
+    // (assignment through an element re-stores its slot while the const
+    // aliases still read the source)
     let mut vm = build_vm();
     vm.capture_output();
     assert_eq!(
@@ -68,7 +69,8 @@ fn tuples_construct_destructure_and_dispatch_on_the_frame() {
     );
     assert_eq!(
         vm.captured_output(),
-        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nwide 45\nwide eq\nvar true\n" as &[u8]
+        b"host:8080\nsum 7\narm go\ntail z2\none 5\nunit 1\nlist 23\neq\nwide 45\nwide eq\nvar true\nvarwide true\n"
+            as &[u8]
     );
 }
 

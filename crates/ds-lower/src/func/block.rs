@@ -314,7 +314,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             self.refuse_closure_widen(&init, declared, local.span)?;
             self.guard_deinit_union_member(init.ty, declared, local.span)?;
             // A destructuring var owns one re-storable slot per
-            // element: each element word copies into its own var
+            // element: each element's span copies into its own var
             // slot at the binding, so an assignment through an
             // element re-stores its slot alone — the const
             // convention aliases the tuple's words instead.
@@ -449,11 +449,10 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// Binds one destructuring `var`'s elements to fresh per-element
-    /// slots: each width-1 element word copies into its own var slot (a
-    /// Ref word inc's at the copy), so an assignment through an element
-    /// re-stores its slot alone and the source tuple keeps its words.
-    /// Wider elements refuse: a multi-word element would need a
-    /// span-shaped slot, which the span rework's width slices open.
+    /// slots: each element's whole word span copies into its own var
+    /// slot span (a Ref word inc's at the copy), so an assignment
+    /// through an element re-stores its slot alone and the source tuple
+    /// keeps its words.
     pub(super) fn var_tuple_slots(
         &mut self,
         pats: &[Pattern],
@@ -468,7 +467,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             return Err(mismatch("a tuple pattern's arity"));
         }
         let addrs = self.word_addrs(&init.place, declared)?;
-        for ((sub, field), addr) in pats.iter().zip(s.fields.iter()).zip(addrs.iter()) {
+        let srcs = ordered_field_srcs(&addrs, &s.fields)?;
+        for ((sub, field), src) in pats.iter().zip(s.fields.iter()).zip(srcs) {
             let Pattern::Binding { span, name } = sub else {
                 match sub {
                     Pattern::Wildcard(_) => continue,
@@ -493,28 +493,56 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                      placement has no overwrite contract for it yet",
                 ));
             }
-            let Shape::Word(slot) = &*self.shapes.shape(fact.ty)? else {
-                return Err(LowerError::unsupported(
-                    *span,
-                    "a var destructuring element wider than one word",
-                    "a struct, tuple, or union element would need a span-shaped var slot; the \
-                     span rework's width slices open it",
-                ));
-            };
-            if *slot != field.slot() {
-                return Err(mismatch("a var destructuring element word"));
-            }
-            let target = self.temp_word(*slot)?;
-            self.emit(Op::Mov {
-                dst: Slot::body(target),
-                src: Slot::body(addr.slot),
-            });
-            if addr.slot_ty == SlotType::Ref {
-                self.rc.copied(&mut self.code, target, addr.slot);
-            }
-            let place = Place {
-                base: target,
-                shape: PlaceShape::Word(*slot),
+            let base = src
+                .first()
+                .ok_or_else(|| mismatch("a tuple element's span"))?
+                .slot;
+            let place = match &*self.shapes.shape(fact.ty)? {
+                Shape::Word(slot) => {
+                    if *slot != field.slot() {
+                        return Err(mismatch("a var destructuring element word"));
+                    }
+                    let target = self.temp_word(*slot)?;
+                    self.emit(Op::Mov {
+                        dst: Slot::body(target),
+                        src: Slot::body(base),
+                    });
+                    if src[0].slot_ty == SlotType::Ref {
+                        self.rc.copied(&mut self.code, target, base);
+                    }
+                    Place {
+                        base: target,
+                        shape: PlaceShape::Word(*slot),
+                    }
+                },
+                _ => {
+                    // a wide element owns a fresh slot span: the element's
+                    // words copy in word for word, so an assignment
+                    // re-stores the span alone while the source tuple
+                    // keeps its words
+                    let words = self.shapes.words(fact.ty)?;
+                    if words.len() != src.len()
+                        || words.iter().zip(src.iter()).any(|(w, a)| *w != a.slot_ty)
+                    {
+                        return Err(mismatch("a var destructuring element word"));
+                    }
+                    let target = self.temp_span(fact.ty)?;
+                    for (offset, addr) in src.iter().enumerate() {
+                        let word =
+                            target.base + u8::try_from(offset).expect("element span fits u8");
+                        self.emit(Op::Mov {
+                            dst: Slot::body(word),
+                            src: Slot::body(addr.slot),
+                        });
+                        if addr.slot_ty == SlotType::Ref {
+                            self.rc.copied(&mut self.code, word, addr.slot);
+                        }
+                    }
+                    Place {
+                        base: target.base,
+                        shape: PlaceShape::Span(fact.ty),
+                    }
+                },
             };
             self.binders.insert(*span, place.clone());
             self.rc_bind(*span, &place, fact.ty)?;

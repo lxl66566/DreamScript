@@ -63,6 +63,18 @@ fn var_slots(t: (string, int)) -> bool {
   h2 == "db.local" && p2 == 5432 && host == "db" && port == 5433
 }
 
+fn var_wide_slots(t: ((point, int), string)) -> bool {
+  var (inner, label) = t
+  const (q, n) = inner
+  const before = q.x + q.y + n == 45
+  inner = (point { x: 2, y: 2 }, 8)
+  label = "moved"
+  const (q2, n2) = inner
+  const (q0, n0) = t
+  const (p0, m0) = q0
+  before && p0.x == 20 && p0.y == 22 && m0 == 3 && q2.x == 2 && q2.y == 2 && n2 == 8 && label == "moved" && n0 == "wide"
+}
+
 fn main() -> bool {
   const t = mk("host", 8080)
   const (name, port) = t
@@ -80,5 +92,6 @@ fn main() -> bool {
   println("${label} ${p.x + p.y + n}")
   println(if wide_element(point { x: 1, y: 2 }) == wide_element(point { x: 1, y: 2 }) { "wide eq" } else { "wide ne" })
   println("var ${var_slots(mk("db.local", 5432))}")
-  pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432))
+  println("varwide ${var_wide_slots(wide_element(point { x: 20, y: 22 }))}")
+  pair_sum((20, 22)) == 42 && var_slots(mk("db.local", 5432)) && var_wide_slots(wide_element(point { x: 20, y: 22 }))
 }
