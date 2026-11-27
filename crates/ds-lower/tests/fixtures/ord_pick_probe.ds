@@ -1,0 +1,22 @@
+struct ranked { key: int, label: string }
+
+impl ord for ranked {
+  fn compare(self, other: Self) -> int { self.key.compare(other.key) }
+}
+
+fn main() -> int {
+  println("ints ${max(3, 9)} ${min(3, 9)} ${(3).max(9)} ${(3).min(9)}")
+  println("words ${max("pear", "apple")} ${min("pear", "apple")}")
+  const low = ranked { key: 1, label: "low" }
+  const high = ranked { key: 2, label: "high" }
+  println("records ${max(low, high).label} ${min(low, high).label}")
+  const tie_a = ranked { key: 1, label: "first" }
+  const tie_b = ranked { key: 1, label: "second" }
+  println("ties ${max(tie_a, tie_b).label} ${min(tie_a, tie_b).label}")
+  const nan = 0.0 / 0.0
+  const expected_max = if total_compare(nan, 1.0) >= 0 { nan } else { 1.0 }
+  const expected_min = if total_compare(nan, 1.0) <= 0 { nan } else { 1.0 }
+  println("generic nan ${max(nan, 1.0) == expected_max} ${min(nan, 1.0) == expected_min} ${max(1.0, nan) == expected_max} ${min(1.0, nan) == expected_min}")
+  println("member nan ${nan.max(1.0) == nan} ${nan.min(1.0) == nan} ${1.0.max(nan) == 1.0} ${1.0.min(nan) == 1.0}")
+  0
+}

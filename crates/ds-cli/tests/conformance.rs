@@ -537,6 +537,6 @@ fn the_float_surface_answers_the_family_and_the_ordering_pair() {
     // answer (the unit tail prints the run's own 0)
     run_golden(
         "float_surface.ds",
-        "unary true\nlimits true\norder true\nnan true\n",
+        "unary true\nlimits true\norder true\nnan true\ngeneric nan true\n",
     );
 }

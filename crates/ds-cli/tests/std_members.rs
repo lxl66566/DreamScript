@@ -4,10 +4,9 @@
 //! (each declaration naming the builtin core native the lowering routes
 //! by name); the entry surfaces keep the bare spellings alive (the run
 //! path's script sessions composing the faces back beside the core, the
-//! dev script rounds and the REPL serving the merged composition), while
-//! a package compile over a std-declaring graph keeps the boundary: the
-//! ambient band is the shrunk core, a bare use an unknown name, the
-//! linked import the binding face. The list pair are bodied members of
+//! dev script rounds and the REPL serving the merged composition). The
+//! generic ordering pair rides the core in every registration. The list
+//! pair are bodied members of
 //! the same file, so the bare spellings run through a script session
 //! while the linked import keeps the generic-head refusal (the take,
 //! drop, and flat_map shapes refuse at the ambient splice's
@@ -196,28 +195,24 @@ fn std_manifest() -> String {
 }
 
 /// The manifest-root boundary the migration keeps: a package compile
-/// over a std-declaring graph registers the shrunk core (the ordering
-/// pair gone from its namespace — a bare use an unknown name), while
-/// the members answer over the link through the ambient band every
-/// registration carries, an @std row binding an exportable face.
+/// over a std-declaring graph registers the shrunk core with its generic
+/// ordering pair, while the primitive members answer through the ambient
+/// band every registration carries.
 #[test]
-fn a_std_declared_root_refuses_bare_and_binds_the_link() {
-    // the bare spelling refuses over the core
+fn a_std_declared_root_runs_generic_and_binds_the_link() {
+    // The core owns the generic spelling in every registration.
     let bare = write_root("core", &std_manifest(), &[(
         "app.ds",
-        "fn main() -> int {\n  max(3, 9)\n}\n",
+        "fn main() -> int {\n  println(\"${max(3, 9)} ${min(3, 9)}\")\n  0\n}\n",
     )]);
     let out = run(&["run", &entry_of(&bare)]);
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "the bare use over the core refuses"
-    );
-    assert!(
-        text(&out.stderr).contains("unknown name `max`"),
-        "the refusal names the missing member: {}",
+        Some(0),
+        "the generic pair runs over the core: {}",
         text(&out.stderr)
     );
+    assert_eq!(text(&out.stdout), "9 3\n");
     fs::remove_dir_all(&bare).expect("the temp tree removes");
 
     // the linked surface binds the member tier: the pair left the

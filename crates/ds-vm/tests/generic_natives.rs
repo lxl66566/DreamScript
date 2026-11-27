@@ -1,18 +1,13 @@
-//! The five generic container natives past the map block (indices
-//! 32-37): `cons` (32), `tail` (34), `collect` (35), `first` (36), `max`
-//! (37) — the retired `head` spelling's slot at 33 stays reserved —
-//! each addressed through CALLG with one evidence word staged after the
-//! real arguments (the container adapters drop it —
-//! the container word is one `Ref` whatever the element). The producers
-//! answer fresh lists (construction copies), `first` carries
-//! the one checked first-element body in `list_get`'s ok/none span
-//! shape, and `max` dispatches on the numeric instance the evidence
-//! word names — int in i64's total order and float per IEEE, refusing
-//! every other word kind. The retain contract's balance pins live in
-//! rc_diag.rs under the diag feature.
+//! The generic container natives past the map block: `cons` (32),
+//! `tail` (34), `collect` (35), and `first` (36) — the retired `head`
+//! spelling's slot at 33 stays reserved — each addressed through CALLG
+//! with one evidence word staged after the real arguments. The producers
+//! answer fresh lists, and `first` carries the checked first-element
+//! body in `list_get`'s ok/none span shape. The retain contract's balance
+//! pins live in rc_diag.rs under the diag feature.
 
 use ds_vm::{
-    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
+    Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
         BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{Bool, Raw, Ref},
@@ -21,7 +16,7 @@ use ds_vm::{
     assemble,
     native::{
         BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIRST, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
-        BUILTIN_MAX, BUILTIN_TAIL, PLATFORM_IO_OK, PLATFORM_NONE,
+        BUILTIN_TAIL, PLATFORM_IO_OK, PLATFORM_NONE,
     },
 };
 
@@ -49,9 +44,6 @@ fn pool() -> Vec<Const> {
         builtin(BUILTIN_TAIL),                    // k4
         builtin(BUILTIN_COLLECT),                 // k5
         builtin(BUILTIN_FIRST),                   // k6
-        builtin(BUILTIN_MAX),                     // k7
-        Const::I64(BuiltinInstance::Int as i64),  // k8: the int evidence word
-        Const::I64(BuiltinInstance::Float as i64), // k9: the float evidence word
     ]
 }
 
@@ -82,8 +74,6 @@ fn gn_registry() -> ModuleRegistry {
             first_tag(),
             tail(),
             collect(),
-            max_of(),
-            max_float_of(),
         ])
         .expect("valid fixture module"),
     );
@@ -209,37 +199,6 @@ fn collect() -> FunctionDef {
     ])
 }
 
-/// `(a, b: i64) -> i64`: the greater of the two staged words, the int
-/// instance staged as the evidence word.
-fn max_of() -> FunctionDef {
-    max_with_evidence("max_of", k(8))
-}
-
-/// `(a, b: f64) -> f64`: the float spelling over the one body, the
-/// float instance staged as the evidence word.
-fn max_float_of() -> FunctionDef {
-    max_with_evidence("max_float_of", k(9))
-}
-
-/// The shared `max` site: two staged operands plus the named evidence
-/// word behind them.
-fn max_with_evidence(name: &str, evidence: ConstIdx) -> FunctionDef {
-    def(name, &[Raw, Raw, Raw, Raw, Raw], 2, 3, &[
-        Uop::Funcf { frame_slots: 5 },
-        Uop::Mov { dst: 2, src: 0 },
-        Uop::Mov { dst: 3, src: 1 },
-        Uop::Kimm {
-            dst: 4,
-            kidx: evidence,
-        },
-        Uop::Callg {
-            callee: k(7),
-            nargs: 2,
-        },
-        Uop::Ret { src: 2 },
-    ])
-}
-
 fn run_value(vm: &mut Vm, func: &str, args: &[Value]) -> Value {
     let answer = vm.run("gn", func, args).expect("the fixture runs");
     let [word] = answer.as_slice() else {
@@ -346,71 +305,4 @@ fn tail_and_collect_answer_fresh_copies() {
         vm.objects().list_at(ab_id.id()).expect("the source"),
         "elements shared by identity"
     );
-}
-
-#[test]
-fn max_orders_int_and_float_and_refuses_the_rest() {
-    let mut vm = Vm::new(gn_registry());
-    assert_eq!(
-        run_value(&mut vm, "max_of", &[Value::I64(3), Value::I64(7)]),
-        Value::I64(7)
-    );
-    assert_eq!(
-        run_value(&mut vm, "max_of", &[Value::I64(-2), Value::I64(-5)]),
-        Value::I64(-2)
-    );
-    assert_eq!(
-        run_value(&mut vm, "max_float_of", &[
-            Value::F64(2.25),
-            Value::F64(2.5)
-        ]),
-        Value::F64(2.5)
-    );
-    // IEEE: floats never trap, a NaN operand answers the other side
-    assert_eq!(
-        run_value(&mut vm, "max_float_of", &[
-            Value::F64(f64::NAN),
-            Value::F64(2.5)
-        ]),
-        Value::F64(2.5)
-    );
-    // a non-numeric or mixed pair refuses like a comparison against a
-    // mismatched slot — the value-kind branch stays the body's defense
-    // under a covered instance
-    let a = vm.intern_str("a");
-    let b = vm.intern_str("b");
-    assert!(matches!(
-        vm.run("gn", "max_of", &[a, b]),
-        Err(Trap::SlotTypeMismatch { .. })
-    ));
-    assert!(matches!(
-        vm.run("gn", "max_of", &[Value::I64(1), Value::F64(2.0)]),
-        Err(Trap::SlotTypeMismatch { .. })
-    ));
-    // the dispatch is evidence-keyed like `len`'s: an instance the body
-    // orders nothing of traps before the operands are read
-    let mut reg = gn_registry();
-    let body = [
-        Uop::Funcf { frame_slots: 5 },
-        Uop::Mov { dst: 2, src: 0 },
-        Uop::Mov { dst: 3, src: 1 },
-        Uop::Kimm { dst: 4, kidx: k(0) }, // the list instance
-        Uop::Callg {
-            callee: k(7),
-            nargs: 2,
-        },
-        Uop::Ret { src: 2 },
-    ];
-    let def = FunctionDef {
-        name: "max_bad".into(),
-        layout: FrameLayout::new(vec![Raw, Raw, Raw, Raw, Raw], 2, 3).expect("valid layout"),
-        pool: pool(),
-        code: assemble(&body).expect("fixture body encodes"),
-    };
-    reg.install(ModuleVersion::new("bad", vec![def]).expect("valid fixture module"));
-    let mut other = Vm::new(reg);
-    assert!(matches!(
-        other.run("bad", "max_bad", &[Value::I64(1), Value::I64(2)]),
-        Err(Trap::UnknownInstance { .. })
-    ));
 }

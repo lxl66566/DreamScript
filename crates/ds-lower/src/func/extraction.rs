@@ -42,6 +42,9 @@ pub(super) enum AmbientExtern {
     /// merge-sort body through CALLG, the spelling carrying no
     /// comparator of its own.
     Sort,
+    /// The ord-routed generic two-operand picks.
+    Max,
+    Min,
 }
 
 impl AmbientExtern {
@@ -54,6 +57,8 @@ impl AmbientExtern {
             Self::Panic => "panic",
             Self::Exit => "exit",
             Self::Sort => "sort",
+            Self::Max => "max",
+            Self::Min => "min",
         }
     }
 }
@@ -571,6 +576,9 @@ impl FnLower<'_, '_, '_> {
                     // routing to the primitive.
                     AmbientExtern::Die | AmbientExtern::Panic => {
                         sig.params.len() == 1 && (sig.generics.len() == 1 || self.is_never_ret(sig))
+                    },
+                    AmbientExtern::Max | AmbientExtern::Min => {
+                        sig.generics.len() == 1 && sig.params.len() == 2
                     },
                     _ => sig.generics.len() == 1 && sig.params.len() == 1,
                 })

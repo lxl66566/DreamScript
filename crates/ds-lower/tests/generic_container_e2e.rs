@@ -8,8 +8,8 @@
 //! hit and miss members. The container closes [phase 3] run the same
 //! dispatch: `cons` (the evidence word names the element instance — int
 //! and string both), `tail`, `collect`, the `first` checked
-//! first element (the empty list answers none), and `max` over both
-//! numeric instances. A plain CALL never reaches the reserved slots, so
+//! first element (the empty list answers none). A plain CALL never
+//! reaches the reserved slots, so
 //! the phase-1 name-routed monomorphic fallback is gone.
 
 use ds_abi::{BuiltinInstance, Inst};
@@ -36,8 +36,7 @@ fn insts(function: &ds_mod::Function) -> Vec<Inst> {
 /// The routed natives' reserved slots: the FuncRef index, the real
 /// arguments a site stages, the evidence words behind them, and the
 /// builtin instances the evidence words name (the receiver's container,
-/// the element for `cons`, the numeric operand for `max` — the
-/// per-element spellings name their own instance).
+/// the element for `cons` — the per-element spellings name their own instance).
 const ROUTED: &[(u32, u8, u8, &[BuiltinInstance])] = &[
     (21, 1, 1, &[BuiltinInstance::List]), // list_len
     (22, 2, 1, &[BuiltinInstance::List]), // list_get
@@ -48,7 +47,6 @@ const ROUTED: &[(u32, u8, u8, &[BuiltinInstance])] = &[
     (34, 1, 1, &[BuiltinInstance::List]), // tail
     (35, 1, 1, &[BuiltinInstance::List]), // collect
     (36, 1, 1, &[BuiltinInstance::List]), // first
-    (37, 2, 1, &[BuiltinInstance::Int, BuiltinInstance::Float]), // max
     (10, 1, 1, &[BuiltinInstance::Map]),  // len
 ];
 
@@ -92,8 +90,7 @@ fn build_vm() -> (Vm, Lowered) {
 /// receiver's element types with distinct outputs, and the checked reads
 /// answer their hit and miss members in both spellings' shared path.
 /// The closes add the cons/tail/collect compositions over int and
-/// string elements, the empty list's none arm under `first`,
-/// and `max` over both numeric instances.
+/// string elements and the empty list's none arm under `first`.
 #[test]
 fn container_natives_run_two_element_types_and_both_checked_arms() {
     let (mut vm, _) = build_vm();
@@ -106,7 +103,7 @@ fn container_natives_run_two_element_types_and_both_checked_arms() {
     assert_eq!(
         vm.captured_output(),
         b"ints 3 6 3 0\ntexts 3 gamma ?\nnames 2 2 0\nschemes 1 http ?\n\
-          pairs 2 1\nclosed 4 7 3\nheaded delta 3\ndropped 2 3 alpha\nblank 0 ?\nmax 9 2.5\n"
+          pairs 2 1\nclosed 4 7 3\nheaded delta 3\ndropped 2 3 alpha\nblank 0 ?\n"
     );
 }
 
@@ -175,9 +172,9 @@ fn every_container_native_site_is_one_callg_with_container_evidence() {
     }
     assert_eq!(
         sites,
-        [7, 2, 2, 2, 2, 2, 3, 2, 2, 2, 2],
+        [7, 2, 2, 2, 2, 2, 3, 2, 2, 2],
         "one Callg per use: list_len seven (one UFCS), list_get and list_concat two, map_len and \
-         map_get two, cons two, tail three (one UFCS), collect two, first two, max two, len two \
-         (one UFCS over each map)"
+         map_get two, cons two, tail three (one UFCS), collect two, first two, len two (one UFCS \
+         over each map)"
     );
 }

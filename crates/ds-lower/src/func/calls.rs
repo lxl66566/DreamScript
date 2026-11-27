@@ -519,6 +519,26 @@ impl<'a> FnLower<'a, '_, '_> {
             if self.ambient_extern(def, AmbientExtern::Sort) {
                 return self.sort_call(&arg_exprs, ty, call_span, callee_span);
             }
+            if self.ambient_extern(def, AmbientExtern::Max) {
+                return self.ord_pick_call(
+                    OrdPick::Max,
+                    &arg_exprs,
+                    ty,
+                    call_span,
+                    callee_span,
+                    matches!(callee.as_ref(), Expr::Field { .. }),
+                );
+            }
+            if self.ambient_extern(def, AmbientExtern::Min) {
+                return self.ord_pick_call(
+                    OrdPick::Min,
+                    &arg_exprs,
+                    ty,
+                    call_span,
+                    callee_span,
+                    matches!(callee.as_ref(), Expr::Field { .. }),
+                );
+            }
         }
         // a trait-method dispatch names its impl body directly: the call
         // stages and transfers like a local callee, with the solved

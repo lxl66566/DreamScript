@@ -10,11 +10,10 @@
 //! `list_get`'s two-word span (the hit is [`PLATFORM_IO_OK`] with the
 //! element handed out under its own count, an empty list the
 //! [`PLATFORM_NONE`] member with the inert unit word as payload —
-//! there is no rejected index to carry); `max` answers the greater of
-//! two numeric words, int in i64's total order and float IEEE (a NaN
-//! operand answers the other side), any other word kind refusing like
-//! a comparison against a mismatched slot. Their table slots stay
-//! reserved trap entries like every generic builtin's.
+//! there is no rejected index to carry). The ord-routed `max`/`min`
+//! pair selects one of two same-width operand spans through the staged
+//! compare callable. Their table slots stay reserved trap entries like
+//! every generic builtin's.
 //!
 //! # The reentrant combinators (indices 38-40, 46)
 //!
@@ -43,8 +42,7 @@ use ds_abi::Staging;
 use super::{
     fork::{par_map_generic_fn, par_reduce_generic_fn},
     list::{
-        collect_fn, cons_fn, first_element_fn, list_concat_fn, list_get_fn, list_len_fn, max_fn,
-        tail_fn,
+        collect_fn, cons_fn, first_element_fn, list_concat_fn, list_get_fn, list_len_fn, tail_fn,
     },
     map::{map_get_fn, map_keys_fn, map_len_fn},
     scalar::abs_fn,
@@ -108,6 +106,7 @@ pub(super) const GENERIC_BODIES: &[(&str, GenericFn)] = &[
     ("collect", collect_generic_fn),
     ("first", first_generic_fn),
     ("max", max_generic_fn),
+    ("min", min_generic_fn),
     ("abs", abs_generic_fn),
     ("map", map_generic_fn),
     ("filter", filter_generic_fn),
@@ -297,31 +296,50 @@ pub(super) fn collect_generic_fn(
     collect_fn(&mut heaps, out, args)
 }
 
-/// `max`'s one body: dispatch on the call's evidence word like `len`'s —
-/// the numeric instances the body orders. The value-kind match inside
-/// the shared scalar body stays the defense: a corrupted stream staging
-/// a non-numeric word refuses there instead of misreading it.
 pub(super) fn max_generic_fn(
     vm: &mut Vm,
-    evidence: &[Value],
+    _evidence: &[Value],
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    let instance = evidence.first().copied().unwrap_or(Value::I64(-1));
-    match instance {
-        Value::I64(id)
-            if id == ds_abi::BuiltinInstance::Int as i64
-                || id == ds_abi::BuiltinInstance::Float as i64 =>
-        {
-            let (mut heaps, out) = vm.split();
-            max_fn(&mut heaps, out, args)
-        },
-        staged => Err(Trap::UnknownInstance {
-            evidence: match staged {
-                Value::I64(id) => id,
-                _ => -1,
-            },
-        }),
+    ord_pick_generic_fn(vm, args, true)
+}
+
+pub(super) fn min_generic_fn(
+    vm: &mut Vm,
+    _evidence: &[Value],
+    args: &[Value],
+) -> Result<NativeResult, Trap> {
+    ord_pick_generic_fn(vm, args, false)
+}
+
+/// Selects one of two same-width spans through the trailing comparator.
+/// The answer carries one fresh count per selected reference word.
+fn ord_pick_generic_fn(vm: &mut Vm, args: &[Value], max: bool) -> Result<NativeResult, Trap> {
+    let Some((&cmp, operands)) = args.split_last() else {
+        return Err(Trap::ArityMismatch {
+            expected: 3,
+            given: 0,
+        });
+    };
+    if operands.len() < 2 || operands.len() % 2 != 0 {
+        return Err(Trap::ArityMismatch {
+            expected: 3,
+            given: args.len(),
+        });
     }
+    let width = operands.len() / 2;
+    let (first, second) = operands.split_at(width);
+    let ordering = compare_order(vm, cmp, first, second)?;
+    let select_first = if max { ordering >= 0 } else { ordering <= 0 };
+    let selected = if select_first { first } else { second };
+    let words = selected.to_vec();
+    let (mut heaps, _) = vm.split();
+    for value in &words {
+        if let Value::Ref(word) = *value {
+            heaps.inc(word)?;
+        }
+    }
+    Ok(NativeResult::Total { words })
 }
 
 /// `abs`'s one body: dispatch on the call's evidence word like `max`'s —
@@ -576,12 +594,17 @@ pub(super) fn compare_orders_first(
     first: &[Value],
     second: &[Value],
 ) -> Result<bool, Trap> {
+    Ok(compare_order(vm, cmp, first, second)? <= 0)
+}
+
+/// Runs one staged comparator and returns its signed ordering word.
+fn compare_order(vm: &mut Vm, cmp: Value, first: &[Value], second: &[Value]) -> Result<i64, Trap> {
     let mut args = Vec::with_capacity(first.len() + second.len());
     args.extend_from_slice(first);
     args.extend_from_slice(second);
     let answer = vm.call_hosted(cmp, &args)?;
     match answer.as_slice() {
-        [Value::I64(ordering)] => Ok(*ordering <= 0),
+        [Value::I64(ordering)] => Ok(*ordering),
         wider => Err(Trap::SlotTypeMismatch {
             slot: 0,
             expected: SlotType::I64,

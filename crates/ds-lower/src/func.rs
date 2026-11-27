@@ -80,6 +80,7 @@ use plan::*;
 pub(crate) use plan::{
     BodyId, Demands, Discovery, EvidenceEnv, Plan, discover_item, runtime_pairs,
 };
+use sort::OrdPick;
 use value::*;
 
 /// One symbolic frame slot: a body word, or an outgoing-overlay word that

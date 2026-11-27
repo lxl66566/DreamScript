@@ -87,6 +87,8 @@ fn std_manifest() -> String {
 
 /// The acceptance run's expected output.
 const FACE_OUT: &str = concat!(
+    "picks 9 3 pear apple\n",
+    "picked pt { x: 2, y: 1 }\n",
     "ints 1 3\n",
     "ufcs 1 3\n",
     "words apple pear\n",

@@ -342,41 +342,6 @@ pub(super) fn first_element_fn(
     })
 }
 
-/// The greater of two numeric words: int compares in i64's total order;
-/// float follows IEEE and never traps, a NaN operand answering the other
-/// side. Any other word kind refuses like a comparison against a
-/// mismatched slot — the call site's own trap shape.
-pub(super) fn max_fn(
-    _heaps: &mut Heaps,
-    _out: &mut OutputSink,
-    args: &[Value],
-) -> Result<NativeResult, Trap> {
-    match args {
-        [Value::I64(a), Value::I64(b)] => Ok(NativeResult::Word(Value::I64((*a).max(*b)))),
-        [Value::F64(a), Value::F64(b)] => Ok(NativeResult::Word(Value::F64((*a).max(*b)))),
-        _ => {
-            // the pair must agree on one numeric kind: name the word that
-            // breaks it at its own index — the first non-numeric word, or
-            // the second of a mixed int/float pair — citing the other
-            // side's kind as expected
-            let offender = args
-                .iter()
-                .position(|a| !matches!(a, Value::I64(_) | Value::F64(_)))
-                .unwrap_or(1);
-            let expected = args
-                .iter()
-                .enumerate()
-                .find(|(i, a)| *i != offender && matches!(a, Value::I64(_) | Value::F64(_)))
-                .map_or(SlotType::I64, |(_, a)| a.slot_type());
-            Err(Trap::SlotTypeMismatch {
-                slot: u8::try_from(offender).expect("slot index fits u8"),
-                expected,
-                actual: args.get(offender).map_or(SlotType::I64, Value::slot_type),
-            })
-        },
-    }
-}
-
 // The arena natives (the read-side aliasing container): ordinary pure
 // natives over the object store — no scheduler step, so no dispatcher
 // interception; the handle packing and the slot discipline live in the

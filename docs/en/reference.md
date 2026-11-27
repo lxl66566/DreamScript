@@ -629,6 +629,22 @@ Maps the failure side of a union through the lambda.
 pub extern fn map_err[t, e, e2](x: t | e, f: fn(e) -> e2) -> t | e2
 ```
 
+#### `max`
+
+The larger operand under its type's ord instance; ties answer the first.
+
+```ds
+pub extern fn max[t: ord](a: t, b: t) -> t
+```
+
+#### `min`
+
+The smaller operand under its type's ord instance; ties answer the first.
+
+```ds
+pub extern fn min[t: ord](a: t, b: t) -> t
+```
+
 #### `mkdir`
 
 Creates one directory level; answers unit or the io failure.

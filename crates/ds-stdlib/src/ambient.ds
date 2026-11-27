@@ -864,8 +864,8 @@ pub extern fn tan (x: float) -> float
 // declaration per value-namespace name holding no more. The float
 // comparison answers the partial order: a NaN first operand poisons
 // the answer, a NaN second operand loses. The int pair spells the
-// total order directly. The generic ord-routed pair does not exist
-// yet.
+// total order directly. The free generic pair below routes through
+// each operand type's ord instance.
 /// The float pair: the partial order, a NaN first operand poisoning the answer.
 impl float {
   /// The larger operand; a NaN first operand answers NaN, a NaN
@@ -970,10 +970,14 @@ extern fn first[t] (xs: list[t]) -> t?
 extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
 extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
 extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
-// The ord-routed list sort's native seam: the `sort` member above
-// declares no comparator parameter, so the call site routes one out of
-// the solved element type's serving ord instance — the `compare`
-// body's callable word staging beside the list.
+// The ord-routed pair and list sort's native seams: the source
+// spellings declare no comparator parameter, so each call site routes
+// one out of the solved operand type's serving ord instance — the
+// `compare` body's callable word staging beside the operands.
+/// The larger operand under its type's ord instance; ties answer the first.
+pub extern fn max[t: ord] (a: t, b: t) -> t
+/// The smaller operand under its type's ord instance; ties answer the first.
+pub extern fn min[t: ord] (a: t, b: t) -> t
 extern fn sort[t: ord] (xs: list[t]) -> list[t]
 // The explicit-comparator sort's native seam, `sort_by`'s own.
 extern fn sort_by[t] (xs: list[t], cmp: fn(t, t) -> int) -> list[t]

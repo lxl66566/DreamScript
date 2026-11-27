@@ -1,10 +1,11 @@
 // source: the float face completion round (the math family's missing members and the member-tier ordering pair)
-// purpose: the float math family's five completions answer their IEEE rows over values, the limiting rows stay total (a NaN or negative ln operand answers NaN, ln at zero answers negative infinity, exp at both infinities answers 0 and infinity), and the float max/min members order through the dot call with the comparison's own NaN answer — a NaN first operand poisoning the result, a NaN second operand losing; the flat max/min names stay the int pair's
+// purpose: the float math family's five completions answer their IEEE rows over values, the limiting rows stay total (a NaN or negative ln operand answers NaN, ln at zero answers negative infinity, exp at both infinities answers 0 and infinity), the float max/min members order through the dot call with the comparison's own NaN answer — a NaN first operand poisoning the result, a NaN second operand losing — and the free generic pair follows float's total ord instance
 // items:
 // unary-values: stage: run
 // limiting-rows: stage: run
 // ordering-pair: stage: run
 // nan-answers: stage: run
+// generic-nan-answers: stage: run
 // main: stage: run
 
 fn unary_values() -> bool {
@@ -23,9 +24,17 @@ fn nan_answers() -> bool {
   (0.0 / 0.0).max(1.0) == 0.0 / 0.0 && 1.5.min(0.0 / 0.0) == 1.5 && (0.0 / 0.0).min(1.0) == 0.0 / 0.0 && round(0.0 / 0.0) == 0.0 / 0.0 && ln(0.0 / 0.0) == 0.0 / 0.0
 }
 
+fn generic_nan_answers() -> bool {
+  const nan = 0.0 / 0.0
+  const high = if total_compare(nan, 1.0) >= 0 { nan } else { 1.0 }
+  const low = if total_compare(nan, 1.0) <= 0 { nan } else { 1.0 }
+  max(nan, 1.0) == high && min(nan, 1.0) == low && max(1.0, nan) == high && min(1.0, nan) == low
+}
+
 fn main() -> () {
   println("unary ${unary_values()}")
   println("limits ${limiting_rows()}")
   println("order ${ordering_pair()}")
   println("nan ${nan_answers()}")
+  println("generic nan ${generic_nan_answers()}")
 }

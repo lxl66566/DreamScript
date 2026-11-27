@@ -44,7 +44,7 @@ use ds_vm::{
         BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
         BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_MAP, BUILTIN_MAP_CONTAINS,
         BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
-        BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_NURSERY_BOUNDARY,
+        BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_MIN, BUILTIN_NURSERY_BOUNDARY,
         BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
         BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND,
         BUILTIN_SORT, BUILTIN_SORT_BY, BUILTIN_STR_BOOL, BUILTIN_STR_CHAR, BUILTIN_STR_COMPARE,
@@ -1177,9 +1177,11 @@ fn both_native_modules_are_installed_and_resolvable() {
     // the comparator sort (115): the CALLG generic whose slot the table
     // reserves like every generic builtin's
     assert!(reg.resolve_native("builtin", BUILTIN_SORT_BY).is_some());
+    // the generic minimum (116): the reserved CALLG seat beside maximum
+    assert!(reg.resolve_native("builtin", BUILTIN_MIN).is_some());
     assert!(
-        reg.resolve_native("builtin", 116).is_none(),
-        "116 table entries: the core's, the list block, the fiber pair, the push, the map
+        reg.resolve_native("builtin", 117).is_none(),
+        "117 table entries: the core's, the list block, the fiber pair, the push, the map
  block, the generic container closes, the reentrant combinators, the nursery seams, the
  join, the partition, the fork-join combinator, the fork-join fold, the float sort key,
  the string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1192,7 +1194,8 @@ fn both_native_modules_are_installed_and_resolvable() {
  slot, the collection member round, the arena face's construct/store/remove/read seams,
  the timer race's intercepted timeout seam, the channel deadlines' intercepted
  deadline twin seams, the list membership read, the char conversion's str_char seat,
- the owning container's construct/read/store trio, the comparator sort's sort_by seat"
+ the owning container's construct/read/store trio, the comparator sort's sort_by seat,
+ the generic minimum's reserved seat"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform

@@ -7,8 +7,8 @@
 // running for every entry script session while its data-shaped @std
 // imports stay bound through the linked surface. The int ordering
 // pair and the list family's bodied transforms live at their types'
-// member tiers (the 2026-11-27 naming ruling), their bodies the same
-// ds source; the flat `max`/`min` spellings are gone.
+// member tiers, their bodies the same ds source. The generic free
+// `max`/`min` pair stays in the ambient core beside them.
 //
 // The FP combinator family: the list transforms as plain generic
 // library fns. A generic body stages values only through the shapes it

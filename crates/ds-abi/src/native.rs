@@ -164,7 +164,7 @@ pub const BUILTIN_TAIL: u32 = 34;
 pub const BUILTIN_COLLECT: u32 = 35;
 /// The generic `first[t] (xs: list[t]) -> t \| none`, the checked first-element read.
 pub const BUILTIN_FIRST: u32 = 36;
-/// The generic `max[t] (a, b: t) -> t` over the numeric instances.
+/// The ord-routed generic `max[t: ord] (a, b: t) -> t`.
 pub const BUILTIN_MAX: u32 = 37;
 /// The generic `map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]`, reentrant.
 pub const BUILTIN_MAP: u32 = 38;
@@ -444,6 +444,8 @@ pub const BUILTIN_BOX_SET: u32 = 114;
 /// comparator-taking sort riding the same stable merge sort body, the
 /// callable word staged from the call site's own argument.
 pub const BUILTIN_SORT_BY: u32 = 115;
+/// The ord-routed generic `min[t: ord] (a, b: t) -> t`.
+pub const BUILTIN_MIN: u32 = 116;
 
 // The comptime reflection module's rows.
 
@@ -2230,19 +2232,31 @@ pub const GENERIC_NATIVES: &[GenericNative] = &[
         shape: NativeShape::Checked,
         instances: &[BuiltinInstance::List],
     },
+    // The two same-shaped operand spans lead the trailing comparator.
+    // Only the ambient ord-routed call sites stage this hidden argument.
     GenericNative {
         name: "max",
         module: NativeModule::Builtin,
         index: BUILTIN_MAX,
-        evidence: 1,
-        params: &[SlotType::Raw, SlotType::Raw],
-        staging: Staging::Fixed,
-        shape: NativeShape::TotalByInstance,
-        instances: &[BuiltinInstance::Int, BuiltinInstance::Float],
+        evidence: 0,
+        params: &[SlotType::Fn],
+        staging: Staging::Leading,
+        shape: NativeShape::TotalByResultType,
+        instances: &[],
+    },
+    GenericNative {
+        name: "min",
+        module: NativeModule::Builtin,
+        index: BUILTIN_MIN,
+        evidence: 0,
+        params: &[SlotType::Fn],
+        staging: Staging::Leading,
+        shape: NativeShape::TotalByResultType,
+        instances: &[],
     },
     // abs joins the int and float widths on one spelling: the solved
     // argument type names the numeric instance the evidence word
-    // stages, the result word keying off it (`max`'s shape)
+    // stages, and the result word keys off it
     GenericNative {
         name: "abs",
         module: NativeModule::Builtin,

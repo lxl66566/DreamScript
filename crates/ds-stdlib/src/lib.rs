@@ -68,10 +68,9 @@
 //!   contrast, is ambient-owned (`io_err`, `net_err`, `parse_err` — the discriminants the platform
 //!   natives answer), so the fallible reads (`read_file`, `parse_int`, the file face's reads)
 //!   return real success unions.
-//! * `max`/`min` migrated to the @std bodied members' file as the int pair (the library-boundary
-//!   round): the word-shaped signature a linked call binds and a session composes back, the float
-//!   and ord-generic spellings riding the later linked-surface rounds. Likewise `u32` is a distinct
-//!   atom (mixed-width arithmetic is the corpus's staged noise).
+//! * `max`/`min` are the int and float member pairs beside the ord-routed generic free pair in the
+//!   ambient core, so every registration carries them. Likewise `u32` is a distinct atom
+//!   (mixed-width arithmetic is the corpus's staged noise).
 //! * Every extern names a callee the lowering answers; the dead declarations (declared externs
 //!   whose callee no native or rule answered — `get`, `log`, `close`, `to_u32_le`, `read_config`,
 //!   `default_config`, `load_rows`, `fetch`, `consume`, `die`) are gone, so their uses are unknown
@@ -184,8 +183,7 @@ pub const STD_MEMBERS_SOURCE: &str = include_str!("std_members.ds");
 
 /// The `@std` bodied members' file name inside the default package: the
 /// migrated declarations whose bodies are plain ds source over
-/// word-shaped atoms — the ordering pair (`max`/`min`) the
-/// library-boundary round landed, the list pair (`enumerate`/`zip`) the
+/// word-shaped atoms — the list pair (`enumerate`/`zip`) the
 /// FP surface round, and the seeded
 /// PRNG family (`rand`/`rand_next`/`rand_seed`, splitmix64) the
 /// scarcity audit's first std gap — the later bodied migrations' home.
@@ -910,10 +908,16 @@ mod tests {
             pkg_package.lookup_value("urls").is_some(),
             "`urls` lives in the @std members' source beside the core"
         );
-        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
+        for name in ["enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
                 pkg_package.lookup_value(name).is_none(),
                 "`{name}` left the free namespace (the member tier owns it)"
+            );
+        }
+        for name in ["max", "min"] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "the generic `{name}` stays in the core beside its primitive members"
             );
         }
         for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
@@ -981,8 +985,8 @@ mod tests {
         );
         for name in ["max", "min"] {
             assert!(
-                core_package.lookup_value(name).is_none(),
-                "`{name}` left the shrunk core (the extern and the bodied pair both)"
+                core_package.lookup_value(name).is_some(),
+                "the core carries the generic `{name}` for every registration"
             );
         }
         for name in ["enumerate", "zip"] {
@@ -1073,10 +1077,16 @@ mod tests {
             session_diags.is_empty(),
             "the session composition resolves clean: {session_diags:?}"
         );
-        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
+        for name in ["enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
                 session_package.lookup_value(name).is_none(),
                 "the session composition retires the flat `{name}` (the member tier owns it)"
+            );
+        }
+        for name in ["max", "min"] {
+            assert!(
+                session_package.lookup_value(name).is_some(),
+                "the session composition resolves the generic `{name}`"
             );
         }
         for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
@@ -1149,10 +1159,16 @@ mod tests {
             merged_package.lookup_value("urls").is_some(),
             "the merged reading keeps `urls`"
         );
-        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
+        for name in ["enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
                 merged_package.lookup_value(name).is_none(),
                 "the merged reading retires the flat `{name}` (the member tier owns it)"
+            );
+        }
+        for name in ["max", "min"] {
+            assert!(
+                merged_package.lookup_value(name).is_some(),
+                "the merged reading resolves the generic `{name}`"
             );
         }
         for name in [
