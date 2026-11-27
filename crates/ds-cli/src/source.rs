@@ -1618,7 +1618,7 @@ mod tests {
     /// the same ids a hand-built root carrying the same dep assigns.
     #[test]
     fn a_built_module_s_recorded_dep_list_round_trips_the_walk() {
-        const APP: &str = "import @std/csv (split)\nimport @std/io\n\nfn main() -> int {\n7\n}\n";
+        const APP: &str = "import @std/csv (println)\nimport @std/io\n\nfn main() -> int {\n7\n}\n";
         let compiled = compile_script(&script_inputs("app"), APP, false, true).expect("compiles");
         let recorded = compiled.lowered.module().deps().to_vec();
         assert_eq!(

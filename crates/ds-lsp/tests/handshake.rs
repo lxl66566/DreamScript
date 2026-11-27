@@ -149,7 +149,7 @@ async fn the_handshake_diagnoses_and_answers() {
         let source = concat!(
             "const msg: string = \"hi\"\n",
             "const broken: string = 1\n",
-            "const text: string = trim(msg)\n",
+            "const text: string = join([msg], \"\")\n",
         );
         send(
             &mut client,
@@ -274,7 +274,7 @@ async fn the_handshake_diagnoses_and_answers() {
             .iter()
             .filter_map(|item| item["label"].as_str())
             .collect();
-        for name in ["msg", "broken", "text", "trim"] {
+        for name in ["msg", "broken", "text", "join"] {
             assert!(labels.contains(&name), "{labels:?}");
         }
         let idx = |name: &str| {
@@ -283,7 +283,7 @@ async fn the_handshake_diagnoses_and_answers() {
                 .position(|got| *got == name)
                 .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
         };
-        assert!(idx("trim") < idx("msg"), "{labels:?}");
+        assert!(idx("join") < idx("msg"), "{labels:?}");
 
         // References answer the declaration plus every use of the name at
         // the position; uses inside the ambient carry no URI and drop.
@@ -308,7 +308,7 @@ async fn the_handshake_diagnoses_and_answers() {
         assert_eq!(locations[0]["range"]["start"]["line"], 0);
         assert_eq!(locations[0]["range"]["start"]["character"], 6);
         assert_eq!(locations[1]["range"]["start"]["line"], 2);
-        assert_eq!(locations[1]["range"]["start"]["character"], 26);
+        assert_eq!(locations[1]["range"]["start"]["character"], 27);
 
         // Prepare-rename answers the name's range and spelling.
         send(
@@ -322,8 +322,8 @@ async fn the_handshake_diagnoses_and_answers() {
         .await;
         let reply = expect(&mut client, Wanted::Id(8)).await;
         assert_eq!(reply["result"]["range"]["start"]["line"], 2);
-        assert_eq!(reply["result"]["range"]["start"]["character"], 26);
-        assert_eq!(reply["result"]["range"]["end"]["character"], 29);
+        assert_eq!(reply["result"]["range"]["start"]["character"], 27);
+        assert_eq!(reply["result"]["range"]["end"]["character"], 30);
         assert_eq!(reply["result"]["placeholder"], "msg");
 
         // Rename answers the edit set over the declaration and the use.
@@ -348,11 +348,11 @@ async fn the_handshake_diagnoses_and_answers() {
         assert_eq!(edits[0]["range"]["start"]["line"], 0);
         assert_eq!(edits[0]["range"]["start"]["character"], 6);
         assert_eq!(edits[1]["range"]["start"]["line"], 2);
-        assert_eq!(edits[1]["range"]["start"]["character"], 26);
+        assert_eq!(edits[1]["range"]["start"]["character"], 27);
         assert_eq!(edits[1]["newText"], "greeting");
 
         // A rename of an ambient name answers an error, honestly worded:
-        // `trim` lives in the stdlib ambient, which no document edits.
+        // `join` lives in the stdlib ambient, which no document edits.
         send(
             &mut client,
             &request(
@@ -539,8 +539,9 @@ async fn completion_answers_members_types_and_ranking() {
             "  none\n",
             "}\n",
             "fn probe() -> int {\n",
-            "  tr\n",
+            "  print\n",
             "}\n",
+            "const sprint = 1\n",
             "const fnord = 1\n",
         );
         send(
@@ -556,7 +557,8 @@ async fn completion_answers_members_types_and_ranking() {
             ),
         )
         .await;
-        // The open publishes diagnostics (the `tr` line resolves nothing);
+        // The open publishes diagnostics (the `print` line resolves the
+        // ambient names);
         // the request loop below skips them.
         let completion = |id: u64, line: u32, character: u32| {
             request(
@@ -594,14 +596,14 @@ async fn completion_answers_members_types_and_ranking() {
         for name in ["string", "point"] {
             assert!(labels.contains(&name), "`{name}` answers: {labels:?}");
         }
-        assert!(!labels.contains(&"trim"), "value names stay out: {labels:?}");
+        assert!(!labels.contains(&"join"), "value names stay out: {labels:?}");
 
         // The typed prefix ranks the answer: the exact prefix first, the
         // word-boundary match next, the substring after, the rest last.
-        // `trap` and `trim` share the exact `tr` prefix — their relative
-        // order follows the ambient's declaration order, which a
-        // composed-tail migration moves.
-        send(&mut client, &completion(5, 13, 4)).await;
+        // `print` and `println` share the exact `print` prefix — their
+        // relative order follows the ambient's declaration order, which
+        // a composed-tail migration moves.
+        send(&mut client, &completion(5, 13, 7)).await;
         let reply = expect(&mut client, Wanted::Id(5)).await;
         let items = reply["result"].as_array().expect("completion answers a list");
         let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
@@ -611,9 +613,9 @@ async fn completion_answers_members_types_and_ranking() {
                 .position(|got| *got == name)
                 .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
         };
-        assert!(idx("trim") < idx("str"), "prefix ahead of substring: {labels:?}");
-        assert!(idx("trap") < idx("str"), "prefix ahead of substring: {labels:?}");
-        assert!(idx("str") < idx("pick"), "substring ahead of the rest: {labels:?}");
+        assert!(idx("print") < idx("sprint"), "prefix ahead of substring: {labels:?}");
+        assert!(idx("println") < idx("sprint"), "prefix ahead of substring: {labels:?}");
+        assert!(idx("sprint") < idx("pick"), "substring ahead of the rest: {labels:?}");
 
         // A dot over an unresolved expression answers the ordinary scope
         // names honestly, never a guessed member.
@@ -644,7 +646,7 @@ async fn completion_answers_members_types_and_ranking() {
         let reply = expect(&mut client, Wanted::Id(6)).await;
         let items = reply["result"].as_array().expect("completion answers a list");
         let labels: Vec<&str> = items.iter().filter_map(|i| i["label"].as_str()).collect();
-        assert!(labels.contains(&"trim"), "scope names answer: {labels:?}");
+        assert!(labels.contains(&"println"), "scope names answer: {labels:?}");
         assert!(labels.contains(&"broken"), "{labels:?}");
 
         // The fixed skeletons answer behind a typed keyword prefix: `fn`
@@ -723,15 +725,12 @@ impl ImportCase {
     /// The case's document (its own URI spelling and source).
     fn document(self) -> (String, String) {
         let (name, source) = match self {
-            Self::Fresh => ("fresh", "const text: string = to_up\n"),
+            Self::Fresh => ("fresh", "const text: string = he\n"),
             Self::Merge => (
                 "merge",
-                "import @std/io (println)\nconst text: string = to_up\n",
+                "import @std/io (println)\nconst text: string = he\n",
             ),
-            Self::Picked => (
-                "picked",
-                "import @std (to_upper)\nconst text: string = to_up\n",
-            ),
+            Self::Picked => ("picked", "import @std (hex)\nconst text: string = he\n"),
         };
         let uri = document_uri(&format!("ds_lsp_{name}"));
         (uri, source.to_owned())
@@ -765,7 +764,7 @@ async fn completion_offers_auto_imports_over_the_wire() {
         expect(&mut client, Wanted::Id(1)).await;
         send(&mut client, &notification("initialized", &json!({}))).await;
 
-        // The edit of the `to_upper` item in each document's answer.
+        // The edit of the `hex` item in each document's answer.
         for (id, case) in [ImportCase::Fresh, ImportCase::Merge, ImportCase::Picked]
             .into_iter()
             .enumerate()
@@ -805,7 +804,7 @@ async fn completion_offers_auto_imports_over_the_wire() {
                 .expect("completion answers a list");
             let item = items
                 .iter()
-                .find(|item| item["label"] == "to_upper")
+                .find(|item| item["label"] == "hex")
                 .expect("the exported ambient member answers");
             let edit = item["additionalTextEdits"]
                 .as_array()
@@ -818,7 +817,7 @@ async fn completion_offers_auto_imports_over_the_wire() {
                         json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}),
                         "{edit}"
                     );
-                    assert_eq!(edit["newText"], "import @std (to_upper)\n\n", "{edit}");
+                    assert_eq!(edit["newText"], "import @std (hex)\n\n", "{edit}");
                 },
                 ImportCase::Merge => {
                     let edit = edit.expect("the offer imports");
@@ -827,7 +826,7 @@ async fn completion_offers_auto_imports_over_the_wire() {
                         json!({"start": {"line": 0, "character": 23}, "end": {"line": 0, "character": 23}}),
                         "{edit}"
                     );
-                    assert_eq!(edit["newText"], ", to_upper", "{edit}");
+                    assert_eq!(edit["newText"], ", hex", "{edit}");
                 },
                 ImportCase::Picked => assert!(
                     edit.is_none(),
@@ -1077,7 +1076,7 @@ async fn semantic_tokens_answer_over_the_wire() {
             "// a leading comment\n",
             "const msg: string = \"hi\"\n",
             "fn clean() -> string {\n",
-            "  msg.trim()\n",
+            "  join(msg)\n",
             "}\n",
         );
         send(
@@ -1117,7 +1116,7 @@ async fn semantic_tokens_answer_over_the_wire() {
         assert_eq!(&data[..5], &[0, 0, 20, 2, 0], "{data:?}");
         // The decoded stream names the document's pieces in order: the
         // `const` keyword on line 1, the `msg` declaration with
-        // declaration and readonly bits, and the dot-call's free function.
+        // declaration and readonly bits, and the free call's callee.
         let keyword = token_types.iter().position(|t| *t == "keyword").unwrap();
         let decoded: Vec<[u64; 5]> = data
             .chunks(5)
@@ -1132,7 +1131,7 @@ async fn semantic_tokens_answer_over_the_wire() {
         // and readonly (bit 1).
         let variable = token_types.iter().position(|t| *t == "variable").unwrap();
         assert_eq!(decoded[2], [0, 6, 3, variable as u64, 3], "{decoded:?}");
-        // `trim` answers a function at its use.
+        // `join` answers a function at its use.
         let function = token_types.iter().position(|t| *t == "function").unwrap();
         assert!(
             decoded.iter().any(|t| t[2] == 4 && t[3] == function as u64),

@@ -372,7 +372,7 @@ fn the_reentry_serves_the_keys_a_run_composes() {
     fs::write(
         &probe,
         concat!(
-            "import @std (to_upper)\n",
+            "import @std (println)\n",
             "\n",
             "fn main() -> int {\n",
             "  println(\"${(3).max(9)} ${(3).min(9)}\")\n",

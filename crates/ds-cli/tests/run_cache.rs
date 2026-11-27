@@ -476,7 +476,7 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
 #[test]
 fn both_writers_record_the_dep_list_a_walk_resolves() {
     const IMPORT_MAIN: &str =
-        "import @std (to_upper)\nimport @std (urls)\n\nfn main() -> int {\n  7\n}\n";
+        "import @std (println)\nimport @std (urls)\n\nfn main() -> int {\n  7\n}\n";
     let cache = cache_dir("deps");
     let source = source_file("deps", IMPORT_MAIN);
 

@@ -285,15 +285,6 @@ pub tag utf8_err
 
 ### Functions
 
-#### `abs`
-
-The absolute value; the solved argument type picks int or
-float.
-
-```ds
-pub extern fn abs[t](x: t) -> t
-```
-
 #### `accept`
 
 Accepts one connection over the listener, answering its
@@ -318,14 +309,6 @@ The process's staged arguments as strings.
 
 ```ds
 pub extern fn args() -> list[string]
-```
-
-#### `atan2`
-
-The arctangent of (y, x), quadrant-aware.
-
-```ds
-pub extern fn atan2(y: float, x: float) -> float
 ```
 
 #### `byte_at`
@@ -392,14 +375,6 @@ scope's block answers it.
 
 ```ds
 pub extern fn cancel[t](e: t) -> ()
-```
-
-#### `ceil`
-
-The least whole float at or above the value.
-
-```ds
-pub extern fn ceil(x: float) -> float
 ```
 
 #### `char_compare`
@@ -476,14 +451,6 @@ The char's code point.
 pub extern fn code_of(c: char) -> int
 ```
 
-#### `cos`
-
-The cosine of a float (radians).
-
-```ds
-pub extern fn cos(x: float) -> float
-```
-
 #### `env`
 
 One environment variable's value, none when unset.
@@ -516,14 +483,6 @@ Ends the process with the status; never answers.
 pub extern fn exit(code: int) -> never
 ```
 
-#### `exp`
-
-e raised to the value.
-
-```ds
-pub extern fn exp(x: float) -> float
-```
-
 #### `fields`
 
 A struct's fields or an enum's cases, one row each; comptime
@@ -553,14 +512,6 @@ The float's content hash, -0.0 and NaN normalized.
 
 ```ds
 pub extern fn float_hash(f: float) -> int
-```
-
-#### `floor`
-
-The greatest whole float at or below the value.
-
-```ds
-pub extern fn floor(x: float) -> float
 ```
 
 #### `fs_list`
@@ -602,14 +553,6 @@ The u32's number.
 
 ```ds
 pub extern fn int_of_u32(v: u32) -> int
-```
-
-#### `ln`
-
-The natural logarithm.
-
-```ds
-pub extern fn ln(x: float) -> float
 ```
 
 #### `local_addr`
@@ -763,14 +706,6 @@ call sits in any value position.
 
 ```ds
 pub extern fn panic(msg: string) -> never
-```
-
-#### `pow`
-
-The base raised to the exponent.
-
-```ds
-pub extern fn pow(base: float, exp: float) -> float
 ```
 
 #### `print`
@@ -936,14 +871,6 @@ or the io failure.
 pub extern fn remove(path: string) -> () | io_err
 ```
 
-#### `round`
-
-The nearest whole float, halves to even.
-
-```ds
-pub extern fn round(x: float) -> float
-```
-
 #### `send`
 
 Sends the text over the connection, or its net failure.
@@ -952,28 +879,12 @@ Sends the text over the connection, or its net failure.
 pub fn send(h: net_handle, data: string) -> () | net_err
 ```
 
-#### `sin`
-
-The sine of a float (radians).
-
-```ds
-pub extern fn sin(x: float) -> float
-```
-
 #### `sleep`
 
 Parks the calling fiber for at least the given nanoseconds.
 
 ```ds
 pub extern fn sleep(nanos: int) -> ()
-```
-
-#### `sqrt`
-
-The square root; a negative operand answers NaN.
-
-```ds
-pub extern fn sqrt(x: float) -> float
 ```
 
 #### `str`
@@ -992,29 +903,12 @@ The UTF-8 byte order over two strings.
 pub extern fn str_compare(a: string, b: string) -> int
 ```
 
-#### `str_fixed`
-
-The fixed-point spelling: exactly the digit count of fraction
-digits, half-to-even at the cut.
-
-```ds
-pub extern fn str_fixed(x: float, digits: int) -> string
-```
-
 #### `str_hash`
 
 The FNV-1a content hash over the string's bytes.
 
 ```ds
 pub extern fn str_hash(s: string) -> int
-```
-
-#### `tan`
-
-The tangent of a float (radians).
-
-```ds
-pub extern fn tan(x: float) -> float
 ```
 
 #### `time`
@@ -1041,14 +935,6 @@ positive.
 
 ```ds
 pub extern fn total_compare(a: float, b: float) -> int
-```
-
-#### `trunc`
-
-The value with its fraction dropped, toward zero.
-
-```ds
-pub extern fn trunc(x: float) -> float
 ```
 
 #### `try_wait`
@@ -1218,6 +1104,27 @@ Duplicates by answering the word itself.
 impl clone for string { fn clone(self) -> Self }
 ```
 
+The float type's math members.
+
+```ds
+impl float {
+  fn sqrt(self) -> float
+  fn sin(self) -> float
+  fn cos(self) -> float
+  fn tan(self) -> float
+  fn atan2(self, x: float) -> float
+  fn floor(self) -> float
+  fn ceil(self) -> float
+  fn round(self) -> float
+  fn trunc(self) -> float
+  fn ln(self) -> float
+  fn exp(self) -> float
+  fn pow(self, exp: float) -> float
+  fn abs(self) -> float
+  fn str_fixed(self, digits: int) -> string
+}
+```
+
 The float type's `default` member: positive zero.
 
 ```ds
@@ -1270,6 +1177,13 @@ Hashes the text's bytes under FNV-1a.
 
 ```ds
 impl hash for string { fn hash(self) -> int }
+```
+
+The int type's absolute value; the `i64::MIN` magnitude traps
+like the arithmetic family's overflow.
+
+```ds
+impl int { fn abs(self) -> int }
 ```
 
 The int type's `default` member: zero.
@@ -1374,6 +1288,24 @@ Answers the string itself.
 
 ```ds
 impl show for string { fn show(self) -> string }
+```
+
+The string face's member tier.
+
+```ds
+impl string {
+  fn trim(self) -> string
+  fn parse_int(self) -> int | parse_err
+  fn parse_float(self) -> float | parse_err
+  fn split(self, sep: char | string) -> list[string]
+  fn substring(self, start: int, end: int) -> string | none
+  fn to_upper(self) -> string
+  fn to_lower(self) -> string
+  fn char_at(self, i: int) -> char | none
+  fn contains(self, needle: string) -> bool
+  fn index_of(self, needle: string) -> int | none
+  fn replace(self, needle: string, with: string) -> string
+}
 ```
 
 The concatenation member over the seam the `+` spelling lowers
@@ -1654,22 +1586,6 @@ Panics rendering both words unless the strings are equal.
 pub fn assert_eq_string(a: string, b: string, msg: string) -> ()
 ```
 
-#### `char_at`
-
-The char at the position, none outside the string.
-
-```ds
-pub extern fn char_at(s: string, i: int) -> char | none
-```
-
-#### `contains`
-
-Whether the needle occurs; the empty needle always.
-
-```ds
-pub extern fn contains(haystack: string, needle: string) -> bool
-```
-
 #### `datetime_str`
 
 The fixed `YYYY-MM-DDTHH:MM:SS` spelling, the year zero-padded
@@ -1704,14 +1620,6 @@ its sign.
 
 ```ds
 pub fn hex(n: int) -> string
-```
-
-#### `index_of`
-
-The first occurrence's char index, none on a miss.
-
-```ds
-pub extern fn index_of(haystack: string, needle: string) -> int | none
 ```
 
 #### `interleave`
@@ -1880,22 +1788,6 @@ a longer text answers itself.
 pub fn pad_right(s: string, width: int, pad: char) -> string
 ```
 
-#### `parse_float`
-
-The float the text spells, or parse_err.
-
-```ds
-pub extern fn parse_float(s: string) -> float | parse_err
-```
-
-#### `parse_int`
-
-The int the text spells, or parse_err.
-
-```ds
-pub extern fn parse_int(s: string) -> int | parse_err
-```
-
 #### `parse_json`
 
 One document's typed value, or parse_err carrying the offset
@@ -1929,63 +1821,12 @@ A fresh state from the wall clock.
 pub fn rand_seed() -> int
 ```
 
-#### `replace`
-
-The text with every non-overlapping occurrence swapped for
-`with`.
-
-```ds
-pub extern fn replace(haystack: string, needle: string, with: string) -> string
-```
-
-#### `split`
-
-The slices around every occurrence of the separator's text;
-an empty separator slices per char.
-
-```ds
-pub extern fn split(s: string, sep: char | string) -> list[string]
-```
-
-#### `substring`
-
-The chars between the two positions, none outside the valid
-range.
-
-```ds
-pub extern fn substring(s: string, start: int, end: int) -> string | none
-```
-
 #### `to_json`
 
 The value's serialized JSON text.
 
 ```ds
 pub fn to_json(v: json) -> string
-```
-
-#### `to_lower`
-
-The text lowercased.
-
-```ds
-pub extern fn to_lower(s: string) -> string
-```
-
-#### `to_upper`
-
-The text uppercased.
-
-```ds
-pub extern fn to_upper(s: string) -> string
-```
-
-#### `trim`
-
-The text without its surrounding whitespace.
-
-```ds
-pub extern fn trim(s: string) -> string
 ```
 
 #### `utc_datetime`

@@ -501,6 +501,25 @@ impl FileResolver<'_> {
                 "sort" => "; the member spelling is `xs.sort()`",
                 "sort_by" => "; the member spelling is `xs.sort_by(cmp)`",
                 "concat" => "; the member spelling is `s.concat(t)`",
+                // the float math family and the string face's retired
+                // seams
+                "sqrt" | "sin" | "cos" | "tan" | "floor" | "ceil" | "round" | "trunc" | "ln"
+                | "exp" => "; the member spelling is `x.<op>()`",
+                "atan2" => "; the member spelling is `y.atan2(x)`",
+                "pow" => "; the member spelling is `base.pow(exp)`",
+                "abs" => "; the member spelling is `x.abs()`",
+                "str_fixed" => "; the member spelling is `x.str_fixed(digits)`",
+                "trim" => "; the member spelling is `s.trim()`",
+                "parse_int" => "; the member spelling is `s.parse_int()`",
+                "parse_float" => "; the member spelling is `s.parse_float()`",
+                "split" => "; the member spelling is `s.split(sep)`",
+                "substring" => "; the member spelling is `s.substring(start, end)`",
+                "to_upper" => "; the member spelling is `s.to_upper()`",
+                "to_lower" => "; the member spelling is `s.to_lower()`",
+                "char_at" => "; the member spelling is `s.char_at(i)`",
+                "contains" => "; the member spelling is `s.contains(needle)`",
+                "index_of" => "; the member spelling is `s.index_of(needle)`",
+                "replace" => "; the member spelling is `s.replace(needle, with)`",
                 _ => "",
             };
             self.diags.push(

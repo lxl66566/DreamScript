@@ -88,8 +88,8 @@ fn chained(parts: list[string], line: string) -> string {
 
 fn main() -> bool {
   const line = "boom"
-  const parts = split("7:34", ':')
-  const bad = split("a:b", ':')
+  const parts = "7:34".split(':')
+  const bad = "a:b".split(':')
   println("cased ${cased(true, line)} ${cased(false, line)}")
   println("worded ${worded(true, line)} ${worded(false, line)}")
   println("united ${united(true)} ${united(false)}")

@@ -21,7 +21,7 @@ fn via_param() -> string {
 // A bare case label inside the handler body resolves against the
 // narrowed parameter's own union.
 fn label_body() -> int {
-  parse_int("4x").err((e) => { match e { parse_err => -1 } })
+  "4x".parse_int().err((e) => { match e { parse_err => -1 } })
 }
 
 // The identity .ok handler covers nothing: it checks clean and the
@@ -32,7 +32,7 @@ fn ok_identity() -> string {
 
 // The same chain over the parse receiver.
 fn chain() -> int {
-  parse_int("42").ok((x) => x).err((_) => -1)
+  "42".parse_int().ok((x) => x).err((_) => -1)
 }
 
 // The checked get receiver, miss and hit sides.

@@ -914,6 +914,61 @@ mod tests {
                 "`{name}` left the free namespace (the member tier owns it)"
             );
         }
+        for name in [
+            "trim",
+            "parse_int",
+            "parse_float",
+            "split",
+            "substring",
+            "to_upper",
+            "to_lower",
+            "char_at",
+            "contains",
+            "index_of",
+            "replace",
+        ] {
+            assert!(
+                pkg_package.lookup_value(name).is_some(),
+                "the string face's `{name}` seam rides the bundle core (private, the member \
+                 tier's routing)"
+            );
+            assert!(
+                pkg_package.method_candidates(name).next().is_some(),
+                "the string face's `{name}` registers as a member over the bundle core"
+            );
+        }
+        for name in [
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "atan2",
+            "floor",
+            "ceil",
+            "round",
+            "trunc",
+            "ln",
+            "exp",
+            "pow",
+            "abs",
+            "str_fixed",
+            "trim",
+            "parse_int",
+            "parse_float",
+            "split",
+            "substring",
+            "to_upper",
+            "to_lower",
+            "char_at",
+            "contains",
+            "index_of",
+            "replace",
+        ] {
+            assert!(
+                pkg_package.method_candidates(name).next().is_some(),
+                "`{name}` registers as a member over the ambient band"
+            );
+        }
         for name in ["max", "min"] {
             assert!(
                 pkg_package.lookup_value(name).is_some(),
@@ -1023,8 +1078,13 @@ mod tests {
                 "`{name}` left the shrunk core (the @std json face's own source)"
             );
         }
+        for name in ["join", "hex", "pad_left", "pad_right", "view_len"] {
+            assert!(
+                core_package.lookup_value(name).is_none(),
+                "`{name}` stayed in the @std string face's own source"
+            );
+        }
         for name in [
-            "join",
             "trim",
             "parse_int",
             "parse_float",
@@ -1036,10 +1096,28 @@ mod tests {
             "contains",
             "index_of",
             "replace",
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "atan2",
+            "floor",
+            "ceil",
+            "round",
+            "trunc",
+            "ln",
+            "exp",
+            "pow",
+            "abs",
+            "str_fixed",
         ] {
             assert!(
-                core_package.lookup_value(name).is_none(),
-                "`{name}` left the shrunk core (the @std string face's own source)"
+                core_package.lookup_value(name).is_some(),
+                "the `{name}` seam rides the core (private, the member tier's routing)"
+            );
+            assert!(
+                core_package.method_candidates(name).next().is_some(),
+                "the `{name}` registers as a member"
             );
         }
         assert!(
@@ -1132,10 +1210,16 @@ mod tests {
                 "`{name}` stays link-bound in the session shape"
             );
         }
-        for name in ["trim", "substring", "parse_int", "contains"] {
+        for name in ["join", "hex", "pad_left", "view_len"] {
             assert!(
                 session_package.lookup_value(name).is_some(),
-                "the session composition keeps the bare string face's `{name}`"
+                "the session composition keeps the string face's free `{name}`"
+            );
+        }
+        for name in ["trim", "parse_int", "substring", "contains"] {
+            assert!(
+                session_package.method_candidates(name).next().is_some(),
+                "the session composition registers the string face's `{name}` member"
             );
         }
 
@@ -1229,6 +1313,7 @@ mod tests {
             "the merged reading keeps the typed writers (namespace-identical)"
         );
         for name in [
+            "sqrt",
             "trim",
             "to_upper",
             "split",
@@ -1237,8 +1322,14 @@ mod tests {
             "parse_float",
         ] {
             assert!(
+                merged_package.method_candidates(name).next().is_some(),
+                "the merged reading registers the `{name}` member (namespace-identical)"
+            );
+        }
+        for name in ["join", "hex", "pad_left", "view_len"] {
+            assert!(
                 merged_package.lookup_value(name).is_some(),
-                "the merged reading keeps the string face's `{name}` (namespace-identical)"
+                "the merged reading keeps the string face's free `{name}` (namespace-identical)"
             );
         }
         // the composition rules the consts pin: the session text is

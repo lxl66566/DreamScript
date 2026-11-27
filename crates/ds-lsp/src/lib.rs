@@ -616,12 +616,12 @@ mod tests {
     #[test]
     fn ambient_resolves_and_stays_filtered() {
         let mut session = Session::new();
-        // `trim` is an ambient spelling; a document using it checks clean
+        // `join` is an ambient spelling; a document using it checks clean
         // because the ambient resolves the name.
         let file = open(
             &mut session,
             "a.ds",
-            "const text: string = trim(\" hi \")\n",
+            "const text: string = join([\"a\"], \"-\")\n",
         );
         let diags = session.diagnostics(file).expect("the pass runs");
         assert!(diags.is_empty(), "{diags:?}");
@@ -818,9 +818,9 @@ mod tests {
         let file = open(
             &mut session,
             "a.ds",
-            "const text: string = trim(\" hi \")\n",
+            "const text: string = join([\"a\"], \"-\")\n",
         );
-        // `trim` sits at chars 21..25; the cursor lands on its `r`.
+        // `join` sits at chars 21..25; the cursor lands on its `o`.
         let answer = session
             .hover(Path::new("a.ds"), file, 0, 22)
             .expect("the pass runs")
@@ -828,7 +828,7 @@ mod tests {
         assert!(
             answer
                 .contents
-                .contains("pub extern fn trim(s: string) -> string"),
+                .contains("pub extern fn join(parts: list[string], sep: char | string) -> string"),
             "{}",
             answer.contents
         );
@@ -1083,8 +1083,8 @@ mod tests {
             (link == "@std").then(|| {
                 std::sync::Arc::new(LinkedSurface {
                     signatures: std::collections::HashMap::from([(
-                        "trim".to_owned(),
-                        "pub fn trim(s: bogus) -> bogus".to_owned(),
+                        "join".to_owned(),
+                        "pub fn join(s: bogus) -> bogus".to_owned(),
                     )]),
                 })
             })
@@ -1092,7 +1092,7 @@ mod tests {
         let file = open(
             &mut session,
             "a.ds",
-            "const text: string = trim(\" hi \")\n",
+            "const text: string = join([\"a\"], \"-\")\n",
         );
         let answer = session
             .hover(Path::new("a.ds"), file, 0, 22)
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(
             answer
                 .contents
-                .contains("pub extern fn trim(s: string) -> string"),
+                .contains("pub extern fn join(parts: list[string], sep: char | string) -> string"),
             "the ambient path answers through the ambient's own parse: {}",
             answer.contents
         );
@@ -1154,7 +1154,7 @@ mod tests {
         };
         // An ambient spelling answers ahead of the document's own
         // declarations (the ambient registers as the first member).
-        assert!(idx("trim") < idx("top"), "{labels:?}");
+        assert!(idx("println") < idx("top"), "{labels:?}");
         assert!(idx("top") < idx("add"), "{labels:?}");
         // Locals come last, innermost-first: the block binding ahead of
         // the enclosing parameter.
@@ -1261,10 +1261,11 @@ mod tests {
         let file = open(
             &mut session,
             "a.ds",
-            "fn clean(s: string) -> string {\n  s.trim()\n}\n",
+            "fn clean(s: string) -> string {\n  s.pan\n}\n",
         );
-        // The cursor sits between the dot and the member of `s.trim`.
-        let items = session.completion(file, 1, 4).expect("the pass runs");
+        // The cursor sits between the dot and the typed prefix of
+        // `s.pan`.
+        let items = session.completion(file, 1, 6).expect("the pass runs");
         let kind = |name: &str| {
             items
                 .iter()
@@ -1272,7 +1273,7 @@ mod tests {
                 .map(|item| item.kind)
         };
         assert_eq!(
-            kind("trim"),
+            kind("panic"),
             Some(Some(lsp::CompletionItemKind::FUNCTION)),
             "the UFCS extern fn answers as a function: {items:?}"
         );
@@ -1318,7 +1319,7 @@ mod tests {
         for name in ["string", "int", "list", "point"] {
             assert!(labels.contains(&name), "`{name}` answers: {labels:?}");
         }
-        for name in ["first", "trim"] {
+        for name in ["first", "join"] {
             assert!(!labels.contains(&name), "`{name}` stays out: {labels:?}");
         }
         // The cursor sits inside the `Self` return of the impl member:
@@ -1345,16 +1346,16 @@ mod tests {
             &mut session,
             "a.ds",
             concat!(
-                "const my_trim = 1\n",
+                "const my_print = 1\n",
                 "const extra = 2\n",
                 "const other = 3\n",
                 "fn probe() -> int {\n",
-                "  tr\n",
+                "  print\n",
                 "}\n",
             ),
         );
-        // The cursor sits right after the typed prefix `tr`.
-        let items = session.completion(file, 4, 4).expect("the pass runs");
+        // The cursor sits right after the typed prefix `print`.
+        let items = session.completion(file, 4, 7).expect("the pass runs");
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         let idx = |name: &str| {
             labels
@@ -1362,14 +1363,15 @@ mod tests {
                 .position(|got| *got == name)
                 .unwrap_or_else(|| panic!("`{name}` answers: {labels:?}"))
         };
-        // The ambient's `trim` and `trap` carry the exact prefix — the
-        // two ranking ahead of the underscore boundary match in either
+        // The ambient's `print` and `println` carry the exact prefix —
+        // the two ranking ahead of the word-boundary match in either
         // order (their relative order follows the ambient's declaration
-        // order, which a composed-tail migration moves); the substring
-        // match follows that; the non-matching rest answers last.
-        assert!(idx("trim") < idx("my_trim"), "{labels:?}");
-        assert!(idx("trap") < idx("my_trim"), "{labels:?}");
-        assert!(idx("my_trim") < idx("extra"), "{labels:?}");
+        // order, which a composed-tail migration moves); the
+        // underscore-boundary match follows that; the non-matching rest
+        // answers last.
+        assert!(idx("print") < idx("my_print"), "{labels:?}");
+        assert!(idx("println") < idx("my_print"), "{labels:?}");
+        assert!(idx("my_print") < idx("extra"), "{labels:?}");
         assert!(idx("extra") < idx("other"), "{labels:?}");
     }
 
@@ -1386,7 +1388,7 @@ mod tests {
         let items = session.completion(file, 0, 22).expect("the pass runs");
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(
-            labels.contains(&"trim"),
+            labels.contains(&"println"),
             "an ambient name answers: {labels:?}"
         );
         assert!(
@@ -1399,7 +1401,7 @@ mod tests {
         let items = session.completion(tail, 0, 18).expect("the pass runs");
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(
-            labels.contains(&"trim"),
+            labels.contains(&"println"),
             "an ambient name answers: {labels:?}"
         );
     }
@@ -1551,16 +1553,12 @@ mod tests {
     #[test]
     fn auto_import_offers_the_exported_ambient_members() {
         let mut session = Session::new();
-        let file = open(
-            &mut session,
-            "a.ds",
-            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
-        );
-        // The cursor sits right after the typed prefix `to_up` on line 1.
-        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let file = open(&mut session, "a.ds", "fn probe() -> string {\n  he\n}\n");
+        // The cursor sits right after the typed prefix `he` on line 1.
+        let items = session.completion(file, 1, 4).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the exported ambient member answers");
         let edits = item
             .additional_text_edits
@@ -1571,11 +1569,11 @@ mod tests {
             edits[0].range,
             lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 0))
         );
-        assert_eq!(edits[0].new_text, "import @std (to_upper)\n\n");
+        assert_eq!(edits[0].new_text, "import @std (hex)\n\n");
         // Accepting the offer — the client inserts the name and applies
         // the edit — parses and validates clean: the row selects a `pub`
         // ambient member.
-        let accepted = "import @std (to_upper)\n\nfn probe() -> string {\n  to_upper(\"x\")\n}\n";
+        let accepted = "import @std (hex)\n\nfn probe() -> string {\n  hex(255)\n}\n";
         session
             .set(Path::new("a.ds"), accepted)
             .expect("the accept applies");
@@ -1606,13 +1604,13 @@ mod tests {
         let file = open(
             &mut session,
             "a.ds",
-            "import @std/io (println)\nconst text: string = to_up\n",
+            "import @std/io (println)\nconst text: string = he\n",
         );
         // The cursor sits right after the typed prefix on line 1.
-        let items = session.completion(file, 1, 26).expect("the pass runs");
+        let items = session.completion(file, 1, 23).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the exported ambient member answers");
         let edits = item
             .additional_text_edits
@@ -1623,8 +1621,8 @@ mod tests {
             lsp::Range::new(lsp::Position::new(0, 23), lsp::Position::new(0, 23)),
             "the edit anchors after the row's last selection"
         );
-        assert_eq!(edits[0].new_text, ", to_upper");
-        let accepted = "import @std/io (println, to_upper)\nconst text: string = to_upper(\"x\")\n";
+        assert_eq!(edits[0].new_text, ", hex");
+        let accepted = "import @std/io (println, hex)\nconst text: string = hex(255)\n";
         session
             .set(Path::new("a.ds"), accepted)
             .expect("the accept applies");
@@ -1641,29 +1639,29 @@ mod tests {
     #[test]
     fn auto_import_stays_off_behind_resolved_positions() {
         let mut session = Session::new();
-        // The file's row already selects `to_upper`: the item answers
+        // The file's row already selects `hex`: the item answers
         // plain, nothing to import.
         let file = open(
             &mut session,
             "a.ds",
-            "import @std (to_upper)\n\nconst text: string = to_up\n",
+            "import @std (hex)\n\nconst text: string = he\n",
         );
-        let items = session.completion(file, 2, 26).expect("the pass runs");
+        let items = session.completion(file, 2, 23).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the name answers");
         assert!(
             item.additional_text_edits.is_none(),
             "an already-imported name carries no edit: {item:?}"
         );
         // A resolved prefix: the typed prefix spells the visible
-        // `to_upper` itself.
-        let file = open(&mut session, "b.ds", "const text: string = to_upper\n");
-        let items = session.completion(file, 0, 29).expect("the pass runs");
+        // `hex` itself.
+        let file = open(&mut session, "b.ds", "const text: string = hex\n");
+        let items = session.completion(file, 0, 26).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the name answers");
         assert!(
             item.additional_text_edits.is_none(),
@@ -1680,11 +1678,11 @@ mod tests {
         );
         // A member position never takes the tier — the unchecked-dot
         // fallback included: importing a name serves no dot.
-        let file = open(&mut session, "d.ds", "const broken = missing.to_up\n");
-        let items = session.completion(file, 0, 28).expect("the pass runs");
+        let file = open(&mut session, "d.ds", "const broken = missing.he\n");
+        let items = session.completion(file, 0, 25).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the scope answer serves the fallback");
         assert!(
             item.additional_text_edits.is_none(),
@@ -1757,13 +1755,13 @@ mod tests {
         let file = open(
             &mut session,
             "b.ds",
-            "fn shout() -> string {\n  to_upper(\"x\")\n}\n",
+            "fn shout() -> string {\n  hex(255)\n}\n",
         );
-        // The cursor sits right after the exact spelling `to_upper`.
-        let items = session.completion(file, 1, 10).expect("the pass runs");
+        // The cursor sits right after the exact spelling `hex`.
+        let items = session.completion(file, 1, 5).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the face is visible under the session registration");
         assert!(
             item.additional_text_edits.is_none(),
@@ -1869,21 +1867,17 @@ mod tests {
         // The migrated string face's member offers the same way: the
         // face's names left the shrunk core, so the table's composed
         // half serves each behind any prefix it matches.
-        let file = open(
-            &mut session,
-            "e.ds",
-            "fn probe() -> string {\n  to_up(\"x\")\n}\n",
-        );
-        let items = session.completion(file, 1, 7).expect("the pass runs");
+        let file = open(&mut session, "e.ds", "fn probe() -> string {\n  he\n}\n");
+        let items = session.completion(file, 1, 4).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "to_upper")
+            .find(|item| item.label == "hex")
             .expect("the string face's member offers");
         let edits = item
             .additional_text_edits
             .as_ref()
             .expect("the offer imports");
-        assert_eq!(edits[0].new_text, "import @std (to_upper)\n\n");
+        assert_eq!(edits[0].new_text, "import @std (hex)\n\n");
         // The json face's members ride the same half.
         let file = open(
             &mut session,
@@ -2251,7 +2245,7 @@ mod tests {
             &mut session,
             "a.ds",
             concat!(
-                "const text: string = trim(\" hi \")\n",
+                "const text: string = join([\"a\"], \"-\")\n",
                 "extern fn foreign(x: int) -> int\n",
                 "const shown = text.show()\n",
                 "trait a { fn f(self) -> int { 1 } }\n",
@@ -2270,7 +2264,7 @@ mod tests {
             },
             other => panic!("a keyword position refuses: {other:?}"),
         }
-        // The ambient's `trim` names a stdlib definition: no open
+        // The ambient's `join` names a stdlib definition: no open
         // document can edit it, and both rename requests refuse with
         // the same message.
         match session.prepare_rename(a, 0, 22).expect("the pass runs") {
@@ -2602,7 +2596,7 @@ mod tests {
             "  none\n",
             "}\n",
             "fn clean() -> string {\n",
-            "  msg.trim()\n",
+            "  join(msg)\n",
             "}\n",
             "tag marker\n",
             "const tint = red\n",
@@ -2709,8 +2703,8 @@ mod tests {
             ("clean", T::Function.index(), d),
             ("->", T::Operator.index(), 0),
             ("string", T::EnumMember.index(), 0),
+            ("join", T::Function.index(), 0),
             ("msg", T::Variable.index(), r),
-            ("trim", T::Function.index(), 0),
             ("tag", T::Keyword.index(), 0),
             ("marker", T::EnumMember.index(), d),
             ("const", T::Keyword.index(), 0),

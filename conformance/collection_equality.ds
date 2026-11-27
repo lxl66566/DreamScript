@@ -60,7 +60,7 @@ fn member_rows() -> bool {
 fn float_rows() -> bool {
   const n = 0.0 / 0.0
   const z = 0.0
-  const nz = parse_float("-0").ok((v: float) => v).err((_: parse_err) => 0.0)
+  const nz = "-0".parse_float().ok((v: float) => v).err((_: parse_err) => 0.0)
   const scalar = n == n && !(z == nz)
   const lists = [n] == [n] && !([z] == [nz])
   const member = [n].contains(n) && ![z].contains(nz)

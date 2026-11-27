@@ -3941,10 +3941,10 @@ fn a_declared_std_dep_serves_the_default_install() {
         &work,
         &std_root_manifest(&ver, &std_id.to_string()),
         concat!(
-            "import @std (to_upper)\n",
+            "import @std (println)\n",
             "\n",
             "fn main() -> int {\n",
-            "  println(to_upper(\"hi\".concat(\"!\")))\n",
+            "  println(\"hi!\".to_upper())\n",
             "  0\n",
             "}\n",
         ),
@@ -3955,7 +3955,10 @@ fn a_declared_std_dep_serves_the_default_install() {
 
     let (ok, out, err) = ds_env(&cache, None, &["run", "--print-result", entry]);
     assert!(ok, "the default-install run exits 0 (stderr: {err})");
-    assert_eq!(out, "HI!\n", "the @std members answer through the link");
+    assert_eq!(
+        out, "HI!\n",
+        "the ambient band's members answer over the link"
+    );
 
     // the default install landed in the content-addressed store
     assert!(
@@ -4007,10 +4010,10 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
         &work,
         &std_root_manifest(&ver, &std_id.to_string()),
         concat!(
-            "import @std (to_upper)\n",
+            "import @std (println)\n",
             "\n",
             "fn main() -> int {\n",
-            "  println(to_upper(\"core\"))\n",
+            "  println(\"core\".to_upper())\n",
             "  0\n",
             "}\n",
         ),
@@ -4023,7 +4026,7 @@ fn a_declared_std_dep_compiles_over_the_shrunk_core() {
     assert!(ok, "the shrunk-core run exits 0 (stderr: {err})");
     assert_eq!(
         out, "CORE\n",
-        "the linked extern face answers over the core"
+        "the ambient band's member answers over the core"
     );
 
     // the migrated residue binds through the linked surface: the alias

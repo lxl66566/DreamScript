@@ -11,11 +11,11 @@
 fn main() -> int {
   // the retry re-adds the handled parse_err: the failed parse answers the
   // re-parsed 21, the clean parse keeps 42
-  const retried = match parse_int("4x").err((e: parse_err) => parse_int("21")) {
+  const retried = match "4x".parse_int().err((e: parse_err) => "21".parse_int()) {
     parse_err => 0 - 1
     n => n
   }
-  const direct = match parse_int("42").err((e: parse_err) => parse_int("21")) {
+  const direct = match "42".parse_int().err((e: parse_err) => "21".parse_int()) {
     parse_err => 0 - 1
     n => n
   }
@@ -28,8 +28,8 @@ fn main() -> int {
   // the difference rule still governs .err: the body keeps the int, so
   // the un-annotated handler covers only the handled member and fires on
   // the failed parse alone
-  const caught = parse_int("4x").err((e) => 0 - 7)
-  const kept = parse_int("42").err((e) => 0 - 7)
+  const caught = "4x".parse_int().err((e) => 0 - 7)
+  const kept = "42".parse_int().err((e) => 0 - 7)
   println("caught ${caught} kept ${kept}")
   0
 }

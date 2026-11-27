@@ -6,40 +6,40 @@
 // the char member out through its printable interpolation.
 
 fn slice_match(s: string) -> string {
-  match substring(s, 0, 2) {
+  match s.substring(0, 2) {
     none => "none"
     part => part
   }
 }
 
 fn slice_narrowed(s: string) -> string {
-  const r = substring(s, 0, 99)
+  const r = s.substring(0, 99)
   if r is string { "hit" } else { "none" }
 }
 
 fn slice_negative(s: string) -> string {
-  const r = substring(s, -1, 2)
+  const r = s.substring(-1, 2)
   if r is none { "none" } else { "hit" }
 }
 
 fn slice_fallback(s: string) -> string {
-  substring(s, 5, 3).unwrap_or("none")
+  s.substring(5, 3).unwrap_or("none")
 }
 
 fn char_match(s: string) -> string {
-  match char_at(s, 1) {
+  match s.char_at(1) {
     none => "none"
     c => "${c}"
   }
 }
 
 fn char_narrowed(s: string) -> string {
-  const c = char_at(s, 9)
+  const c = s.char_at(9)
   if c is char { "hit" } else { "none" }
 }
 
 fn char_fallback(s: string) -> char {
-  char_at(s, 0).unwrap_or('x')
+  s.char_at(0).unwrap_or('x')
 }
 
 fn main () -> () {
@@ -50,5 +50,5 @@ fn main () -> () {
   println(char_match("hello"))
   println(char_narrowed("hello"))
   println("${char_fallback("")}")
-  println(substring("héllo", 1, 3).unwrap_or("?"))
+  println("héllo".substring(1, 3).unwrap_or("?"))
 }

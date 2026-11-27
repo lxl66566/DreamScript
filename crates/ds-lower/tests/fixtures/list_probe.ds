@@ -28,12 +28,12 @@ extern fn join (parts: list[string], sep: char | string) -> string
 extern fn fs_list (dir: string) -> list[string]
 
 fn word_at(s: string, at: int) -> string {
-  const word = list_get(split(s, ':'), at)
+  const word = list_get(s.split(':'), at)
   word.ok((w: string) => w).err((_: none) => "?")
 }
 
 fn main() -> bool {
-  const parts = split("alpha:beta:gamma", ':')
+  const parts = "alpha:beta:gamma".split(':')
   const joined = list_concat(parts, parts)
   const n = list_len(joined) + list_len(list_new())
   const a = word_at("alpha:beta:gamma", 1)

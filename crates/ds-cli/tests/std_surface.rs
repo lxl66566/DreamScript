@@ -67,11 +67,11 @@ fn show_list(xs: &str) -> String {
 fn split_takes_the_string_separator_beside_the_char() {
     let (status, stdout, stderr) = run_source(&show_list(
         r#"fn main() -> () {
-  show_list(split("a,b;c", ","))
-  show_list(split("a,b;c", ','))
-  show_list(split("do.or.re", ""))
+  show_list("a,b;c".split(","))
+  show_list("a,b;c".split(','))
+  show_list("do.or.re".split(""))
   var sep = ","
-  show_list(split("x,y", sep))
+  show_list("x,y".split(sep))
 }
 "#,
     ));
@@ -101,7 +101,7 @@ fn join_takes_the_string_separator_beside_the_char() {
 fn a_separator_outside_the_union_refuses_at_the_check() {
     let (status, _stdout, stderr) = run_source(
         r#"fn main() -> () {
-  println(str(split("a,b", 5)))
+  println(str("a,b".split(5)))
 }
 "#,
     );
@@ -116,10 +116,10 @@ fn a_separator_outside_the_union_refuses_at_the_check() {
 fn abs_joins_the_int_width_on_the_float_face() {
     let (status, stdout, stderr) = run_source(
         r"fn main() -> () {
-  println(str(abs(-5)))
-  println(str(abs(0 - 9)))
-  println(str(abs(0.0 - 2.5)))
-  println(str(abs(3.5)))
+  println(str((-5).abs()))
+  println(str((0 - 9).abs()))
+  println(str((0.0 - 2.5).abs()))
+  println(str(3.5.abs()))
 }
 ",
     );
@@ -131,7 +131,7 @@ fn abs_joins_the_int_width_on_the_float_face() {
 fn the_int_magnitude_traps_at_the_words_floor() {
     let (status, _stdout, stderr) = run_source(
         r"fn main() -> () {
-  println(str(abs(-9223372036854775807 - 1)))
+  println(str((-9223372036854775807 - 1).abs()))
 }
 ",
     );
@@ -146,9 +146,9 @@ fn the_int_magnitude_traps_at_the_words_floor() {
 fn the_format_family_answers_over_the_builtin_faces() {
     let (status, stdout, stderr) = run_source(
         r#"fn main() -> () {
-  println(str_fixed(3.14159, 2))
-  println(str_fixed(1.0 / 3.0, 4))
-  println(str_fixed(2.0, 0))
+  println(3.14159.str_fixed(2))
+  println((1.0 / 3.0).str_fixed(4))
+  println(2.0.str_fixed(0))
   println(hex(255))
   println(hex(0))
   println(hex(-26))
@@ -166,16 +166,16 @@ fn the_format_family_answers_over_the_builtin_faces() {
 }
 
 #[test]
-fn a_non_numeric_abs_argument_refuses_at_the_lowering() {
+fn a_non_numeric_abs_argument_refuses_at_the_check() {
     let (status, _stdout, stderr) = run_source(
         r#"fn main() -> () {
-  println(str(abs("s")))
+  println(str("s".abs()))
 }
 "#,
     );
-    assert!(!status.success(), "a string argument refuses at the call");
+    assert!(!status.success(), "a string receiver refuses at the call");
     assert!(
-        stderr.contains("DS4009"),
-        "the lowering refusal names the numeric instances: {stderr}"
+        stderr.contains("DS2013") && stderr.contains("no method `abs` accepts receiver `string`"),
+        "the refusal names the member tier's owners: {stderr}"
     );
 }

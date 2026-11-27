@@ -669,7 +669,17 @@ impl<'a> FnLower<'a, '_, '_> {
             // pair) re-spans every argument into its whole region, so
             // the staged words match the native's positional span
             // whatever member the caller wrote
-            Callee::Builtin(_) => self.analyzed.checked.call_params.get(&call_span).cloned(),
+            // a native-routed member's site carries no free call's own
+            // record: the member's solved parameter types stage the same
+            // union re-span (the separator pair's dispatch constant
+            // reads them)
+            Callee::Builtin(_) => self
+                .analyzed
+                .checked
+                .call_params
+                .get(&call_span)
+                .cloned()
+                .or(self.member_call_params(call_span)?),
             _ => None,
         };
         // whether each written argument position feeds a consuming

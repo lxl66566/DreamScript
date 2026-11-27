@@ -289,6 +289,42 @@ impl bytes { fn len (self) -> int }
 /// through.
 impl string { fn concat (self, other: string) -> string }
 
+// The string face's member tier: the pure string operations the @std
+// string face once served as free spellings, the receiver feeding the
+// first argument each free spelling took. The checked reads answer the
+// optional over the out-of-range position (never a clamp and never a
+// trap), the parses answer the taxonomy's parse_err carrying the
+// offset, and the separator's text slices per its own width (an empty
+// separator slicing per char).
+/// The string face's member tier.
+impl string {
+  /// The text without its surrounding whitespace.
+  fn trim (self) -> string
+  /// The int the text spells, or parse_err.
+  fn parse_int (self) -> int | parse_err
+  /// The float the text spells, or parse_err.
+  fn parse_float (self) -> float | parse_err
+  /// The slices around every occurrence of the separator's text;
+  /// an empty separator slices per char.
+  fn split (self, sep: char | string) -> list[string]
+  /// The chars between the two positions, none outside
+  /// `0 <= start <= end` and the string's char count.
+  fn substring (self, start: int, end: int) -> string | none
+  /// The text uppercased.
+  fn to_upper (self) -> string
+  /// The text lowercased.
+  fn to_lower (self) -> string
+  /// The char at the position, none outside the string.
+  fn char_at (self, i: int) -> char | none
+  /// Whether the needle occurs; the empty needle always.
+  fn contains (self, needle: string) -> bool
+  /// The first occurrence's char index, none on a miss.
+  fn index_of (self, needle: string) -> int | none
+  /// The text with every non-overlapping occurrence swapped for
+  /// `with`.
+  fn replace (self, needle: string, with: string) -> string
+}
+
 // The collection face's member tier: the inherent members the
 // runtime seam lowers over the builtin collections. A member whose
 // parameter or answer spans the collection's own type variable has no
@@ -815,50 +851,80 @@ pub extern fn utf8_decode (b: bytes) -> string | utf8_err
 // over the instance table, the private seam the member calls lower
 // through — one body for every receiver.
 extern fn len[t] (xs: t) -> int
-// The float math family: IEEE f64 semantics over the float type, total
-// by construction — no operand shape traps (a negative sqrt or ln
-// answers NaN, a NaN or infinite operand answers
+// The float math family's native seams, the member tier's own natives:
+// the float-receiving free spellings this core once served retired to
+// the float type's member tier (the impl above), so these externs are
+// the private routing seams their calls lower through — same-file
+// here, invisible to every other file. IEEE f64 semantics over the
+// float type, total by construction — no operand shape traps (a
+// negative sqrt or ln answers NaN, a NaN or infinite operand answers
 // itself). `atan2` takes (y, x), the quadrant read off both signs;
 // `pow` takes (base, exp). `round` and `trunc` cover the float width
 // alone; `abs` joins the int width on the same spelling — the solved
 // argument type picks the numeric instance (int answers int, float
 // float), an `i64::MIN` magnitude trapping like the arithmetic family's
-// overflow, and any other width refusing at the call's lowering.
-/// The square root; a negative operand answers NaN.
-pub extern fn sqrt (x: float) -> float
-/// The sine of a float (radians).
-pub extern fn sin (x: float) -> float
-/// The cosine of a float (radians).
-pub extern fn cos (x: float) -> float
-/// The arctangent of (y, x), quadrant-aware.
-pub extern fn atan2 (y: float, x: float) -> float
-/// The greatest whole float at or below the value.
-pub extern fn floor (x: float) -> float
-/// The least whole float at or above the value.
-pub extern fn ceil (x: float) -> float
-/// The base raised to the exponent.
-pub extern fn pow (base: float, exp: float) -> float
-/// The absolute value; the solved argument type picks int or
-/// float.
-pub extern fn abs[t] (x: t) -> t
+// overflow, and any other width having no member row at all.
+extern fn sqrt (x: float) -> float
+extern fn sin (x: float) -> float
+extern fn cos (x: float) -> float
+extern fn atan2 (y: float, x: float) -> float
+extern fn floor (x: float) -> float
+extern fn ceil (x: float) -> float
+extern fn pow (base: float, exp: float) -> float
+extern fn abs[t] (x: t) -> t
 // The fixed-point float formatter: exactly `digits` fraction digits
 // (half-to-even at the cut over the value's exact binary expansion),
 // the width riding 0..=767 — the widest exact f64 fraction — clamped
 // at both sides, never trapping. NaN and the infinities answer the
 // `str` spelling's own words.
-/// The fixed-point spelling: exactly the digit count of fraction
-/// digits, half-to-even at the cut.
-pub extern fn str_fixed (x: float, digits: int) -> string
-/// The nearest whole float, halves to even.
-pub extern fn round (x: float) -> float
-/// The value with its fraction dropped, toward zero.
-pub extern fn trunc (x: float) -> float
-/// The natural logarithm.
-pub extern fn ln (x: float) -> float
-/// e raised to the value.
-pub extern fn exp (x: float) -> float
-/// The tangent of a float (radians).
-pub extern fn tan (x: float) -> float
+extern fn str_fixed (x: float, digits: int) -> string
+extern fn round (x: float) -> float
+extern fn trunc (x: float) -> float
+extern fn ln (x: float) -> float
+extern fn exp (x: float) -> float
+extern fn tan (x: float) -> float
+
+// The float math family's member tier, beside the ordering pair above:
+// the bodiless spellings route their natives by name, the receiver
+// feeding the first argument each free spelling took.
+/// The float type's math members.
+impl float {
+  /// The square root; a negative operand answers NaN.
+  fn sqrt (self) -> float
+  /// The sine of a float (radians).
+  fn sin (self) -> float
+  /// The cosine of a float (radians).
+  fn cos (self) -> float
+  /// The tangent of a float (radians).
+  fn tan (self) -> float
+  /// The arctangent of (self, x), quadrant-aware.
+  fn atan2 (self, x: float) -> float
+  /// The greatest whole float at or below the value.
+  fn floor (self) -> float
+  /// The least whole float at or above the value.
+  fn ceil (self) -> float
+  /// The nearest whole float, halves to even.
+  fn round (self) -> float
+  /// The value with its fraction dropped, toward zero.
+  fn trunc (self) -> float
+  /// The natural logarithm.
+  fn ln (self) -> float
+  /// e raised to the value.
+  fn exp (self) -> float
+  /// The base raised to the exponent.
+  fn pow (self, exp: float) -> float
+  /// The absolute value.
+  fn abs (self) -> float
+  /// The fixed-point spelling: exactly the digit count of fraction
+  /// digits, half-to-even at the cut.
+  fn str_fixed (self, digits: int) -> string
+}
+/// The int type's absolute value; the `i64::MIN` magnitude traps
+/// like the arithmetic family's overflow.
+impl int {
+  /// The absolute value.
+  fn abs (self) -> int
+}
 
 // The ordering pairs on the primitives' own member tiers, one
 // declaration per value-namespace name holding no more. The float
@@ -903,6 +969,23 @@ impl int {
 // after the json face for every reading that does not declare the
 // dep.
 extern fn concat (a: string, b: string) -> string
+// The pure string operations' native seams, the member tier's own
+// natives beside the `concat` one: the string-receiving free spellings
+// the @std string face once served retired to the string type's member
+// tier (the impl above), so these externs are the private routing
+// seams their calls lower through — the composed readings keep the
+// face's own free calls same-file with them.
+extern fn trim (s: string) -> string
+extern fn parse_int (s: string) -> int | parse_err
+extern fn parse_float (s: string) -> float | parse_err
+extern fn split (s: string, sep: char | string) -> list[string]
+extern fn substring (s: string, start: int, end: int) -> string | none
+extern fn to_upper (s: string) -> string
+extern fn to_lower (s: string) -> string
+extern fn char_at (s: string, i: int) -> char | none
+extern fn contains (haystack: string, needle: string) -> bool
+extern fn index_of (haystack: string, needle: string) -> int | none
+extern fn replace (haystack: string, needle: string, with: string) -> string
 // The codepoint pair, the @std json face's one native seam beside the
 // width bridges below: the scalar range and the code point's integer
 // spelling are not expressible in ds source, so the escape decoder

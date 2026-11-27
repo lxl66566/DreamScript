@@ -356,14 +356,14 @@ mod tests {
     fn a_fresh_row_opens_the_file_ahead_of_the_first_item() {
         // No import rows: the row lands ahead of the first item, blank
         // line included.
-        let source = "fn probe() -> string {\n  to_upper\n}\n";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (0, "import @std (to_upper)\n\n"));
+        let source = "fn probe() -> string {\n  join\n}\n";
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (0, "import @std (join)\n\n"));
         // A doc comment leads the first item: the row lands ahead of the
         // doc, never between it and its item.
         let source = "/// the probe's doc\nfn probe() {\n}\n";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (0, "import @std (to_upper)\n\n"));
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (0, "import @std (join)\n\n"));
     }
 
     #[test]
@@ -371,29 +371,29 @@ mod tests {
         // A bare-path row (never an @std merge target) groups the fresh
         // row after itself on the next line.
         let source = "import acme/pipeline/schema (row)\n\nfn probe() {\n}\n";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (34, "import @std (to_upper)\n"));
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (34, "import @std (join)\n"));
         // A file whose last row ends without a newline appends after a
         // fresh break.
         let source = "import acme/pipeline/schema (row)";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (33, "\nimport @std (to_upper)\n"));
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (33, "\nimport @std (join)\n"));
     }
 
     #[test]
     fn a_selection_merges_into_a_plain_std_row() {
         // After the last selection entry, ahead of a trailing comment.
         let source = "import @std/io (println) // the row's note\n";
-        let (start, end, text) = edit(source, "to_upper");
-        assert_eq!((start, end, text.as_str()), (23, 23, ", to_upper"));
+        let (start, end, text) = edit(source, "join");
+        assert_eq!((start, end, text.as_str()), (23, 23, ", join"));
         // A bare @std row gains its selection list after the path.
         let source = "import @std\n";
-        let (start, end, text) = edit(source, "to_upper");
-        assert_eq!((start, end, text.as_str()), (11, 11, " (to_upper)"));
+        let (start, end, text) = edit(source, "join");
+        assert_eq!((start, end, text.as_str()), (11, 11, " (join)"));
         // A deeper @std path is the same row under the merged reading.
         let source = "import @std/csv\n";
-        let (start, end, text) = edit(source, "to_upper");
-        assert_eq!((start, end, text.as_str()), (15, 15, " (to_upper)"));
+        let (start, end, text) = edit(source, "join");
+        assert_eq!((start, end, text.as_str()), (15, 15, " (join)"));
     }
 
     #[test]
@@ -401,23 +401,23 @@ mod tests {
         // An aliased row is not a merge target: the fresh row groups
         // after it instead.
         let source = "import @std as s\n";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (17, "import @std (to_upper)\n"));
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (17, "import @std (join)\n"));
         // A conditional row is not one either.
         let source = "import @std if os == \"windows\"\n";
-        let (at, text) = inserted(source, "to_upper");
-        assert_eq!((at, text.as_str()), (31, "import @std (to_upper)\n"));
+        let (at, text) = inserted(source, "join");
+        assert_eq!((at, text.as_str()), (31, "import @std (join)\n"));
     }
 
     #[test]
     fn a_name_the_rows_already_select_needs_no_edit() {
         for source in [
-            "import @std (to_upper)\n",
-            "import @std/io (println, to_upper)\n",
+            "import @std (join)\n",
+            "import @std/io (println, join)\n",
             // A selection's alias binds the name just as well.
-            "import @std (trim as to_upper)\n",
+            "import @std (trim as join)\n",
         ] {
-            assert_eq!(row_edit(source, &ast(source), "to_upper"), None, "{source}");
+            assert_eq!(row_edit(source, &ast(source), "join"), None, "{source}");
         }
     }
 
@@ -455,7 +455,7 @@ mod tests {
             .iter()
             .map(|member| member.name.as_str())
             .collect();
-        for name in ["urls", "parse_json", "to_upper", "replace"] {
+        for name in ["urls", "parse_json", "join", "view_len"] {
             assert!(names.contains(&name), "`{name}` rides the table");
         }
     }
@@ -465,8 +465,9 @@ mod tests {
         // The migrated json and string faces: every exported name, kinds
         // and all, read out of the bundle's own compile shape — the
         // table's composed half, source order within the faces. The json
-        // face's bodied declarations are const-of-lambda bindings,
-        // the string face's extern entries fns.
+        // face's bodied declarations are const-of-lambda bindings, the
+        // string face's surviving exports (the list-receiver join, the
+        // format family, the view face) fns and consts.
         let members = exported_face_members(
             ds_stdlib::AMBIENT_CORE_SOURCE,
             ds_stdlib::BUNDLE_CORE_SOURCE,
@@ -495,17 +496,6 @@ mod tests {
             ("json_of_char", DefKind::Const),
             ("json_of_bytes", DefKind::Const),
             ("join", DefKind::Fn),
-            ("trim", DefKind::Fn),
-            ("parse_int", DefKind::Fn),
-            ("parse_float", DefKind::Fn),
-            ("split", DefKind::Fn),
-            ("substring", DefKind::Fn),
-            ("to_upper", DefKind::Fn),
-            ("to_lower", DefKind::Fn),
-            ("char_at", DefKind::Fn),
-            ("contains", DefKind::Fn),
-            ("index_of", DefKind::Fn),
-            ("replace", DefKind::Fn),
             ("hex", DefKind::Const),
             ("pad_left", DefKind::Const),
             ("pad_right", DefKind::Const),

@@ -336,6 +336,34 @@ impl<'a> FnLower<'a, '_, '_> {
             // native each
             ("list" | "map" | "string" | "bytes" | "arena", "len") => ("len", false, false),
             ("string", "concat") => ("concat", false, false),
+            // the float math family and the string face: bodiless
+            // spellings over the retired free seams, the receiver
+            // feeding the first argument the free spelling took
+            ("float", "sqrt") => ("sqrt", false, false),
+            ("float", "sin") => ("sin", false, false),
+            ("float", "cos") => ("cos", false, false),
+            ("float", "tan") => ("tan", false, false),
+            ("float", "atan2") => ("atan2", false, false),
+            ("float", "floor") => ("floor", false, false),
+            ("float", "ceil") => ("ceil", false, false),
+            ("float", "round") => ("round", false, false),
+            ("float", "trunc") => ("trunc", false, false),
+            ("float", "ln") => ("ln", false, false),
+            ("float", "exp") => ("exp", false, false),
+            ("float", "pow") => ("pow", false, false),
+            ("float", "str_fixed") => ("str_fixed", false, false),
+            ("float" | "int", "abs") => ("abs", false, false),
+            ("string", "trim") => ("trim", false, false),
+            ("string", "parse_int") => ("parse_int", false, false),
+            ("string", "parse_float") => ("parse_float", false, false),
+            ("string", "split") => ("split", false, false),
+            ("string", "substring") => ("substring", false, false),
+            ("string", "to_upper") => ("to_upper", false, false),
+            ("string", "to_lower") => ("to_lower", false, false),
+            ("string", "char_at") => ("char_at", false, false),
+            ("string", "contains") => ("contains", false, false),
+            ("string", "index_of") => ("index_of", false, false),
+            ("string", "replace") => ("replace", false, false),
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;

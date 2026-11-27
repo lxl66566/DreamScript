@@ -1,65 +1,31 @@
-// The @std string face: the pure string operations that left the
-// ambient core as the reserved package's own source. Every declaration
-// here names a builtin core
-// native the lowering routes by name at the callee resolution seam, so
-// the package owns the spelling while the engine owns the seam. The
-// face rides composed into the @std bundle's core member (beside the
-// json face, whose free calls into this face stay same-file with it)
-// and into both ambient readings — the entry script session's and the
-// merged source's — keeping the bare spellings and the UFCS forms
-// (`s.trim()`, `"42".parse_int()`) alive while the migration runs. The
-// core string face stays ambient-owned: `str`, the `concat` seam the
-// interpolation and `+` spellings lower through, the sort key and
-// content hash (`str_compare`, `str_hash`) the derive families read,
-// and the `char_of`/`code_of` codepoint pair.
+// The @std string face: the operations over the core string face that
+// stay free spellings — the separator-pair `join` (the list receiver),
+// the format family, and the zero-copy `string_view` face. The
+// string-receiving operations (the checked slice and char read, the
+// case pair, the separator `split`, the search family, the parses)
+// moved onto the string type's member tier in the ambient core, so
+// this face's own calls into their seams stay same-file with the
+// composed core. Every declaration here names a builtin core native
+// the lowering routes by name at the callee resolution seam (or a
+// plain ds body over those), so the package owns the spelling while
+// the engine owns the seam. The face rides composed into the @std
+// bundle's core member (beside the json face, whose free calls into
+// this face stay same-file with it) and into both ambient readings —
+// the entry script session's and the merged source's — keeping the
+// bare spellings alive while the migration runs. The core string face
+// stays ambient-owned: `str`, the `concat` seam the interpolation and
+// `+` spellings lower through, the moved operations' private seams,
+// the sort key and content hash (`str_compare`, `str_hash`) the derive
+// families read, and the `char_of`/`code_of` codepoint pair.
 
-// The separator takes the char and the string beside it: `split`
-// slices per the separator's text (an empty string slicing per char)
-// and `join` renders the neighbors around it. The union stages over the
+// The list-side separator spelling: `join` renders the neighbors'
+// texts around the separator (`split` moved onto the string member
+// tier, the string receiver's own face). The union stages over the
 // ordinary tagged layout — the tag word beside the member's own payload
 // word, a char the integer slot's code point and a string the text
-// Ref — and both members read that payload back.
+// Ref — and the native reads that payload back.
 /// Renders the neighbors' texts around the separator.
 pub extern fn join (parts: list[string], sep: char | string) -> string
-/// The text without its surrounding whitespace.
-pub extern fn trim (s: string) -> string
-/// The int the text spells, or parse_err.
-pub extern fn parse_int (s: string) -> int | parse_err
-/// The float the text spells, or parse_err.
-pub extern fn parse_float (s: string) -> float | parse_err
-/// The slices around every occurrence of the separator's text;
-/// an empty separator slices per char.
-pub extern fn split (s: string, sep: char | string) -> list[string]
-// The checked slice: the chars between the two positions, none
-// outside `0 <= start <= end` and the string's char count — never
-// clamping and never a trap.
-/// The chars between the two positions, none outside the valid
-/// range.
-pub extern fn substring (s: string, start: int, end: int) -> string | none
-/// The text uppercased.
-pub extern fn to_upper (s: string) -> string
-/// The text lowercased.
-pub extern fn to_lower (s: string) -> string
-// The checked char read: the char at the position, none outside
-// the string's range — the old total spelling answered the empty
-// string instead.
-/// The char at the position, none outside the string.
-pub extern fn char_at (s: string, i: int) -> char | none
-// The string search family:
-// `contains` answers the membership read, the empty needle always
-// occurring; `index_of` answers the first occurrence's char index
-// (substring's indexing, so the answer composes with the checked
-// slice), a miss none and the empty needle index 0; `replace` swaps
-// every non-overlapping occurrence in one left-to-right pass, the
-// inserted text never re-scanned, the empty needle inserting `with` at
-// every char boundary.
-/// Whether the needle occurs; the empty needle always.
-pub extern fn contains (haystack: string, needle: string) -> bool
-/// The first occurrence's char index, none on a miss.
-pub extern fn index_of (haystack: string, needle: string) -> int | none
-/// The text with every non-overlapping occurrence swapped for
-/// `with`.
-pub extern fn replace (haystack: string, needle: string, with: string) -> string
 
 // The format family: plain ds source over the builtin faces. `hex`
 // spells the lowercase hex digits of a non-negative word (a negative

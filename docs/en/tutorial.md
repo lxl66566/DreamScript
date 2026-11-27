@@ -21,7 +21,7 @@ fn count_up() -> int {
 
 The seeded PRNG is an @std member set over the wrapping ops: the stream state is one int the caller threads — `rand(seed)` the draw following a seed, `rand_next(seed)` the pure state step, `rand_seed()` a fresh state stepped from the wall clock.
 
-The float face is the ambient math family (`sqrt`, `sin`, `cos`, `atan2`, `floor`, `ceil`, `pow`, `abs`, `round`, `trunc`, `ln`, `exp`, `tan` — f64 throughout, total by construction: a negative `sqrt` or `ln` answers NaN, `ln(0.0)` answers `-inf`, an infinite operand answers itself) with the ordering pair on the float's own member tier — `x.max(y)` and `x.min(y)` through the dot call, the comparison's partial order answering a NaN first operand as the poisoned result and a NaN second operand as the other side; the flat `max`/`min` names are the int pair's (@std members), and a generic ord-routed pair rides the later linked-surface rounds.
+The float face is the ambient math family on the float's own member tier (`x.sqrt()`, `x.sin()`, `x.cos()`, `y.atan2(x)`, `x.floor()`, `x.ceil()`, `x.pow(e)`, `x.abs()` beside the int pair, `x.round()`, `x.trunc()`, `x.ln()`, `x.exp()`, `x.tan()` — f64 throughout, total by construction: a negative `x.sqrt()` or `x.ln()` answers NaN, `x.ln()` over 0.0 answers `-inf`, an infinite operand answers itself) with the ordering pair on the float's own member tier — `x.max(y)` and `x.min(y)` through the dot call, the comparison's partial order answering a NaN first operand as the poisoned result and a NaN second operand as the other side; the flat `max`/`min` names are the int pair's (@std members), and a generic ord-routed pair rides the later linked-surface rounds.
 
 ```ts
 var s = rand_seed()               // a fresh stream state from the wall clock
@@ -264,7 +264,7 @@ for u in roster { println("user ${u.name}") }
 
 The mutation and membership members share the same exclusive window: `xs.insert(i, x)` splices, `xs.remove(i)` and `m.remove(k)` delete one element or row (a missing map key a no-op), `xs.clear()` empties, `xs.contains(x)` and `m.contains(k)` read membership, and `m.entries()` answers the entry-order `list[(k, v)]`; assignment sugar writes places in place over a `var` root — `p.x = v`, `xs[i] = v`, and nestings of both (`xs[i].x.y = v`) — with an out-of-range store trapping rather than answering a miss, a `const` receiver refusing (DS3006), and a compound operator over a place chain keeping the plain-binding refusal this round (DS2002).
 
-Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the collection members' own type tiers.
+Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls on the string's member tier: checked `s.substring(0, 2)` answers `string | none` on char boundaries, `s.char_at(i)` answers `char | none`, `s.split(sep)` takes one `char` or string separator, and the free `join` renders the list around it. `xs.len()` and `m.len()` answer through the collection members' own type tiers.
 
 ```ts
 // rows: list[entry]

@@ -1,16 +1,15 @@
 //! The library-boundary end-to-end pins: the ordering pair are the @std
-//! package's first bodied members (the word-shaped int signature a linked
-//! call binds) and the pure string operations are the @std string face
-//! (each declaration naming the builtin core native the lowering routes
-//! by name); the entry surfaces keep the bare spellings alive (the run
-//! path's script sessions composing the faces back beside the core, the
-//! dev script rounds and the REPL serving the merged composition). The
-//! generic ordering pair rides the core in every registration. The list
-//! pair are bodied members of
-//! the same file, so the bare spellings run through a script session
-//! while the linked import keeps the generic-head refusal (the take,
-//! drop, and flat_map shapes refuse at the ambient splice's
-//! lowering-time-records seam). The fork-join engine seams keep their
+//! package's first members, the pure string operations the ambient
+//! core's member tier beside them (the private seams the lowering
+//! routes by name); the entry surfaces keep the bare spellings alive
+//! (the run path's script sessions composing the faces back beside the
+//! core, the dev script rounds and the REPL serving the merged
+//! composition). The ordering pair and the generic free max/min ride
+//! the core in every registration. The list combinators (fold/zip
+//! included) and the race pair keep their free spellings in the bodied
+//! file (the member moves wait on a member's own generic body
+//! instantiating per shape, and on the list[fn() -> t] receiver head
+//! binding its element variable). The fork-join engine seams keep their
 //! private externs in the same file with the pooled library spellings
 //! retired from the surface, the VM level pinning the pooled drive's
 //! byte-identical answers and the multi-word fold keeping its seam-level
@@ -253,14 +252,14 @@ const STRINGS_MAIN: &str = concat!(
     "fn main() -> int {\n",
     "  const t = \"  Hello World  \".trim()\n",
     "  println(\"${t}\")\n",
-    "  println(\"${to_upper(t)} ${to_lower(t)}\")\n",
+    "  println(\"${t.to_upper()} ${t.to_lower()}\")\n",
     "  println(join(t.split(' '), '-'))\n",
-    "  println(substring(t, 0, 5).unwrap_or(\"none\"))\n",
-    "  println(\"${char_at(t, 1).unwrap_or('?')}\")\n",
-    "  println(\"${contains(t, \"World\")} ${index_of(t, \"World\").err((_: none) => -1)}\")\n",
-    "  println(replace(t, \"World\", \"There\"))\n",
-    "  println(\"${parse_int(\"42\").err((_: parse_err) => 0)} ",
-    "${parse_float(\"3.5\").err((_: parse_err) => 0.0)}\")\n",
+    "  println(t.substring(0, 5).unwrap_or(\"none\"))\n",
+    "  println(\"${t.char_at(1).unwrap_or('?')}\")\n",
+    "  println(\"${t.contains(\"World\")} ${t.index_of(\"World\").err((_: none) => -1)}\")\n",
+    "  println(t.replace(\"World\", \"There\"))\n",
+    "  println(\"${\"42\".parse_int().err((_: parse_err) => 0)} ",
+    "${\"3.5\".parse_float().err((_: parse_err) => 0.0)}\")\n",
     "  0\n",
     "}\n",
 );
@@ -306,12 +305,13 @@ fn the_bare_string_face_runs_through_a_bare_script() {
 }
 
 /// The std-declared root keeps the boundary over the string face too: a
-/// bare use over the shrunk core refuses as an unknown name, while the
-/// linked import binds the face's extern entries and the calls route to
-/// the builtin natives by name.
+/// bare free use over the shrunk core refuses as an unknown name (the
+/// free spellings retired to the member tier's private seams), while
+/// the member spellings ride the ambient band the declaring root
+/// carries — the calls routing to the builtin natives by name.
 #[test]
-fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
-    // the bare spelling refuses over the core
+fn a_std_declared_root_refuses_bare_strings_and_runs_the_members() {
+    // the bare free spelling refuses over the core
     let bare = write_root("strings-core", &std_manifest(), &[(
         "app.ds",
         "fn main() -> int {\n  trim(\"  hi  \")\n}\n",
@@ -323,29 +323,21 @@ fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
         "the bare use over the core refuses"
     );
     assert!(
-        text(&out.stderr).contains("unknown name `trim`"),
-        "the refusal names the missing member: {}",
+        text(&out.stderr).contains("DS4017") && text(&out.stderr).contains("`s.trim()`"),
+        "the refusal names the member spelling: {}",
         text(&out.stderr)
     );
     fs::remove_dir_all(&bare).expect("the temp tree removes");
 
-    // the linked import binds the string face's scalar-word extern
-    // entries: the package owns the spellings while the builtin
-    // natives keep the seams, the calls routing by name exactly as the
-    // ambient's own declarations did. The union-returning spellings
-    // (`substring`, `char_at`, `index_of`, the parses) keep the
-    // linked-surface's tag-seam refusal and the list-returning pair
-    // (`split`/`join`) the generic-head refusal, both riding the
-    // entry faces alone until their crossing rounds
+    // the member spellings need no import: the band crosses every
+    // registration, the routing seams private to the ambient file
     let linked = write_root("strings-link", &std_manifest(), &[(
         "app.ds",
         concat!(
-            "import @std (trim, to_upper, to_lower, contains, replace)\n",
-            "\n",
             "fn main() -> int {\n",
-            "  const t = trim(\"  hi there  \")\n",
-            "  println(\"${to_upper(t)} ${to_lower(t)} ${contains(t, \"there\")}\")\n",
-            "  println(replace(t, \"hi\", \"yo\"))\n",
+            "  const t = \"  hi there  \".trim()\n",
+            "  println(\"${t.to_upper()} ${t.to_lower()} ${t.contains(\"there\")}\")\n",
+            "  println(t.replace(\"hi\", \"yo\"))\n",
             "  0\n",
             "}\n",
         ),
@@ -354,13 +346,13 @@ fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "the linked run exits 0: {}",
+        "the member run exits 0: {}",
         text(&out.stderr)
     );
     assert_eq!(
         text(&out.stdout),
         concat!("HI THERE hi there true\n", "yo there\n", "",),
-        "the string face answers over the link"
+        "the string face answers over the band"
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }

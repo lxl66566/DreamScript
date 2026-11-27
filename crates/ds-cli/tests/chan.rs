@@ -285,7 +285,7 @@ fn the_empty_race_parks_the_rendezvous_answers_channel_into_the_deadlock() {
     // answers the honest deadlock (the degenerate race)
     let (status, _stdout, stderr) = run_source(
         r"fn main() -> int {
-  const x = firstof(list[fn() -> int]())
+  const x = list[fn() -> int]().firstof()
   x
 }
 ",
