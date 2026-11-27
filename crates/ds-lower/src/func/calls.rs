@@ -1156,6 +1156,26 @@ impl<'a> FnLower<'a, '_, '_> {
                 self.rc.staged_move(&mut self.code, slot);
             }
         }
+        // The unbox's take is the move-out only at the receiver's own
+        // death: a word that survives this call keeps its holder, so the
+        // site specializes to the plain read and every holder keeps the
+        // container whole (the value door). The receiver is the call's
+        // one staged argument.
+        let target = if matches!(target, Callee::Builtin(native) if native.name == "box_take") {
+            match moves.first() {
+                Some(&(_, slot)) if !self.rc.dies_at(slot) => {
+                    let def = self
+                        .analyzed
+                        .package
+                        .lookup_value("box_get")
+                        .expect("the box read is covered by the ambient");
+                    self.resolve_callee(def, callee_span, *span)?
+                },
+                _ => target,
+            }
+        } else {
+            target
+        };
         self.guard_staged_width(target, &staged, callee_span, member_params)?;
         if let Callee::Builtin(native) = target
             && matches!(

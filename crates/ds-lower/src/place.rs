@@ -713,7 +713,7 @@ impl Placement {
     /// loop-carried word never dies in-body: its content's count rolls
     /// over at the next overwrite and the carried claim dies past the
     /// loop.
-    fn dies_at(&self, word: u8) -> bool {
+    pub(crate) fn dies_at(&self, word: u8) -> bool {
         let Some(owned) = self.owned.get(&word) else {
             return false;
         };

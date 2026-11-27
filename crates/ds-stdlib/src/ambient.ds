@@ -551,14 +551,27 @@ impl[t] arena[t] {
 // heap application. `get` copies the held value out (the container
 // keeps its edge), `set` replaces it through the mut window — the
 // container's own object at a unique count, a fresh copy at a shared
-// one — and answers the receiver's post-mutation word; the held value's
-// whole span stages at both seams.
+// one — and answers the receiver's post-mutation word; `unbox` moves
+// the held value out whole-span, the container freeing at the caller's
+// dying share; the held value's whole span stages at every seam.
 /// The owning container's member tier.
 impl[t] box[t] {
   /// The held value, copied out (the container keeps its own).
   fn get (self) -> t
   /// Replaces the held value, answering the receiver.
   fn set (mut self, x: t) -> box[t]
+  /// The held value moved out whole-span: the container frees when this
+  /// was its one share (the receiver's own last use), a holder that
+  /// survives reading a copy instead — value semantics.
+  fn unbox (move self) -> t
+}
+
+// The container's show face: the construction spelling over the held
+// value's own instance, so a derived struct's box field renders through
+// the same dispatch any other part rides.
+/// Renders `box(<held>)` over the held type's show instance.
+impl[t: show] show for box[t] {
+  fn show(self) -> string { "box(${self.get().show()})" }
 }
 
 /// The 64-bit signed integer type.
@@ -773,6 +786,7 @@ extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 extern fn tail[t] (xs: list[t]) -> list[t]
 extern fn box_new[t] (x: t) -> box[t]
 extern fn box_get[t] (b: box[t]) -> t
+extern fn box_take[t] (b: box[t]) -> t
 extern fn box_set[t] (b: mut box[t], x: t) -> box[t]
 extern fn list_new[t] () -> list[t]
 extern fn list_len[t] (xs: list[t]) -> int

@@ -1360,6 +1360,12 @@ the comparator.
 impl[t: ord] list[t] { fn sort(self) -> list[t] }
 ```
 
+Renders `box(<held>)` over the held type's show instance.
+
+```ds
+impl[t: show] show for box[t] { fn show(self) -> string }
+```
+
 The arena's member tier.
 
 ```ds
@@ -1374,7 +1380,11 @@ impl[t] arena[t] {
 The owning container's member tier.
 
 ```ds
-impl[t] box[t] { fn get(self) -> t, fn set(mut self, x: t) -> box[t] }
+impl[t] box[t] {
+  fn get(self) -> t
+  fn set(mut self, x: t) -> box[t]
+  fn unbox(move self) -> t
+}
 ```
 
 The channel's member tier.

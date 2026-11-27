@@ -594,6 +594,27 @@ impl<'a> Heaps<'a> {
         Ok(words)
     }
 
+    /// The consuming take: the held word span moves out as the answer.
+    /// At a unique count the container's own edge counts become the
+    /// answer's — the ledger rows adopted with no count mutation, the
+    /// emptied container freeing at the caller's dying share (the
+    /// window flush's dec) — and at a shared one the value copies out
+    /// under fresh counts (the value door; every holder keeps the
+    /// container whole).
+    pub(crate) fn cell_take(&mut self, cell: RefId) -> Result<Vec<Value>, Trap> {
+        if self.count_is_unique(cell)? {
+            let words = self.store(cell)?.cell_take_words(cell.id())?;
+            for value in &words {
+                if let Value::Ref(word) = value {
+                    self.adopt_claim(self.owner, *word);
+                }
+            }
+            Ok(words)
+        } else {
+            self.cell_get(cell)
+        }
+    }
+
     /// Replaces owning container `cell`'s whole held span, routed: the
     /// mutation lands on the container's store, the incoming span's
     /// acquired counts beside it and the held span's releases routed
@@ -955,7 +976,7 @@ impl<'a> Heaps<'a> {
     }
 
     /// The content-compare face the object behind `word` presents, routed:
-    /// the four kinds the structural `==` content compare reads, or `None`
+    /// the five kinds the structural `==` content compare reads, or `None`
     /// for a faceless kind (a closure), which compares by word identity
     /// alone.
     ///
@@ -969,6 +990,7 @@ impl<'a> Heaps<'a> {
             Some(Object::Bytes(_)) => Some(ContentFace::Bytes),
             Some(Object::List(_)) => Some(ContentFace::List),
             Some(Object::Map(_)) => Some(ContentFace::Map),
+            Some(Object::Cell(_)) => Some(ContentFace::Cell),
             _ => None,
         })
     }
@@ -1109,6 +1131,19 @@ impl<'a> Heaps<'a> {
                         pending.extend(left.iter().copied().zip(right.iter().copied()));
                     }
                 },
+                (Some(ContentFace::Cell), Some(ContentFace::Cell)) => {
+                    // the held spans compare word for word through the
+                    // same walk; a held span cannot name its own
+                    // container (the held value exists before the box),
+                    // so no cycle memo rides. Both spans copy out of
+                    // their owning stores before the walk routes on.
+                    let front = self.store(a)?.cell_words(a.id())?;
+                    let back = self.store(b)?.cell_words(b.id())?;
+                    if front.len() != back.len() {
+                        return Ok(false);
+                    }
+                    pending.extend(front.into_iter().zip(back));
+                },
                 // mixed kinds, or a faceless kind against anything: no
                 // content face, never equal
                 _ => return Ok(false),
@@ -1131,6 +1166,8 @@ pub(crate) enum ContentFace {
     List,
     /// A map's rows.
     Map,
+    /// The owning container's held span.
+    Cell,
 }
 
 /// A map key probe's resolution for [`Objects::map_at`] and

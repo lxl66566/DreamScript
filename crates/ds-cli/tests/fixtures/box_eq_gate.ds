@@ -1,0 +1,13 @@
+// source: item 156, the box residuals round 2026-11-28
+// purpose: the held value's own equality gate: the structural compare descends into the held value, so a callable held value (no content equality) refuses the chain at the plan
+
+fn bump(x: int) -> int {
+  x + 1
+}
+
+fn main() -> int {
+  const a = box[fn(int) -> int](bump)
+  const same = a == box[fn(int) -> int](bump)
+  println("${same}")
+  0
+}

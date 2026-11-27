@@ -520,12 +520,15 @@ fn the_block_fn_surface_calls_siblings_and_persists_captures() {
 #[test]
 fn the_box_surface_moves_stores_and_walks_the_recursive_chain() {
     // the constructor moves one value in, the handle copies and moves,
-    // get/set answer through the member tier, the recursive chain
-    // declared through `box` walks to six and dies with the wrapper's
-    // deinit, and the name stands beside the error box face
+    // get/set answer through the member tier, unbox moves the held
+    // value out (the container freeing at the last share, a surviving
+    // holder reading a copy), the equality and show faces descend into
+    // the held value, and the recursive chain declared through `box`
+    // walks to six and dies with the wrapper's deinit
     run_golden(
         "box_surface.ds",
-        "held 3\ncopied 3 3\nset 41\nsplit 82\ntotal 6\nboxed negative input\nchain 7 dies\n",
+        "held 3\ncopied 3 3\nset 41\nsplit 82\ntotal 6\nboxed negative input\nunbox 11\nkept 5 \
+         still 5\neq true true\nshow box(s) wrapshow { n: 3, b: box(4) }\nchain 7 dies\n",
     );
 }
 

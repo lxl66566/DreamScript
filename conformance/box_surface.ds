@@ -1,5 +1,5 @@
 // source: item 156, the owning container round 2026-11-27
-// purpose: the `box[t]` owning pointer end to end: the constructor moves one value in, the handle copies and moves linearly, `get` copies the held value out, `set` replaces it in place through the mut window, a recursive chain declared through `box` builds walks and dies with the wrapper's deinit firing, and the name stands beside the error box face untouched
+// purpose: the `box[t]` owning pointer end to end: the constructor moves one value in, the handle copies and moves linearly, `get` copies the held value out, `set` replaces it in place through the mut window, `unbox` moves the held value out whole-span (the container freeing at the last share, a surviving holder reading a copy), the structural equality and the show face descend into the held value, a recursive chain declared through `box` builds walks and dies with the wrapper's deinit firing, and the name stands beside the error box face untouched
 // items:
 // node: stage: run
 // chain: stage: run
@@ -7,6 +7,7 @@
 // link: stage: run
 // hold: stage: run
 // twice: stage: run
+// wrapshow: stage: run
 // wrapped: stage: run
 // main: stage: run
 
@@ -51,6 +52,12 @@ fn twice(b: box[int]) -> int {
   inner * 2
 }
 
+#[derive(show)]
+struct wrapshow {
+  n: int
+  b: box[int]
+}
+
 fn wrapped(n: int) -> int | box_err {
   if n >= 0 {
     n
@@ -78,5 +85,13 @@ fn main() -> int {
   if boxed is box_err {
     println("boxed ${boxed.msg}")
   }
+  // the consuming unbox: the last share moves out and frees, a holder
+  // that survives reading a copy
+  println("unbox ${hold(11).unbox()}")
+  const keeps = box[int](5)
+  println("kept ${keeps.unbox()} still ${keeps.get()}")
+  // the structural equality and the show face descend into the held value
+  println("eq ${box[int](2) == box[int](2)} ${[box[int](1)] == [box[int](1)]}")
+  println("show ${box[string]("s")} ${wrapshow { n: 3, b: box[int](4) }}")
   0
 }

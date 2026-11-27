@@ -317,6 +317,7 @@ impl<'a> FnLower<'a, '_, '_> {
             ("arena", "remove") => ("arena_remove", false, false),
             ("arena", "at") => ("arena_at", false, false),
             ("box", "get") => ("box_get", false, false),
+            ("box", "unbox") => ("box_take", false, false),
             ("box", "set") => ("box_set", true, false),
             // the moved list-combinator members: bodiless spellings over
             // the retired free seams, the receiver feeding the first

@@ -26,6 +26,23 @@ impl Objects {
         }
     }
 
+    /// Moves owning container `obj`'s whole held span out, leaving it
+    /// empty: the counts ride with the words (the caller adopts them as
+    /// its answer's), so the emptied container's death cascade releases
+    /// nothing twice.
+    ///
+    /// # Errors
+    ///
+    /// [`Trap::UnknownObject`] when the reference names no live owning
+    /// container.
+    pub fn cell_take_words(&mut self, obj: u32) -> Result<Vec<Value>, Trap> {
+        let header = self.header_of(obj)?;
+        match self.heap.payload_mut::<Object>(header) {
+            Object::Cell(data) => Ok(std::mem::take(&mut data.words)),
+            _ => Err(Trap::UnknownObject { obj }),
+        }
+    }
+
     /// Replaces owning container `obj`'s whole held span, in place: the
     /// incoming span stores under acquired counts (one per `Ref` word)
     /// and the held span's counts release after the swap — a bogus

@@ -646,8 +646,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if *slot == SlotType::Ref {
                     if let Some(word) = self.collection_ty_word(lty)? {
                         self.collection_eq_word(word, lhs, rhs, span)?
-                    } else if self.shapes.box_element(lty).is_some() {
-                        return Err(box_eq_refusal());
                     } else {
                         self.scalar_eq_word(lhs, rhs, span, *slot)?
                     }
@@ -777,6 +775,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             WordEq::Bytes => "bytes_eq",
             WordEq::List => "list_eq",
             WordEq::Map => "map_eq",
+            WordEq::Box => "box_eq",
             WordEq::Scalar(_) => return Err(mismatch("a content compare")),
         };
         let native = crate::native::lookup(name).ok_or_else(|| mismatch("the content compare"))?;
@@ -811,21 +810,18 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// the chain compares fields by their declared type, never by
     /// their slot kind alone, so the plan pairs with `word_addrs` word
     /// for word. A collection-typed Ref word plans that collection's
-    /// content compare (`builtin_instance` names the collection the way
-    /// the call sites do); every other word plans the scalar uop its kind
-    /// selects — a kind with no uop keeps the refusal the slot-kind
-    /// chain gave.
+    /// content compare (the builtin instance or the box application
+    /// names it the way the call sites do); every other word plans the
+    /// scalar uop its kind selects — a kind with no uop keeps the
+    /// refusal the slot-kind chain gave.
     pub(super) fn eq_word_plan(&mut self, ty: Ty) -> Result<Vec<WordEq>, LowerError> {
         let shape = self.shapes.shape(ty)?;
         match &*shape {
             Shape::Word(slot) => {
-                if *slot == SlotType::Ref {
-                    if let Some(word) = self.collection_ty_word(ty)? {
-                        return Ok(vec![word]);
-                    }
-                    if self.shapes.box_element(ty).is_some() {
-                        return Err(box_eq_refusal());
-                    }
+                if *slot == SlotType::Ref
+                    && let Some(word) = self.collection_ty_word(ty)?
+                {
+                    return Ok(vec![word]);
                 }
                 Ok(vec![WordEq::Scalar(eq_op(*slot)?)])
             },
@@ -867,9 +863,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 if let Some(word) = self.collection_atom_word(atom)? {
                     return Ok(vec![word]);
                 }
-                if self.shapes.atom_is_box(atom) {
-                    return Err(box_eq_refusal());
-                }
                 let shape = self.shapes.atom_shape(atom)?;
                 let Shape::Word(slot) = &*shape else {
                     return Err(mismatch("an equality plan"));
@@ -880,12 +873,13 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     }
 
     /// The content-compare word one solved collection type plans:
-    /// the native its builtin instance names — the by-type entry the
-    /// direct operand pair, a membership's element, and the flattened
-    /// plan's word arm share.
+    /// the native its builtin instance names, the owning container the
+    /// held span's own gate — the by-type entry the direct operand
+    /// pair, a membership's element, and the flattened plan's word arm
+    /// share.
     ///
-    /// `None` for every non-collection type (the string's EqStr serves
-    /// its own Ref word).
+    /// `None` for every other type (the string's EqStr serves its own
+    /// Ref word).
     pub(super) fn collection_ty_word(&mut self, ty: Ty) -> Result<Option<WordEq>, LowerError> {
         match self.shapes.builtin_instance(ty) {
             Some(BuiltinInstance::Bytes) => Ok(Some(WordEq::Bytes)),
@@ -905,6 +899,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 self.eq_word_plan(value).map_err(|_| map_refusal())?;
                 Ok(Some(WordEq::Map))
             },
+            // the owning container: the held value's own plan gates
+            // the compare, the container's one Ref word answering it
+            None if self.shapes.box_element(ty).is_some() => {
+                let element = self
+                    .shapes
+                    .box_element(ty)
+                    .ok_or_else(|| mismatch("a box equality plan"))?;
+                self.eq_word_plan(element).map_err(|_| box_eq_refusal())?;
+                Ok(Some(WordEq::Box))
+            },
             _ => Ok(None),
         }
     }
@@ -916,6 +920,16 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         &mut self,
         atom: TypeId,
     ) -> Result<Option<WordEq>, LowerError> {
+        // the owning container first: a box atom carries no builtin
+        // instance, so the instance gate would hide it behind the None
+        // and the field would fall through to the string uop
+        if self.shapes.atom_is_box(atom) {
+            let [element] = self.shapes.apply_args(atom).unwrap_or(&[]) else {
+                return Err(mismatch("a box equality plan"));
+            };
+            self.eq_word_plan(*element).map_err(|_| box_eq_refusal())?;
+            return Ok(Some(WordEq::Box));
+        }
         let Some(instance) = self.shapes.atom_builtin_instance(atom) else {
             return Ok(None);
         };
@@ -976,9 +990,6 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
             _ => {
                 if let Some(word) = self.collection_atom_word(atom)? {
                     return Ok(vec![word]);
-                }
-                if self.shapes.atom_is_box(atom) {
-                    return Err(box_eq_refusal());
                 }
                 let shape = self.shapes.atom_shape(atom)?;
                 let Shape::Word(slot) = &*shape else {
@@ -1057,7 +1068,7 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
                 },
                 // a collection word dispatches its content compare,
                 // staged keep-mode (the chain's merged exits release)
-                WordEq::Bytes | WordEq::List | WordEq::Map => {
+                WordEq::Bytes | WordEq::List | WordEq::Map | WordEq::Box => {
                     self.content_eq_slots(kind, pair.0.slot, pair.1.slot, false)?
                 },
             };
@@ -1295,16 +1306,16 @@ pub(super) fn list_refusal() -> LowerError {
     )
 }
 
-/// The named refusal a box word answers in an equality plan: the chain
-/// has no content compare over the container's word, and two handles
-/// may share one held value, so the held values compare through their
-/// own `get` reads.
+/// The named refusal a box word's element gate answers: the held
+/// value's own plan found a word without content equality, so the
+/// chain refuses instead of reading the container's word through the
+/// EqStr uop (a runtime trap over a non-string object).
 pub(super) fn box_eq_refusal() -> LowerError {
     LowerError::unsupported(
         no_span(),
         "a structural equality over box values",
-        "the chain compares held values through their own reads (`b.get()`), never the \
-         container's word",
+        "the content compare descends into the held value, so the held type needs content \
+         equality of its own; callable held values have none",
     )
 }
 
@@ -1337,6 +1348,10 @@ pub(super) enum WordEq {
     List,
     /// One map-typed word: the content compare through the native call.
     Map,
+    /// One box-typed word: the held span's content compare through the
+    /// native call, the walk descending into the held value's own
+    /// reference words.
+    Box,
 }
 
 /// The single identifier of a one-segment path expression, if it is one.

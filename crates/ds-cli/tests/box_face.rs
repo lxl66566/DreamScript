@@ -1,12 +1,15 @@
 //! End-to-end through the `ds` binary over the real ambient: the owning
-//! container round. The tree fixture builds a two-child tree declared
-//! through `box`, walks it, instantiates a generic fn per held shape,
-//! and dies with the wrapper's deinit firing while the branch cascade
-//! frees the tree. The refusal legs pin the classes the round keeps:
-//! the cyclic-field refusal unchanged for the spellings without `box`
-//! (the check stays clean, the run refuses at the depth budget), the
-//! `~Copyable` value refusing the constructor at the check, and the
-//! structural equality refusing at the chain.
+//! container round and its residuals. The tree fixture builds a
+//! two-child tree declared through `box`, walks it, instantiates a
+//! generic fn per held shape, unboxes at the last share (the container
+//! freeing) and over a surviving holder (a copy), compares and shows
+//! through the held value, and dies with the wrapper's deinit firing
+//! while the branch cascade frees the tree. The refusal legs pin the
+//! classes the round keeps: the cyclic-field refusal unchanged for the
+//! spellings without `box` (the check stays clean, the run refuses at
+//! the depth budget), the `~Copyable` value refusing the constructor at
+//! the check, and a callable held value refusing the structural
+//! equality at the plan.
 
 use std::{
     env, fs,
@@ -54,6 +57,16 @@ fn the_box_face_builds_walks_and_dies() {
             "tree 3 boxes 5 6\n",
             "root 2\n",
             "held hey\n",
+            "unbox 42\n",
+            "taken move me\n",
+            "kept 3 still 3\n",
+            "eq true true\n",
+            "eqstr true\n",
+            "eqnest true\n",
+            "eqlist true true\n",
+            "eqwrap true\n",
+            "show box(3) box(box(7))\n",
+            "derived wrap { n: 1, b: box(x) }\n",
             "tracked 4 dies\n",
         ),
         "the box tree's golden stdout drifted"
@@ -101,19 +114,17 @@ fn the_linear_held_value_refuses_the_box() {
     );
 }
 
-/// The structural equality refuses at the chain: the held values
-/// compare through their own reads, never the container's word.
+/// The structural equality descends into the held value: the container's
+/// word never compares, a callable held value (no content equality)
+/// refusing the chain at the plan.
 #[test]
-fn the_box_equality_refuses_at_the_chain() {
+fn the_box_equality_descends_and_gates_the_held_value() {
     let dir = workdir("equality");
-    let out = run(
-        ds_in(&dir).arg("run").arg(fixture("box_eq_refusal.ds")),
-        &dir,
-    );
+    let out = run(ds_in(&dir).arg("run").arg(fixture("box_eq_gate.ds")), &dir);
     assert!(!out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("compares held values through their own reads"),
-        "the run refuses the box equality: {stderr}"
+        stderr.contains("descends into the held value"),
+        "the run refuses the callable held value: {stderr}"
     );
 }

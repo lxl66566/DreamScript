@@ -1520,8 +1520,8 @@ impl<'a> Shapes<'a> {
     }
 
     /// Whether one declared atom is a whole-box application: the
-    /// equality plan's refusal reads it (the container's word has no
-    /// content compare of its own).
+    /// equality plan's box arm reads it (the container's Ref word
+    /// answers the held span's content compare).
     pub(crate) fn atom_is_box(&self, atom: TypeId) -> bool {
         let universe = &self.universe;
         let Ok(decl) = universe.atom_decl(atom) else {

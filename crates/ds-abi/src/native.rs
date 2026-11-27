@@ -446,6 +446,19 @@ pub const BUILTIN_BOX_SET: u32 = 114;
 pub const BUILTIN_SORT_BY: u32 = 115;
 /// The ord-routed generic `min[t: ord] (a, b: t) -> t`.
 pub const BUILTIN_MIN: u32 = 116;
+/// `box_take(b: box[t]) -> t` — the consuming take: the held value's whole word span moves out.
+/// At a unique count the container's own edge counts become the answer's (the emptied container
+/// frees at the caller's dying share); at a shared one the value copies out under fresh counts and
+/// every holder keeps the container — the value door. The member tier's `box[t].unbox` routes
+/// here, the call site specializing to `box_get` whenever the receiver's word survives the call.
+pub const BUILTIN_BOX_TAKE: u32 = 117;
+/// `box_eq(a, b: box) -> bool` — the owning container's structural content compare: the held
+/// spans compared word for word through the walk `list_eq` serves, every nested reference pair
+/// descending the same way. The `==`/`!=` chain over box operands dispatches here — the string's
+/// EqStr uop reads string objects alone, so the one Ref word's shape needs its own body.
+pub const BUILTIN_BOX_EQ: u32 = 118;
+/// The builtin table's length: one entry past the highest reserved index.
+pub const BUILTIN_TABLE_LEN: u32 = BUILTIN_BOX_EQ + 1;
 
 // The comptime reflection module's rows.
 
@@ -2096,6 +2109,24 @@ pub const NATIVES: &[Native] = &[
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: true,
         shape: NativeShape::Total(SlotType::Ref),
+    },
+    Native {
+        name: "box_take",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_BOX_TAKE,
+        params: &[SlotType::Ref],
+        variadic: false,
+        shape: NativeShape::TotalByResultType,
+    },
+    Native {
+        name: "box_eq",
+        routing: NativeRouting::Lowered,
+        module: NativeModule::Builtin,
+        index: BUILTIN_BOX_EQ,
+        params: &[SlotType::Ref, SlotType::Ref],
+        variadic: false,
+        shape: NativeShape::Total(SlotType::Bool),
     },
 ];
 

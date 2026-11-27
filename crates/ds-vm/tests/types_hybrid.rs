@@ -33,23 +33,24 @@ use ds_vm::{
     },
     assemble,
     native::{
-        BUILTIN_ARENA_AT, BUILTIN_ARENA_NEW, BUILTIN_BOX_NEW, BUILTIN_BOX_SET, BUILTIN_BYTE_AT,
-        BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST, BUILTIN_BYTE_OF, BUILTIN_BYTES_COMPARE,
-        BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH, BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW,
-        BUILTIN_CHAN_RECV, BUILTIN_CHAN_RECV_DEADLINE, BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT,
-        BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH, BUILTIN_COLLECT, BUILTIN_CONS,
-        BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST, BUILTIN_FLOAT_HASH, BUILTIN_HEAD,
-        BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN, BUILTIN_LEN, BUILTIN_LIST_CLEAR,
-        BUILTIN_LIST_CONCAT, BUILTIN_LIST_CONTAINS, BUILTIN_LIST_EQ, BUILTIN_LIST_GET,
-        BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW, BUILTIN_LIST_PUSH,
-        BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_MAP, BUILTIN_MAP_CONTAINS,
-        BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET, BUILTIN_MAP_LEN, BUILTIN_MAP_NEW,
-        BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX, BUILTIN_MIN, BUILTIN_NURSERY_BOUNDARY,
-        BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN, BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN,
-        BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE, BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND,
-        BUILTIN_SORT, BUILTIN_SORT_BY, BUILTIN_STR_BOOL, BUILTIN_STR_CHAR, BUILTIN_STR_COMPARE,
-        BUILTIN_STR_FLOAT, BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL, BUILTIN_TAN,
-        BUILTIN_TIMEOUT, BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
+        BUILTIN_ARENA_AT, BUILTIN_ARENA_NEW, BUILTIN_BOX_EQ, BUILTIN_BOX_NEW, BUILTIN_BOX_SET,
+        BUILTIN_BOX_TAKE, BUILTIN_BYTE_AT, BUILTIN_BYTE_COMPARE, BUILTIN_BYTE_LIST,
+        BUILTIN_BYTE_OF, BUILTIN_BYTES_COMPARE, BUILTIN_BYTES_EQ, BUILTIN_BYTES_HASH,
+        BUILTIN_BYTES_OF, BUILTIN_CHAN_NEW, BUILTIN_CHAN_RECV, BUILTIN_CHAN_RECV_DEADLINE,
+        BUILTIN_CHAN_SEND_DEADLINE, BUILTIN_CHAR_AT, BUILTIN_CHAR_COMPARE, BUILTIN_CHAR_HASH,
+        BUILTIN_COLLECT, BUILTIN_CONS, BUILTIN_FIBER_RESUME, BUILTIN_FILTER, BUILTIN_FIRST,
+        BUILTIN_FLOAT_HASH, BUILTIN_HEAD, BUILTIN_INT_OF_BYTE, BUILTIN_INT_OF_U32, BUILTIN_JOIN,
+        BUILTIN_LEN, BUILTIN_LIST_CLEAR, BUILTIN_LIST_CONCAT, BUILTIN_LIST_CONTAINS,
+        BUILTIN_LIST_EQ, BUILTIN_LIST_GET, BUILTIN_LIST_INSERT, BUILTIN_LIST_LEN, BUILTIN_LIST_NEW,
+        BUILTIN_LIST_PUSH, BUILTIN_LIST_REMOVE, BUILTIN_LIST_SET, BUILTIN_MAP,
+        BUILTIN_MAP_CONTAINS, BUILTIN_MAP_ENTRIES, BUILTIN_MAP_EQ, BUILTIN_MAP_GET,
+        BUILTIN_MAP_LEN, BUILTIN_MAP_NEW, BUILTIN_MAP_REMOVE, BUILTIN_MAP_SET, BUILTIN_MAX,
+        BUILTIN_MIN, BUILTIN_NURSERY_BOUNDARY, BUILTIN_NURSERY_CANCEL, BUILTIN_NURSERY_JOIN,
+        BUILTIN_NURSERY_OPEN, BUILTIN_NURSERY_SPAWN, BUILTIN_PAR_MAP, BUILTIN_PAR_REDUCE,
+        BUILTIN_PARTITION, BUILTIN_REDUCE, BUILTIN_ROUND, BUILTIN_SORT, BUILTIN_SORT_BY,
+        BUILTIN_STR_BOOL, BUILTIN_STR_CHAR, BUILTIN_STR_COMPARE, BUILTIN_STR_FLOAT,
+        BUILTIN_STR_HASH, BUILTIN_STR_INT, BUILTIN_TAIL, BUILTIN_TAN, BUILTIN_TIMEOUT,
+        BUILTIN_TOTAL_COMPARE, BUILTIN_TRAP, BUILTIN_U32_OF, BUILTIN_UTF8_DECODE,
         BUILTIN_UTF8_ENCODE,
     },
     platform::{
@@ -1179,9 +1180,12 @@ fn both_native_modules_are_installed_and_resolvable() {
     assert!(reg.resolve_native("builtin", BUILTIN_SORT_BY).is_some());
     // the generic minimum (116): the reserved CALLG seat beside maximum
     assert!(reg.resolve_native("builtin", BUILTIN_MIN).is_some());
+    // the owning container's take and content compare (117, 118)
+    assert!(reg.resolve_native("builtin", BUILTIN_BOX_TAKE).is_some());
+    assert!(reg.resolve_native("builtin", BUILTIN_BOX_EQ).is_some());
     assert!(
-        reg.resolve_native("builtin", 117).is_none(),
-        "117 table entries: the core's, the list block, the fiber pair, the push, the map
+        reg.resolve_native("builtin", 119).is_none(),
+        "119 table entries: the core's, the list block, the fiber pair, the push, the map
  block, the generic container closes, the reentrant combinators, the nursery seams, the
  join, the partition, the fork-join combinator, the fork-join fold, the float sort key,
  the string, char, and byte sort keys, the string, float, and char content hashes, the
@@ -1194,8 +1198,8 @@ fn both_native_modules_are_installed_and_resolvable() {
  slot, the collection member round, the arena face's construct/store/remove/read seams,
  the timer race's intercepted timeout seam, the channel deadlines' intercepted
  deadline twin seams, the list membership read, the char conversion's str_char seat,
- the owning container's construct/read/store trio, the comparator sort's sort_by seat,
- the generic minimum's reserved seat"
+ the owning container's construct/read/store/take/compare quintet, the comparator sort's
+ sort_by seat, the generic minimum's reserved seat"
     );
     // the installed platform handler: the dense world-call ABI, every op
     // served by the default platform
