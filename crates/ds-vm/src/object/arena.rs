@@ -30,7 +30,7 @@ impl Objects {
                         u32::try_from(data.slots.len()).expect("the slot index stays below 2^32");
                     data.slots.push(ArenaSlot {
                         generation: 0,
-                        word: None,
+                        words: None,
                     });
                     (index, 0)
                 }
@@ -39,36 +39,38 @@ impl Objects {
         }
     }
 
-    /// Stores one element word into arena object `obj`, answering the
-    /// packed `(index, generation)` handle: the store acquires one edge
-    /// count for a `Ref` element exactly like a list element (a local
-    /// word through the store's own inc, a foreign word by posting the
-    /// inc to the pending queue), and the slot array's growth is the
-    /// backing buffer's amortized doubling.
+    /// Stores one element's whole word span into arena object `obj`,
+    /// answering the packed `(index, generation)` handle: the store
+    /// acquires one edge count per `Ref` element word exactly like a
+    /// list element (a local word through the store's own inc, a foreign
+    /// word by posting the inc to the pending queue), and the slot
+    /// array's growth is the backing buffer's amortized doubling.
     ///
     /// # Errors
     ///
     /// [`Trap::UnknownObject`] when the reference names no arena.
-    pub fn arena_insert(&mut self, obj: u32, word: Value) -> Result<i64, Trap> {
+    pub fn arena_insert(&mut self, obj: u32, words: &[Value]) -> Result<i64, Trap> {
         let header = self.header_of(obj)?;
         if !matches!(self.heap.payload::<Object>(header), Object::Arena(_)) {
             return Err(Trap::UnknownObject { obj });
         }
         // the acquire happens before the store: a bogus element
         // reference leaves the arena untouched
-        if let Value::Ref(word) = word {
-            if word.fiber() == self.owner {
-                self.inc(word.id())?;
-            } else {
-                self.pending.push_back(ForeignOp::Inc(word));
+        for word in words {
+            if let Value::Ref(word) = *word {
+                if word.fiber() == self.owner {
+                    self.inc(word.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Inc(word));
+                }
             }
         }
         let (index, generation) = self.arena_take_slot(header);
         match self.heap.payload_mut::<Object>(header) {
             Object::Arena(data) => {
                 let slot = &mut data.slots[index as usize];
-                debug_assert!(slot.word.is_none(), "a taken slot sits retired");
-                slot.word = Some(word);
+                debug_assert!(slot.words.is_none(), "a taken slot sits retired");
+                slot.words = Some(words.to_vec());
                 data.live += 1;
             },
             _ => unreachable!("the kind check precedes the store"),
@@ -76,9 +78,10 @@ impl Objects {
         Ok((i64::from(generation) << 32) | i64::from(index))
     }
 
-    /// The element word behind a live handle, shared: the slot's stored
-    /// word without any count move — the caller (the routed read) owns
-    /// the retain the answer needs, exactly a list's checked read-out.
+    /// The element span behind a live handle, shared: the slot's stored
+    /// words without any count move — the caller (the routed read) owns
+    /// the retain each `Ref` word's answer needs, exactly a list's
+    /// checked read-out.
     ///
     /// # Errors
     ///
@@ -86,7 +89,7 @@ impl Objects {
     /// [`Trap::DanglingArenaHandle`] when the handle names a retired
     /// slot, a slot the arena never held, or an old generation of a
     /// reused one.
-    pub fn arena_word(&mut self, obj: u32, handle: i64) -> Result<Value, Trap> {
+    pub fn arena_words(&mut self, obj: u32, handle: i64) -> Result<Vec<Value>, Trap> {
         let header = self.header_of(obj)?;
         let (index, generation) = Self::arena_unpack(handle);
         let slot = match self.heap.payload::<Object>(header) {
@@ -96,8 +99,8 @@ impl Objects {
         match slot {
             Some(ArenaSlot {
                 generation: live,
-                word: Some(word),
-            }) if *live == generation => Ok(*word),
+                words: Some(words),
+            }) if *live == generation => Ok(words.clone()),
             _ => Err(Trap::DanglingArenaHandle { index, generation }),
         }
     }
@@ -117,11 +120,11 @@ impl Objects {
     pub fn arena_remove(&mut self, obj: u32, handle: i64) -> Result<(), Trap> {
         let header = self.header_of(obj)?;
         let (index, generation) = Self::arena_unpack(handle);
-        let word = match self.heap.payload_mut::<Object>(header) {
+        let words = match self.heap.payload_mut::<Object>(header) {
             Object::Arena(data) => {
                 let Some(ArenaSlot {
                     generation: live,
-                    word,
+                    words,
                 }) = data.slots.get_mut(index as usize)
                 else {
                     return Err(Trap::DanglingArenaHandle { index, generation });
@@ -132,15 +135,17 @@ impl Objects {
                 *live = live.wrapping_add(1);
                 data.live -= 1;
                 data.free.push(index);
-                word.take()
+                words.take()
             },
             _ => return Err(Trap::UnknownObject { obj }),
         };
-        if let Some(Value::Ref(word)) = word {
-            if word.fiber() == self.owner {
-                self.dec(word.id())?;
-            } else {
-                self.pending.push_back(ForeignOp::Dec(word));
+        for word in words.into_iter().flatten() {
+            if let Value::Ref(word) = word {
+                if word.fiber() == self.owner {
+                    self.dec(word.id())?;
+                } else {
+                    self.pending.push_back(ForeignOp::Dec(word));
+                }
             }
         }
         Ok(())

@@ -624,26 +624,28 @@ impl<'a> Heaps<'a> {
         self.settle(cell.fiber())
     }
 
-    /// Stores one element word into arena `arena`, routed: the mutation
-    /// and the element's edge count land on the arena's store (a
-    /// foreign element's inc posting through the pending funnel).
-    /// Answers the packed `(index, generation)` handle.
-    pub(crate) fn arena_insert(&mut self, arena: RefId, word: Value) -> Result<i64, Trap> {
-        let handle = self.store(arena)?.arena_insert(arena.id(), word)?;
+    /// Stores one element's whole word span into arena `arena`, routed:
+    /// the mutation and each `Ref` element word's edge count land on the
+    /// arena's store (a foreign element's inc posting through the
+    /// pending funnel). Answers the packed `(index, generation)` handle.
+    pub(crate) fn arena_insert(&mut self, arena: RefId, words: &[Value]) -> Result<i64, Trap> {
+        let handle = self.store(arena)?.arena_insert(arena.id(), words)?;
         self.settle(arena.fiber())?;
         Ok(handle)
     }
 
-    /// The element word behind a live handle in arena `arena`, routed:
-    /// a `Ref` element answers as one retained count for the reading
-    /// frame (the arena keeps its own), exactly a checked list
+    /// The element span behind a live handle in arena `arena`, routed:
+    /// each `Ref` element word answers as one retained count for the
+    /// reading frame (the arena keeps its own), exactly a checked list
     /// read-out.
-    pub(crate) fn arena_at(&mut self, arena: RefId, handle: i64) -> Result<Value, Trap> {
-        let word = self.store(arena)?.arena_word(arena.id(), handle)?;
-        if let Value::Ref(word) = word {
-            self.inc(word)?;
+    pub(crate) fn arena_at(&mut self, arena: RefId, handle: i64) -> Result<Vec<Value>, Trap> {
+        let words = self.store(arena)?.arena_words(arena.id(), handle)?;
+        for word in &words {
+            if let Value::Ref(word) = *word {
+                self.inc(word)?;
+            }
         }
-        Ok(word)
+        Ok(words)
     }
 
     /// Removes the element behind a live handle in arena `arena`,

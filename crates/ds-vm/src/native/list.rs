@@ -364,8 +364,9 @@ pub(super) fn arena_insert_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let arena = ref_arg(args, 0)?;
-    // the one element word (the staging's one-word element policy)
-    let handle = heaps.arena_insert(arena, args[1])?;
+    // the variadic tail is the element's whole word span (the staged
+    // element slot's shape, `list_push`'s exact sibling)
+    let handle = heaps.arena_insert(arena, &args[1..])?;
     Ok(NativeResult::Word(Value::I64(handle)))
 }
 
@@ -388,8 +389,14 @@ pub(super) fn arena_at_fn(
 ) -> Result<NativeResult, Trap> {
     let arena = ref_arg(args, 0)?;
     let handle = i64_arg(args, 1)?;
-    // a `Ref` element answers as one retained count (the arena keeps
-    // its own), a scalar word verbatim; a dangling handle traps here
-    let word = heaps.arena_at(arena, handle)?;
-    Ok(NativeResult::Word(word))
+    // each `Ref` element word answers as one retained count (the arena
+    // keeps its own), a scalar word verbatim; a dangling handle traps
+    // here. A wider element answers the total-by-result-type span
+    let words = heaps.arena_at(arena, handle)?;
+    Ok(match words.as_slice() {
+        [only] => NativeResult::Word(*only),
+        words => NativeResult::Total {
+            words: words.to_vec(),
+        },
+    })
 }

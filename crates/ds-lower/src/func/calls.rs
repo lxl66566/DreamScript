@@ -854,21 +854,6 @@ impl FnLower<'_, '_, '_> {
                     };
                 }
                 arg_val = self.stage_heap_element(arg_val, arg.span(), what)?;
-                // an arena element stages exactly one word: the slot array
-                // stores one element word per handle, so a wider element (a
-                // multi-word record or tuple, a union's region) refuses at the
-                // staging with the per-instantiation seam's own refusal
-                if matches!(target, Callee::Builtin(native) if native.name == "arena_insert") {
-                    let addrs = self.word_addrs(&arg_val.place, arg_val.ty)?;
-                    if addrs.len() != 1 {
-                        return Err(LowerError::unsupported(
-                            arg.span(),
-                            "an arena_insert element",
-                            "arena elements lower as one machine word per slot this round; a \
-                             wider element waits on the per-instantiation element-span seam",
-                        ));
-                    }
-                }
             }
             // a map_set's key stages exactly one word: the probe
             // resolution and the row index hash whole words, so a wider

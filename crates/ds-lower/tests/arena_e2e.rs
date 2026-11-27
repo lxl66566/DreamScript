@@ -289,23 +289,38 @@ fn a_dangling_handle_traps_at_either_member() {
     }
 }
 
-/// The one-word element policy's named refusals: a multi-word record
-/// element and a deinit-carrying element both refuse at the insert's
-/// staging, before any run.
+/// A multi-word record element stores and reads whole: the slot holds
+/// the element's whole word span behind the one-word handle, `at`
+/// answers the struct whole (the field reads over the answer), and the
+/// removal releases the span — the walk over a linked row reading the
+/// next row's fields through its own handle.
 #[test]
-fn wider_and_deinit_carrying_elements_refuse_at_the_staging() {
-    refuses(
-        &with_ambient(concat!(
-            "struct node { value: int, next: int }\n",
-            "fn main() -> int {\n",
-            "  var a = arena[node]()\n",
-            "  const h = a.insert(node { value: 1, next: 0 })\n",
-            "  h\n",
-            "}\n",
-        )),
-        "an arena_insert element is outside the M3 runtime contract",
-        "one machine word per slot this round",
-    );
+fn a_multi_word_element_stores_and_reads_whole() {
+    let out = runs(&with_ambient(concat!(
+        "struct node { value: int, next: int }\n",
+        "fn main() -> int {\n",
+        "  var a = arena[node]()\n",
+        "  const tail = a.insert(node { value: 2, next: -1 })\n",
+        "  const head = a.insert(node { value: 1, next: tail })\n",
+        "  if a.len() != 2 { return 1 }\n",
+        "  const h = a.at(head)\n",
+        "  if h.value != 1 { return 2 }\n",
+        "  const t = a.at(h.next)\n",
+        "  if t.value != 2 || t.next != -1 { return 3 }\n",
+        "  a.remove(head)\n",
+        "  if a.len() != 1 { return 4 }\n",
+        "  println(\"${a.at(tail).value}\")\n",
+        "  0\n",
+        "}\n",
+    )));
+    assert_eq!(out, FrameAnswer::one(Value::I64(0)));
+}
+
+/// The deinit-carrying element keeps its named refusal at the insert's
+/// staging: the slot's edge retention owns counts, never claims, so the
+/// element's hook has no door at the remove or the arena's death.
+#[test]
+fn a_deinit_carrying_element_refuses_at_the_staging() {
     refuses(
         &with_ambient(concat!(
             "struct held: ~Copyable {\n",

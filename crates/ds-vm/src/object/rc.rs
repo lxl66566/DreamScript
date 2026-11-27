@@ -264,9 +264,7 @@ impl Objects {
                     // dies, one owned count per `Ref` word exactly like a
                     // list's; the retired slots hold nothing
                     for slot in &mut data.slots {
-                        if let Some(word) = slot.word.take() {
-                            spill.push(word);
-                        }
+                        spill.extend(slot.words.take().into_iter().flatten());
                     }
                     Vec::new()
                 },
@@ -385,8 +383,10 @@ impl Objects {
                 },
                 Object::Arena(arena) => {
                     for slot in &mut arena.slots {
-                        if let Some(Value::Fn(func)) = &mut slot.word {
-                            visit(StagedSite::ArenaElement { fiber: owner }, func)?;
+                        for word in slot.words.iter_mut().flatten() {
+                            if let Value::Fn(func) = word {
+                                visit(StagedSite::ArenaElement { fiber: owner }, func)?;
+                            }
                         }
                     }
                 },

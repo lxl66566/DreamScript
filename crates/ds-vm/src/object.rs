@@ -231,7 +231,7 @@ pub(crate) struct ChanData {
 }
 
 /// The arena's slot payload (the read-side aliasing container): one
-/// element word per live slot, a per-slot generation counter that
+/// element's whole word span per live slot, a per-slot generation counter that
 /// retires the handles of removed elements, and the retired slots'
 /// free list. The slot array grows by amortized doubling; a removed
 /// slot tombstones (its word leaves first) and its generation bumps at
@@ -239,8 +239,8 @@ pub(crate) struct ChanData {
 /// the slot's old generation and never the reused element.
 #[derive(Debug, Default)]
 pub(crate) struct ArenaData {
-    /// One slot per allocated index: the generation plus the element
-    /// word (`None` on a retired slot awaiting reuse).
+    /// One slot per allocated index: the generation plus the element's
+    /// word span (`None` on a retired slot awaiting reuse).
     pub(crate) slots: Vec<ArenaSlot>,
     /// The retired slots' free list, last-retired-first-reused.
     pub(crate) free: Vec<u32>,
@@ -248,7 +248,8 @@ pub(crate) struct ArenaData {
     pub(crate) live: usize,
 }
 
-/// One arena slot: the generation counter plus the stored element word.
+/// One arena slot: the generation counter plus the stored element's
+/// whole word span.
 #[derive(Debug)]
 pub(crate) struct ArenaSlot {
     /// The generation this slot's current occupant inserted under; the
@@ -256,8 +257,9 @@ pub(crate) struct ArenaSlot {
     /// fails the check at once and the next reuse answers handles
     /// under the bumped one.
     pub(crate) generation: u32,
-    /// The stored element word; `None` while the slot sits retired.
-    pub(crate) word: Option<Value>,
+    /// The stored element's word span; `None` while the slot sits
+    /// retired.
+    pub(crate) words: Option<Vec<Value>>,
 }
 
 /// One parked sender: the fiber and its staged payload span.
@@ -1463,8 +1465,8 @@ mod tests {
     }
 
     /// The arena's slot discipline: insert answers packed
-    /// `(index, generation)` handles, the read answers the stored word
-    /// with no count move, remove retires the slot (its edge count
+    /// `(index, generation)` handles, the read answers the stored span
+    /// with no count move, remove retires the slot (its edge counts
     /// releasing with it), reuse takes the retired slot first with the
     /// generation bumped — so a stale handle traps instead of naming the
     /// reused element — and the death cascade drops one count per live
@@ -1475,7 +1477,7 @@ mod tests {
         let text = objects.intern("payload");
         let arena = objects.alloc_arena();
         let first = objects
-            .arena_insert(arena, Value::Ref(RefId::new(FIBER_ROOT, text)))
+            .arena_insert(arena, &[Value::Ref(RefId::new(FIBER_ROOT, text))])
             .expect("the first element stores");
         assert_eq!(first, 0, "slot 0, generation 0");
         assert_eq!(
@@ -1485,12 +1487,12 @@ mod tests {
         );
         assert_eq!(objects.arena_len(arena), Ok(1), "one live element");
         assert_eq!(
-            objects.arena_word(arena, first),
-            Ok(Value::Ref(RefId::new(FIBER_ROOT, text)))
+            objects.arena_words(arena, first),
+            Ok(vec![Value::Ref(RefId::new(FIBER_ROOT, text))])
         );
         // a second insert takes a fresh slot, the index packing one past
         let second = objects
-            .arena_insert(arena, Value::I64(9))
+            .arena_insert(arena, &[Value::I64(9)])
             .expect("the scalar element stores");
         assert_eq!(second >> 32, 0, "generation 0 again, a fresh slot");
         // the removal retires the first slot and releases its edge count
@@ -1501,7 +1503,7 @@ mod tests {
         assert_eq!(objects.arena_len(arena), Ok(1));
         // the retired slot's stale handle traps with its own halves
         assert_eq!(
-            objects.arena_word(arena, first),
+            objects.arena_words(arena, first),
             Err(Trap::DanglingArenaHandle {
                 index: 0,
                 generation: 0
@@ -1516,7 +1518,7 @@ mod tests {
         );
         // a never-held index traps the same deterministic trap
         assert_eq!(
-            objects.arena_word(arena, (i64::from(7u32) << 32) | 0x63),
+            objects.arena_words(arena, (i64::from(7u32) << 32) | 0x63),
             Err(Trap::DanglingArenaHandle {
                 index: 99,
                 generation: 7
@@ -1524,10 +1526,10 @@ mod tests {
         );
         // the reuse takes the retired slot first, its generation bumped
         let third = objects
-            .arena_insert(arena, Value::I64(11))
+            .arena_insert(arena, &[Value::I64(11)])
             .expect("the reuse stores");
         assert_eq!(third, 1 << 32, "slot 0, generation 1");
-        assert_eq!(objects.arena_word(arena, third), Ok(Value::I64(11)));
+        assert_eq!(objects.arena_words(arena, third), Ok(vec![Value::I64(11)]));
         // the death cascade drops one count per live element word, the
         // retired slot holding nothing
         objects.dec(arena).expect("the arena's owner drops");

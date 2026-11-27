@@ -387,15 +387,16 @@ pub const BUILTIN_MAP_ENTRIES: u32 = 97;
 /// arena object on the calling fiber's store. The element type never reaches the code (every arena
 /// one Ref word).
 pub const BUILTIN_ARENA_NEW: u32 = 98;
-/// `arena_insert(a: mut arena[t], x: t) -> int` — store one element word, answer the packed
-/// `(index, generation)` handle. The element stages as exactly one word (the one-word element
-/// policy the call's staging enforces).
+/// `arena_insert(a: mut arena[t], x: element words) -> int` — store one element's whole word span,
+/// answer the packed `(index, generation)` handle. The element stages variadic at the span
+/// (`list_push`'s staging shape).
 pub const BUILTIN_ARENA_INSERT: u32 = 99;
 /// `arena_remove(a: mut arena[t], h: int) -> ` — retire the element behind a live handle, the slot
 /// tombstoning onto the free list with a generation bump at reuse.
 pub const BUILTIN_ARENA_REMOVE: u32 = 100;
-/// `arena_at(a: mut arena[t], h: int) -> t` — the element word behind a live handle, a `Ref`
-/// element answering as one retained count; a dangling handle traps deterministically.
+/// `arena_at(a: mut arena[t], h: int) -> t` — the element's whole word span behind a live handle,
+/// each `Ref` element word answering as one retained count; a dangling handle traps
+/// deterministically.
 pub const BUILTIN_ARENA_AT: u32 = 101;
 /// `round(x: float) -> float` — the nearest integer, the half away from zero, as a float.
 pub const BUILTIN_ROUND: u32 = 102;
@@ -1395,7 +1396,7 @@ pub const NATIVES: &[Native] = &[
         module: NativeModule::Builtin,
         index: BUILTIN_ARENA_INSERT,
         params: &[SlotType::Ref, SlotType::Raw],
-        variadic: false,
+        variadic: true,
         shape: NativeShape::Total(SlotType::I64),
     },
     Native {
