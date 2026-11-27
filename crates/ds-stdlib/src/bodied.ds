@@ -32,9 +32,12 @@
 // solves from a concrete fn or lambda argument (containment binds a
 // bare return variable alone, and no lambda-return annotation exists),
 // so `flatten` lands as the composable half — the flat spelling
-// composing at call sites over map's hosted lambda. scan and compose
-// wait behind the seams above (their bodies need the type variable's
-// runtime word kind, the same reflection fact).
+// composing at call sites over map's hosted lambda. scan landed once
+// the generic body's own `var` binding and one-element concat
+// instantiating per shape retired the word-kind refusals; compose
+// still waits — its fn-typed parameters' variables never solve from a
+// monomorphic fn value or lambda argument (the same containment seam
+// flat_map hit, not a word kind).
 //
 // The race combinators over the timer capability: the caller builds the
 // thunk list (a fn-typed collection element holds the closure Ref word,
@@ -78,12 +81,11 @@
 // back to its logical bits — the mask a no-op when the shifted word
 // carries no sign. The int spellings of the mixer's unsigned constants
 // ride as negative literals (the i64 range the literals carry).
-// The FP combinators still in the free tier (the ones whose member
-// move waits on their own seams: zip and fold need a member's own
-// generic body instantiating per shape — the H3.5 round's own, item
-// 140 — while the race pair moved beside the list's member tiers, the
-// list[fn() -> t] receiver head binding its element variable through
-// the fn signature's return).
+// The FP combinators still in the free tier (zip and fold's member
+// move is a surface decision since the member body's per-shape
+// instantiation landed, and the race pair moved beside the list's
+// member tiers, the list[fn() -> t] receiver head binding its
+// element variable through the fn signature's return).
 /// Folds the list over the initial value through the step
 /// lambda.
 pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
@@ -92,6 +94,16 @@ pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
     acc = f(acc, x)
   }
   acc
+}
+/// The running fold: the accumulated value at every step.
+pub fn scan[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> list[r] {
+  var acc = init
+  var out = list[r]()
+  for x in xs {
+    acc = f(acc, x)
+    out = out.concat([acc])
+  }
+  out
 }
 /// The positional pairs of the two lists, up to the shorter
 /// one's length.

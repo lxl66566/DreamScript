@@ -304,6 +304,23 @@ impl<'a> FnLower<'a, '_, '_> {
             .cloned()
     }
 
+    /// The checked bound answers one inherent member call carries,
+    /// un-substituted: the copy-routed read (a copy-local site's answers
+    /// live in the per-copy tables). The ord seams' re-solve reads it.
+    pub(super) fn written_inherent_call_bounds(&self, span: Span) -> Option<InherentCallBounds> {
+        if let Some(bounds) = self
+            .copy_record(span)
+            .and_then(|rec| rec.inherent_bounds.clone())
+        {
+            return Some(bounds);
+        }
+        self.analyzed
+            .checked
+            .inherent_call_bounds
+            .get(&span)
+            .cloned()
+    }
+
     /// The member call's solved parameter types, read through the lens.
     pub(super) fn member_call_params(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
         let Some(params) = self

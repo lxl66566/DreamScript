@@ -37,6 +37,7 @@ const FILES: &[Scanned] = &[
             "is_test",
             "generic_call",
             "written_generic_call_bounds",
+            "written_inherent_call_bounds",
             "member_call_params",
             "handler_handled",
             "place_store",
@@ -54,9 +55,10 @@ const FILES: &[Scanned] = &[
     // the call staging was repointed wholesale except the dispatch
     // existence decisions and the capture scan's span map, which read
     // records as the body's own checking wrote them; the ord-routed sort
-    // reads the checker's per-call bound record for the served instance,
-    // a decision the lens cannot re-answer (a generic body's element
-    // type never carries one at check time)
+    // reads the checker's per-call bound record for the served instance
+    // and re-solves an unserved answer through the lens (the same
+    // resolve the plan's instance key ran), the staging decisions the
+    // written record keeps by design
     Scanned {
         path: "../src/func/calls.rs",
         src: include_str!("../src/func/calls.rs"),
@@ -70,7 +72,7 @@ const FILES: &[Scanned] = &[
     Scanned {
         path: "../src/func/sort.rs",
         src: include_str!("../src/func/sort.rs"),
-        allowed: &["sort_call"],
+        allowed: &[],
     },
 ];
 

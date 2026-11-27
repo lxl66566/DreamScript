@@ -253,6 +253,12 @@ pub(crate) enum ShapeKey {
     /// A union: one entry per member — the member's atom and its payload
     /// fields' (word offset, span) pairs, in claim order.
     Union(Vec<UnionMemberKey>),
+    /// The ord instance one sort or ord-routed pick seam inside the body
+    /// bakes: its own id, unshared. Two same-shaped distinct atoms share
+    /// a shape key and serve different ord instances, so the shape key
+    /// alone would bake the first entering shape's comparator into the
+    /// twin's calls.
+    OrdInstance(u32),
 }
 
 /// The key one union takes: each member's atom with its payload fields'
@@ -914,6 +920,9 @@ impl<'a> Shapes<'a> {
                     self.render_ty(element, out);
                 }
                 out.push(')');
+            },
+            ShapeKey::OrdInstance(id) => {
+                write!(out, "ord:{id}").expect("a String write");
             },
             ShapeKey::Union(members) => {
                 out.push_str("union(");

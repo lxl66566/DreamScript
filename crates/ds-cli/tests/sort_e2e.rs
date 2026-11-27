@@ -6,13 +6,16 @@
 //! staged beside the list `Ref` (the receiver's list-instance evidence
 //! word trailing them like filter's), and the VM's stable merge sort
 //! reenters the dispatcher per comparison through the reduce seam's
-//! CALLG discipline. The refusals pin the honest boundaries: a non-ord
-//! element type refuses at the declared bound's own checker seam, and a
-//! sort over a generic body's own type variable refuses at lowering
-//! (no instance to stage, the per-instantiation seam the JIT
-//! specialization tier owns). A std-declaring graph keeps the spelling
-//! alive too: the shrunk core declares the extern and the ord impls
-//! ride the core's own ambient band.
+//! CALLG discipline. A sort over a generic body's own type variable
+//! re-solves the bound answer through the lens — the entering site's
+//! substitution concretizes the variable, the serving instance's
+//! compare body stages, and the instance key carries the baked
+//! comparator so two same-shaped structs keep their own orders. The
+//! refusals pin the honest boundary left: a sort whose body only
+//! lowers as the ONE Raw-word body a variable-naming site enters
+//! carries no instance to stage. A std-declaring graph keeps the
+//! spelling alive too: the shrunk core declares the extern and the ord
+//! impls ride the core's own ambient band.
 
 use std::{
     env, fs,
@@ -137,22 +140,78 @@ fn the_sort_refuses_the_non_ord_element() {
     );
 }
 
-/// A sort over a generic body's own type variable refuses at lowering:
-/// the bound answer carries no instance, so no compare body exists to
-/// stage — the per-instantiation seam the JIT specialization tier owns.
+/// A sort over a generic body's own type variable sorts per shape: the
+/// bound answer re-solves through the lens at the entering site's
+/// substitution, the serving instance's compare body stages as the
+/// callable, and the sorted run answers.
 #[test]
-fn the_sort_refuses_the_variable_element_inside_a_generic_body() {
+fn a_sort_over_a_generic_body_s_own_variable_sorts_per_shape() {
     let entry = fixture("sort_variable.ds");
     let out = run(&["run", &entry]);
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "the variable element type refuses"
+        Some(0),
+        "the variable element sorts: {}",
+        text(&out.stderr)
     );
+    assert_eq!(text(&out.stdout), "1\n2\n3\n", "the generic body sorts");
+}
+
+/// The instance key carries the baked comparator: two same-shaped
+/// structs enter distinct instances, each sorting under its own ord
+/// instance's compare body — a shape key alone would bake the first
+/// entering shape's comparator into the twin's calls.
+#[test]
+fn the_instance_key_carries_the_baked_comparator() {
+    let entry = fixture("sort_share.ds");
+    let out = run(&["run", &entry]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the twin shapes sort: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        text(&out.stdout),
+        "a 3 2 1\nb 1 2 3\n",
+        "each struct's own order answers"
+    );
+}
+
+/// A sort whose body only lowers as the ONE Raw-word body a
+/// variable-naming site enters refuses at lowering: the bound answer
+/// carries no instance and the substitution never binds, so no compare
+/// body exists to stage.
+#[test]
+fn the_sort_refuses_inside_a_one_body() {
+    let entry = fixture("sort_one_body.ds");
+    let out = run(&["run", &entry]);
+    assert_eq!(out.status.code(), Some(1), "the ONE-body sort refuses");
     assert!(
         text(&out.stderr).contains("in-scope assumption"),
-        "the refusal names the per-instantiation seam: {}",
+        "the refusal names the ONE body's seam: {}",
         text(&out.stderr)
+    );
+}
+
+/// The ord-routed picks over a generic body's own type variables take
+/// the same lens re-solve: the primitive widths keep their inherent
+/// dispatch, the struct shape stages the solved instance's compare
+/// body, and the tail-position pick lowers in place.
+#[test]
+fn an_ord_pick_over_a_generic_body_s_own_variables_picks() {
+    let entry = fixture("pick_variable.ds");
+    let out = run(&["run", &entry]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the variable picks run: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        text(&out.stdout),
+        "ints 7 3\npt 9\n",
+        "the generic picks answer"
     );
 }
 

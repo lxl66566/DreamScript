@@ -1,0 +1,25 @@
+// The per-shape key carries the baked comparator: two same-shaped
+// structs share nothing but their word spans, so a shape key alone
+// would bake the first entering shape's compare body into the twin's
+// calls. Each struct's own ord instance rides the instance key, and
+// the two sorts answer their own orders.
+
+struct pa { k: int }
+struct pb { k: int }
+
+impl ord for pa {
+  fn compare(self, other: Self) -> int { other.k - self.k }
+}
+impl ord for pb {
+  fn compare(self, other: Self) -> int { self.k - other.k }
+}
+
+fn sort_any[t: ord](xs: list[t]) -> list[t] { xs.sort() }
+
+fn main() -> int {
+  const as = sort_any([pa { k: 1 }, pa { k: 3 }, pa { k: 2 }])
+  println("a ${as[0].k} ${as[1].k} ${as[2].k}")
+  const bs = sort_any([pb { k: 1 }, pb { k: 3 }, pb { k: 2 }])
+  println("b ${bs[0].k} ${bs[1].k} ${bs[2].k}")
+  0
+}

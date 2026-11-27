@@ -475,7 +475,7 @@ impl Plan {
         for &ty in body.iter() {
             found.types.substitute(&subst, ty)?;
         }
-        let key = instance::instance_key(found, &subst, &body)?;
+        let key = instance::instance_key(found, &subst, &body, generic.body.span())?;
         let mut planned = false;
         let index = if let Some(&index) =
             self.member_instances

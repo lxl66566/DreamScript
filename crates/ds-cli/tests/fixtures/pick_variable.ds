@@ -1,0 +1,20 @@
+// The ord-routed picks over a generic body's own type variables: the
+// same lens re-solve the sort seam runs, the primitive widths keeping
+// their inherent dispatch and the struct shape staging the solved
+// instance's compare body.
+
+struct pt { x: int, y: int }
+
+impl ord for pt {
+  fn compare(self, other: Self) -> int { self.x - other.x }
+}
+
+fn pick_max[t: ord](a: t, b: t) -> t { max(a, b) }
+fn pick_min[t: ord](a: t, b: t) -> t { min(a, b) }
+
+fn main() -> int {
+  println("ints ${pick_max(3, 7)} ${pick_min(3, 7)}")
+  const p = pick_max(pt { x: 4, y: 0 }, pt { x: 9, y: 0 })
+  println("pt ${p.x}")
+  0
+}

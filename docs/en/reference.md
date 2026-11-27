@@ -1855,6 +1855,14 @@ A fresh state from the wall clock.
 pub fn rand_seed() -> int
 ```
 
+#### `scan`
+
+The running fold: the accumulated value at every step.
+
+```ds
+pub fn scan[t, r](xs: list[t], init: r, f: fn(r, t) -> r) -> list[r]
+```
+
 #### `to_json`
 
 The value's serialized JSON text.

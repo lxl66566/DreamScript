@@ -61,6 +61,9 @@ impl FnLower<'_, '_, '_> {
                     Some(Res::Def(def))
                         if self.extraction_def(*def).is_some()
                             || self.ambient_extern(*def, AmbientExtern::Str)
+                            || self.ambient_extern(*def, AmbientExtern::Sort)
+                            || self.ambient_extern(*def, AmbientExtern::Max)
+                            || self.ambient_extern(*def, AmbientExtern::Min)
                             || self.comptime_def(*def)
                             || self
                                 .analyzed

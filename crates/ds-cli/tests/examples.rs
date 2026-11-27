@@ -87,7 +87,8 @@ fn combinators_run_their_lambdas_reentrantly() {
     // reduce folds (an empty list would answer its init), partition
     // splits into its two-list total at the call site, and the
     // block-body println interleaves in element order; the @std list
-    // pair (zip, enumerate) answers as the bodied generic library fns
+    // pair (zip, enumerate) answers as the bodied generic library fns,
+    // scan the running fold over its own generic body's var binding
     assert_eq!(
         run_ok(ds().arg("run").arg(example("combinators.ds"))),
         "doubled 5 2 10
@@ -100,6 +101,7 @@ visiting 5
 traced 10 50
 sum 15 joined alphabeta
 split 3 2
+scan 5 6
 zip 3 enum 2 5
 "
     );

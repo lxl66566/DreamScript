@@ -1,11 +1,13 @@
-// The variable-element refusal: inside a generic body the bound
-// answers through the frame's own in-scope assumption, carrying no
-// instance, so no compare body exists to stage at the call site —
-// the per-instantiation seam the JIT specialization tier owns.
+// A sort over a generic body's own type variable: the bound answer
+// re-solves through the lens at lowering — the entering site's
+// substitution concretizes the variable, and the serving instance's
+// compare body stages as the callable (the per-shape instance the
+// plan keyed, the ord instances riding the key).
 
 fn sort_any[t: ord](xs: list[t]) -> list[t] { xs.sort() }
 
 fn main() -> int {
-  const ys = sort_any([3, 1])
+  const ys = sort_any([3, 1, 2])
+  for x in ys { println("${x}") }
   0
 }

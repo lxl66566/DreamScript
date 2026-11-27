@@ -40,6 +40,18 @@ impl Subst {
         self.vars.get(&var).copied()
     }
 
+    /// The type one written parameter name binds, over this
+    /// substitution's own variable atoms: the serving impl's
+    /// declaration and the walked body mint different atoms for one
+    /// written parameter, so a record carrying the declaration's atom
+    /// reads its solved type through the written name (the demand
+    /// walk's bridge).
+    pub(crate) fn by_param_name(&self, universe: &Universe, name: &str) -> Option<Ty> {
+        self.vars.iter().find_map(|(atom, ty)| {
+            (crate::shape::var_param_name(universe, *atom).as_deref() == Some(name)).then_some(*ty)
+        })
+    }
+
     /// Whether `ty` names one of this substitution's variables, at any
     /// depth.
     pub(crate) fn mentions(&self, universe: &Universe, ty: Ty) -> bool {

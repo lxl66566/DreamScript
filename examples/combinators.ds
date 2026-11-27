@@ -27,6 +27,8 @@ fn main() -> () {
   println("sum ${sum} joined ${joined}")
   const (big, small) = xs.partition((x: int) => x > 2)
   println("split ${big.len()} ${small.len()}")
+  const partials = xs.scan(0, (a: int, b: int) => a + b)
+  println("scan ${partials.len()} ${at(partials, 2)}")
   const pairs = zip(xs, ["x", "y", "z"])
   const numbered = ["a", "b"].enumerate()
   println("zip ${pairs.len()} enum ${numbered.len()} ${xs.enumerate().len()}")

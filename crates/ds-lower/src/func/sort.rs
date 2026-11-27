@@ -31,10 +31,14 @@ impl FnLower<'_, '_, '_> {
     /// checker's per-call bound record answers the ord instance, the
     /// instance's compare body supplies the callable, and the lowering's
     /// generic-native mirror names the CALLG addressing. A bound answer
-    /// carrying no instance (an in-scope assumption, the element type
-    /// this frame's own type variable) and a compare body carrying
-    /// runtime-evidence demands (a generic impl's one body) both refuse
-    /// naming the per-instantiation seam those shapes wait on.
+    /// carrying no instance re-solves through the lens: inside a
+    /// per-shape instance body the substitution concretizes the frame's
+    /// own variable, and the package's serving instance answers — the
+    /// same resolve the plan's instance key ran, so the shared body
+    /// bakes its own comparator. A variable the substitution never
+    /// binds (the ONE body a variable-naming site enters) keeps the
+    /// refusal, the comparator word needing the per-instantiation
+    /// lowering no interpreter frame carries.
     pub(super) fn sort_call(
         &mut self,
         args: &[&Expr],
@@ -45,20 +49,14 @@ impl FnLower<'_, '_, '_> {
         let [xs] = args else {
             return Err(mismatch("a sort call's arguments"));
         };
-        let Some(record) = self
-            .analyzed
-            .checked
-            .generic_call_bounds
-            .get(&call)
-            .cloned()
-        else {
+        let Some(record) = self.written_generic_call_bounds(call) else {
             return Err(LowerError::unsupported(
                 span,
                 "a sort call",
                 "the checker recorded no ord answer for the element type; report the construct",
             ));
         };
-        let &[(_, bound, served, _)] = record.as_slice() else {
+        let &[(_, bound, served, solved)] = record.as_slice() else {
             return Err(mismatch("a sort call's bound record"));
         };
         let Some(ord) = self.universe().trait_by_name("ord") else {
@@ -67,15 +65,9 @@ impl FnLower<'_, '_, '_> {
         if bound != ord {
             return Err(mismatch("a sort call's ord bound"));
         }
-        let Some(instance) = served else {
-            return Err(LowerError::unsupported(
-                span,
-                "a sort call",
-                "the element type's ord instance solved only through an in-scope assumption (the \
-                 element type is this frame's own type variable); the comparator word needs the \
-                 instance's own compare body, and per-instantiation frames are the JIT \
-                 specialization tier's, never the interpreter's",
-            ));
+        let instance = match served {
+            Some(instance) => instance,
+            None => self.seam_instance_or_refuse(solved, span, "a sort call")?,
         };
         self.sort_stage(xs, instance, ty, span)
     }
@@ -85,7 +77,9 @@ impl FnLower<'_, '_, '_> {
     /// bound record answers the ord instance the element type solves,
     /// and the staging is the free spelling's own — the callable word
     /// the instance's compare body supplies, the receiver's
-    /// list-instance evidence word trailing it.
+    /// list-instance evidence word trailing it. A bound answer carrying
+    /// no instance re-solves through the lens over the written
+    /// bound's substituted variable, the free spelling's lift exactly.
     pub(in crate::func) fn sort_member_call(
         &mut self,
         recv: &Expr,
@@ -96,33 +90,29 @@ impl FnLower<'_, '_, '_> {
         let Some(ord) = self.universe().trait_by_name("ord") else {
             return Err(mismatch("the ord trait's declaration"));
         };
-        let Some(record) = self
-            .analyzed
-            .checked
-            .inherent_call_bounds
-            .get(&call)
-            .cloned()
-        else {
+        let Some(record) = self.written_inherent_call_bounds(call) else {
             return Err(LowerError::unsupported(
                 span,
                 "a sort call",
                 "the checker recorded no ord answer for the element type; report the construct",
             ));
         };
-        let Some((_, _, served)) = record.iter().find(|(_, bound, _)| *bound == ord) else {
+        let Some(&(_, _, served)) = record.iter().find(|(_, bound, _)| *bound == ord) else {
             return Err(mismatch("a sort call's bound record"));
         };
-        let Some(instance) = served else {
-            return Err(LowerError::unsupported(
-                span,
-                "a sort call",
-                "the element type's ord instance solved only through an in-scope assumption (the \
-                 element type is this frame's own type variable); the comparator word needs the \
-                 instance's own compare body, and per-instantiation frames are the JIT \
-                 specialization tier's, never the interpreter's",
-            ));
+        let instance = if let Some(instance) = served {
+            instance
+        } else {
+            // the bound row carries the bound variable's atom; the
+            // receiver's lens-read type peels the same element the
+            // plan's key substituted
+            let recv_ty = self.val(recv.span())?.ty;
+            let Some(element) = self.shapes.list_element(recv_ty) else {
+                return Err(mismatch("a sort receiver's element type"));
+            };
+            self.seam_instance_or_refuse(element, span, "a sort call")?
         };
-        self.sort_stage(recv, *instance, ty, span)
+        self.sort_stage(recv, instance, ty, span)
     }
 
     /// One generic `max(a, b)` or `min(a, b)` site. Concrete int calls
@@ -154,7 +144,7 @@ impl FnLower<'_, '_, '_> {
                 "the checker recorded no ord answer for the operand type; report the construct",
             ));
         };
-        let &[(_, bound, served, _)] = record.as_slice() else {
+        let &[(_, bound, served, solved)] = record.as_slice() else {
             return Err(mismatch("an ord-routed pick's bound record"));
         };
         let Some(ord) = self.universe().trait_by_name("ord") else {
@@ -163,13 +153,9 @@ impl FnLower<'_, '_, '_> {
         if bound != ord {
             return Err(mismatch("an ord-routed pick's ord bound"));
         }
-        let Some(instance) = served else {
-            return Err(LowerError::unsupported(
-                span,
-                "an ord-routed pick",
-                "the operand type's ord instance solved only through an in-scope assumption; the \
-                 comparator word needs the instance's own compare body",
-            ));
+        let instance = match served {
+            Some(instance) => instance,
+            None => self.seam_instance_or_refuse(solved, span, "an ord-routed pick")?,
         };
         self.ord_pick_stage(kind, a, b, instance, ty, span)
     }
@@ -343,6 +329,45 @@ impl FnLower<'_, '_, '_> {
         self.scalar_fn_words.insert(callable);
         self.fn_words.insert(callable, compare);
         Ok(callable)
+    }
+
+    /// The ord instance one bound answer the written walk left unserved
+    /// resolves to under the lens: inside a per-shape instance body the
+    /// substitution concretizes the frame's own variable, and the
+    /// package's serving instance answers — the same resolve the plan's
+    /// instance key ran, so the shared body bakes its own comparator. A
+    /// variable the substitution never binds (the ONE body a
+    /// variable-naming site enters), or a substituted type no unique
+    /// instance serves, keeps the refusal: the comparator word needs the
+    /// instance's own compare body, and the interpreter frame carries no
+    /// per-instantiation lowering for it.
+    fn seam_instance_or_refuse(
+        &mut self,
+        ty: Ty,
+        span: Span,
+        what: &'static str,
+    ) -> Result<InstanceId, LowerError> {
+        let Some(ord) = self.universe().trait_by_name("ord") else {
+            return Err(mismatch("the ord trait's declaration"));
+        };
+        let concrete = self.shapes.subst(ty).map_err(|err| err.respanned(span))?;
+        if !crate::types::has_variables(self.universe(), concrete) {
+            let env = &self.analyzed.decls.instances;
+            if let Some(instance) =
+                ds_check::instance_solve::resolve(self.universe(), env, &[], ord, concrete, None)
+                    .solved()
+            {
+                return Ok(instance);
+            }
+        }
+        Err(LowerError::unsupported(
+            span,
+            what,
+            "the ord instance solved only through an in-scope assumption (the type is this \
+             frame's own type variable); the comparator word needs the instance's own compare \
+             body, and the ONE body a variable-naming site enters lowers no per-instantiation \
+             comparator",
+        ))
     }
 
     /// The shared staging of both sort spellings: the solved ord

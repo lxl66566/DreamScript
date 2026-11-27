@@ -1,0 +1,20 @@
+// The ONE-body refusal: a sort whose body only lowers as the ONE
+// Raw-word body a variable-naming site enters carries no instance to
+// stage — the comparator word needs the per-instantiation lowering no
+// interpreter frame carries. The runtime-dispatched member reaches the
+// sort through a bound variable, so nothing concretizes on the path.
+
+trait sized { fn total(self) -> int }
+
+fn sort_any[t: ord](xs: list[t]) -> int { xs.sort().len() }
+
+impl [t: ord] sized for list[t] {
+  fn total(self) -> int { sort_any(self) }
+}
+
+fn count[x: sized](x: x) -> int { x.total() }
+
+fn main() -> int {
+  println("${count([3, 1, 2])}")
+  0
+}

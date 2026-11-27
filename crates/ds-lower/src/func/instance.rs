@@ -405,7 +405,7 @@ impl Plan {
         for &ty in body.iter() {
             found.types.substitute(&subst, ty)?;
         }
-        let key = instance_key(found, &subst, &body)?;
+        let key = instance_key(found, &subst, &body, generic.lambda.span())?;
         let mut planned = false;
         let index = if let Some(&index) = self.instances.get(&(generic.def, key.clone())) {
             index
@@ -529,11 +529,12 @@ impl Plan {
 
 /// The shape key of one generic body under one substitution: every
 /// recorded type's shape, over the substituted type the discovery
-/// resolved it to.
+/// resolved it to, plus the ord seams the body bakes at lowering.
 pub(super) fn instance_key(
     found: &mut Discovery<'_, '_>,
     subst: &Subst,
     body: &[Ty],
+    within: Span,
 ) -> Result<Rc<InstanceKey>, LowerError> {
     let deinits = found.deinits.clone();
     let mut probe = Shapes::new(found.analyzed, found.types, deinits);
@@ -542,5 +543,92 @@ pub(super) fn instance_key(
         let ty = found.types.substituted(subst, ty).unwrap_or(ty);
         keys.push(probe.type_key(ty)?);
     }
+    ord_seam_keys(found, subst, within, &mut keys)?;
     Ok(Rc::from(keys))
+}
+
+/// The ord instances the body's seams bake: an ord bound the written
+/// walk answered only through an in-scope assumption (the element type
+/// is the body's own variable) joins the key with the serving instance
+/// the substitution resolves, whenever it concretizes the variable.
+/// The lowering's ord seams (the sort's comparator word, the ord-routed
+/// picks) re-solve the same rows through the same resolve, so the key
+/// must determine the baked callable — the entries sort ascending,
+/// keeping the key (and the instance names it digests) deterministic
+/// run to run. A variable the substitution never binds contributes
+/// nothing: the ONE body's seams keep their refusal.
+fn ord_seam_keys(
+    found: &mut Discovery<'_, '_>,
+    subst: &Subst,
+    within: Span,
+    keys: &mut Vec<ShapeKey>,
+) -> Result<(), LowerError> {
+    let universe = &found.analyzed.decls.universe;
+    let Some(ord) = universe.trait_by_name("ord") else {
+        return Ok(());
+    };
+    let inside =
+        |at: Span| at.file == within.file && at.start >= within.start && at.end <= within.end;
+    let mut baked: Vec<u32> = Vec::new();
+    for (at, rows) in &found.analyzed.checked.generic_call_bounds {
+        if !inside(*at) {
+            continue;
+        }
+        for &(_, bound, served, solved) in rows {
+            if served.is_none() && bound == ord {
+                ord_seam_instance(found, subst, universe, ord, solved, *at, &mut baked)?;
+            }
+        }
+    }
+    for (at, rows) in &found.analyzed.checked.inherent_call_bounds {
+        if !inside(*at) {
+            continue;
+        }
+        for &(var, bound, served) in rows {
+            if served.is_none() && bound == ord {
+                // the bound row carries the serving impl's own
+                // variable atom; the walked body's written parameter
+                // name bridges it to the substitution's binding
+                let Some(name) = crate::shape::var_param_name(universe, var) else {
+                    continue;
+                };
+                let Some(ty) = subst.by_param_name(universe, &name) else {
+                    continue;
+                };
+                ord_seam_instance(found, subst, universe, ord, ty, *at, &mut baked)?;
+            }
+        }
+    }
+    baked.sort_unstable();
+    keys.extend(baked.into_iter().map(ShapeKey::OrdInstance));
+    Ok(())
+}
+
+/// One seam's resolved instance under the substitution: a concrete
+/// substituted type resolving through the package's own serving
+/// instances (the same read the lowering's seam runs). A variable left,
+/// or a type no unique instance serves, contributes nothing.
+fn ord_seam_instance(
+    found: &mut Discovery<'_, '_>,
+    subst: &Subst,
+    universe: &ds_check::Universe,
+    ord: TraitId,
+    ty: Ty,
+    at: Span,
+    out: &mut Vec<u32>,
+) -> Result<(), LowerError> {
+    let ty = found
+        .types
+        .substitute(subst, ty)
+        .map_err(|err| err.respanned(at))?;
+    if crate::types::has_variables(universe, ty) {
+        return Ok(());
+    }
+    let env = &found.analyzed.decls.instances;
+    if let Some(instance) =
+        ds_check::instance_solve::resolve(universe, env, &[], ord, ty, None).solved()
+    {
+        out.push(instance.index());
+    }
+    Ok(())
 }
