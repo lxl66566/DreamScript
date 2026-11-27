@@ -509,6 +509,20 @@ fn rewrite_set(
                 }
                 out.push(universe.apply_atom(ctor, &rewritten).ok()?);
             },
+            AtomKind::FnSig(ref params, ret) => {
+                // a signature's parts rewrite through the substitution
+                // and re-mint, so a trait's generic nested behind a
+                // receiver's fn-typed position names the bound type
+                let owned: Vec<Ty> = params.to_vec();
+                let mut rewritten = Vec::with_capacity(owned.len());
+                for param in owned {
+                    let members = rewrite_set(universe, subst, param)?;
+                    rewritten.push(universe.set_ty(&members));
+                }
+                let ret_members = rewrite_set(universe, subst, ret)?;
+                let ret_ty = universe.set_ty(&ret_members);
+                out.push(universe.fn_atom(&rewritten, ret_ty).ok()?);
+            },
             _ => out.push(atom),
         }
     }
@@ -694,6 +708,24 @@ fn unify_atom(
                     .zip(qelements.iter())
                     .all(|(h, q)| unify_atom(universe, subst, *h, *q))
         },
+        AtomKind::FnSig(params, ret) => {
+            // A fn-typed head position unifies structurally: an impl head
+            // carrying a signature (`impl[t] list[fn() -> t]`) binds its
+            // variables from the receiver's signature parts, so the
+            // fn-typed collection faces serve like any other head.
+            let Ok(qdecl) = universe.atom_decl(query) else {
+                return false;
+            };
+            let AtomKind::FnSig(qparams, qret) = &qdecl.kind else {
+                return false;
+            };
+            params.len() == qparams.len()
+                && params
+                    .iter()
+                    .zip(qparams.iter())
+                    .all(|(h, q)| unify_set(universe, subst, *h, *q))
+                && unify_set(universe, subst, *ret, *qret)
+        },
         _ => pattern == query,
     }
 }
@@ -844,6 +876,9 @@ pub(crate) enum Ground {
     /// An application of the constructor with grounded argument member
     /// sets.
     App(TypeId, Vec<Vec<Ground>>),
+    /// A function signature rebuilt structurally: parameter grounding
+    /// sets plus the return grounding set.
+    FnSig(Vec<Vec<Ground>>, Vec<Ground>),
 }
 
 /// Whether two heads with variables cover one common instantiation (see
@@ -942,6 +977,14 @@ fn shapes_meet(universe: &Universe, a: TypeId, b: TypeId) -> bool {
                     .zip(ys.iter())
                     .all(|(x, y)| shapes_meet(universe, *x, *y))
         },
+        (AtomKind::FnSig(ps, pr), AtomKind::FnSig(qs, qr)) => {
+            ps.len() == qs.len()
+                && ps
+                    .iter()
+                    .zip(qs.iter())
+                    .all(|(x, y)| sets_meet(universe, *x, *y))
+                && sets_meet(universe, *pr, *qr)
+        },
         _ => a == b,
     }
 }
@@ -992,6 +1035,12 @@ fn carries_vars(universe: &Universe, atom: TypeId) -> bool {
                 .iter()
                 .any(|&a| carries_vars(universe, a))
         }),
+        AtomKind::FnSig(params, ret) => params.iter().chain(std::iter::once(ret)).any(|ty| {
+            universe
+                .members(*ty)
+                .iter()
+                .any(|&a| carries_vars(universe, a))
+        }),
         _ => false,
     }
 }
@@ -1012,15 +1061,24 @@ fn ground_atom_desc(universe: &Universe, atom: TypeId, x: TypeId) -> Option<Grou
     if is_var(universe, atom) {
         return Some(Ground::Atom(x));
     }
-    let (ctor, args) = match &universe.atom_decl(atom).ok()?.kind {
-        AtomKind::Apply(ctor, args) => (*ctor, args),
-        _ => return Some(Ground::Atom(atom)),
-    };
-    let mut grounded = Vec::with_capacity(args.len());
-    for arg in args {
-        grounded.push(ground_head(universe, *arg, x)?);
+    let decl = universe.atom_decl(atom).ok()?;
+    match &decl.kind {
+        AtomKind::Apply(ctor, args) => {
+            let mut grounded = Vec::with_capacity(args.len());
+            for arg in args {
+                grounded.push(ground_head(universe, *arg, x)?);
+            }
+            Some(Ground::App(*ctor, grounded))
+        },
+        AtomKind::FnSig(params, ret) => {
+            let mut grounded = Vec::with_capacity(params.len());
+            for param in params {
+                grounded.push(ground_head(universe, *param, x)?);
+            }
+            Some(Ground::FnSig(grounded, ground_head(universe, *ret, x)?))
+        },
+        _ => Some(Ground::Atom(atom)),
     }
-    Some(Ground::App(ctor, grounded))
 }
 
 /// [`serves_head`] over grounding descriptions: containment reads only
@@ -1169,6 +1227,40 @@ fn unify_ground_atom(
                     .zip(qelements.iter())
                     .all(|(h, q)| unify_ground_atom(universe, subst, *h, &Ground::Atom(*q)))
         },
+        (AtomKind::FnSig(params, ret), Ground::FnSig(qparams, qret)) => {
+            params.len() == qparams.len()
+                && params
+                    .iter()
+                    .zip(qparams.iter())
+                    .all(|(h, q)| unify_ground_set(universe, subst, *h, q))
+                && unify_ground_set(universe, subst, *ret, qret)
+        },
+        (AtomKind::FnSig(params, ret), Ground::Atom(qatom)) => {
+            // The overlap probe's fn-typed head position: a signature
+            // head unifies a concrete signature grounding part for part,
+            // so two impls whose heads meet behind a signature report
+            // their overlap instead of declaring beside each other.
+            let Ok(qdecl) = universe.atom_decl(*qatom) else {
+                return false;
+            };
+            let AtomKind::FnSig(qparams, qret) = &qdecl.kind else {
+                return false;
+            };
+            let unify_part = |subst: &mut Vec<(TypeId, Vec<Ground>)>, pattern: Ty, q: Ty| {
+                let members: Vec<Ground> = universe
+                    .members(q)
+                    .iter()
+                    .map(|a| Ground::Atom(*a))
+                    .collect();
+                unify_ground_set(universe, subst, pattern, &members)
+            };
+            params.len() == qparams.len()
+                && params
+                    .iter()
+                    .zip(qparams.iter())
+                    .all(|(h, q)| unify_part(subst, *h, *q))
+                && unify_part(subst, *ret, *qret)
+        },
         (_, Ground::Atom(qatom)) => pattern == *qatom,
         _ => false,
     }
@@ -1226,6 +1318,14 @@ fn ground_witness_atom(universe: &mut Universe, ground: &Ground) -> Result<TypeI
                 arg_tys.push(ground_witness(universe, arg)?);
             }
             universe.apply_atom(*ctor, &arg_tys)
+        },
+        Ground::FnSig(params, ret) => {
+            let mut param_tys = Vec::with_capacity(params.len());
+            for param in params {
+                param_tys.push(ground_witness(universe, param)?);
+            }
+            let ret_ty = ground_witness(universe, ret)?;
+            universe.fn_atom(&param_tys, ret_ty)
         },
     }
 }

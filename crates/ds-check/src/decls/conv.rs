@@ -660,14 +660,55 @@ pub(super) fn solve_written(
             );
             decls.universe.union(a, b)
         },
+        Type::Fn { params, ret, .. } => {
+            // A fn-typed position solves through its parts so an impl
+            // head's variables nested behind a signature (`impl[t]
+            // list[fn() -> t]`) mint into the head pattern: the bare
+            // fn-type parameter names its in-scope variable, and an
+            // unwritten return stays the unit word. Without the arm the
+            // head conversion degrades to None and the impl's variables
+            // never bind at call sites.
+            let mut param_tys = Vec::with_capacity(params.len());
+            for param in params {
+                let written = param
+                    .ty
+                    .clone()
+                    .unwrap_or_else(|| fn_param_name_type(&param.name.name));
+                param_tys.push(solve_written(package, &written, vars, decls)?);
+            }
+            let ret_ty = match ret {
+                Some(ret) => solve_written(package, ret, vars, decls)?,
+                None => decls.universe.unit_ty(),
+            };
+            let atom = decls.universe.fn_atom(&param_tys, ret_ty).ok()?;
+            decls.universe.atom_ty(atom).ok()?
+        },
         Type::Intersect { .. }
         | Type::Difference { .. }
         | Type::Negation { .. }
-        | Type::Fn { .. }
         | Type::Ptr { .. }
         | Type::Foreign { .. } => return None,
         // the comptime type-value atom, in the written-variable
         // conversion context
         Type::TypeKw(_) => decls.universe.atom_ty(TypeId::TYPE).ok()?,
     })
+}
+
+/// A synthetic path type naming one identifier — the written form of a
+/// bare fn-type parameter (`fn(t) -> r`), resolved through the head's
+/// own variables like any written type.
+fn fn_param_name_type(name: &str) -> Type {
+    let span = Span::new(ds_diag::FileId::new(0), 0, 0);
+    Type::Path {
+        span,
+        path: ds_parse::Path {
+            span,
+            segments: vec![Ident {
+                span,
+                name: name.to_owned(),
+            }],
+        },
+        args: Vec::new(),
+        delim: Delim::Bracket,
+    }
 }

@@ -1078,3 +1078,80 @@ fn indexed_solve_answers_and_row_order_match_the_scan() {
     };
     assert_eq!(id, merged_show);
 }
+
+#[test]
+fn a_fn_signature_head_binds_from_the_receiver_s_signature_parts() {
+    // `show for list[fn() -> t]`: a concrete fn-typed head no longer
+    // declares beside the signature head — the fn-typed position unifies
+    // part for part (the overlap probe's witness the fn(int) atom) — and
+    // the signature head alone serves a `list[fn() -> string]` receiver,
+    // its variable bound from the signature's return.
+    let mut f = fixture();
+    let list = f.universe.declare_struct("list").unwrap();
+    let t = f.universe.declare_tag("$t#1").unwrap();
+    let t_ty = f.universe.atom_ty(t).unwrap();
+    let fn_t = f.universe.fn_atom(&[], t_ty).unwrap();
+    let fn_t_ty = f.universe.atom_ty(fn_t).unwrap();
+    let list_fn_t = f.universe.apply_atom(list, &[fn_t_ty]).unwrap();
+    let ids = f.declare(f.show, TypeExpr::atom(list_fn_t)).unwrap();
+    let int_ty = f.ty(f.int);
+    let fn_int = f.universe.fn_atom(&[], int_ty).unwrap();
+    let fn_int_ty = f.universe.atom_ty(fn_int).unwrap();
+    let list_fn_int = f.universe.apply_atom(list, &[fn_int_ty]).unwrap();
+    let err = f.declare(f.show, TypeExpr::atom(list_fn_int)).unwrap_err();
+    let Error::InstanceOverlap { witness, .. } = &err else {
+        panic!("expected InstanceOverlap behind the signature, got {err:?}");
+    };
+    assert_eq!(f.universe.render_witness(witness), "list[fn() -> int]");
+    assert_eq!(
+        f.env.len(),
+        1,
+        "the overlapping declaration inserts nothing"
+    );
+    let string_ty = f.ty(f.string);
+    let fn_string = f.universe.fn_atom(&[], string_ty).unwrap();
+    let fn_string_ty = f.universe.atom_ty(fn_string).unwrap();
+    let list_fn_string = f.universe.apply_atom(list, &[fn_string_ty]).unwrap();
+    let recv = f.universe.atom_ty(list_fn_string).unwrap();
+    assert!(matches!(
+        ds_check::instance_solve::resolve(&f.universe, &f.env, &[], f.show, recv, None),
+        ds_check::instance_solve::Resolution::Unique(id) if id == ids[0]
+    ));
+}
+
+#[test]
+fn the_signature_head_unifies_parameters_and_return_part_for_part() {
+    // The inherent head-binding seam: `pattern_substitution` over
+    // `list[fn(string) -> t]` against `list[fn(string) -> int]` answers
+    // the one pair binding `t` from the signature's return; a parameter
+    // mismatch refuses the head.
+    let mut universe = Universe::new();
+    let int = universe.declare_tag("int").unwrap();
+    let string = universe.declare_tag("string").unwrap();
+    let list = universe.declare_struct("list").unwrap();
+    let t = universe.declare_tag("$t#1").unwrap();
+    let int_ty = universe.atom_ty(int).unwrap();
+    let string_ty = universe.atom_ty(string).unwrap();
+    let t_ty = universe.atom_ty(t).unwrap();
+    let head_fn = universe.fn_atom(&[string_ty], t_ty).unwrap();
+    let recv_fn = universe.fn_atom(&[string_ty], int_ty).unwrap();
+    let head_part = universe.atom_ty(head_fn).unwrap();
+    let recv_part = universe.atom_ty(recv_fn).unwrap();
+    let head_atom = universe.apply_atom(list, &[head_part]).unwrap();
+    let recv_atom = universe.apply_atom(list, &[recv_part]).unwrap();
+    let head = universe.atom_ty(head_atom).unwrap();
+    let recv = universe.atom_ty(recv_atom).unwrap();
+    let subst = ds_check::instance_solve::pattern_substitution(&mut universe, head, recv)
+        .expect("the signature head unifies");
+    assert_eq!(subst.len(), 1, "the one variable binds");
+    assert_eq!(subst[0].0, t);
+    assert_eq!(universe.set_ty(&subst[0].1), int_ty);
+    let other_fn = universe.fn_atom(&[int_ty], int_ty).unwrap();
+    let other_part = universe.atom_ty(other_fn).unwrap();
+    let other_atom = universe.apply_atom(list, &[other_part]).unwrap();
+    let other = universe.atom_ty(other_atom).unwrap();
+    assert!(
+        ds_check::instance_solve::pattern_substitution(&mut universe, head, other).is_none(),
+        "a parameter mismatch refuses the head"
+    );
+}
