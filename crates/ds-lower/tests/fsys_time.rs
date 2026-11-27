@@ -122,8 +122,9 @@ fn a_failed_open_prints_the_message_and_halts_on_the_tag() {
         "the handler halts on the discriminant, the run result is the tag"
     );
     let out = String::from_utf8_lossy(vm.captured_output()).into_owned();
+    let rendered = missing.display().to_string();
     assert!(
-        out.starts_with("io error: open "),
+        out.starts_with(&format!("io error: {rendered}")),
         "the printed failure line was {out:?}"
     );
 }

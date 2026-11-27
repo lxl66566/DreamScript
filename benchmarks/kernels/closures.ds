@@ -15,7 +15,7 @@ fn make_adder(k: int) -> fn(int) -> int {
 }
 
 fn make_suffix(s: string) -> fn(string) -> string {
-  (w: string) => concat(w, s)
+  (w: string) => w.concat(s)
 }
 
 fn main() -> () {
@@ -53,7 +53,7 @@ fn main() -> () {
   while w < 400000 {
     const bang = make_suffix("-${w % 89}")
     const tagged = bang("t${w % 17}")
-    lensum += len(tagged)
+    lensum += tagged.len()
     w += 1
   }
   println("result: ${sum1} ${acc} ${sum2} ${lensum}")

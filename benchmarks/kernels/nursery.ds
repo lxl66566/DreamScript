@@ -18,7 +18,7 @@ fn deep(i: int, label: string) -> int | net_err {
     spawn {
       const inner = nursery {
         spawn {
-          len(label) + i % 7
+          label.len() + i % 7
         }
       }
       const cell = inner.get(0)
@@ -41,7 +41,7 @@ fn main() -> () {
         (i % 97) + (i % 13)
       }
       spawn {
-        len(label) + i % 11
+        label.len() + i % 11
       }
     }
     const a = got.get(0)
@@ -62,7 +62,7 @@ fn main() -> () {
   }
   var sum: int = 0
   var j: int = 0
-  const m: int = len(out)
+  const m: int = out.len()
   while j < m {
     const cell = out.get(j)
     sum += cell.ok((e: int) => e).err((_: none) => 0)

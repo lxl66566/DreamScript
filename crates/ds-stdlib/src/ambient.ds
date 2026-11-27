@@ -624,43 +624,48 @@ pub enum json {
   json_object { fields: map[string, json] }
 }
 
-// The failure taxonomy of the fallible natives:
-// `io_err` and `net_err` are aliases over branchable unit tags, each
-// native failure landing on its class and the classes a platform cannot
-// discriminate portably folding into the `*_other` floors — which alone
-// carry the OS message string. Signatures spell the alias; `?` checks
+// The failure taxonomy of the fallible natives: `io_err` and
+// `net_err` are declaration-keyed enums, each native failure landing
+// on its class and the classes a platform cannot discriminate
+// portably folding into the `*_other` floors — the path classes name
+// the path they failed on, and the OS message string rides the
+// `*_other` floors alone. Signatures spell the enum; `?` checks
 // membership by set containment. `parse_err` carries the position the
 // parse gave up at (the offset into the input document; a shape failure
 // over an already-decoded value answers 0, no position existing there),
 // and `utf8_err` stays one bare tag. never parse_err for the bytes
 // decode bridge — it names document shape failures alone.
-/// The io class for a missing path.
-pub tag not_found
-/// The io class for an access denial.
-pub tag permission_denied
-/// The io class for an existing entry.
-pub tag already_exists
-/// The io class for an expired deadline.
-pub tag timed_out
-/// The io class for input ending early.
-pub tag unexpected_eof
-/// The io floor: a failure no class discriminates, carrying the OS message.
-pub tag io_other { msg: string }
-/// The io failure union the fsys natives answer.
-pub type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+/// The io failure union the fsys natives answer: one class case per
+/// failure kind, the path classes carrying the path they failed on.
+pub enum io_err {
+  /// The io class for a missing path.
+  not_found { path: string }
+  /// The io class for an access denial.
+  permission_denied { path: string }
+  /// The io class for an existing entry.
+  already_exists { path: string }
+  /// The io class for an expired deadline.
+  timed_out
+  /// The io class for input ending early.
+  unexpected_eof
+  /// The io floor: a failure no class discriminates, carrying the OS message.
+  io_other { msg: string }
+}
 
-/// The net class for a timed-out operation.
-pub tag timeout
-/// The net class for a refused connection.
-pub tag refused
-/// The net class for a bound address.
-pub tag addr_in_use
-/// The net class for a reset connection.
-pub tag reset
-/// The net floor: a failure no class discriminates, carrying the OS message.
-pub tag net_other { msg: string }
-/// The net failure union the net natives answer.
-pub type net_err = timeout | refused | addr_in_use | reset | net_other
+/// The net failure union the net natives answer: one class case per
+/// failure kind, the floor alone carrying the OS message.
+pub enum net_err {
+  /// The net class for a timed-out operation.
+  timeout
+  /// The net class for a refused connection.
+  refused
+  /// The net class for a bound address.
+  addr_in_use
+  /// The net class for a reset connection.
+  reset
+  /// The net floor: a failure no class discriminates, carrying the OS message.
+  net_other { msg: string }
+}
 
 /// A parse failure carrying the offset it gave up at.
 pub tag parse_err { pos: int }
@@ -1022,8 +1027,12 @@ pub extern fn read_file (path: string) -> string | io_err
 /// Writes the text to the path, replacing what is there;
 /// answers unit or the io failure.
 pub extern fn write_file (path: string, contents: string) -> () | io_err
-/// Whether the path names an entry.
-pub extern fn file_exists (path: string) -> bool
+/// Whether the path names an entry, or its io failure.
+// The existence probe answers `bool | io_err`: a path the process can
+// stat answers its presence, an absent path the false side, and a
+// stat failure its io_err class (a directory the process cannot read
+// answering `permission_denied` with the path it failed on).
+pub extern fn file_exists (path: string) -> bool | io_err
 /// The directory's entry names, sorted, or its io failure.
 pub extern fn fs_list (dir: string) -> list[string] | io_err
 /// The entry's byte count, or its io failure.

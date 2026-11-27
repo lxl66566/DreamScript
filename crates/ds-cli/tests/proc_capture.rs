@@ -161,7 +161,7 @@ fn a_failed_capture_spawn_halts_on_the_total_spellings_error_line() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("io error: proc_spawn ds-proc-capture-no-such-program:"),
+        stdout.contains("io error: ds-proc-capture-no-such-program"),
         "the total spelling's failure halts on the io error line: {stdout:?}"
     );
 }

@@ -150,16 +150,28 @@ fn roundtrip() -> FunctionDef {
     ])
 }
 
-/// `(path: string) -> bool`: `file_exists` overlays one word.
+/// `(path: string) -> bool | io_err`: stage, call, dispatch on the span's
+/// tag word; success returns the payload `Bool`, failure halts on the tag
+/// word so the run result itself is the `io_err` shape.
+///
+/// Slots: [path, result, t, overlay tag, overlay payload].
 fn exists() -> FunctionDef {
-    def("exists", &[Ref, Raw], 1, 1, &[
-        Uop::Funcf { frame_slots: 2 },
-        Uop::Mov { dst: 1, src: 0 },
+    def("exists", &[Ref, Bool, Bool, Raw, Raw], 1, 2, &[
+        Uop::Funcf { frame_slots: 5 },
+        Uop::Mov { dst: 3, src: 0 },
         Uop::Call {
             callee: k(2),
             nargs: 1,
         },
+        Uop::TagTest {
+            dst: 2,
+            src: 3,
+            tag: PLATFORM_IO_OK,
+        },
+        Uop::Jmpif { cond: 2, target: 5 },
+        Uop::Mov { dst: 1, src: 4 },
         Uop::Ret { src: 1 },
+        Uop::Halt { slot: 3 },
     ])
 }
 
@@ -228,7 +240,7 @@ fn tail_read() -> FunctionDef {
 /// `(path: string) -> tag`: calls `tail_read` (non-tail), so the
 /// native's span lands on THIS frame's overlay words; saves the tag word
 /// before the println call reuses the staging slot, prints the payload
-/// word (the content on success, the OS error message on failure), and
+/// word (the content on success, the path on a not_found failure), and
 /// returns the tag word. The run result distinguishes the member; the
 /// captured stdout carries the payload.
 ///
@@ -334,9 +346,9 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
         Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
 
-    // through `ask` the payload reaches the caller: the OS error message
-    // is a nonempty string naming the operation and the path. Ref words
-    // name THIS VM's objects, so the path re-interns per VM.
+    // through `ask` the payload reaches the caller: the not_found class
+    // answers the path it failed on. Ref words name THIS VM's objects,
+    // so the path re-interns per VM.
     let mut vm = Vm::new(io_registry());
     vm.capture_output();
     let args = [string(&mut vm, missing.to_str().unwrap())];
@@ -345,11 +357,11 @@ fn read_file_of_a_missing_path_yields_the_io_err_span() {
         Ok(FrameAnswer::one(Value::Tag(PLATFORM_IO_NOT_FOUND)))
     );
     let printed = String::from_utf8_lossy(vm.captured_output()).into_owned();
-    assert!(
-        printed.starts_with("read_file ") && printed.contains("absent.txt"),
-        "the payload describes the failure: {printed:?}"
+    assert_eq!(
+        printed,
+        format!("{}\n", missing.display()),
+        "the payload names the path it failed on"
     );
-    assert!(printed.ends_with('\n'), "println ends the line");
 }
 
 #[test]

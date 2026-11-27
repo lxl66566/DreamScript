@@ -1589,7 +1589,11 @@ pub const NATIVES: &[Native] = &[
         index: OP_FILE_EXISTS,
         params: &[SlotType::Ref],
         variadic: false,
-        shape: NativeShape::Total(SlotType::Bool),
+        shape: NativeShape::Fallible {
+            payload: SlotType::Bool,
+            fail_payload: SlotType::Ref,
+            family: FailureClasses::Io,
+        },
     },
     Native {
         name: "fs_list",

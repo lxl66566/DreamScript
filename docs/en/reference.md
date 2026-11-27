@@ -144,6 +144,22 @@ pub struct proc_handle: ~Copyable { id: int }
 
 ### Enums
 
+#### `io_err`
+
+The io failure union the fsys natives answer: one class case per
+failure kind, the path classes carrying the path they failed on.
+
+```ds
+pub enum io_err {
+  not_found { path: string }
+  permission_denied { path: string }
+  already_exists { path: string }
+  timed_out
+  unexpected_eof
+  io_other { msg: string }
+}
+```
+
 #### `json`
 
 The JSON value family: one case per grammar shape, int and
@@ -161,6 +177,21 @@ pub enum json {
 }
 ```
 
+#### `net_err`
+
+The net failure union the net natives answer: one class case per
+failure kind, the floor alone carrying the OS message.
+
+```ds
+pub enum net_err {
+  timeout
+  refused
+  addr_in_use
+  reset
+  net_other { msg: string }
+}
+```
+
 #### `never`
 
 The bottom type: no value inhabits it, and a call answering it
@@ -171,22 +202,6 @@ pub enum never { }
 ```
 
 ### Tags
-
-#### `addr_in_use`
-
-The net class for a bound address.
-
-```ds
-pub tag addr_in_use
-```
-
-#### `already_exists`
-
-The io class for an existing entry.
-
-```ds
-pub tag already_exists
-```
 
 #### `bool`
 
@@ -236,60 +251,12 @@ The 64-bit signed integer type.
 pub tag int
 ```
 
-#### `io_other`
-
-The io floor: a failure no class discriminates, carrying the OS message.
-
-```ds
-pub tag io_other { msg: string }
-```
-
-#### `net_other`
-
-The net floor: a failure no class discriminates, carrying the OS message.
-
-```ds
-pub tag net_other { msg: string }
-```
-
-#### `not_found`
-
-The io class for a missing path.
-
-```ds
-pub tag not_found
-```
-
 #### `parse_err`
 
 A parse failure carrying the offset it gave up at.
 
 ```ds
 pub tag parse_err { pos: int }
-```
-
-#### `permission_denied`
-
-The io class for an access denial.
-
-```ds
-pub tag permission_denied
-```
-
-#### `refused`
-
-The net class for a refused connection.
-
-```ds
-pub tag refused
-```
-
-#### `reset`
-
-The net class for a reset connection.
-
-```ds
-pub tag reset
 ```
 
 #### `string`
@@ -300,22 +267,6 @@ The UTF-8 text type: one immutable counted block behind one word.
 pub tag string
 ```
 
-#### `timed_out`
-
-The io class for an expired deadline.
-
-```ds
-pub tag timed_out
-```
-
-#### `timeout`
-
-The net class for a timed-out operation.
-
-```ds
-pub tag timeout
-```
-
 #### `u32`
 
 The unsigned 32-bit integer type; constructed through `u32.of`.
@@ -324,38 +275,12 @@ The unsigned 32-bit integer type; constructed through `u32.of`.
 pub tag u32
 ```
 
-#### `unexpected_eof`
-
-The io class for input ending early.
-
-```ds
-pub tag unexpected_eof
-```
-
 #### `utf8_err`
 
 A UTF-8 validation failure.
 
 ```ds
 pub tag utf8_err
-```
-
-### Type aliases
-
-#### `io_err`
-
-The io failure union the fsys natives answer.
-
-```ds
-pub type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
-```
-
-#### `net_err`
-
-The net failure union the net natives answer.
-
-```ds
-pub type net_err = timeout | refused | addr_in_use | reset | net_other
 ```
 
 ### Functions
@@ -610,10 +535,8 @@ pub extern fn fields(t: type) -> list[field]
 
 #### `file_exists`
 
-Whether the path names an entry.
-
 ```ds
-pub extern fn file_exists(path: string) -> bool
+pub extern fn file_exists(path: string) -> bool | io_err
 ```
 
 #### `file_size`

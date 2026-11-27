@@ -21,8 +21,8 @@ fn main() -> () {
   var r: int = 0
   while r < 250 {
     const doubled = xs.map((x: int) => x * 2)
-    const kept = filter(doubled, (x: int) => x % 3 == 0)
-    sum += reduce(kept, 0, (a: int, b: int) => a + b)
+    const kept = doubled.filter((x: int) => x % 3 == 0)
+    sum += kept.reduce(0, (a: int, b: int) => a + b)
     r += 1
   }
   var ys: list[string] = list[string]()
@@ -34,11 +34,11 @@ fn main() -> () {
   var lensum: int = 0
   var q: int = 0
   while q < 40 {
-    const banged = ys.map((w: string) => concat(w, "!"))
-    const short = filter(banged, (w: string) => len(w) < 5)
-    const joined = reduce(short, "", (a: string, b: string) => concat(a, b))
-    lensum += len(joined)
+    const banged = ys.map((w: string) => w.concat("!"))
+    const short = banged.filter((w: string) => w.len() < 5)
+    const joined = short.reduce("", (a: string, b: string) => a.concat(b))
+    lensum += joined.len()
     q += 1
   }
-  println("result: ${sum} ${len(xs)} ${lensum} ${len(ys)}")
+  println("result: ${sum} ${xs.len()} ${lensum} ${ys.len()}")
 }

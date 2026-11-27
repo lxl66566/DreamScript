@@ -174,7 +174,8 @@ impl Bodies<'_> {
                         // the case labels are the enum's own written
                         // members: they resolve under the enum's
                         // declaring file, never the use site's shadow
-                        // map
+                        // map — the file restores after the whole loop,
+                        // so every case reads the declaring file's map
                         let decl_file = self.file;
                         self.file = Some(self.package.def(def).span.file);
                         let mut union: Option<Ty> = None;
@@ -182,7 +183,6 @@ impl Bodies<'_> {
                             let case_def = self
                                 .type_def_of(name)
                                 .or_else(|| self.decls.foreign_type(name));
-                            self.file = decl_file;
                             let case_def = case_def?;
                             let atom = self.decls.atoms.get(&case_def).copied()?;
                             let ty = self.decls.universe.atom_ty(atom).ok()?;
@@ -191,6 +191,7 @@ impl Bodies<'_> {
                                 None => ty,
                             });
                         }
+                        self.file = decl_file;
                         // A zero-case enum names the empty set.
                         Some(union.unwrap_or_else(|| self.empty()))
                     },

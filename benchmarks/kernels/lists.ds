@@ -56,5 +56,5 @@ fn main() -> () {
     total += w.parse_int().err((_: parse_err) => 0)
     j += 1
   }
-  println("result: ${sum} ${total} ${len(acc)}")
+  println("result: ${sum} ${total} ${acc.len()}")
 }

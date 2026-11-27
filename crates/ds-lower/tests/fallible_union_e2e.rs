@@ -4,8 +4,9 @@
 //! installs into the VM, and runs — the two-word platform span re-spans
 //! into the call's own union over the error-class mapping (ok constructs
 //! the payload member, failure the class member the discriminant names,
-//! the bare classes dropping their message count and the `*_other` floor
-//! and the parse reader adopting theirs as a field), so `?`, `.ok`,
+//! the bare classes dropping their message count, the path classes, the
+//! `*_other` floor, and the parse reader adopting their word as a
+//! field), so `?`, `.ok`,
 //! `.err`, and match extract real values at run level. The failure
 //! paths' counting is pinned by the heap drain.
 
@@ -114,8 +115,9 @@ fn success_typed_fallible_natives_extract_through_every_spelling() {
 /// The placed shape of one union-spelled read: the call answers the
 /// two-word span, the discriminant test forks, every bare io class arm
 /// constructs its member (zero-initing the dead Ref word) and drops the
-/// native-born message count before its jump, the `io_other` arm adopts
-/// its message field instead, the ok arm constructs the payload member —
+/// native-born message count before its jump, the path classes and the
+/// `io_other` arm adopt their word as the member's field instead, the
+/// ok arm constructs the payload member —
 /// and no print-and-halt remains (that path belongs to the total
 /// spellings).
 #[test]
@@ -154,16 +156,16 @@ fn the_failure_arms_drop_or_adopt_the_message_count_in_place() {
         "six class members plus the payload member: {kinds:?}"
     );
     // the counting discipline: the staged borrow flush after the call,
-    // every bare class arm's message dec before its jump (five decs),
-    // the `io_other` arm adopting its field (no dec), and the handler
-    // epilogue's own dec
+    // the two bare class arms' message decs before their jumps, the
+    // three path classes and the `io_other` floor adopting their word
+    // as the member's field (no dec), and the handler epilogue's own dec
     let decs = placed
         .iter()
         .filter(|op| matches!(op, PlacedOp::Rc(RcOp::Dec { .. })))
         .count();
     assert_eq!(
-        decs, 7,
-        "the staged flush, the five bare arms' message decs, and the handler epilogue: {kinds:?}"
+        decs, 4,
+        "the staged flush, the two bare arms' message decs, and the handler epilogue: {kinds:?}"
     );
     let incs = placed
         .iter()

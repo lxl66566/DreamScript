@@ -2,7 +2,6 @@
 //! file and clock natives.
 
 use std::{
-    path::Path,
     sync::LazyLock,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,19 +51,29 @@ pub(crate) fn io_class(err: &std::io::Error) -> u8 {
     }
 }
 
-/// The `io_err` span: the failure's class discriminant with the OS
-/// error rendered as `"<op> <path>: <error>"` in the payload word (the
-/// message rides the `io_other` member alone; the other classes drop
-/// it at the re-span).
+/// The `io_err` span: the failure's class discriminant with the word
+/// the re-spanned member carries as the payload — the path classes
+/// (not_found, permission_denied, already_exists) answer the path they
+/// failed on, `io_other` the rendered message `"<op> <path>: <error>"`
+/// (the OS message rides the floor alone), and the bare classes a
+/// diagnostic detail the bare member discards at the classed re-span
+/// and the total spelling prints.
 pub(crate) fn io_err(
     heaps: &mut Heaps,
     op: &str,
     path: &str,
     err: &std::io::Error,
 ) -> NativeResult {
+    let class = io_class(err);
+    let detail = match class {
+        PLATFORM_IO_NOT_FOUND | PLATFORM_IO_PERMISSION_DENIED | PLATFORM_IO_ALREADY_EXISTS => {
+            path.to_owned()
+        },
+        _ => format!("{op} {path}: {err}"),
+    };
     NativeResult::Tag {
-        tag: io_class(err),
-        payload: heaps.new_str(format!("{op} {path}: {err}")),
+        tag: class,
+        payload: heaps.new_str(detail),
     }
 }
 
@@ -107,9 +116,21 @@ pub(crate) fn file_exists_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    // total by contract: an entry the process cannot stat answers false
-    let path = heaps.str_at(ref_arg(args, 0)?)?;
-    Ok(NativeResult::Word(Value::Bool(Path::new(path).exists())))
+    // the checked spelling `bool | io_err`: a path the process can stat
+    // answers its presence (an absent path the false side), and every
+    // other stat failure its io_err class
+    let path = heaps.str_at(ref_arg(args, 0)?)?.to_owned();
+    Ok(match std::fs::metadata(&path) {
+        Ok(_) => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::Bool(true),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => NativeResult::Tag {
+            tag: PLATFORM_IO_OK,
+            payload: Value::Bool(false),
+        },
+        Err(err) => io_err(heaps, "file_exists", &path, &err),
+    })
 }
 
 pub(crate) fn fs_list_fn(

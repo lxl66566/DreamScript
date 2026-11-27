@@ -1,13 +1,17 @@
 // A write/read round trip through the file-IO natives: write_file, then
 // read_file, file_size, and file_exists over the same bytes, comparing
-// the round trip by content. Every fallible leg answers the io_err
-// union — the write narrows through `is`, the read extracts through the
-// `.err` handler, and the size through `?` — so a failed leg answers a
-// value instead of halting. The path is fixed relative to the current
-// directory.
+// the round trip by content. Every leg answers the io_err union — the
+// write narrows through `is`, the read extracts through the `.err`
+// handler, the size and the existence probe through `?` — so a failed
+// leg answers a value instead of halting. The path is fixed relative to
+// the current directory.
 
 fn size_of(path: string) -> int | io_err {
   file_size(path)?
+}
+
+fn exists(path: string) -> bool | io_err {
+  file_exists(path)?
 }
 
 fn main() -> () {
@@ -20,7 +24,7 @@ fn main() -> () {
   const back = read_file(path).err((_: io_err) => "")
   println("read back: ${back}")
   println("size: ${size_of(path).err((_: io_err) => -1)}")
-  println("exists: ${file_exists(path)}")
+  println("exists: ${exists(path).err((_: io_err) => false)}")
   if back == text {
     println("round trip ok")
   } else {

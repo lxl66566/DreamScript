@@ -13,27 +13,27 @@ fn main() -> () {
   var xs: list[int] = list[int]()
   var i: int = 0
   while i < 15000 {
-    xs = cons((i * 37) % 900 + 100, xs)
+    xs = xs.cons((i * 37) % 900 + 100)
     i += 1
   }
   var m: int = 0
   var rest = xs
   var c: int = 0
   while c < 15000 {
-    const h = first(rest)
+    const h = rest.first()
     const v = h.ok((x: int) => x).err((_: none) => -1)
-    m = max(m, v)
-    rest = tail(rest)
+    m = m.max(v)
+    rest = rest.tail()
     c += 1
   }
   var total: int = 0
   var r: int = 0
   while r < 150 {
-    const ys = collect(xs)
-    total += len(ys)
+    const ys = xs.collect()
+    total += ys.len()
     r += 1
   }
-  const f0 = first(xs)
+  const f0 = xs.first()
   const first_v = f0.ok((x: int) => x).err((_: none) => -1)
-  println("result: ${len(xs)} ${m} ${total} ${first_v}")
+  println("result: ${xs.len()} ${m} ${total} ${first_v}")
 }

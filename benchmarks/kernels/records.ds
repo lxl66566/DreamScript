@@ -45,7 +45,7 @@ fn main() -> () {
       sum_id += p.id
       sum_w += p.w
       total += p.score
-      lensum += len(p.name)
+      lensum += p.name.len()
       j += 1
     }
     r += 1
@@ -58,7 +58,7 @@ fn main() -> () {
     miss += p.id
     q += 1
   }
-  const h = first(xs)
+  const h = xs.first()
   const hid = h.ok((e: item) => e.id).err((_: none) => -1)
   println("result: ${sum_id} ${sum_w} ${lensum} ${miss} ${hid} ${total}")
 }

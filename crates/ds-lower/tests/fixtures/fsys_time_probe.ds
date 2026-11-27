@@ -17,13 +17,14 @@ tag bool
 tag string
 tag byte
 tag bytes
-tag not_found
-tag permission_denied
-tag already_exists
-tag timed_out
-tag unexpected_eof
-tag io_other { msg: string }
-type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+pub enum io_err {
+  not_found { path: string }
+  permission_denied { path: string }
+  already_exists { path: string }
+  timed_out
+  unexpected_eof
+  io_other { msg: string }
+}
 pub trait Copyable { }
 pub struct list[t]
 

@@ -2,22 +2,23 @@
 // two-word platform span re-spans into the call's own union per member
 // over the error-class mapping (read_file over the io class set,
 // parse_int over its one class), so ?, .ok, .err, and match extract
-// real values; the bare class members carry no payload field, so their
-// failure arms drop the native-born message count, the *_other floor's
-// member adopts its message field, and the parse failure's position
-// rides its member's field (the input survives the failing parse and
-// reads again).
+// real values; the path classes adopt the path word the native answers
+// into their payload field, the bare classes drop the native-born count
+// inside their arms, the *_other floor's member adopts its message field,
+// and the parse failure's position rides its member's field (the input
+// survives the failing parse and reads again).
 
 tag int
 tag string
 tag bool
-tag not_found
-tag permission_denied
-tag already_exists
-tag timed_out
-tag unexpected_eof
-tag io_other { msg: string }
-type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+pub enum io_err {
+  not_found { path: string }
+  permission_denied { path: string }
+  already_exists { path: string }
+  timed_out
+  unexpected_eof
+  io_other { msg: string }
+}
 tag parse_err { pos: int }
 
 extern fn println (s: string) -> ()

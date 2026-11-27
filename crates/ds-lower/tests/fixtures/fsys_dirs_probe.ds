@@ -1,6 +1,6 @@
 // purpose: the fsys path round's lowering end to end — the three path
 // natives over the io_err union the ambient owns (the fixture declaring
-// the taxonomy's tags itself, the no-ambient discipline), each failure
+// the taxonomy's enums itself, the no-ambient discipline), each failure
 // discriminant landing on the io_err member the error class names, so
 // match, ?, and the .err handler extract real members: mkdir's
 // single-level create (already_exists the branchable outcome), remove's
@@ -12,13 +12,14 @@ tag int
 tag string
 tag bool
 
-tag not_found
-tag permission_denied
-tag already_exists
-tag timed_out
-tag unexpected_eof
-tag io_other { msg: string }
-type io_err = not_found | permission_denied | already_exists | timed_out | unexpected_eof | io_other
+pub enum io_err {
+  not_found { path: string }
+  permission_denied { path: string }
+  already_exists { path: string }
+  timed_out
+  unexpected_eof
+  io_other { msg: string }
+}
 
 extern fn mkdir (dir: string) -> () | io_err
 extern fn remove (path: string) -> () | io_err

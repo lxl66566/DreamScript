@@ -12,20 +12,21 @@ const AMBIENT: &str = concat!(
     "pub tag int\n",
     "pub tag string\n",
     "pub tag bool\n",
-    "pub tag not_found\n",
-    "pub tag permission_denied\n",
-    "pub tag already_exists\n",
-    "pub tag timed_out\n",
-    "pub tag unexpected_eof\n",
-    "pub tag io_other { msg: string }\n",
-    "pub type io_err = not_found | permission_denied | already_exists | timed_out | \
-     unexpected_eof | io_other\n",
-    "pub tag timeout\n",
-    "pub tag refused\n",
-    "pub tag addr_in_use\n",
-    "pub tag reset\n",
-    "pub tag net_other { msg: string }\n",
-    "pub type net_err = timeout | refused | addr_in_use | reset | net_other\n",
+    "pub enum io_err {\n",
+    "  not_found { path: string }\n",
+    "  permission_denied { path: string }\n",
+    "  already_exists { path: string }\n",
+    "  timed_out\n",
+    "  unexpected_eof\n",
+    "  io_other { msg: string }\n",
+    "}\n",
+    "pub enum net_err {\n",
+    "  timeout\n",
+    "  refused\n",
+    "  addr_in_use\n",
+    "  reset\n",
+    "  net_other { msg: string }\n",
+    "}\n",
 );
 
 /// Checks the user file against the ambient stub and returns its
@@ -95,7 +96,7 @@ fn a_declared_label_outside_the_expected_union_refuses_unknown_member() {
     let diags = check_user(concat!(
         "const bad: io_err = refused\n",
         "fn m(e: io_err) -> string { match e { refused => \"x\", rest => \"y\" } }\n",
-        "const test: bool = not_found is addr_in_use\n",
+        "const test: bool = timed_out is addr_in_use\n",
     ));
     assert_eq!(diags.len(), 3, "{diags:?}");
     for diag in &diags {
@@ -158,7 +159,7 @@ fn a_qualified_label_over_an_ambiguous_head_refuses() {
 fn a_qualified_label_outside_the_head_refuses_unknown_member() {
     let diags = check_user(concat!(
         "const v: io_err = io_err::refused\n",
-        "const t: bool = not_found is io_err::refused\n",
+        "const t: bool = timed_out is io_err::refused\n",
         "fn m(e: io_err) -> string { match e { io_err::refused => \"x\", rest => \"y\" } }\n",
     ));
     assert_eq!(diags.len(), 3, "{diags:?}");

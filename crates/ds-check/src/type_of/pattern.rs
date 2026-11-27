@@ -606,14 +606,23 @@ impl Bodies<'_> {
                     // its cases answer through the name index the linked
                     // install filled; the cases are the enum's own written
                     // members, so they resolve under its declaring file.
-                    let shape = self.decls.enums.get(&def)?;
-                    let (case_name, ..) =
-                        shape.cases.iter().find(|(name, ..)| name == &tail.name)?;
+                    // A tail naming no case falls through to the shared
+                    // qualified-label report, the value spelling's own
+                    // unknown-member wording.
+                    let shape = self.decls.enums.get(&def)?.clone();
+                    let Some(case_name) = shape
+                        .cases
+                        .iter()
+                        .find(|(name, ..)| name == &tail.name)
+                        .map(|(name, ..)| name.clone())
+                    else {
+                        return self.qualified_pattern_label(head, tail);
+                    };
                     let enum_file = self.package.def(def).span.file;
                     let case_def = self
                         .package
-                        .lookup_type_in(enum_file, case_name)
-                        .or_else(|| self.decls.foreign_type(case_name))?;
+                        .lookup_type_in(enum_file, &case_name)
+                        .or_else(|| self.decls.foreign_type(&case_name))?;
                     let atom = match self.decls.atoms.get(&case_def).copied() {
                         Some(atom) => {
                             self.record_directed_tag(tail.span, atom);

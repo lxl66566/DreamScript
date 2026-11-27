@@ -1466,12 +1466,12 @@ mod tests {
         };
         assert_eq!(tag, crate::native::PLATFORM_IO_NOT_FOUND);
         let Value::Ref(word) = payload else {
-            panic!("the failure payload is the message: {payload:?}");
+            panic!("the failure payload is the path word: {payload:?}");
         };
-        let message = heaps.str_at(word).expect("the message reads").to_owned();
-        assert!(
-            message.starts_with("proc_spawn ds-proc-test-no-such-program:"),
-            "the message names the op and the program: {message}"
+        let path = heaps.str_at(word).expect("the path reads").to_owned();
+        assert_eq!(
+            path, "ds-proc-test-no-such-program",
+            "the not_found class answers the program it failed on: {path}"
         );
     }
 }

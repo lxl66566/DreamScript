@@ -29,4 +29,4 @@ const inner_gone = remove("fsys_dirs_probe.d/inner")
 if inner_gone is io_err { println("inner still") } else { println("inner removed") }
 const swept = remove("fsys_dirs_probe.d")
 if swept is io_err { println("sweep failed") } else { println("swept") }
-println("clean ${file_exists("fsys_dirs_probe.d")}")
+println("clean ${file_exists("fsys_dirs_probe.d").err((_: io_err) => false)}")

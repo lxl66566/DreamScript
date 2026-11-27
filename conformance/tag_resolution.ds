@@ -97,7 +97,9 @@ fn qualified_timeout() -> net_err {
 }
 
 fn undirected() -> io_err {
-  const bare = not_found
+  // the undirected bare label resolves the case's own def, the payload
+  // classes keeping the call form their construction door
+  const bare = timed_out
   bare
 }
 
