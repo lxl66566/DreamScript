@@ -699,6 +699,7 @@ pub(super) fn res_data(res: &Res) -> ResData {
                 candidates: candidates.iter().map(|m| m.index()).collect(),
             },
             ds_check::DotRes::Module { func } => DotResData::Module { func: func.index() },
+            ds_check::DotRes::Field => DotResData::Field,
         }),
         Res::Handler => ResData::Handler,
         Res::Module(module) => ResData::Module(module.index()),

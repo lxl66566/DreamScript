@@ -181,6 +181,17 @@ impl<'a> FnLower<'a, '_, '_> {
             Vec<&Expr>,
             Option<TraitDispatch>,
         ) = if let Expr::Field { recv, name, .. } = &**callee {
+            // The field tier: the checker's record at the call span owns
+            // the routing (the record, not the resolution tier) — the
+            // call is the indirect call of the fn-typed field's word, the
+            // written arguments alone. The receiver is no argument (a
+            // field holds a plain callable, unlike a method member), and
+            // the field read's word is the heap-closure round's Ref, so
+            // the computed-callee path binds it through the temporary
+            // before the arguments stage.
+            if self.analyzed.checked.field_calls.contains(&call_span) {
+                return self.computed_callee_call(callee, ty, args, trailing.as_deref(), tail);
+            }
             match self.res.get(name.span) {
                 Some(Res::Handler) => {
                     // the `.err`/`.ok` handlers: tag dispatch plus an
@@ -369,40 +380,10 @@ impl<'a> FnLower<'a, '_, '_> {
             }
         } else {
             let Expr::Path { path, span, .. } = &**callee else {
-                // A computed callee: the callee word binds through a
-                // temporary before the arguments stage (argument
-                // evaluation may itself call), the indirect call reading
-                // it like any binding's word.
-                let callee_val = self.value(callee)?;
-                let callee_ty = self.val(callee.span())?.ty;
-                let Some((params, ret)) = fn_sig_of(self.universe(), callee_ty) else {
-                    return Err(LowerError::unsupported(
-                        callee.span(),
-                        "a computed callee",
-                        "its checked type is not a function",
-                    ));
-                };
-                let params = params.to_vec();
-                let word = single(
-                    &self
-                        .word_addrs(&callee_val.place, callee_val.ty)
-                        .map_err(|err| err.respanned(callee.span()))?,
-                    callee.span(),
-                )?;
-                let mut arg_exprs: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
-                if let Some(block) = trailing {
-                    arg_exprs.push(&**block);
-                }
-                return self.calls_word(
-                    ty,
-                    &params,
-                    ret,
-                    word,
-                    None,
-                    callee.span(),
-                    &arg_exprs,
-                    tail,
-                );
+                // A computed callee (`fs[0](x)`, a call result, the
+                // field tier): the callee word binds through a temporary
+                // before the arguments stage.
+                return self.computed_callee_call(callee, ty, args, trailing.as_deref(), tail);
             };
             // `Trait::f(x)` qualification: the checker records the
             // solved instance at the call's own span like the dot form,
@@ -1668,6 +1649,53 @@ impl<'a> FnLower<'a, '_, '_> {
             _ => PlaceShape::Span(ty),
         };
         Ok(Place { base, shape })
+    }
+
+    /// The computed callee: the callee expression evaluates first and
+    /// its word binds through the temporary, the arguments staging after
+    /// it (argument evaluation may itself call), the indirect call
+    /// reading the word like any binding's. The heap-closure round's
+    /// vocabulary rides along: a fn-typed field read, a subscript read,
+    /// or a call result hands the callee word over — a scalar Fn word or
+    /// the closure Ref word CALLS reads through.
+    fn computed_callee_call(
+        &mut self,
+        callee: &Expr,
+        ty: Ty,
+        args: &[CallArg],
+        trailing: Option<&Expr>,
+        tail: bool,
+    ) -> Result<Place, LowerError> {
+        let callee_val = self.value(callee)?;
+        let callee_ty = self.val(callee.span())?.ty;
+        let Some((params, ret)) = fn_sig_of(self.universe(), callee_ty) else {
+            return Err(LowerError::unsupported(
+                callee.span(),
+                "a computed callee",
+                "its checked type is not a function",
+            ));
+        };
+        let params = params.to_vec();
+        let word = single(
+            &self
+                .word_addrs(&callee_val.place, callee_val.ty)
+                .map_err(|err| err.respanned(callee.span()))?,
+            callee.span(),
+        )?;
+        let mut arg_exprs: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
+        if let Some(block) = trailing {
+            arg_exprs.push(block);
+        }
+        self.calls_word(
+            ty,
+            &params,
+            ret,
+            word,
+            None,
+            callee.span(),
+            &arg_exprs,
+            tail,
+        )
     }
 
     /// CALLS (the callable-word call form): the callee is a local

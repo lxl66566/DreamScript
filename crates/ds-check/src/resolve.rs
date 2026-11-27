@@ -312,6 +312,15 @@ pub enum DotRes {
         /// The linked member's function the call enters.
         func: DefId,
     },
+    /// No free function and no registered member answers the name: the
+    /// call may still be the receiver's fn-typed field called through
+    /// the dot. The resolver cannot type the receiver, so this row is
+    /// the marker the checker decides on — the receiver's single-struct
+    /// type carrying a fn-typed field of the name turns the spelling
+    /// into an indirect call of the field's word, and every other
+    /// receiver takes the refused reading there (the diagnostic lives
+    /// with the decision, never here).
+    Field,
 }
 
 /// The side table a resolution pass produces: use span to resolution.
@@ -482,7 +491,9 @@ impl UseIndex {
                     Res::Dot(DotRes::Free { func, .. } | DotRes::Module { func }) => {
                         index.defs.entry(func.index()).or_default().push(use_span);
                     },
-                    Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. })
+                    // The field tier's name is the receiver's field
+                    // label, no value-namespace target.
+                    Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. } | DotRes::Field)
                     | Res::Handler
                     | Res::Module(_) => {},
                 }
@@ -509,4 +520,34 @@ impl UseIndex {
     pub fn method_uses(&self, id: MethodId) -> &[Span] {
         self.methods.get(&id.index()).map_or(&[], Vec::as_slice)
     }
+}
+
+/// The nearest candidate by edit distance; ties break to the
+/// lexicographically smallest name so the suggestion is deterministic.
+pub(crate) fn nearest(name: &str, mut candidates: Vec<String>) -> Option<String> {
+    candidates.sort();
+    let threshold = (name.len() / 3).max(1);
+    candidates
+        .into_iter()
+        .map(|candidate| (edit_distance(name, &candidate), candidate))
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .and_then(|(distance, candidate)| (distance <= threshold).then_some(candidate))
+}
+
+/// Levenshtein edit distance over bytes; small strings only (identifiers).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_bytes = b.as_bytes();
+    let mut previous: Vec<usize> = (0..=b_bytes.len()).collect();
+    let mut current = vec![0; b_bytes.len() + 1];
+    for (i, a_byte) in a.as_bytes().iter().enumerate() {
+        current[0] = i + 1;
+        for (j, b_byte) in b_bytes.iter().enumerate() {
+            let cost = usize::from(a_byte != b_byte);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + cost);
+        }
+        core::mem::swap(&mut previous, &mut current);
+    }
+    previous[b_bytes.len()]
 }

@@ -382,6 +382,9 @@ impl Session {
                 .iter()
                 .map(|id| package.method(*id).span)
                 .collect(),
+            // A field call's name is the receiver's field label, a
+            // declaration the value-namespace tables never hold.
+            Res::Dot(DotRes::Field) => Vec::new(),
             // The handler forms and a bare module alias name no
             // definition behind them (the alias's members are the
             // cross-package scope round's).
@@ -551,9 +554,12 @@ impl Session {
                         },
                     ))
                 },
-                // The module-qualified tier, the handler forms, and a
-                // module alias name no single target behind them.
-                Res::Dot(DotRes::Module { .. }) | Res::Handler | Res::Module(_) => None,
+                // The field tier, the module-qualified tier, the
+                // handler forms, and a module alias name no single
+                // target behind them.
+                Res::Dot(DotRes::Field | DotRes::Module { .. }) | Res::Handler | Res::Module(_) => {
+                    None
+                },
             });
         }
         for raw in 0..package.len() {

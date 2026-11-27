@@ -390,6 +390,9 @@ impl Walker<'_> {
                 (Tok::Method, 0)
             },
             Res::Dot(DotRes::Free { .. } | DotRes::Module { .. }) => (Tok::Function, 0),
+            // The field tier's name is the receiver's field label read
+            // in call position.
+            Res::Dot(DotRes::Field) => (Tok::Property, 0),
             // The `.err`/`.ok` handler forms are surface syntax, and a
             // bare module alias is not a value.
             Res::Handler | Res::Module(_) => (Tok::Keyword, 0),

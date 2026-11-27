@@ -353,18 +353,37 @@ fn ufcs_method_tier_registers_candidates() {
 
 #[test]
 fn ufcs_unresolved_lists_tiers_in_order() {
-    let f = fixture(&[(
-        "t.ds",
-        concat!(
-            "pub tag t\n",
-            "pub fn len(xs: t) -> t { xs }\n",
-            "pub fn caller(xs: t) -> t { xs.lenn() }\n",
-        ),
-    )]);
+    let source = concat!(
+        "pub tag t\n",
+        "pub fn len(xs: t) -> t { xs }\n",
+        "pub fn caller(xs: t) -> t { xs.lenn() }\n",
+    );
+    let f = fixture(&[("t.ds", source)]);
     assert_eq!(f.collect, Vec::new());
-    let (_, diags) = f.resolve(0);
-    assert_eq!(diags.len(), 1, "{diags:?}");
-    let diag = &diags[0];
+    // The miss is the checker's decision now: resolution records the
+    // field-tier marker silently (the resolver cannot type the
+    // receiver), and the refusal lands where the receiver's type
+    // declined the field reading.
+    let (uses, diags) = f.resolve(0);
+    assert!(diags.is_empty(), "{diags:?}");
+    let span = span_in(f.source(0), file_of(&f, 0), "xs.lenn()", 0, "lenn");
+    match uses.get(span) {
+        Some(Res::Dot(DotRes::Field)) => {},
+        other => panic!("the field-tier marker expected: {other:?}"),
+    }
+    // The checker's refusal keeps the wording, F3's tier note, and the
+    // nearest candidate.
+    let mut files = Files::new();
+    let id = files.add_source("t.ds", source);
+    let ast = parse(&files, id).expect("parses");
+    let analyzed = ds_check::analyze(&files, &[ast]);
+    assert_eq!(
+        analyzed.checked.diags.len(),
+        1,
+        "{:?}",
+        analyzed.checked.diags
+    );
+    let diag = &analyzed.checked.diags[0];
     assert_eq!(diag.code, ErrorCode::UnresolvedName);
     assert!(
         diag.notes
@@ -372,6 +391,13 @@ fn ufcs_unresolved_lists_tiers_in_order() {
             .any(|n| n.contains("free functions first")),
         "the note lists F3's tier order: {:?}",
         diag.notes
+    );
+    assert!(
+        diag.suggestions
+            .iter()
+            .any(|s| matches!(s, ds_diag::Suggestion::Replace { with, .. } if with == "len")),
+        "the nearest candidate suggests: {:?}",
+        diag.suggestions
     );
     assert!(
         diag.suggestions

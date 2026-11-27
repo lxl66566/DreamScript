@@ -194,6 +194,9 @@ pub enum DotResData {
         /// The linked function's definition index.
         func: u32,
     },
+    /// No free function and no registered member answered: the checker
+    /// decides between the receiver's fn-typed field and the refusal.
+    Field,
 }
 
 /// The universe's mint logs and interned sets: the reserve-phase atoms

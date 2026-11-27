@@ -66,7 +66,7 @@ use crate::{
     extraction::Extraction,
     instance::{Condition, InstanceId},
     instance_solve::Resolution,
-    resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions},
+    resolve::{DefId, DefKind, DotRes, MethodId, MethodOwner, Package, Res, Resolutions, nearest},
     universe::Ty,
 };
 
@@ -374,6 +374,12 @@ pub struct Checked {
     /// tables' method-to-impl-item map; no instance exists for an
     /// inherent impl, so nothing else records at the site.
     pub inherent_calls: FxHashMap<Span, MethodId>,
+    /// Every dot-call the field tier answered, keyed by the call's own
+    /// span: the spelling lowered as the indirect call of the receiver's
+    /// fn-typed field word, the written arguments alone (the receiver no
+    /// argument). The lowering routes on this record before any
+    /// resolution tier.
+    pub field_calls: FxHashSet<Span>,
     /// The runtime evidence a call into a generic inherent impl's body
     /// needs: one entry per declared bound — the bound's variable
     /// atom, its trait, and the unique instance serving the substituted
@@ -606,6 +612,7 @@ pub fn analyze_resolved(
         trait_calls: checked.trait_calls,
         hole_show_dispatches: checked.hole_show_dispatches,
         inherent_calls: checked.inherent_calls,
+        field_calls: checked.field_calls,
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
@@ -780,6 +787,7 @@ fn analyze_served_over(
         trait_calls: checked.trait_calls,
         hole_show_dispatches: checked.hole_show_dispatches,
         inherent_calls: checked.inherent_calls,
+        field_calls: checked.field_calls,
         inherent_call_bounds: checked.inherent_call_bounds,
         generic_call_bounds: checked.generic_call_bounds,
         is_tests: checked.is_tests,
@@ -839,6 +847,7 @@ where
     let mut generic_calls = FxHashMap::default();
     let mut trait_calls = FxHashMap::default();
     let mut inherent_calls = FxHashMap::default();
+    let mut field_calls = FxHashSet::default();
     let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut member_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
     let mut call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
@@ -872,6 +881,7 @@ where
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
             inherent_calls: &mut inherent_calls,
+            field_calls: &mut field_calls,
             inherent_call_bounds: &mut inherent_call_bounds,
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
@@ -941,6 +951,7 @@ where
             generic_calls: &mut generic_calls,
             trait_calls: &mut trait_calls,
             inherent_calls: &mut inherent_calls,
+            field_calls: &mut field_calls,
             inherent_call_bounds: &mut inherent_call_bounds,
             generic_call_bounds: &mut generic_call_bounds,
             is_tests: &mut is_tests,
@@ -1036,6 +1047,7 @@ where
         trait_calls,
         hole_show_dispatches,
         inherent_calls,
+        field_calls,
         inherent_call_bounds,
         generic_call_bounds,
         is_tests,
@@ -1219,6 +1231,7 @@ fn expand_comptime_instances(
         let mut scratch_trait_calls = FxHashMap::default();
         let mut scratch_hole_show = FxHashMap::default();
         let mut scratch_inherent_calls = FxHashMap::default();
+        let mut scratch_field_calls = FxHashSet::default();
         let mut scratch_inherent_bounds = FxHashMap::default();
         let mut scratch_generic_bounds = FxHashMap::default();
         let mut scratch_is_tests = FxHashMap::default();
@@ -1246,6 +1259,7 @@ fn expand_comptime_instances(
             generic_calls: &mut scratch_generic_calls,
             trait_calls: &mut scratch_trait_calls,
             inherent_calls: &mut scratch_inherent_calls,
+            field_calls: &mut scratch_field_calls,
             inherent_call_bounds: &mut scratch_inherent_bounds,
             generic_call_bounds: &mut scratch_generic_bounds,
             is_tests: &mut scratch_is_tests,
@@ -1458,6 +1472,10 @@ struct Bodies<'a> {
     generic_calls: &'a mut FxHashMap<Span, Vec<Ty>>,
     trait_calls: &'a mut FxHashMap<Span, TraitCall>,
     inherent_calls: &'a mut FxHashMap<Span, MethodId>,
+    /// Every dot-call the field tier answered, keyed by the call's own
+    /// span: the lowering's authority for routing the spelling to the
+    /// computed-callee path (the record, not the resolution tier).
+    field_calls: &'a mut FxHashSet<Span>,
     method_selections: &'a mut FxHashMap<Span, MethodId>,
     member_call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
     call_params: &'a mut FxHashMap<Span, Vec<Ty>>,

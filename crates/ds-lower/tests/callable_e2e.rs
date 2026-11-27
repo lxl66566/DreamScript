@@ -633,9 +633,7 @@ fn main() -> int {{ take((x: int) => x * 7) }}
 /// is the one Ref word the count traffic covers, a named fn and a
 /// capturing lambda both construct through the literal (the named fn
 /// wrapping into its static closure object), and the field read's word
-/// stages as a callable argument. The dot-call spelling through a field
-/// name stays refused at the check (the resolver's dot tiers name free
-/// functions and members, never fields).
+/// stages as a callable argument.
 #[test]
 fn fn_typed_struct_fields_hold_closures() {
     acceptance(
@@ -658,6 +656,129 @@ fn main() -> int {{
         ),
         Value::I64(0),
         b"a 2 b 4\n",
+    );
+}
+
+/// The dot-call spelling through a fn-typed field is the field tier's
+/// indirect call: no free function and no member answers the name, the
+/// receiver's field does, and the written arguments alone feed its word
+/// (the receiver is no argument — a field holds a plain callable,
+/// unlike a method member). The receiver's own inherent member keeps its
+/// precedence over a same-named field; a member over another type misses
+/// the receiver and the field answers. The callee word binds through the
+/// computed-callee temporary the heap-closure round established, so a
+/// capturing closure's Ref calls like any binding's.
+#[test]
+fn fn_typed_field_dot_calls() {
+    acceptance(
+        "fn_field_dot_calls",
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn one(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const k = 3
+  const a = box {{ f: one }}
+  const b = box {{ f: (x: int) => x + k }}
+  const r1 = a.f(41)
+  const r2 = b.f(r1)
+  println(\"dot ${{r1}} ${{r2}} ${{a.f(1)}}\")
+  0
+}}
+"
+        ),
+        Value::I64(0),
+        b"dot 42 45 2\n",
+    );
+    // The receiver's own inherent member shadows the field; a member
+    // spelled over another type never claims a receiver it cannot take.
+    acceptance(
+        "fn_field_member_precedence",
+        &format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+struct other {{ n: int }}
+
+impl box {{ fn f(self, x: int) -> int {{ x * 10 }} }}
+impl other {{ fn f(self, x: int) -> int {{ x * 100 + self.n }} }}
+
+fn one(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const o = other {{ n: 5 }}
+  const a = box {{ f: one }}
+  println(\"o ${{o.f(1)}} a ${{a.f(1)}} field ${{apply(a.f, 1)}}\")
+  0
+}}
+
+fn apply(f: fn(int) -> int, v: int) -> int {{ f(v) }}
+"
+        ),
+        Value::I64(0),
+        b"o 105 a 10 field 2\n",
+    );
+}
+
+/// The field tier's refusals keep their homes: a receiver naming no
+/// field of the dot name keeps the resolution-pass wording (the
+/// diagnostic moved to the check with the tier, the receiver's type
+/// deciding), and a field of no callable type refuses the spelling at
+/// the call.
+#[test]
+fn fn_typed_field_dot_call_refusals() {
+    let probe = |name: &str, source: String, needle: &str| {
+        let mut files = Files::new();
+        let id = files.add_source(name, &source);
+        let asts = [parse(&files, id).expect("the probe parses")];
+        let analyzed = analyze(&files, &asts);
+        assert!(
+            !analyzed.checked.diags.is_empty(),
+            "the probe refuses at checking"
+        );
+        let rendered = analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>();
+        assert!(
+            rendered.contains(needle),
+            "the refusal names the seam, got {rendered:?}"
+        );
+    };
+    probe(
+        "field_no_such.ds",
+        format!(
+            "{PRELUDE}
+struct box {{ f: fn(int) -> int }}
+
+fn one(x: int) -> int {{ x + 1 }}
+
+fn main() -> int {{
+  const a = box {{ f: one }}
+  a.g(1)
+  0
+}}
+"
+        ),
+        "no name `g` behind the dot",
+    );
+    probe(
+        "field_not_callable.ds",
+        format!(
+            "{PRELUDE}
+struct box {{ n: int }}
+
+fn main() -> int {{
+  const a = box {{ n: 1 }}
+  a.n(1)
+  0
+}}
+"
+        ),
+        "is not callable; expected one function type",
     );
 }
 

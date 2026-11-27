@@ -749,3 +749,113 @@ fn a_tag_name_keeps_its_value_reading_behind_the_dot() {
         "the type's own receiverless member owns the bare-name receiver"
     );
 }
+
+/// The field tier answers past the member tiers' miss: a dot-call over
+/// the receiver's fn-typed field checks clean, recording the field-call
+/// row and no dispatch record, while the receiver's own inherent member
+/// keeps its precedence over a same-named field (the field answers only
+/// where the member tier lost).
+#[test]
+fn a_field_call_answers_past_the_member_tiers() {
+    let field_only = concat!(
+        "tag int\n",
+        "struct box { f: fn(int) -> int }\n",
+        "fn one(x: int) -> int { x + 1 }\n",
+        "fn main() -> int {\n",
+        "  const a = box { f: one }\n",
+        "  a.f(1)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (ast, analyzed) = analyze_source("field_call.ds", field_only);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the field call checks clean: {}",
+        render(&analyzed)
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one field-call site")
+    };
+    assert!(
+        analyzed.checked.field_calls.contains(call),
+        "the field call records its row at the call span"
+    );
+    assert!(
+        analyzed.checked.inherent_calls.is_empty() && analyzed.checked.trait_calls.is_empty(),
+        "no dispatch records at a field call"
+    );
+
+    let member_first = concat!(
+        "tag int\n",
+        "struct box { f: fn(int) -> int }\n",
+        "fn one(x: int) -> int { x + 1 }\n",
+        "impl box { fn f(self, x: int) -> int { x * 10 } }\n",
+        "fn main() -> int {\n",
+        "  const a = box { f: one }\n",
+        "  a.f(1)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (ast, analyzed) = analyze_source("member_first.ds", member_first);
+    assert!(
+        analyzed.checked.diags.is_empty(),
+        "the member's precedence checks clean: {}",
+        render(&analyzed)
+    );
+    let spans = call_spans(&ast);
+    let [call] = spans.as_slice() else {
+        panic!("one member-call site")
+    };
+    assert!(
+        analyzed.checked.field_calls.is_empty(),
+        "the field tier never claims a member's spelling"
+    );
+    let method = analyzed
+        .checked
+        .inherent_calls
+        .get(call)
+        .expect("the receiver's own member owns the call");
+    assert_eq!(analyzed.package.method(*method).name, "f");
+}
+
+/// The field tier's misses keep the refused readings: a receiver naming
+/// no field of the dot name keeps the resolution-pass wording (the
+/// diagnostic moved to the check with the tier, the receiver's type
+/// deciding), and a field of no callable type refuses the spelling at
+/// the call.
+#[test]
+fn the_field_tiers_miss_keeps_the_dot_refusals() {
+    let no_field = concat!(
+        "tag int\n",
+        "struct box { f: fn(int) -> int }\n",
+        "fn one(x: int) -> int { x + 1 }\n",
+        "fn main() -> int {\n",
+        "  const a = box { f: one }\n",
+        "  a.g(1)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (_ast, analyzed) = analyze_source("no_field.ds", no_field);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("no name `g` behind the dot"),
+        "the miss keeps the dot refusal: {rendered}"
+    );
+
+    let not_callable = concat!(
+        "tag int\n",
+        "struct box { n: int }\n",
+        "fn main() -> int {\n",
+        "  const a = box { n: 1 }\n",
+        "  a.n(1)\n",
+        "  0\n",
+        "}\n",
+    );
+    let (_ast, analyzed) = analyze_source("not_callable.ds", not_callable);
+    let rendered = render(&analyzed);
+    assert!(
+        rendered.contains("is not callable; expected one function type"),
+        "a non-callable field refuses at the call: {rendered}"
+    );
+}

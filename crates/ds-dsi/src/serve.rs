@@ -652,6 +652,7 @@ pub(super) fn serve_resolutions(artifact: &PrefixDsi) -> Vec<Resolutions> {
                                 DotResData::Module { func } => ds_check::DotRes::Module {
                                     func: DefId::from_raw(*func),
                                 },
+                                DotResData::Field => ds_check::DotRes::Field,
                             }),
                             ResData::Handler => Res::Handler,
                             ResData::Module(module) => {

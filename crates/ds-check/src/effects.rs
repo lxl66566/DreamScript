@@ -1409,7 +1409,11 @@ impl Walker<'_, '_> {
                     self.edge(Node::Method(*m), mask);
                 }
             },
-            Some(Res::Local { .. } | Res::Handler | Res::Module(_)) | None => {},
+            // A field call is an indirect call of the receiver's word:
+            // no static callee edge exists, and the receiver's own use
+            // flows through its expression walk.
+            Some(Res::Local { .. } | Res::Handler | Res::Module(_) | Res::Dot(DotRes::Field))
+            | None => {},
         }
     }
 }

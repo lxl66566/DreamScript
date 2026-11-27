@@ -4,6 +4,21 @@
 use super::*;
 
 impl Package {
+    /// Callable-ish names for the dot-call suggestions: value-namespace
+    /// declarations plus registered method names. The resolver and the
+    /// checker's field-tier miss read one list, so a refused dot names
+    /// the same nearest candidate both passes would.
+    #[must_use]
+    pub fn callable_candidates(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.value_names.keys().cloned().collect();
+        names.extend(self.method_index.keys().cloned());
+        if let Some(base) = self.base.as_deref() {
+            names.extend(base.value_names.keys().cloned());
+            names.extend(base.method_index.keys().cloned());
+        }
+        names
+    }
+
     /// The linked modules' tag-table rows the link pass collected (the
     /// shared tag mapping): the lowering seeds its own table with them
     /// before any body mints, so a union-typed word crossing a module

@@ -3,8 +3,10 @@
 //! and the `.err`/`.ok` handler arms and extraction calls result types answer
 //! through.
 
+use ds_diag::Suggestion;
+
 use super::super::*;
-use crate::atom::AtomKind;
+use crate::{atom::AtomKind, type_of::place::FieldLookup};
 
 impl Bodies<'_> {
     /// DS2050: a call site's `as` selection where no trait dispatch
@@ -232,6 +234,7 @@ impl Bodies<'_> {
 
     pub(in crate::type_of) fn dot_call(
         &mut self,
+        callee: &Expr,
         recv: &Expr,
         name: &Ident,
         args: &[ds_parse::CallArg],
@@ -315,6 +318,7 @@ impl Bodies<'_> {
                         let recv_val = self.expr(recv, None);
                         if !self.free_fn_takes_receiver(func, recv_val.ty) {
                             return self.method_select_typed(
+                                callee,
                                 recv,
                                 recv_val,
                                 name,
@@ -358,8 +362,63 @@ impl Bodies<'_> {
                 }
                 self.call_def(func, None, args, trailing, span)
             },
-            Res::Dot(DotRes::Methods { candidates }) => {
-                self.method_select(recv, name, &candidates, args, trailing, span, selection)
+            Res::Dot(DotRes::Methods { candidates }) => self.method_select(
+                callee,
+                recv,
+                name,
+                &candidates,
+                args,
+                trailing,
+                span,
+                selection,
+            ),
+            Res::Dot(DotRes::Field) => {
+                // The field tier: no free function and no member answered
+                // the name, so the receiver's fn-typed field decides — the
+                // call is the indirect call of the field's word, the
+                // receiver no argument. Any other receiver takes the
+                // refused reading, whose diagnostic moved here with the
+                // tier (the miss is only known once the receiver's type
+                // declined the field reading).
+                if let Some(selection) = selection {
+                    self.selection_without_dispatch(
+                        selection,
+                        span,
+                        "a field call dispatches through no trait instance",
+                    );
+                }
+                let recv_val = self.expr(recv, None);
+                if recv_val.poisoned {
+                    for arg in args {
+                        self.expr(&arg.value, None);
+                    }
+                    if let Some(tail) = trailing {
+                        self.expr(tail, None);
+                    }
+                    return Val {
+                        ty: self.empty(),
+                        diverges: false,
+                        poisoned: true,
+                    };
+                }
+                if let Some(val) =
+                    self.field_call_site(callee, recv_val.ty, name, args, trailing, span)
+                {
+                    val
+                } else {
+                    self.report_dot_name_miss(name);
+                    for arg in args {
+                        self.expr(&arg.value, None);
+                    }
+                    if let Some(tail) = trailing {
+                        self.expr(tail, None);
+                    }
+                    Val {
+                        ty: self.empty(),
+                        diverges: false,
+                        poisoned: false,
+                    }
+                }
             },
             _ => {
                 self.error(
@@ -379,6 +438,76 @@ impl Bodies<'_> {
                 }
             },
         }
+    }
+
+    /// The field tier behind the dot: the receiver's single-struct type
+    /// carries a field of the name and the call is the indirect call of
+    /// the field's word — the receiver is no argument (a field holds a
+    /// plain callable, unlike a method member), the field's fn type
+    /// validating the written arguments through the ordinary indirect
+    /// call. The field read's checked type records at the callee's own
+    /// span and the call records in `field_calls` — the lowering's
+    /// authority for the record-over-tier routing. `None` answers the
+    /// miss (no field of the name); an unsolved field type refuses at
+    /// the field's own spelling, the same words the value access keeps.
+    pub(in crate::type_of) fn field_call_site(
+        &mut self,
+        callee: &Expr,
+        recv_ty: Ty,
+        name: &Ident,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Option<Val> {
+        match self.lookup_field(recv_ty, name) {
+            FieldLookup::NotAStruct | FieldLookup::Missing => None,
+            FieldLookup::Unsolved => {
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("field `{}` does not solve", name.name),
+                        name.span,
+                        "unsolvable field type",
+                    );
+                }
+                Some(Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
+                })
+            },
+            FieldLookup::Found(ty) => {
+                let field_val = Val {
+                    ty,
+                    diverges: false,
+                    poisoned: false,
+                };
+                self.record_val(callee.span(), field_val);
+                self.field_calls.insert(span);
+                Some(self.indirect_call(field_val, args, trailing, span))
+            },
+        }
+    }
+
+    /// The refused reading of a dot-call name the field tier also
+    /// missed: the resolution pass's own wording, moved here with the
+    /// field tier — no diagnostic fires at resolution, where the
+    /// receiver's type is unknown, and this is the one place the miss
+    /// is certain.
+    pub(in crate::type_of) fn report_dot_name_miss(&mut self, name: &Ident) {
+        let mut diag = Diagnostic::error(
+            ErrorCode::UnresolvedName,
+            format!("no name `{}` behind the dot", name.name),
+        )
+        .with_primary(name.span, "not a free function, not a method")
+        .with_note("tried free functions first, then trait and inherent methods [F3]");
+        if let Some(near) = nearest(&name.name, self.package.callable_candidates()) {
+            diag = diag.with_suggestion(Suggestion::Replace {
+                span: name.span,
+                with: near,
+            });
+        }
+        self.diags.push(diag);
     }
 
     /// The receiver of a type-keyed dot-call: a bare single-segment path
@@ -661,8 +790,10 @@ impl Bodies<'_> {
     /// type — trait members through the instance environment (or an
     /// in-scope assumption), inherent members by owner type; survivors
     /// beyond one are true ambiguity, never a priority order.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::type_of) fn method_select(
         &mut self,
+        callee: &Expr,
         recv: &Expr,
         name: &Ident,
         candidates: &[MethodId],
@@ -673,7 +804,7 @@ impl Bodies<'_> {
     ) -> Val {
         let recv_val = self.expr(recv, None);
         self.method_select_typed(
-            recv, recv_val, name, candidates, args, trailing, span, selection,
+            callee, recv, recv_val, name, candidates, args, trailing, span, selection,
         )
     }
 
@@ -688,6 +819,7 @@ impl Bodies<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::type_of) fn method_select_typed(
         &mut self,
+        callee: &Expr,
         recv: &Expr,
         recv_val: Val,
         name: &Ident,
@@ -785,6 +917,13 @@ impl Bodies<'_> {
                     diverges: false,
                     poisoned: false,
                 };
+            }
+            // The member tier lost to no bound and no selection: the
+            // receiver's fn-typed field takes the name before the refusal
+            // does (fields come after members, never before).
+            if let Some(val) = self.field_call_site(callee, recv_val.ty, name, args, trailing, span)
+            {
+                return val;
             }
             let trait_names: Vec<String> = candidates
                 .iter()

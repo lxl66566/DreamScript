@@ -4,6 +4,18 @@
 
 use super::*;
 
+/// The quiet answer of a field lookup on a solved receiver type.
+pub(super) enum FieldLookup {
+    /// The receiver's solved set is not one struct atom.
+    NotAStruct,
+    /// One struct atom, but it names no such field.
+    Missing,
+    /// The field's written type solves to nothing.
+    Unsolved,
+    /// The field's solved type.
+    Found(Ty),
+}
+
 impl Bodies<'_> {
     /// Bare field access `x.f`: struct-owned, type-directed; on a
     /// generic application through the constructor's shape and the
@@ -79,100 +91,102 @@ impl Bodies<'_> {
                 poisoned: true,
             };
         }
-        let single = {
-            let members = self.decls.universe.members(recv_val.ty);
-            members.first().filter(|_| members.len() == 1).copied()
-        };
-        let Some(single) = single else {
-            self.error(
-                ErrorCode::TypeMismatch,
-                format!(
-                    "field access needs one struct, `{}` given; narrow with `is` first [B2]",
-                    self.decls.universe.render(recv_val.ty)
-                ),
-                name.span,
-                "not a single struct",
-            );
-            return Val {
-                ty: self.empty(),
+        // The field lookup is the one table walk the value access and
+        // the dot-call's field tier read.
+        match self.lookup_field(recv_val.ty, name) {
+            FieldLookup::NotAStruct => {
+                self.error(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "field access needs one struct, `{}` given; narrow with `is` first [B2]",
+                        self.decls.universe.render(recv_val.ty)
+                    ),
+                    name.span,
+                    "not a single struct",
+                );
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
+            FieldLookup::Missing => {
+                self.no_field(recv_val.ty, name);
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
+            FieldLookup::Unsolved => {
+                if !self.take_solve_reported() {
+                    self.error(
+                        ErrorCode::TypeMismatch,
+                        format!("field `{}` does not solve", name.name),
+                        name.span,
+                        "unsolvable field type",
+                    );
+                }
+                Val {
+                    ty: self.empty(),
+                    diverges: false,
+                    poisoned: false,
+                }
+            },
+            FieldLookup::Found(ty) => Val {
+                ty,
                 diverges: false,
                 poisoned: false,
-            };
+            },
+        }
+    }
+
+    /// The single-struct receiver's field lookup, quiet: the field-access
+    /// value walk and the dot-call's field tier read one table walk.
+    /// [`FieldLookup::NotAStruct`] when the receiver's solved set is not
+    /// one struct atom, [`FieldLookup::Missing`] when that atom names no
+    /// such field, [`FieldLookup::Unsolved`] when the written field type
+    /// solves to nothing, [`FieldLookup::Found`] with the solved type
+    /// otherwise.
+    pub(super) fn lookup_field(&mut self, recv_ty: Ty, name: &Ident) -> FieldLookup {
+        let members = self.decls.universe.members(recv_ty);
+        let Some(single) = members.first().filter(|_| members.len() == 1).copied() else {
+            return FieldLookup::NotAStruct;
         };
         let kind = self.decls.universe.atom_decl(single).ok().map(|d| &d.kind);
         let (def, subst): (DefId, FxHashMap<String, Ty>) = match kind {
             Some(AtomKind::Apply(ctor, args)) => {
-                if let Some(def) = self.decls.defs_of_atoms.get(ctor).copied() {
-                    let mut subst = FxHashMap::default();
-                    if let Some(shape) = self.decls.structs.get(&def) {
-                        for (param, arg) in shape.params.iter().zip(args.iter()) {
-                            subst.insert(param.name.clone(), *arg);
-                        }
+                let Some(def) = self.decls.defs_of_atoms.get(ctor).copied() else {
+                    return FieldLookup::Missing;
+                };
+                let mut subst = FxHashMap::default();
+                if let Some(shape) = self.decls.structs.get(&def) {
+                    for (param, arg) in shape.params.iter().zip(args.iter()) {
+                        subst.insert(param.name.clone(), *arg);
                     }
-                    (def, subst)
-                } else {
-                    self.no_field(recv_val.ty, name);
-                    return Val {
-                        ty: self.empty(),
-                        diverges: false,
-                        poisoned: false,
-                    };
                 }
+                (def, subst)
             },
             _ => match self.decls.defs_of_atoms.get(&single).copied() {
                 Some(def) if self.decls.structs.contains_key(&def) => (def, FxHashMap::default()),
-                _ => {
-                    self.no_field(recv_val.ty, name);
-                    return Val {
-                        ty: self.empty(),
-                        diverges: false,
-                        poisoned: false,
-                    };
-                },
+                _ => return FieldLookup::Missing,
             },
         };
-        let field_ty = self
-            .decls
-            .structs
-            .get(&def)
-            .and_then(|shape| {
-                shape
-                    .fields
-                    .iter()
-                    .find(|field| field.name.name == name.name)
-            })
-            .map(|field| field.ty.clone());
-        let Some(field_ty) = field_ty else {
-            self.no_field(recv_val.ty, name);
-            return Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            };
+        let Some(field_ty) = self.decls.structs.get(&def).and_then(|shape| {
+            shape
+                .fields
+                .iter()
+                .find(|field| field.name.name == name.name)
+                .map(|field| field.ty.clone())
+        }) else {
+            return FieldLookup::Missing;
         };
         self.type_vars.push(subst);
-        let field_ty = self.solve_here(&field_ty);
+        let solved = self.solve_here(&field_ty);
         self.type_vars.pop();
-        if let Some(ty) = field_ty {
-            Val {
-                ty,
-                diverges: false,
-                poisoned: false,
-            }
-        } else {
-            if !self.take_solve_reported() {
-                self.error(
-                    ErrorCode::TypeMismatch,
-                    format!("field `{}` does not solve", name.name),
-                    name.span,
-                    "unsolvable field type",
-                );
-            }
-            Val {
-                ty: self.empty(),
-                diverges: false,
-                poisoned: false,
-            }
+        match solved {
+            Some(ty) => FieldLookup::Found(ty),
+            None => FieldLookup::Unsolved,
         }
     }
 

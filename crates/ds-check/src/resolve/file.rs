@@ -718,7 +718,7 @@ impl FileResolver<'_> {
                 } else if let Some(module) = self.module_alias(&name.name) {
                     self.uses.push((name.span, Res::Module(module)));
                 } else if name.name != "none" {
-                    self.unknown_name(name, self.callable_candidates());
+                    self.unknown_name(name, self.package.callable_candidates());
                 }
             },
         }
@@ -911,7 +911,9 @@ impl FileResolver<'_> {
     }
 
     /// A UFCS dot-call's method position: free functions first, then
-    /// registered methods; the `.err`/`.ok` handler forms are surface
+    /// registered methods, then the receiver's fn-typed field (the
+    /// checker's decision — a type-directed tier); the `.err`/`.ok`
+    /// handler forms are surface
     /// syntax, not names. The dot is a function position, so the free
     /// tier searches the VALUE namespace only. A receiver that is
     /// a bare name resolving through the type namespace takes the
@@ -923,10 +925,23 @@ impl FileResolver<'_> {
             return;
         }
         if let Some(target) = self.type_keyed_receiver(recv) {
-            self.static_use(target, name);
+            self.static_use(recv, target, name);
             return;
         }
-        self.dot_use_value(name);
+        self.dot_use_value(recv, name);
+    }
+
+    /// Whether the receiver is a bare name whose use the walk recorded
+    /// nothing for: no local, no namespace def, no import binding — the
+    /// receiver has no value reading for the field tier to decide on,
+    /// and the unknown-name refusal at the receiver is the whole
+    /// answer (the checker's silent no-record path takes over). The
+    /// receiver's own use walk ran already (`dot_recv_use` precedes
+    /// `dot_use`), so the table's answer at the name's span is the
+    /// truth.
+    fn unresolved_receiver(&self, recv: &Expr) -> bool {
+        single_path_ident(recv)
+            .is_some_and(|only| !self.uses.iter().rev().any(|(span, _)| *span == only.span))
     }
 
     /// Whether a dot-call's receiver is a bare name this file's import
@@ -1218,7 +1233,7 @@ impl FileResolver<'_> {
     /// other reading (the constructor value: `tone.show()` dispatches
     /// the trait impl over the tag's value), so the ordinary value
     /// tiers serve it; any other type names its members alone.
-    fn static_use(&mut self, target: DefId, name: &Ident) {
+    fn static_use(&mut self, recv: &Expr, target: DefId, name: &Ident) {
         let type_name = self.package.def(target).name.clone();
         // one pass serves both halves: the owner's own members claim the
         // call, and the rest feed the "exists on" note when none do
@@ -1231,7 +1246,10 @@ impl FileResolver<'_> {
             });
         if candidates.is_empty() {
             if matches!(self.package.def(target).kind, DefKind::Tag | DefKind::Case) {
-                self.dot_use_value(name);
+                // The type name's constructor value is the receiver: a
+                // resolved name, so the field tier's unresolved-receiver
+                // exemption never fires here.
+                self.dot_use_value(recv, name);
                 return;
             }
             let others = others
@@ -1263,9 +1281,12 @@ impl FileResolver<'_> {
 
     /// The ordinary value tiers behind the dot: the handler
     /// forms, then free functions, then every registered method
-    /// candidate. A receiver that reaches here carries a value reading
-    /// (a local, a value def, or a tag/case constructor value).
-    fn dot_use_value(&mut self, name: &Ident) {
+    /// candidate, then the field tier's marker (the checker decides).
+    /// A receiver that reaches here carries a value reading
+    /// (a local, a value def, or a tag/case constructor value) — a bare
+    /// name resolving to nothing excepted, where the field tier has no
+    /// type to decide on and records nothing.
+    fn dot_use_value(&mut self, recv: &Expr, name: &Ident) {
         if name.name == "err" || name.name == "ok" {
             self.uses.push((name.span, Res::Handler));
             return;
@@ -1295,26 +1316,20 @@ impl FileResolver<'_> {
         if candidates.is_empty() {
             // No member answers the name: a privatized free fn keeps
             // its free reading so the privacy gate's refusal names it;
-            // with no def at all the dot has no callable behind it.
+            // with no def at all the field tier decides — the receiver's
+            // fn-typed field called through the dot, else the checker's
+            // refused reading (the diagnostic lives with that decision,
+            // which needs the receiver's type).
             if let Some(func) = self.package.lookup_value(&name.name) {
                 self.enforce_vis(name.span, func);
                 self.uses
                     .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
                 return;
             }
-            let mut diag = Diagnostic::error(
-                ErrorCode::UnresolvedName,
-                format!("no name `{}` behind the dot", name.name),
-            )
-            .with_primary(name.span, "not a free function, not a method")
-            .with_note("tried free functions first, then trait and inherent methods [F3]");
-            if let Some(near) = nearest(&name.name, self.callable_candidates()) {
-                diag = diag.with_suggestion(Suggestion::Replace {
-                    span: name.span,
-                    with: near,
-                });
+            if self.unresolved_receiver(recv) {
+                return;
             }
-            self.diags.push(diag);
+            self.uses.push((name.span, Res::Dot(DotRes::Field)));
             return;
         }
         self.uses
@@ -1675,18 +1690,6 @@ impl FileResolver<'_> {
         }
         names
     }
-
-    /// Callable-ish names for dot-call suggestions: value-namespace
-    /// declarations plus registered method names.
-    fn callable_candidates(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.package.value_names.keys().cloned().collect();
-        names.extend(self.package.method_index.keys().cloned());
-        if let Some(base) = self.package.base.as_deref() {
-            names.extend(base.value_names.keys().cloned());
-            names.extend(base.method_index.keys().cloned());
-        }
-        names
-    }
 }
 /// The identifier of a single-segment path expression, if it is one.
 fn single_path_ident(expr: &Expr) -> Option<&Ident> {
@@ -1708,33 +1711,4 @@ impl MethodDecl {
             MethodOwner::Inherent(target) => format!("inherent impl `{target}`"),
         }
     }
-}
-/// The nearest candidate by edit distance; ties break to the
-/// lexicographically smallest name so the suggestion is deterministic.
-fn nearest(name: &str, mut candidates: Vec<String>) -> Option<String> {
-    candidates.sort();
-    let threshold = (name.len() / 3).max(1);
-    candidates
-        .into_iter()
-        .map(|candidate| (edit_distance(name, &candidate), candidate))
-        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-        .and_then(|(distance, candidate)| (distance <= threshold).then_some(candidate))
-}
-
-/// Levenshtein edit distance over bytes; small strings only (identifiers).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b_bytes = b.as_bytes();
-    let mut previous: Vec<usize> = (0..=b_bytes.len()).collect();
-    let mut current = vec![0; b_bytes.len() + 1];
-    for (i, a_byte) in a.as_bytes().iter().enumerate() {
-        current[0] = i + 1;
-        for (j, b_byte) in b_bytes.iter().enumerate() {
-            let cost = usize::from(a_byte != b_byte);
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + cost);
-        }
-        core::mem::swap(&mut previous, &mut current);
-    }
-    previous[b_bytes.len()]
 }

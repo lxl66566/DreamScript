@@ -1273,6 +1273,17 @@ impl<'a> Lin<'a> {
         };
         let callee = peel(callee);
         if let Expr::Field { recv, name, .. } = callee {
+            // The field tier: the call is the indirect call of the
+            // field-read's word, so the callee walks as the read it is
+            // (a borrow of the field's word), the arguments behind it.
+            if matches!(
+                self.res.and_then(|res| res.get(name.span)),
+                Some(Res::Dot(DotRes::Field))
+            ) {
+                self.expr(callee, false);
+                self.borrow_args(args, trailing.as_deref());
+                return self.expr_diverges(e.span());
+            }
             let _ = self.dot_call(recv, name, args, trailing.as_deref());
             return self.expr_diverges(e.span());
         }

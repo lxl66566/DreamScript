@@ -69,7 +69,15 @@ impl Bodies<'_> {
             }
         }
         if let Expr::Field { recv, name, .. } = callee {
-            return self.dot_call(recv, name, args, trailing.as_deref(), *span, selection);
+            return self.dot_call(
+                callee,
+                recv,
+                name,
+                args,
+                trailing.as_deref(),
+                *span,
+                selection,
+            );
         }
         // A generic-application constructor `list[t]()`: the callee
         // head resolves in the type namespace.
