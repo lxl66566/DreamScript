@@ -1,6 +1,6 @@
 # DreamScript status
 
-What the tree runs today and what boundary each milestone left. Landed history lives in git; the ranked residual work lives in `docs/en/todo.md`; milestone scope and acceptance criteria live in `docs/en/implementation-plan.md`.
+What the tree runs today and what boundary each milestone left. Landed history lives in git; the ranked residual work lives in the `.agents/todograph/` queue graph; milestone scope and acceptance criteria live in `docs/en/implementation-plan.md`.
 
 | Milestone | State |
 |---|---|

@@ -10,9 +10,12 @@ Every working doc lives under `docs/en/`. The repository's front door is `README
 | `tutorial.md` | The entire v1 surface in one short tutorial, the explainability-budget proof. | You need the ruled surface syntax and semantics in reading order. |
 | `implementation-plan.md` | Milestones M0-M9 with scope and acceptance criteria; workspace and crate layout; dependency policy; test and performance methodology; risks and recorded fallbacks; scope guards. | You plan a round or judge whether something is in scope. |
 | `status.md` | What runs today: per-milestone state and the exact lowered subset the tier-1 pipeline executes. | You need the current boundary before promising or probing behavior. |
-| `todo.md` | The ranked open-work queue, with milestone, effort tag, author rulings, and questions awaiting the author. | You pick the next round's work. |
 | `pitfalls.md` | Index over `pitfalls/`: invariants and lessons that prevent breakage, one board per area (coordination and gates, front end, language surface, lowering, runtime and memory, testing and perf). | You touch any of those areas, or a gate fails in a way that smells familiar. |
 | `memory-arc.md` | The memory endgame execution contract: binding rulings, gates that stay green, silent-breakage register, STOP conditions, measured baselines. | You work on `ds-rt`, ownership lowering, or multi-word values. |
+
+## Work queue — `.agents/todograph/`
+
+The ranked queue lives in the todograph graph, one Markdown file per item, with priority (0 highest, the head item is the next round's work), milestone, effort, section and parked tags, and `deps` edges between items. Drive it with the todograph CLI or MCP tools; done items stay on disk as records, residual clauses keep queuing.
 
 ## Frozen archive — `archive/`
 
