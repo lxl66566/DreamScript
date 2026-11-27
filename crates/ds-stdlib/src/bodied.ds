@@ -81,6 +81,8 @@
 // generic body instantiating per shape — the H3.5 round's own, item
 // 140 — and firstof/interleave's receivers are list[fn() -> t], a
 // head no impl spells yet).
+/// Races the thunks in spawned children, answering the first
+/// arrival.
 pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
   const answers = chan[t](thunks.len())
   nursery {
@@ -90,6 +92,7 @@ pub fn firstof[t] (thunks: list[fn() -> t]) -> t {
   }
   answers.recv()
 }
+/// Races the thunks, collecting their answers in arrival order.
 pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
   const answers = chan[t](thunks.len())
   nursery {
@@ -105,6 +108,8 @@ pub fn interleave[t] (thunks: list[fn() -> t]) -> list[t] {
   }
   out
 }
+/// Folds the list over the initial value through the step
+/// lambda.
 pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
   var acc = init
   for x in xs {
@@ -112,6 +117,8 @@ pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
   }
   acc
 }
+/// The positional pairs of the two lists, up to the shorter
+/// one's length.
 pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
   var out = list[(t, r)]()
   var i: int = 0
@@ -130,15 +137,18 @@ pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
 }
 extern fn fork_map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
 extern fn fork_reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+/// The PRNG's pure state step: the next state.
 pub fn rand_next (seed: int) -> int {
   seed +% -7046029254386353131
 }
+/// The draw over a seed: the mixed value of the advanced state.
 pub fn rand (seed: int) -> int {
   var z = rand_next(seed)
   z = (z ^ ((z >> 30) & 17179869183)) *% -4658895280553007687
   z = (z ^ ((z >> 27) & 137438953471)) *% -7723592293110705685
   z ^ ((z >> 31) & 8589934591)
 }
+/// A fresh state from the wall clock.
 pub fn rand_seed () -> int {
   rand_next(time())
 }
@@ -153,6 +163,8 @@ pub fn rand_seed () -> int {
 // no runtime kind for a type variable — the reflection seam the
 // generic spellings wait on — so the concrete members stay the landed
 // surface.
+/// Panics with the message unless the condition holds; answers
+/// unit.
 pub fn assert (cond: bool, msg: string) -> () {
   if cond {
   } else {
@@ -160,6 +172,7 @@ pub fn assert (cond: bool, msg: string) -> () {
     ()
   }
 }
+/// Panics rendering both words unless the ints are equal.
 pub fn assert_eq_int (a: int, b: int, msg: string) -> () {
   if a == b {
     ()
@@ -168,6 +181,7 @@ pub fn assert_eq_int (a: int, b: int, msg: string) -> () {
     ()
   }
 }
+/// Panics rendering both words unless the floats are equal.
 pub fn assert_eq_float (a: float, b: float, msg: string) -> () {
   if a == b {
     ()
@@ -176,6 +190,7 @@ pub fn assert_eq_float (a: float, b: float, msg: string) -> () {
     ()
   }
 }
+/// Panics rendering both words unless the strings are equal.
 pub fn assert_eq_string (a: string, b: string, msg: string) -> () {
   if a == b {
     ()
@@ -184,6 +199,7 @@ pub fn assert_eq_string (a: string, b: string, msg: string) -> () {
     ()
   }
 }
+/// Panics rendering both words unless the bools are equal.
 pub fn assert_eq_bool (a: bool, b: bool, msg: string) -> () {
   if a == b {
     ()

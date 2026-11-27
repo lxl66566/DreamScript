@@ -19,20 +19,31 @@
 // ordinary tagged layout — the tag word beside the member's own payload
 // word, a char the integer slot's code point and a string the text
 // Ref — and both members read that payload back.
+/// Renders the neighbors' texts around the separator.
 pub extern fn join (parts: list[string], sep: char | string) -> string
+/// The text without its surrounding whitespace.
 pub extern fn trim (s: string) -> string
+/// The int the text spells, or parse_err.
 pub extern fn parse_int (s: string) -> int | parse_err
+/// The float the text spells, or parse_err.
 pub extern fn parse_float (s: string) -> float | parse_err
+/// The slices around every occurrence of the separator's text;
+/// an empty separator slices per char.
 pub extern fn split (s: string, sep: char | string) -> list[string]
 // The checked slice: the chars between the two positions, none
 // outside `0 <= start <= end` and the string's char count — never
 // clamping and never a trap.
+/// The chars between the two positions, none outside the valid
+/// range.
 pub extern fn substring (s: string, start: int, end: int) -> string | none
+/// The text uppercased.
 pub extern fn to_upper (s: string) -> string
+/// The text lowercased.
 pub extern fn to_lower (s: string) -> string
 // The checked char read: the char at the position, none outside
 // the string's range — the old total spelling answered the empty
 // string instead.
+/// The char at the position, none outside the string.
 pub extern fn char_at (s: string, i: int) -> char | none
 // The string search family:
 // `contains` answers the membership read, the empty needle always
@@ -42,8 +53,12 @@ pub extern fn char_at (s: string, i: int) -> char | none
 // every non-overlapping occurrence in one left-to-right pass, the
 // inserted text never re-scanned, the empty needle inserting `with` at
 // every char boundary.
+/// Whether the needle occurs; the empty needle always.
 pub extern fn contains (haystack: string, needle: string) -> bool
+/// The first occurrence's char index, none on a miss.
 pub extern fn index_of (haystack: string, needle: string) -> int | none
+/// The text with every non-overlapping occurrence swapped for
+/// `with`.
 pub extern fn replace (haystack: string, needle: string, with: string) -> string
 
 // The format family: plain ds source over the builtin faces. `hex`
@@ -52,6 +67,8 @@ pub extern fn replace (haystack: string, needle: string, with: string) -> string
 // and `pad_right` are the two alignments, the pad char repeated to the
 // width and a past-the-width value answering itself. Floats compose
 // over the builtin `str_fixed` formatter.
+/// The lowercase hex digits of the word; a negative value keeps
+/// its sign.
 pub fn hex (n: int) -> string {
   if n < 0 {
     return "-${hex(-n)}"
@@ -72,6 +89,8 @@ pub fn hex (n: int) -> string {
   out
 }
 
+/// The text padded on the left to the width with the pad char;
+/// a longer text answers itself.
 pub fn pad_left (s: string, width: int, pad: char) -> string {
   const missing = width - len(s)
   if missing <= 0 {
@@ -86,6 +105,8 @@ pub fn pad_left (s: string, width: int, pad: char) -> string {
   "${fill}${s}"
 }
 
+/// The text padded on the right to the width with the pad char;
+/// a longer text answers itself.
 pub fn pad_right (s: string, width: int, pad: char) -> string {
   const missing = width - len(s)
   if missing <= 0 {
@@ -113,17 +134,23 @@ pub fn pad_right (s: string, width: int, pad: char) -> string {
 // without substring allocation, and `view_text` is the one
 // materializing door — a parser holds cursors into a shared base and
 // pays the copy only at the exit that needs the text.
+/// A zero-copy view: a counted share of a base string and the
+/// half-open char range [start, end) into it.
 pub struct string_view { s: string, start: int, end: int }
 
+/// The validated view over the range, none outside the base's
+/// char count.
 pub fn view (s: string, start: int, end: int) -> string_view | none {
   if start < 0 || end < start || end > len(s) { none }
   else { string_view { s: s, start: start, end: end } }
 }
 
+/// The view's char count.
 pub fn view_len (v: string_view) -> int {
   v.end - v.start
 }
 
+/// The char at the view-relative index, none outside the view.
 pub fn view_char_at (v: string_view, i: int) -> char | none {
   if i < 0 || i >= v.end - v.start {
     none
@@ -136,6 +163,8 @@ pub fn view_char_at (v: string_view, i: int) -> char | none {
 // The slice composing a further view: the range validated against this
 // view's own bounds, so the composed view can never fall off the base
 // it already sits inside.
+/// The inner view over a view-relative range, none outside this
+/// view's bounds.
 pub fn view_slice (v: string_view, start: int, end: int) -> string_view | none {
   if start < 0 || end < start || v.start + end > v.end {
     none
@@ -148,6 +177,8 @@ pub fn view_slice (v: string_view, start: int, end: int) -> string_view | none {
 // The content equality against a whole string: the length read first,
 // then the char walk over both — no substring allocation on either
 // side of the compare.
+/// Whether the view's text equals the string's, without
+/// allocation.
 pub fn view_eq (v: string_view, other: string) -> bool {
   if v.end - v.start != len(other) { return false }
   var i = 0
@@ -163,6 +194,8 @@ pub fn view_eq (v: string_view, other: string) -> bool {
 
 // The materializing read back out: the one door that allocates, over a
 // range construction already validated.
+/// The view's text, materialized — the face's one allocating
+/// read.
 pub fn view_text (v: string_view) -> string {
   substring(v.s, v.start, v.end).unwrap_or("")
 }

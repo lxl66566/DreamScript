@@ -10,29 +10,55 @@
 // owns), and implements `encoder` for its constructions (each member
 // consuming one seed document and answering the constructed one — a
 // driver may thread state through the seed; json ignores it).
+/// The encode half of a serialization driver: one construction
+/// member per value shape, consuming the seed document and
+/// answering the constructed one.
 pub trait encoder {
+  /// Encodes one bool into the document.
   fn enc_bool (self, value: bool) -> Self
+  /// Encodes one int into the document.
   fn enc_int (self, value: int) -> Self
+  /// Encodes one float into the document.
   fn enc_float (self, value: float) -> Self
+  /// Encodes one string into the document.
   fn enc_string (self, value: string) -> Self
+  /// Encodes one byte into the document.
   fn enc_byte (self, value: byte) -> Self
+  /// Encodes one u32 into the document.
   fn enc_u32 (self, value: u32) -> Self
+  /// Encodes one char into the document.
   fn enc_char (self, value: char) -> Self
+  /// Encodes one bytes value into the document.
   fn enc_bytes (self, value: bytes) -> Self
+  /// Encodes the array of values into the document.
   fn enc_array (self, items: list[Self]) -> Self
+  /// Encodes the object of members into the document.
   fn enc_object (self, fields: map[string, Self]) -> Self
 }
 
+/// The decode half of a serialization driver: one typed read
+/// per value shape, a wrong shape answering parse_err.
 pub trait decoder {
+  /// Reads the document as an object, or parse_err.
   fn dec_object (self) -> map[string, Self] | parse_err
+  /// Reads the document as an array, or parse_err.
   fn dec_array (self) -> list[Self] | parse_err
+  /// Reads the member behind the key, none over a missing one.
   fn dec_member (self, key: string) -> Self | none
+  /// Reads the document as a string, or parse_err.
   fn dec_string (self) -> string | parse_err
+  /// Reads the document as an int, or parse_err.
   fn dec_int (self) -> int | parse_err
+  /// Reads the document as a float, or parse_err.
   fn dec_float (self) -> float | parse_err
+  /// Reads the document as a bool, or parse_err.
   fn dec_bool (self) -> bool | parse_err
+  /// Reads the document as a byte, or parse_err.
   fn dec_byte (self) -> byte | parse_err
+  /// Reads the document as a u32, or parse_err.
   fn dec_u32 (self) -> u32 | parse_err
+  /// Reads the document as a char, or parse_err.
   fn dec_char (self) -> char | parse_err
+  /// Reads the document as bytes, or parse_err.
   fn dec_bytes (self) -> bytes | parse_err
 }

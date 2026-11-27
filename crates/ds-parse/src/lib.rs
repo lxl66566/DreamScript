@@ -86,6 +86,18 @@ pub use ast::{
 pub use cond::{ImportCond, import_cond};
 pub(crate) use pest_gen::{DsParser, Rule};
 
+/// The doc text one attached `///` trivia carries: the comment's bytes
+/// minus the `///` marker and one leading space. The attachment rule
+/// lives in the parse layer; this is the rendering half every consumer
+/// (the `ds doc` dumper, the LSP hover) shares, so the strip spelling
+/// exists once.
+#[must_use]
+pub fn doc_body<'a>(src: &'a str, trivia: &Trivia) -> &'a str {
+    let text = src[trivia.span.start as usize..trivia.span.end as usize].trim_end();
+    let body = text.strip_prefix("///").unwrap_or(text);
+    body.strip_prefix(' ').unwrap_or(body)
+}
+
 /// Parses one registered source file into its blocks, or the syntax
 /// diagnostics. Two-span diagnostics cover the pairs the record names
 /// (unclosed interpolation holes, mismatched delimiters); raw-string hash

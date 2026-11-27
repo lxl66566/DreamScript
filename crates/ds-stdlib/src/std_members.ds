@@ -10,18 +10,22 @@
 // one, the session composition's source.
 
 // A text row: keyed lookup over strings.
+/// A text row: keyed lookup over strings.
 pub type row = map[string, string]
 
 // The config record (an optional port field beside plain ones). The
 // reader/fallback externs that answered it are gone — no native
 // answered them — so a package wanting them declares its own externs
 // over this shape.
+/// The config record: an optional port field beside plain ones.
 pub struct config { host: string, port: int?, retries: int }
 
 // An opaque response value. The fetch/consume externs that answered it
 // are gone — no native answered them — so a package wanting them
 // declares its own externs over this shape.
+/// An opaque response value.
 pub struct response
 
 // The nursery demo fixed page list.
+/// The nursery demo's fixed page list.
 pub const urls = ["https://ds.dev", "https://example.org"]

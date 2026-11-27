@@ -17,6 +17,8 @@
 // carries no zone designator — the zone is which constructor the
 // caller chose, knowledge the parts keep and the string does not.
 
+/// The civil calendar parts; `weekday` is the ISO day, 1
+/// (Monday) through 7 (Sunday).
 pub struct datetime { year: int, month: int, day: int, hour: int, minute: int, second: int, weekday: int }
 
 // The floor of the seconds-over-a-day division: `/` truncates toward
@@ -28,6 +30,7 @@ fn day_floor (unix_seconds: int) -> int {
   days
 }
 
+/// The UTC calendar parts for a unix-seconds word.
 pub fn utc_datetime (unix_seconds: int) -> datetime {
   const days = day_floor(unix_seconds)
   var sod = unix_seconds % 86400
@@ -65,6 +68,8 @@ pub fn utc_datetime (unix_seconds: int) -> datetime {
   }
 }
 
+/// The host-local calendar parts for a unix-seconds word, over
+/// the host's UTC offset.
 pub fn local_datetime (unix_seconds: int) -> datetime {
   utc_datetime(unix_seconds + utc_offset(unix_seconds))
 }
@@ -77,6 +82,8 @@ fn pad4 (n: int) -> string {
   if n < 0 { str(n) } else if n < 10 { "000${n}" } else if n < 100 { "00${n}" } else if n < 1000 { "0${n}" } else { str(n) }
 }
 
+/// The fixed `YYYY-MM-DDTHH:MM:SS` spelling, the year zero-padded
+/// to four digits; no zone designator.
 pub fn datetime_str (t: datetime) -> string {
   "${pad4(t.year)}-${pad2(t.month)}-${pad2(t.day)}T${pad2(t.hour)}:${pad2(t.minute)}:${pad2(t.second)}"
 }

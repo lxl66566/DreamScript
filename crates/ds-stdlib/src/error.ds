@@ -10,6 +10,7 @@
 // grows as the taxonomy grows and every box site follows — the open
 // half of the box — and a handler or binding can annotate at it where
 // the whole set is wanted.
+/// The box's payload set: the whole failure taxonomy's union.
 pub type any_err = io_err | net_err | parse_err | utf8_err
 
 // The open error box: one tag carrying the original error as the
@@ -17,6 +18,8 @@ pub type any_err = io_err | net_err | parse_err | utf8_err
 // extracts whole — the `b.payload` field read or the match arms
 // destructuring it per member — and `b.msg` is the boundary's own
 // line.
+/// The open error box: the original error as the boxed payload,
+/// the boundary's message beside it.
 pub tag box_err { payload: any_err, msg: string }
 
 // The explicit conversion, riding the box type's own static tier (the
@@ -25,7 +28,9 @@ pub tag box_err { payload: any_err, msg: string }
 // payload set — an `io_err` member, a `parse_err`, a whole alias —
 // and the answer propagates through `?` against a return union
 // naming `box_err` like any member.
+/// The box type's own static tier.
 impl box_err {
+  /// Boxes the error with the boundary's message: `box_err.of(e, msg)`.
   fn of(e: any_err, msg: string) -> box_err {
     box_err(payload: e, msg: msg)
   }

@@ -866,6 +866,135 @@ mod tests {
         );
     }
 
+    /// Hovering a `pub` declaration carrying a `///` doc run answers
+    /// the run's lines after the signature spelling, before the checked
+    /// type.
+    #[test]
+    fn hover_answers_the_doc_run_of_a_pub_declaration() {
+        let mut session = Session::new();
+        open(
+            &mut session,
+            "lib.ds",
+            "/// Doubles the word.\n/// The second line of the run.\npub fn twice(x: int) -> int \
+             { x + x }\n",
+        );
+        let user = open(&mut session, "main.ds", "const four: int = twice(2)\n");
+        // `twice` sits at chars 21..26; the cursor lands on its `w`.
+        let answer = session
+            .hover(Path::new("main.ds"), user, 0, 22)
+            .expect("the pass runs")
+            .expect("the call covers the position");
+        assert!(
+            answer.contents.contains("pub fn twice(x: int) -> int"),
+            "{}",
+            answer.contents
+        );
+        assert!(
+            answer
+                .contents
+                .contains("Doubles the word.\nThe second line of the run."),
+            "the doc run renders between the signature and the type: {}",
+            answer.contents
+        );
+        assert!(answer.contents.contains("int"), "{}", answer.contents);
+    }
+
+    /// Hovering a member call selects the member's own declaration: an
+    /// impl function's signature and `///` doc run answer the hover.
+    #[test]
+    fn hover_answers_the_doc_run_of_a_member() {
+        let mut session = Session::new();
+        open(
+            &mut session,
+            "lib.ds",
+            concat!(
+                "pub struct point { x: int, y: int }\n",
+                "impl point {\n",
+                "  /// The squared distance from the origin.\n",
+                "  fn norm2(self) -> int { self.x * self.x + self.y * self.y }\n",
+                "}\n",
+            ),
+        );
+        let user = open(
+            &mut session,
+            "main.ds",
+            "fn f(p: point) -> int { p.norm2() }\n",
+        );
+        // `norm2` sits at chars 27..32; the cursor lands on its `o`.
+        let answer = session
+            .hover(Path::new("main.ds"), user, 0, 29)
+            .expect("the pass runs")
+            .expect("the member call covers the position");
+        assert!(
+            answer.contents.contains("fn norm2(self) -> int"),
+            "{}",
+            answer.contents
+        );
+        assert!(
+            answer
+                .contents
+                .contains("The squared distance from the origin."),
+            "the member's doc run renders: {}",
+            answer.contents
+        );
+        assert!(answer.contents.contains("int"), "{}", answer.contents);
+    }
+
+    /// Hovering a use of an `@std` member answers the member's
+    /// signature and `///` doc run — the swept source's own text, served
+    /// through the session's ambient parse.
+    #[test]
+    fn hover_answers_the_doc_of_a_std_member() {
+        let mut session = Session::new();
+        let file = open(
+            &mut session,
+            "a.ds",
+            "fn f(xs: list[int]) -> int { xs.len() }\n",
+        );
+        // `len` sits at chars 32..35; the cursor lands on its `e`.
+        let answer = session
+            .hover(Path::new("a.ds"), file, 0, 33)
+            .expect("the pass runs")
+            .expect("the member call covers the position");
+        assert!(
+            answer.contents.contains("fn len(self) -> int"),
+            "{}",
+            answer.contents
+        );
+        assert!(
+            answer.contents.contains("The element count."),
+            "the @std member's doc run serves hover: {}",
+            answer.contents
+        );
+    }
+
+    /// Hovering a use of an `@std` free declaration answers the
+    /// declaration's signature and `///` doc run.
+    #[test]
+    fn hover_answers_the_doc_of_a_std_declaration() {
+        let mut session = Session::new();
+        let file = open(&mut session, "a.ds", "const t = read_file(\"a\")\n");
+        // `read_file` sits at chars 10..19; the cursor lands on its `a`.
+        let answer = session
+            .hover(Path::new("a.ds"), file, 0, 12)
+            .expect("the pass runs")
+            .expect("the call covers the position");
+        assert!(
+            answer
+                .contents
+                .contains("pub extern fn read_file(path: string) -> string | io_err"),
+            "{}",
+            answer.contents
+        );
+        assert!(
+            answer
+                .contents
+                .contains("One file's whole text, or its io failure."),
+            "the @std declaration's doc run serves hover: {}",
+            answer.contents
+        );
+    }
+
     /// A non-exported declaration has no `.dsi` line: hovering a use of
     /// it answers the checked expression alone, never a guessed surface
     /// (`pub(pkg)` and private names stay out of the .dsi).

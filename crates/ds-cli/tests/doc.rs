@@ -61,8 +61,8 @@ fn two_runs_answer_identical_bytes() {
 }
 
 /// A fixture file pins the dump's shape: the fixed family order over
-/// source order, entries sorted inside a family, the comment run
-/// attached as-is, and the private declarations out.
+/// source order, entries sorted inside a family, the `///` doc run
+/// attached to the entry, and the private declarations out.
 #[test]
 fn a_fixture_pins_the_shape() {
     let dir = support::guarded_dir("ds-cli-doc-fixture-");
@@ -71,6 +71,7 @@ fn a_fixture_pins_the_shape() {
         &path,
         concat!(
             "// The pair struct, spelled first but sorted mid-list.\n",
+            "/// Two int fields.\n",
             "pub struct alpha { x: int, y: int }\n",
             "\n",
             "tag hidden\n",
@@ -78,9 +79,10 @@ fn a_fixture_pins_the_shape() {
             "pub fn mid() -> int\n",
             "\n",
             "// The smaller fn, spelled after mid on purpose.\n",
+            "/// Answers one.\n",
             "pub fn beta() -> int\n",
             "\n",
-            "// A value.\n",
+            "// A value: plain prose never renders.\n",
             "pub const omega = 1\n",
             "\n",
             "pub trait show {\n",
@@ -114,11 +116,19 @@ fn a_fixture_pins_the_shape() {
     let beta_at = out.find("#### `beta`").expect("beta renders");
     let mid_at = out.find("#### `mid`").expect("mid renders");
     assert!(beta_at < mid_at, "functions sort by name: {out}");
-    // The comment run rides its declaration, bytes as the source carries
-    // them.
+    // The `///` doc run rides its declaration; the plain `//` prose above
+    // the run stays out, maintainer notes never rendering.
     assert!(
-        out.contains("#### `beta`\n\nThe smaller fn, spelled after mid on purpose.\n\n"),
-        "the comment run attaches: {out}"
+        out.contains("#### `beta`\n\nAnswers one.\n\n"),
+        "the doc run attaches: {out}"
+    );
+    assert!(
+        out.contains("#### `alpha`\n\nTwo int fields.\n\n"),
+        "the doc run attaches across an ordinary comment above it: {out}"
+    );
+    assert!(
+        !out.contains("plain prose never renders"),
+        "ordinary comments stay out of the dump: {out}"
     );
     // The private tag stays out; the impl face renders member signatures.
     assert!(

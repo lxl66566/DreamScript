@@ -315,6 +315,8 @@ fn json_value (text: string, at: int, depth: int) -> json_step | parse_err {
 
 // The JSON reader: one document answering its typed value, invalid text
 // answering parse_err carrying the offset the parse gave up at.
+/// One document's typed value, or parse_err carrying the offset
+/// the parse gave up at.
 pub fn parse_json (text: string) -> json | parse_err {
   const step = json_value(text, 0, 0)
   if step is parse_err { return step }
@@ -437,6 +439,7 @@ fn to_json_parts (v: json, acc: list[string]) -> list[string] {
 }
 
 // The JSON writer: one typed value answering its minified serialization.
+/// The value's serialized JSON text.
 pub fn to_json (v: json) -> string {
   join_empty(to_json_parts(v, list[string]()))
 }
@@ -453,6 +456,8 @@ pub fn to_json (v: json) -> string {
 // per-target (each target's members spell it over these readers).
 
 // The object member by key, none over a missing key or a non-object.
+/// The member behind the key, none over a missing key or a
+/// non-object.
 pub fn json_member (v: json, key: string) -> json | none {
   match v {
     json_object { fields } => {
@@ -463,6 +468,7 @@ pub fn json_member (v: json, key: string) -> json | none {
   }
 }
 
+/// The json_int's value, or parse_err over any other shape.
 pub fn json_as_int (v: json) -> int | parse_err {
   match v {
     json_int { value } => value
@@ -470,6 +476,7 @@ pub fn json_as_int (v: json) -> int | parse_err {
   }
 }
 
+/// The json_float's value, or parse_err over any other shape.
 pub fn json_as_float (v: json) -> float | parse_err {
   match v {
     json_float { value } => value
@@ -477,6 +484,7 @@ pub fn json_as_float (v: json) -> float | parse_err {
   }
 }
 
+/// The json_bool's value, or parse_err over any other shape.
 pub fn json_as_bool (v: json) -> bool | parse_err {
   match v {
     json_bool { value } => value
@@ -484,6 +492,7 @@ pub fn json_as_bool (v: json) -> bool | parse_err {
   }
 }
 
+/// The json_string's value, or parse_err over any other shape.
 pub fn json_as_string (v: json) -> string | parse_err {
   match v {
     json_string { value } => value
@@ -491,6 +500,7 @@ pub fn json_as_string (v: json) -> string | parse_err {
   }
 }
 
+/// The json_array's items, or parse_err over any other shape.
 pub fn json_as_array (v: json) -> list[json] | parse_err {
   match v {
     json_array { items } => items
@@ -498,6 +508,7 @@ pub fn json_as_array (v: json) -> list[json] | parse_err {
   }
 }
 
+/// The json_object's fields, or parse_err over any other shape.
 pub fn json_as_object (v: json) -> map[string, json] | parse_err {
   match v {
     json_object { fields } => fields
@@ -509,6 +520,7 @@ pub fn json_as_object (v: json) -> map[string, json] | parse_err {
 // (0-255) or a u32 through the checked bridge natives — an out-of-range
 // number answers parse_err like a wrong shape — and a one-character json
 // string reads as a char (any other length a wrong shape).
+/// The number as an in-range byte, or parse_err.
 pub fn json_as_byte (v: json) -> byte | parse_err {
   match v {
     json_int { value } => {
@@ -519,6 +531,7 @@ pub fn json_as_byte (v: json) -> byte | parse_err {
   }
 }
 
+/// The number as an in-range u32, or parse_err.
 pub fn json_as_u32 (v: json) -> u32 | parse_err {
   match v {
     json_int { value } => {
@@ -529,6 +542,7 @@ pub fn json_as_u32 (v: json) -> u32 | parse_err {
   }
 }
 
+/// The one-character string's char, or parse_err.
 pub fn json_as_char (v: json) -> char | parse_err {
   match v {
     json_string { value } => {
@@ -545,6 +559,8 @@ pub fn json_as_char (v: json) -> char | parse_err {
 // element per payload byte — the exact round-trip of the writer below,
 // consistent with the show impl's byte-list rendering. Every element
 // must be an in-range json number; anything else answers parse_err.
+/// The json array of numbers as bytes, one element per payload
+/// byte, or parse_err.
 pub fn json_as_bytes (v: json) -> bytes | parse_err {
   const items = json_as_array(v)?
   var out = list[byte]()
@@ -563,12 +579,17 @@ pub fn json_as_bytes (v: json) -> bytes | parse_err {
 // string, and bytes as the array of numbers the reader above takes
 // back — one construction per value the case vocabulary alone cannot
 // spell from these widths.
+/// The byte as a json number.
 pub fn json_of_byte (b: byte) -> json { json_int(value: int_of_byte(b)) }
 
+/// The u32 as a json number.
 pub fn json_of_u32 (v: u32) -> json { json_int(value: int_of_u32(v)) }
 
+/// The char as its one-character json string.
 pub fn json_of_char (c: char) -> json { json_string(value: "$c") }
 
+/// The payload as the json array of numbers the reader takes
+/// back.
 pub fn json_of_bytes (b: bytes) -> json {
   var items = list[json]()
   for e in byte_list(b) {
@@ -584,33 +605,58 @@ pub fn json_of_bytes (b: bytes) -> json {
 // the encoder/decoder impls delegating to this file's own readers and
 // constructions above, so the derive synthesis targets the driver
 // traits alone and a second format plugs in as its own package.
+/// The json driver's seed: the empty document.
 impl json {
+  /// The empty document: json_null.
   fn default() -> json { json_null }
 }
 
+/// The json driver's decode half over this file's typed readers.
 impl decoder for json {
+  /// Reads the value as an object, or parse_err.
   fn dec_object (self) -> map[string, json] | parse_err { json_as_object(self) }
+  /// Reads the value as an array, or parse_err.
   fn dec_array (self) -> list[json] | parse_err { json_as_array(self) }
+  /// Reads the member behind the key, none over a missing one.
   fn dec_member (self, key: string) -> json | none { json_member(self, key) }
+  /// Reads the value as a string, or parse_err.
   fn dec_string (self) -> string | parse_err { json_as_string(self) }
+  /// Reads the value as an int, or parse_err.
   fn dec_int (self) -> int | parse_err { json_as_int(self) }
+  /// Reads the value as a float, or parse_err.
   fn dec_float (self) -> float | parse_err { json_as_float(self) }
+  /// Reads the value as a bool, or parse_err.
   fn dec_bool (self) -> bool | parse_err { json_as_bool(self) }
+  /// Reads the value as a byte, or parse_err.
   fn dec_byte (self) -> byte | parse_err { json_as_byte(self) }
+  /// Reads the value as a u32, or parse_err.
   fn dec_u32 (self) -> u32 | parse_err { json_as_u32(self) }
+  /// Reads the value as a char, or parse_err.
   fn dec_char (self) -> char | parse_err { json_as_char(self) }
+  /// Reads the value as bytes, or parse_err.
   fn dec_bytes (self) -> bytes | parse_err { json_as_bytes(self) }
 }
 
+/// The json driver's encode half over this file's constructions.
 impl encoder for json {
+  /// Encodes one bool into the document.
   fn enc_bool (self, value: bool) -> json { json_bool(value: value) }
+  /// Encodes one int into the document.
   fn enc_int (self, value: int) -> json { json_int(value: value) }
+  /// Encodes one float into the document.
   fn enc_float (self, value: float) -> json { json_float(value: value) }
+  /// Encodes one string into the document.
   fn enc_string (self, value: string) -> json { json_string(value: value) }
+  /// Encodes one byte into the document.
   fn enc_byte (self, value: byte) -> json { json_of_byte(value) }
+  /// Encodes one u32 into the document.
   fn enc_u32 (self, value: u32) -> json { json_of_u32(value) }
+  /// Encodes one char into the document.
   fn enc_char (self, value: char) -> json { json_of_char(value) }
+  /// Encodes one bytes value into the document.
   fn enc_bytes (self, value: bytes) -> json { json_of_bytes(value) }
+  /// Encodes the array of values into the document.
   fn enc_array (self, items: list[json]) -> json { json_array(items: items) }
+  /// Encodes the object of members into the document.
   fn enc_object (self, fields: map[string, json]) -> json { json_object(fields: fields) }
 }

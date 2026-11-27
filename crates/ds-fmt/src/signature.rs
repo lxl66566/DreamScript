@@ -172,6 +172,15 @@ fn render_item(out: &mut String, ctx: &Ctx, item: &Item) {
     }
 }
 
+/// One member function's signature: the `fn` spelling of a trait member
+/// or an impl function, over the declaring file's bytes — the hover
+/// face of one callable member, the same shape `item` renders for a
+/// top-level declaration.
+pub fn member_fn(out: &mut String, src: &str, f: &FnDecl) {
+    let ctx = Ctx::new(src);
+    fn_signature(out, &ctx, f, "fn");
+}
+
 /// One function's signature: `prefix name[g](params) -> ret`, a defaulted
 /// parameter's literal spelled after its type.
 fn fn_signature(out: &mut String, ctx: &Ctx, f: &FnDecl, prefix: &str) {

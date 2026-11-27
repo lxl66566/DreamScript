@@ -15,6 +15,26 @@ use tower_lsp::lsp_types as lsp;
 
 use crate::{HoverAnswer, RenameAnswer, Session, Target, autoimport, completion, convert, tokens};
 
+/// The member `fn` declaration of one registered method: the trait
+/// member or impl function whose span holds the method's registered name
+/// span, the declaration the hover tier renders.
+fn member_decl<'a>(item: &'a ds_parse::Item, name: Span) -> Option<&'a ds_parse::FnDecl> {
+    let mut fns: Vec<&'a ds_parse::FnDecl> = Vec::new();
+    match &item.kind {
+        ds_parse::ItemKind::Trait(t) => {
+            for member in &t.members {
+                if let ds_parse::TraitMember::Fn(fd) = member {
+                    fns.push(fd);
+                }
+            }
+        },
+        ds_parse::ItemKind::Impl(i) => fns.extend(i.fns.iter()),
+        _ => {},
+    }
+    fns.into_iter()
+        .find(|fd| fd.span.start <= name.start && name.end <= fd.span.end)
+}
+
 /// Whether `name` spells a fresh binding name: the grammar itself decides
 /// (a probe parse of one binding against a scratch registry, so keywords
 /// and malformed spellings fail exactly as they would in source), and the
@@ -82,12 +102,13 @@ impl Session {
     /// The hover answer at the position: the checked type of the covering
     /// expression, rendered through the analysis universe, with its
     /// effect row appended (the enclosing definition's row when no
-    /// recorded expression covers the position), preceded by the `.dsi`
-    /// signature spelling when the position names a `pub` package
-    /// declaration — the same line `ds info` prints for that declaration.
-    /// A name one of the package's imports selects that resolution could
-    /// not bind answers the linked tier's line when the embedder serves
-    /// that package's cached `.dsi`.
+    /// recorded expression covers the position), preceded by the
+    /// declaration tier — the signature spelling and the `///` doc run
+    /// of the `pub` package declaration the position names, or of the
+    /// registered member its use selects — the same line `ds info`
+    /// prints for that declaration. A name one of the package's imports
+    /// selects that resolution could not bind answers the linked tier's
+    /// line when the embedder serves that package's cached `.dsi`.
     pub(super) fn hover(
         &mut self,
         path: &Path,
@@ -155,8 +176,9 @@ impl Session {
             let (start, end) = best.expect("a covering span exists with a value");
             range = Some(convert::range(self.db.files(), Span::new(file, start, end)));
         }
-        // The exported-surface half: a name resolving to a `pub` package
-        // declaration answers its signature spelling first; a name one of
+        // The declaration tier: a name resolving to a `pub` package
+        // declaration — or to a registered member — answers its
+        // signature spelling with its `///` doc run first; a name one of
         // the package's imports selects — the import-bound def the
         // session's package-free resolution left unknown — answers the
         // linked tier's line instead, never displacing a resolved name.
@@ -164,12 +186,13 @@ impl Session {
             Some(found) => Some(found),
             None => self.linked_surface(path, file, offset),
         };
-        if let Some((signature, name_range)) = linked {
-            contents = if contents.is_empty() {
-                format!("```dreamscript\n{signature}\n```")
-            } else {
-                format!("```dreamscript\n{signature}\n```\n\n{contents}")
-            };
+        if let Some((signature, doc, name_range)) = linked {
+            let mut block = format!("```dreamscript\n{signature}\n```");
+            if !doc.is_empty() {
+                block.push_str("\n\n");
+                block.push_str(&doc.join("\n"));
+            }
+            contents = if contents.is_empty() { block } else { format!("{block}\n\n{contents}") };
             range = range.or(Some(name_range));
         }
         match range {
@@ -183,16 +206,17 @@ impl Session {
     /// The linked-name tier: a word one of the open documents' imports
     /// selects — the import-bound def the session's package-free
     /// resolution left unknown — answers its `.dsi` signature line from
-    /// the embedder's surface provider, covering the word's range. A
-    /// selection's alias binds the name the way the checker's link pass
-    /// would, so both spellings serve; a word nothing selects answers
-    /// nothing, exactly as before.
+    /// the embedder's surface provider, covering the word's range. No
+    /// doc run answers here: the linked tier reads the cached `.dsi`
+    /// alone, which carries no comments. A selection's alias binds the
+    /// name the way the checker's link pass would, so both spellings
+    /// serve; a word nothing selects answers nothing, exactly as before.
     fn linked_surface(
         &mut self,
         path: &Path,
         file: FileId,
         offset: u32,
-    ) -> Option<(String, lsp::Range)> {
+    ) -> Option<(String, Vec<String>, lsp::Range)> {
         let (word, start, end) = word_at(self.db.files().source(file), offset)?;
         // every open document's imports: the selection may sit in another
         // member of the package (the cross-document hover precedent)
@@ -233,57 +257,100 @@ impl Session {
             .clone();
         Some((
             line,
+            Vec::new(),
             convert::range(self.db.files(), Span::new(file, start, end)),
         ))
     }
 
-    /// The `.dsi` signature spelling of the name at the position: the
-    /// resolution's target when the position names a use, the
-    /// declaration itself when it names the definition — answered only
-    /// for a `pub` package-level definition, the surface the spelling
-    /// renders (locals, impl and trait members, and non-exported
-    /// declarations have no `.dsi` line; `pub(pkg)` and private stay out).
-    /// The renderer is the one `ds info` prints, one item's
-    /// signature over its own parse tree.
+    /// The declaration tier of the name at the position: the resolution's
+    /// target when the position names a use, the declaration itself when
+    /// it names the definition. A `pub` package-level definition answers
+    /// its signature spelling and its `///` doc run (locals and non-
+    /// exported declarations stay out, `pub(pkg)` included); a registered
+    /// member — a trait's member fn, an inherent impl's function — answers
+    /// the same pair over its own `fn` declaration, the callable surface
+    /// the call sites select. The renderer is the one `ds info` prints,
+    /// one declaration's signature over its own parse tree.
     fn surface(
         &mut self,
         file: FileId,
         offset: u32,
-    ) -> Result<Option<(String, lsp::Range)>, QueryError> {
+    ) -> Result<Option<(String, Vec<String>, lsp::Range)>, QueryError> {
         let Some((name_span, target)) = self.target_at(file, offset)? else {
             return Ok(None);
         };
-        let Target::Def(def) = target else {
-            return Ok(None);
+        let answer = match target {
+            Target::Def(def) => {
+                let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+                let decl = resolved.package.def(def);
+                let parse = self.db.get::<ParseFile>(decl.span.file)?;
+                let Some(ast) = &parse.ast else {
+                    return Ok(None);
+                };
+                // Top-level items never nest, so the item whose span holds
+                // the defining name occurrence is the declaration.
+                let Some(item) =
+                    ast.blocks
+                        .iter()
+                        .flat_map(|block| block.items.iter())
+                        .find(|item| {
+                            item.span.start <= decl.span.start && decl.span.end <= item.span.end
+                        })
+                else {
+                    return Ok(None);
+                };
+                if !matches!(item.vis, Some(ds_parse::Vis::Pub(_))) {
+                    return Ok(None);
+                }
+                let src = self.db.files().source(item.span.file);
+                let mut line = String::new();
+                ds_fmt::signature::item(&mut line, src, item);
+                if line.trim_end().is_empty() {
+                    return Ok(None);
+                }
+                let doc = item
+                    .doc
+                    .iter()
+                    .map(|t| ds_parse::doc_body(src, t).to_owned())
+                    .collect();
+                Some((line.trim_end().to_owned(), doc))
+            },
+            Target::Method(id) => {
+                let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
+                let method = resolved.package.method(id);
+                let parse = self.db.get::<ParseFile>(method.span.file)?;
+                let Some(ast) = &parse.ast else {
+                    return Ok(None);
+                };
+                let Some(item) =
+                    ast.blocks
+                        .iter()
+                        .flat_map(|block| block.items.iter())
+                        .find(|item| {
+                            item.span.start <= method.span.start && method.span.end <= item.span.end
+                        })
+                else {
+                    return Ok(None);
+                };
+                let src = self.db.files().source(method.span.file);
+                let Some(fd) = member_decl(item, method.span) else {
+                    return Ok(None);
+                };
+                let mut line = String::new();
+                ds_fmt::signature::member_fn(&mut line, src, fd);
+                if line.trim_end().is_empty() {
+                    return Ok(None);
+                }
+                let doc = fd
+                    .doc
+                    .iter()
+                    .map(|t| ds_parse::doc_body(src, t).to_owned())
+                    .collect();
+                Some((line.trim_end().to_owned(), doc))
+            },
+            _ => None,
         };
-        let resolved = self.db.get::<Resolve>(PackageId::new(0))?;
-        let decl = resolved.package.def(def);
-        let parse = self.db.get::<ParseFile>(decl.span.file)?;
-        let Some(ast) = &parse.ast else {
-            return Ok(None);
-        };
-        // Top-level items never nest, so the item whose span holds the
-        // defining name occurrence is the declaration.
-        let Some(item) = ast
-            .blocks
-            .iter()
-            .flat_map(|block| block.items.iter())
-            .find(|item| item.span.start <= decl.span.start && decl.span.end <= item.span.end)
-        else {
-            return Ok(None);
-        };
-        if !matches!(item.vis, Some(ds_parse::Vis::Pub(_))) {
-            return Ok(None);
-        }
-        let mut line = String::new();
-        ds_fmt::signature::item(&mut line, self.db.files().source(file), item);
-        if line.trim_end().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((
-            line.trim_end().to_owned(),
-            convert::range(self.db.files(), name_span),
-        )))
+        Ok(answer.map(|(line, doc)| (line, doc, convert::range(self.db.files(), name_span))))
     }
 
     /// The definitions of the name use at the position, through the
