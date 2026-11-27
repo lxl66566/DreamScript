@@ -87,6 +87,7 @@ const RECORDS: &[&str] = &[
     "generic_calls",
     "generic_call_bounds",
     "member_call_params",
+    "member_call_clauses",
     "handler_handled",
     "place_stores",
 ];

@@ -461,6 +461,41 @@ impl[t] list[t] {
     }
     out
   }
+  // The two-type pair over the member's own generic clause: the
+  // entering sites solve the clause from the arguments behind the
+  // receiver (the fold's initial value and step callable, the zip's
+  // paired list), the per-shape instance keying over the head's and
+  // the clause's arguments together. The bodies are the same ds source
+  // the free tier carried: the fold threading the accumulator through
+  // the step callable, the pair zip scanning the nested loop whose
+  // inner guard is the catchall match.
+  /// Folds the elements into one over the initial value through the
+  /// step callable.
+  fn fold[r] (self, init: r, f: fn(r, t) -> r) -> r {
+    var acc = init
+    for x in self {
+      acc = f(acc, x)
+    }
+    acc
+  }
+  /// The positional pairs of the two lists, up to the shorter one's
+  /// length.
+  fn zip[r] (self, ys: list[r]) -> list[(t, r)] {
+    var out = list[(t, r)]()
+    var i: int = 0
+    for x in self {
+      var j: int = 0
+      for y in ys {
+        match i - j {
+          0 => { out = out.concat([(x, y)]) }
+          _ => {}
+        }
+        j += 1
+      }
+      i += 1
+    }
+    out
+  }
 }
 
 // The ord-routed list sort: the declared bound is the routing — the

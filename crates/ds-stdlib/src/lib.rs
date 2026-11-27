@@ -554,7 +554,6 @@ mod tests {
             "try_wait",
             "time",
             "parse_json",
-            "zip",
             "rand",
             "rand_next",
             "rand_seed",
@@ -976,18 +975,23 @@ mod tests {
                 "the generic `{name}` stays in the core beside its primitive members"
             );
         }
-        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
+        for name in [
+            "max",
+            "min",
+            "enumerate",
+            "take",
+            "drop",
+            "flatten",
+            "sum",
+            "fold",
+            "zip",
+        ] {
             assert!(
                 pkg_package.method_candidates(name).next().is_some(),
                 "`{name}` registers as a member (the collection seams in the core, the pair \
                  beside the float pair)"
             );
         }
-        assert!(
-            pkg_package.lookup_value("zip").is_some(),
-            "`zip` lives in the @std bodied file as a combinator (its member move waits on the \
-             per-shape member round)"
-        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 pkg_package.lookup_value(name).is_none(),
@@ -1156,7 +1160,7 @@ mod tests {
             session_diags.is_empty(),
             "the session composition resolves clean: {session_diags:?}"
         );
-        for name in ["enumerate", "take", "drop", "flatten", "sum"] {
+        for name in ["enumerate", "take", "drop", "flatten", "sum", "fold", "zip"] {
             assert!(
                 session_package.lookup_value(name).is_none(),
                 "the session composition retires the flat `{name}` (the member tier owns it)"
@@ -1168,23 +1172,22 @@ mod tests {
                 "the session composition resolves the generic `{name}`"
             );
         }
-        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
+        for name in [
+            "max",
+            "min",
+            "enumerate",
+            "take",
+            "drop",
+            "flatten",
+            "sum",
+            "fold",
+            "zip",
+        ] {
             assert!(
                 session_package.method_candidates(name).next().is_some(),
                 "the session composition registers the `{name}` members"
             );
         }
-        for name in ["max", "min", "enumerate"] {
-            assert!(
-                session_package.method_candidates(name).next().is_some(),
-                "the session composition registers the `{name}` members"
-            );
-        }
-        assert!(
-            session_package.lookup_value("zip").is_some(),
-            "the session composition keeps the bare combinator `zip` (its member-generic body \
-             waits on the per-shape member round)"
-        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 session_package.lookup_value(name).is_none(),
@@ -1264,6 +1267,8 @@ mod tests {
             "drop",
             "flatten",
             "sum",
+            "fold",
+            "zip",
             "len",
             "cons",
             "first",
@@ -1275,10 +1280,6 @@ mod tests {
                 "the merged reading registers the `{name}` members (namespace-identical)"
             );
         }
-        assert!(
-            merged_package.lookup_value("zip").is_some(),
-            "the merged reading keeps the combinator `zip` (namespace-identical)"
-        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 merged_package.lookup_value(name).is_none(),

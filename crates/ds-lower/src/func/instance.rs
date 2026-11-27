@@ -225,6 +225,11 @@ fn body_types(analyzed: &Analyzed, generic: &GenericFn) -> Vec<Ty> {
             out.extend(params);
         }
     }
+    for (at, solved) in &checked.member_call_clauses {
+        if inside(*at) {
+            out.extend(solved);
+        }
+    }
     for (at, ty) in &checked.is_tests {
         if inside(*at) {
             out.push(*ty);
@@ -266,6 +271,9 @@ fn body_types(analyzed: &Analyzed, generic: &GenericFn) -> Vec<Ty> {
         }
         if let Some(params) = &rec.member_params {
             out.extend(params.iter().copied());
+        }
+        if let Some(solved) = &rec.member_clause {
+            out.extend(solved.iter().copied());
         }
         if let Some(ty) = rec.is_test {
             out.push(ty);

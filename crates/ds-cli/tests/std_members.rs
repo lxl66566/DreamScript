@@ -5,15 +5,14 @@
 //! (the run path's script sessions composing the faces back beside the
 //! core, the dev script rounds and the REPL serving the merged
 //! composition). The ordering pair and the generic free max/min ride
-//! the core in every registration. The list combinators (fold/zip
-//! included) and the race pair keep their free spellings in the bodied
-//! file (the member moves wait on a member's own generic body
-//! instantiating per shape, and on the list[fn() -> t] receiver head
-//! binding its element variable). The fork-join engine seams keep their
-//! private externs in the same file with the pooled library spellings
-//! retired from the surface, the VM level pinning the pooled drive's
-//! byte-identical answers and the multi-word fold keeping its seam-level
-//! pin in the lowerer's e2e.
+//! the core in every registration. The list pair (fold/zip, the
+//! enumerate beside them) and the race pair answer at the list's member
+//! tier over the member's own generic clause (the fold's accumulator
+//! and the zip's paired list solving the clause at the call site, the
+//! per-shape instance carrying a multi-word accumulator whole). The
+//! fork-join engine seams keep their private externs in the same file
+//! with the pooled library spellings retired from the surface, the VM
+//! level pinning the pooled drive's byte-identical answers.
 
 use std::{
     env, fs,
@@ -357,20 +356,20 @@ fn a_std_declared_root_refuses_bare_strings_and_runs_the_members() {
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
 
-/// The FP combinator round's program text: `enumerate` at its
-/// member tier and `zip` at the free spelling its seam keeps (the
-/// member-generic body waiting on the per-shape member round), the
-/// empty and shorter-side edges included.
+/// The FP combinator round's program text: the fold/zip pair and
+/// `enumerate` at the list's member tier (the pair's own generic clause
+/// solving from the initial value and the paired list), the empty and
+/// shorter-side edges included.
 const COMBINATORS_MAIN: &str = concat!(
     "fn main() -> int {\n",
     "  const xs = [1, 2, 3, 4, 5]\n",
-    "  const pairs = zip(xs, [\"a\", \"b\"])\n",
-    "  const shorter = zip([7, 8], [\"x\", \"y\", \"z\"])\n",
+    "  const pairs = xs.zip([\"a\", \"b\"])\n",
+    "  const shorter = [7, 8].zip([\"x\", \"y\", \"z\"])\n",
     "  const words = [\"alpha\", \"beta\", \"gamma\"]\n",
     "  const enumd = words.enumerate()\n",
     "  println(\"zip ${pairs.len()} ${shorter.len()} enum ${enumd.len()} \
      ${xs.enumerate().len()}\")\n",
-    "  println(\"edge ${zip(xs, list[int]()).len()} ${list[int]().enumerate().len()}\")\n",
+    "  println(\"edge ${xs.zip(list[int]()).len()} ${list[int]().enumerate().len()}\")\n",
     "  0\n",
     "}\n",
 );
@@ -403,14 +402,72 @@ fn the_bare_list_pair_runs_through_a_bare_script() {
     fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
 }
 
-/// The landed pair's linked-surface boundary over a std-declaring graph:
-/// the bare use is an unknown name over the shrunk core, and the linked
-/// import keeps the generic-head refusal (a type-argumented signature
-/// rides the entry faces alone until its crossing round) — the same
-/// seam the string face's list-returning pair keeps.
-/// The retired pooled spellings answer the unknown-dot refusal through
-/// the surface: the pair waits on the fork-join admission round, the
-/// seams staying private to the @std bodied file.
+/// The landed pair's boundaries over a std-declaring graph: the member
+/// tier rides the shrunk core itself (the ambient's own impl, the
+/// enumerate beside it), so the declaring root's member spelling runs;
+/// the free spelling the move took out stays the unknown name over
+/// the same core; and the linked import answers its own refusal —
+/// @std's exported face carries no `zip` (the member tier is the
+/// ambient's own, never a linked export).
+#[test]
+fn a_std_declared_root_serves_the_combinator_member_and_refuses_the_retired_spelling() {
+    let member = write_root("comb-member", &std_manifest(), &[(
+        "app.ds",
+        concat!(
+            "fn main() -> int {\n",
+            "  println(\"z ${[1, 2].zip([\"a\"]).len()}\")\n",
+            "  0\n",
+            "}\n",
+        ),
+    )]);
+    let out = run(&["run", &entry_of(&member)]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the member spelling runs over the core: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "z 1\n", "the member run answers");
+    fs::remove_dir_all(&member).expect("the temp tree removes");
+
+    let bare = write_root("comb-core", &std_manifest(), &[(
+        "app.ds",
+        "fn main() -> int {\n  zip([1, 2], [\"a\"])\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&bare)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the retired free spelling refuses over the core"
+    );
+    assert!(
+        text(&out.stderr).contains("unknown name `zip`"),
+        "the refusal names the retired spelling: {}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(&bare).expect("the temp tree removes");
+
+    let linked = write_root("comb-link", &std_manifest(), &[(
+        "app.ds",
+        "import @std (zip)\n\nfn main() -> int {\n  0\n}\n",
+    )]);
+    let out = run(&["run", &entry_of(&linked)]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the linked import refuses the selection"
+    );
+    assert!(
+        text(&out.stderr).contains("zip"),
+        "the refusal names the missing export: {}",
+        text(&out.stderr)
+    );
+    fs::remove_dir_all(&linked).expect("the temp tree removes");
+}
+
+/// The retired pooled spellings answer the unknown-dot refusal
+/// through the surface: the pair waits on the fork-join admission
+/// round, the seams staying private to the @std bodied file.
 #[test]
 fn the_retired_pooled_spellings_answer_the_unknown_dot() {
     let file = script(
@@ -426,43 +483,6 @@ fn the_retired_pooled_spellings_answer_the_unknown_dot() {
         "the refusal is the unknown dot: {err}"
     );
     fs::remove_dir_all(file.parent().expect("the temp dir")).expect("the temp tree removes");
-}
-
-#[test]
-fn a_std_declared_root_refuses_the_combinator_link() {
-    let bare = write_root("comb-core", &std_manifest(), &[(
-        "app.ds",
-        "fn main() -> int {\n  zip([1, 2], [\"a\"])\n}\n",
-    )]);
-    let out = run(&["run", &entry_of(&bare)]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "the bare use over the core refuses"
-    );
-    assert!(
-        text(&out.stderr).contains("unknown name `zip`"),
-        "the refusal names the missing member: {}",
-        text(&out.stderr)
-    );
-    fs::remove_dir_all(&bare).expect("the temp tree removes");
-
-    let linked = write_root("comb-link", &std_manifest(), &[(
-        "app.ds",
-        "import @std (zip)\n\nfn main() -> int {\n  zip([1, 2], [\"a\"]).len()\n}\n",
-    )]);
-    let out = run(&["run", &entry_of(&linked)]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "the linked import refuses the generic head"
-    );
-    assert!(
-        text(&out.stderr).contains("DS4021"),
-        "the refusal is the linked-surface's head seam: {}",
-        text(&out.stderr)
-    );
-    fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
 
 /// The PRNG family's program text: the fixed-seed splitmix64 stream

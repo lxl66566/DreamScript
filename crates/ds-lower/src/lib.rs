@@ -1080,6 +1080,11 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
                     .iter()
                     .map(|param| param.name.name.clone())
                     .collect(),
+                clause: f
+                    .generics
+                    .iter()
+                    .map(|param| param.name.name.clone())
+                    .collect(),
                 params: Rc::new(f.params.clone()),
                 body: body_expr,
                 decl_span: f.span,
@@ -1156,6 +1161,11 @@ fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &A
                 impl_site: item.span,
                 member: f.name.name.clone(),
                 generics: imp
+                    .generics
+                    .iter()
+                    .map(|param| param.name.name.clone())
+                    .collect(),
+                clause: f
                     .generics
                     .iter()
                     .map(|param| param.name.name.clone())
@@ -1255,6 +1265,7 @@ fn plan_trait_defaults(t: &ds_parse::TraitDecl, plan: &mut Plan, analyzed: &Anal
                             .flatten(),
                     )
                     .collect(),
+                clause: Vec::new(),
                 params: Rc::new(f.params.clone()),
                 body: body_expr,
                 decl_span: f.span,

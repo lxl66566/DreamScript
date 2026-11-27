@@ -207,7 +207,7 @@ impl FnLower<'_, '_, '_> {
             // could disagree with)
             if let Some(generic) = self.plan.generic_member(impl_site, &member) {
                 let written = self.written_trait_call(call).map_or(tc.recv, |tc| tc.recv);
-                let index = self.member_dispatch_target(&generic, written, what)?;
+                let index = self.member_dispatch_target(&generic, written, call, what)?;
                 return Ok(TraitDispatch::Static { index, call: tc });
             }
             if let Some(index) = self.plan.impl_body(impl_site, &member) {
@@ -226,7 +226,7 @@ impl FnLower<'_, '_, '_> {
                 && let Some(generic) = self.plan.generic_default(def, &member)
             {
                 let written = self.written_trait_call(call).map_or(tc.recv, |tc| tc.recv);
-                let index = self.member_dispatch_target(&generic, written, what)?;
+                let index = self.member_dispatch_target(&generic, written, call, what)?;
                 return Ok(TraitDispatch::Static { index, call: tc });
             }
             if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
@@ -463,7 +463,7 @@ impl FnLower<'_, '_, '_> {
                     method,
                 });
             };
-            let index = self.member_dispatch_target(&generic, val.ty, what)?;
+            let index = self.member_dispatch_target(&generic, val.ty, call, what)?;
             return Ok(TraitDispatch::Inherent {
                 index,
                 bounds: self

@@ -20,11 +20,10 @@
 // append through the concat member over a one-element literal, never
 // the push member: a dot-call's free tier prefers the flat name first,
 // so a user's private `push` declaration shadows the member call inside
-// these bodies and trips the file privacy refusal. zip pairs by the
-// nested scan whose inner guard is a catchall match (an `if` guarding a
-// type-variable-carrying write refuses at the branch reconcile; the
-// match spelling lowers), and the slice pair guards the same write by
-// the bool match, the one spelling an order comparison lowers. The
+// these bodies and trips the file privacy refusal. The slice pair
+// guards its append by the bool match, the one spelling an order
+// comparison lowers (an `if` guarding a type-variable-carrying write
+// refuses at the branch reconcile; the match spelling lowers). The
 // slice pair clamps at the list's own bounds (a negative, zero, or
 // past-the-end n answering the empty or whole list the bounds imply).
 // flat_map does not exist: a fn-typed parameter whose return nests the
@@ -56,18 +55,15 @@
 // so a wider answer crosses whole; a deinit-carrying answer refuses at
 // the send's staging (the payload's hook has no claim inside the
 // channel's edge retention). `sum` is the fold spelling over reduce's
-// hosted callable (the CALLG lambda seam), `fold` the two-type spelling
-// whose accumulator body instantiates over its own argument shape (a
-// `var` binding and a call through the callable-defaulted parameter
-// under the entering site's substitution).
+// hosted callable (the CALLG lambda seam).
 //
 // The fork-join engine seams: fork_map/fork_reduce are private
 // bodiless generic externs, the natives the engine routes by name (the
 // same engine-identity key the collection externs in the core hold).
 // The user surface carries no pooled member today, so every collection
 // transform keeps the sequential contract; the free generic body's
-// one-word instantiation boundary binds the fold's init parameter to
-// one-word element types through this spelling (the multi-word fold
+// one-word instantiation boundary binds scan's accumulated value to
+// one-word element types through this spelling (a wider accumulator
 // keeps its seam-level coverage until the generic-body staging seam
 // widens, the same generic-body residuals).
 //
@@ -81,20 +77,10 @@
 // back to its logical bits — the mask a no-op when the shifted word
 // carries no sign. The int spellings of the mixer's unsigned constants
 // ride as negative literals (the i64 range the literals carry).
-// The FP combinators still in the free tier (zip and fold's member
-// move is a surface decision since the member body's per-shape
-// instantiation landed, and the race pair moved beside the list's
-// member tiers, the list[fn() -> t] receiver head binding its
-// element variable through the fn signature's return).
-/// Folds the list over the initial value through the step
-/// lambda.
-pub fn fold[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> r {
-  var acc = init
-  for x in xs {
-    acc = f(acc, x)
-  }
-  acc
-}
+// The fold/zip pair composes at the list's member tier over the
+// member's own generic clause, the race pair beside it over the
+// list[fn() -> t] receiver head binding its element variable through
+// the fn signature's return.
 /// The running fold: the accumulated value at every step.
 pub fn scan[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> list[r] {
   var acc = init
@@ -102,24 +88,6 @@ pub fn scan[t, r] (xs: list[t], init: r, f: fn(r, t) -> r) -> list[r] {
   for x in xs {
     acc = f(acc, x)
     out = out.concat([acc])
-  }
-  out
-}
-/// The positional pairs of the two lists, up to the shorter
-/// one's length.
-pub fn zip[t, r] (xs: list[t], ys: list[r]) -> list[(t, r)] {
-  var out = list[(t, r)]()
-  var i: int = 0
-  for x in xs {
-    var j: int = 0
-    for y in ys {
-      match i - j {
-        0 => { out = out.concat([(x, y)]) }
-        _ => {}
-      }
-      j += 1
-    }
-    i += 1
   }
   out
 }

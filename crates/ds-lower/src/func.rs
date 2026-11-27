@@ -72,7 +72,7 @@ use extraction::AmbientExtern;
 use facts::*;
 pub(crate) use instance::GenericFn;
 use instance::{Instance, InstanceKey};
-pub(crate) use member::GenericMember;
+pub(crate) use member::{GenericMember, MemberSiteKey};
 use op::*;
 use path::*;
 use place::*;

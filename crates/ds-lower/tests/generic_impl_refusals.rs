@@ -27,7 +27,7 @@
 //! generic fn's calls run in `free_generic_e2e.rs`.
 
 use ds_check::analyze;
-use ds_diag::Files;
+use ds_diag::{Files, human};
 use ds_lower::{LowerError, lower};
 use ds_mod::{Hash128, read, write};
 use ds_parse::parse;
@@ -102,7 +102,7 @@ fn refuses_with(source: &str, expected: &str) {
             .checked
             .diags
             .iter()
-            .map(|diag| ds_diag::human(diag, &files))
+            .map(|diag| human(diag, &files))
             .collect::<String>()
     );
     let Err(err) = lower(
@@ -243,14 +243,14 @@ fn checker_refuses_with(source: &str, expected: &str) {
         .checked
         .diags
         .iter()
-        .map(|diag| ds_diag::human(diag, &files))
+        .map(|diag| human(diag, &files))
         .collect();
     assert!(
         analyzed
             .checked
             .diags
             .iter()
-            .any(|diag| ds_diag::human(diag, &files).contains(expected)),
+            .any(|diag| human(diag, &files).contains(expected)),
         "the checker refuses naming the boundary: {rendered}"
     );
 }
@@ -270,7 +270,7 @@ fn lands_and_runs(source: &str, stdout: &[u8]) {
             .checked
             .diags
             .iter()
-            .map(|diag| ds_diag::human(diag, &files))
+            .map(|diag| human(diag, &files))
             .collect::<String>()
     );
     let lowered = lower(
@@ -652,7 +652,7 @@ fn a_mut_parameter_over_a_variable_in_the_one_body_refuses_at_lowering() {
             .checked
             .diags
             .iter()
-            .map(|diag| ds_diag::human(diag, &files))
+            .map(|diag| human(diag, &files))
             .collect::<String>()
     );
     let err = lower(
@@ -706,7 +706,7 @@ fn an_uncalled_free_generic_fn_lowers_nothing() {
             .checked
             .diags
             .iter()
-            .map(|diag| ds_diag::human(diag, &files))
+            .map(|diag| human(diag, &files))
             .collect::<String>()
     );
     let lowered = lower(
@@ -760,31 +760,72 @@ fn a_local_generic_lambda_refuses_at_its_binding() {
     );
 }
 
-/// A bodied member's own generic clause: the checker solves the clause at
-/// the call site like a free fn's (the receiver binding the impl head,
-/// the arguments the clause), but the lowering's member-instance
-/// planning binds only the impl head's variables — the plan's discovery
-/// keys the instance and the site by the receiver alone and reads no
-/// per-site record of the clause's solved shapes, so the clause's
-/// variable still names itself inside the body's recorded types and the
-/// instance key refuses (DS4009). The member spellings of `fold`/`zip`
-/// wait on this seam; the free spellings stay
-/// the serving surface meanwhile.
+/// A bodied member's own generic clause no argument solves: the
+/// checker's row stays empty (the routed lambda fixed nothing), so the
+/// discovery plans the head-only instance over the receiver alone —
+/// and the clause's variable still names itself inside the body's
+/// recorded types, so the instance key refuses (DS4009), exactly the
+/// shape before the clause seam. The solved shapes run in
+/// `member_clause_e2e.rs`; a clause the arguments cannot infer at all
+/// refuses at checking below.
 #[test]
-fn a_members_own_generic_clause_over_a_bodied_member_refuses_at_the_instance_key() {
+fn an_unsolved_member_clause_keeps_the_head_only_instance_refusing_at_the_instance_key() {
     let source = concat!(
         "tag int\n",
         "tag string\n",
         "struct list[t]\n",
         "extern fn println (s: string) -> ()\n",
         "impl[t] list[t] {\n",
-        "  fn fold[r] (self, init: r, f: fn(r, t) -> r) -> r {\n",
-        "    init\n",
+        "  fn side[r] (self, f: fn(r) -> int) -> int {\n",
+        "    0\n",
         "  }\n",
         "}\n",
         "fn main() -> int {\n",
-        "  [1, 2].fold(0, (a: int, x: int) => a + x)\n",
+        "  const n = [1, 2].side((x) => 0)\n",
+        "  println(\"n=${n}\")\n",
+        "  0\n",
         "}\n",
     );
     refuses_with(source, "an instance key");
+}
+
+/// A member clause the call's arguments cannot infer: the site refuses
+/// at checking with the same inference failure a free generic call's
+/// unsolved clause takes (DS2002), never reaching a lowering.
+#[test]
+fn a_member_clause_the_arguments_cannot_infer_refuses_at_the_call() {
+    let source = concat!(
+        "tag int\n",
+        "tag string\n",
+        "struct list[t]\n",
+        "extern fn println (s: string) -> ()\n",
+        "impl[t] list[t] {\n",
+        "  fn applyish[r] (self, f: fn(r) -> r) -> r {\n",
+        "    f(f)\n",
+        "  }\n",
+        "}\n",
+        "fn main() -> int {\n",
+        "  const n = [1, 2].applyish((x) => x)\n",
+        "  println(\"n=${n}\")\n",
+        "  0\n",
+        "}\n",
+    );
+    let mut files = Files::new();
+    let id = files.add_source("infer.ds", source);
+    let asts = [parse(&files, id).expect("the probe parses")];
+    let analyzed = analyze(&files, &asts);
+    assert!(
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .any(|diag| human(diag, &files).contains("cannot infer `r` from this call")),
+        "the unsolvable clause refuses at the call: {}",
+        analyzed
+            .checked
+            .diags
+            .iter()
+            .map(|diag| human(diag, &files))
+            .collect::<String>()
+    );
 }

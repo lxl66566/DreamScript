@@ -17,6 +17,12 @@
 
 use super::*;
 
+/// The site key a member instance's entering sites look their target up
+/// by: the impl item, the member, the receiver type, and the solved
+/// clause's tail segment — the same handles the discovery planned the
+/// instance over.
+pub(crate) type MemberSiteKey = (Span, String, Ty, Rc<Vec<Ty>>);
+
 /// One member body of a generic impl (a trait impl's or an inherent
 /// one's): the body the entering sites instantiate.
 pub(crate) struct GenericMember {
@@ -30,6 +36,11 @@ pub(crate) struct GenericMember {
     /// The impl's declared generic parameter names, in declaration
     /// order — the argument order instance keys and site lookups share.
     pub(crate) generics: Vec<String>,
+    /// The member fn's own generic clause names, in declaration order:
+    /// the variables the entering sites solve from the arguments behind
+    /// the receiver, appended behind the head arguments at the instance
+    /// key. A trait's declared default body declares none.
+    pub(crate) clause: Vec<String>,
     /// The member's declared parameters, the `self` receiver among
     /// them: the body's declared shape.
     pub(crate) params: Rc<Vec<Param>>,
@@ -100,6 +111,11 @@ fn member_body_types(analyzed: &Analyzed, generic: &GenericMember) -> Vec<Ty> {
             out.extend(params);
         }
     }
+    for (at, solved) in &checked.member_call_clauses {
+        if inside(*at) {
+            out.extend(solved);
+        }
+    }
     for (at, ty) in &checked.is_tests {
         if inside(*at) {
             out.push(*ty);
@@ -138,6 +154,9 @@ fn member_body_types(analyzed: &Analyzed, generic: &GenericMember) -> Vec<Ty> {
         }
         if let Some(params) = &rec.member_params {
             out.extend(params.iter().copied());
+        }
+        if let Some(solved) = &rec.member_clause {
+            out.extend(solved.iter().copied());
         }
         if let Some(ty) = rec.is_test {
             out.push(ty);
@@ -230,18 +249,21 @@ enum Site {
 }
 
 /// One dispatch site the checker solved onto a generic impl's member
-/// body: the instance over the receiver's solved shape when the site's
-/// written receiver is concrete, else the ONE Raw-word body. The
-/// decision reads the written receiver, never the lens: an instance
-/// body serves shapes the entering sites' chain words tell apart at
-/// runtime, so a body's own sites bake no shape a shared instance
-/// could disagree with — a variable-written receiver keeps the ONE
-/// body and its slot pass-through whatever the enclosing instantiation
-/// solved. A body pushed here walks at once, so its own sites and mints
-/// plan inside the entry holding this site.
+/// body: the instance over the site's solved shape — the receiver's
+/// head solving plus the member's own clause when the call's checker
+/// row solved every clause parameter — or the ONE Raw-word body where
+/// the solved list still names a variable. The decision reads the
+/// written receiver and the solved clause types, never the lens
+/// alone: an instance body serves shapes the entering sites' chain
+/// words tell apart at runtime, so a body's own sites bake no shape a
+/// shared instance could disagree with — a variable-written receiver
+/// keeps the ONE body and its slot pass-through whatever the enclosing
+/// instantiation solved. A body pushed here walks at once, so its own
+/// sites and mints plan inside the entry holding this site.
 pub(super) fn enter_member_site(
     plan: &mut Plan,
     found: &mut Discovery<'_, '_>,
+    ctx: &MintCtx<'_>,
     call_span: Span,
     recv_span: Option<Span>,
 ) -> Result<(), LowerError> {
@@ -321,12 +343,51 @@ pub(super) fn enter_member_site(
     let universe = found.types.universe();
     let concrete = !crate::types::has_variables(universe, recv);
     let (index, planned) = if concrete {
-        let args = match &site {
+        // The site's solved clause, the copy-routed read (the free
+        // call's solved-argument row mirrored): the types may name the
+        // walking body's own variables, so the entering entry's
+        // substitution resolves them first. A clause segment still
+        // naming a variable keeps the ONE body; a site no row covers
+        // stays the head-only instance.
+        let clause = copy_record
+            .and_then(|rec| rec.member_clause.clone())
+            .or_else(|| {
+                analyzed
+                    .checked
+                    .member_call_clauses
+                    .get(&call_span)
+                    .cloned()
+            });
+        let clause = match (&ctx.subst, clause) {
+            (Some(subst), Some(solved)) => Some(
+                solved
+                    .iter()
+                    .map(|&ty| found.types.substitute(subst, ty))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            (None, Some(solved)) => Some(solved),
+            (_, None) => None,
+        };
+        let head_solved = match &site {
             Site::Impl(head) => member_args(found, *head, recv, &generic.generics),
             Site::Default { tc, impl_site } => default_args(found, tc, *impl_site, recv),
         };
-        match args {
-            Some(args) => plan.member_instance(found, &generic, &args, recv)?,
+        match head_solved {
+            Some(mut args) => {
+                let clause_ready = clause.as_ref().is_some_and(|solved| {
+                    solved
+                        .iter()
+                        .all(|&ty| !crate::types::has_variables(found.types.universe(), ty))
+                });
+                if clause.is_some() && !clause_ready {
+                    plan.member_one_body(analyzed, &generic)
+                } else {
+                    if let Some(solved) = clause {
+                        args.extend(solved);
+                    }
+                    plan.member_instance(found, &generic, &args, recv)?
+                }
+            },
             None => plan.member_one_body(analyzed, &generic),
         }
     } else {
@@ -391,11 +452,18 @@ impl Plan {
 
     /// The instance one entering site solved for, when the plan's
     /// discovery planned it: the lowering's target lookup, keyed by the
-    /// receiver type the site's lens reads — the same handle the
-    /// discovery substituted and recorded.
-    pub(crate) fn member_target(&self, impl_site: Span, member: &str, recv: Ty) -> Option<u32> {
+    /// receiver type the site's lens reads and the solved clause's tail
+    /// segment — the same handle and row the discovery substituted and
+    /// recorded.
+    pub(crate) fn member_target(
+        &self,
+        impl_site: Span,
+        member: &str,
+        recv: Ty,
+        clause: Rc<Vec<Ty>>,
+    ) -> Option<u32> {
         self.member_instance_args
-            .get(&(impl_site, member.to_owned(), recv))
+            .get(&(impl_site, member.to_owned(), recv, clause))
             .copied()
     }
 
@@ -453,10 +521,11 @@ impl Plan {
         index
     }
 
-    /// The instance of one generic member over the receiver's solved
-    /// types: the body lowered over that shape, shared with every site
-    /// whose receiver takes the same shape — the body keyed by the
-    /// shape, the site lookup keyed by the receiver type itself.
+    /// The instance of one generic member over the solved argument
+    /// types: the body lowered over that shape — the impl head's
+    /// arguments plus the member's own clause segment — shared with
+    /// every site whose solved list takes the same shape, the site
+    /// lookup keyed by the receiver type and the clause's tail segment.
     fn member_instance(
         &mut self,
         found: &mut Discovery<'_, '_>,
@@ -464,14 +533,18 @@ impl Plan {
         args: &[Ty],
         recv: Ty,
     ) -> Result<(u32, bool), LowerError> {
-        let key_args = (generic.impl_site, generic.member.clone(), recv);
+        let key_args: MemberSiteKey = (
+            generic.impl_site,
+            generic.member.clone(),
+            recv,
+            Rc::new(args[generic.generics.len()..].to_vec()),
+        );
         if let Some(&index) = self.member_instance_args.get(&key_args) {
             return Ok((index, false));
         }
         let body = self.member_body_types(found.analyzed, generic);
-        let subst = found
-            .types
-            .subst(member_vars(found.analyzed, generic, args));
+        let mut_vars = member_vars(found.analyzed, generic, args);
+        let subst = found.types.subst(mut_vars);
         for &ty in body.iter() {
             found.types.substitute(&subst, ty)?;
         }
@@ -659,7 +732,7 @@ impl Plan {
         }
         self.member_instance_args
             .keys()
-            .any(|(site, name, _)| *site == impl_site && name == member)
+            .any(|(site, name, ..)| *site == impl_site && name == member)
     }
 
     /// Plans one named generic member's ONE body at its own declaration,
@@ -676,73 +749,158 @@ impl Plan {
     }
 }
 
-/// The member body's variable atoms to the solved argument types: the
-/// impl's declared generic parameters bind to the variables the
-/// declaration's checking minted, found by written name anywhere in
-/// the head pattern — the checker pushes the impl's generics and mints
-/// the head over those same atoms.
+/// The member body's variable atoms to the solved argument types. An
+/// impl's member binds two segments by written name — the instance
+/// head's registration minting and the body's own checking minting
+/// are distinct atom sets, so the name alone bridges them: the
+/// receiver's fact carries the impl's own variable atoms as the
+/// body's checking minted them, and the member fn's clause mints in
+/// the body's scope on top of them, shadowing a same-named impl
+/// generic inside the written signature — so an atom outside the
+/// receiver's set belongs to the clause, and the two segments share
+/// atoms by name alone. The clause's variables bind positionally
+/// behind the head segment; a trait's declared default body runs the
+/// same story over the trait's own `Self` variable and declares no
+/// clause, binding every argument by name against the declared list.
 fn member_vars(analyzed: &Analyzed, generic: &GenericMember, args: &[Ty]) -> HashMap<TypeId, Ty> {
     let universe = &analyzed.decls.universe;
     let mut vars = HashMap::new();
+    if generic.default_of.is_some() {
+        for param in generic.params.iter() {
+            let Some(fact) = analyzed.checked.binders.get(&param.name.span) else {
+                continue;
+            };
+            for &atom in universe.members(fact.ty) {
+                bind_member_var(universe, atom, generic, args, &[], &mut vars);
+            }
+        }
+        if let Some(&ret) = analyzed.decls.impl_fn_rets.get(&generic.decl_span) {
+            for &atom in universe.members(ret) {
+                bind_member_var(universe, atom, generic, args, &[], &mut vars);
+            }
+        }
+        return vars;
+    }
+    // the impl's own variable atoms, as the body's checking minted
+    // them: the receiver's fact holds the head pattern's atoms, the
+    // clause's mintings never occur in it
+    let mut head_atoms: Vec<TypeId> = Vec::new();
+    if let Some(param) = generic
+        .params
+        .iter()
+        .find(|param| param.name.name == "self")
+        && let Some(fact) = analyzed.checked.binders.get(&param.name.span)
+    {
+        collect_head_atoms(universe, fact.ty, &mut head_atoms);
+    }
     for param in generic.params.iter() {
         let Some(fact) = analyzed.checked.binders.get(&param.name.span) else {
             continue;
         };
         for &atom in universe.members(fact.ty) {
-            bind_member_var(universe, atom, generic, args, &mut vars);
+            bind_member_var(universe, atom, generic, args, &head_atoms, &mut vars);
         }
     }
     if let Some(&ret) = analyzed.decls.impl_fn_rets.get(&generic.decl_span) {
         for &atom in universe.members(ret) {
-            bind_member_var(universe, atom, generic, args, &mut vars);
+            bind_member_var(universe, atom, generic, args, &head_atoms, &mut vars);
         }
     }
     vars
 }
 
-/// Binds one atom (and the nested atoms its declaration carries) when
-/// it names a generic parameter of the impl.
+/// Every atom one type mentions, the nested declarations included.
+fn collect_head_atoms(universe: &ds_check::Universe, ty: Ty, out: &mut Vec<TypeId>) {
+    for &atom in universe.members(ty) {
+        collect_head_atom(universe, atom, out);
+    }
+}
+
+/// One atom and the nested atoms its declaration carries.
+fn collect_head_atom(universe: &ds_check::Universe, atom: TypeId, out: &mut Vec<TypeId>) {
+    if out.contains(&atom) {
+        return;
+    }
+    out.push(atom);
+    let Ok(decl) = universe.atom_decl(atom) else {
+        return;
+    };
+    match decl.kind.clone() {
+        AtomKind::Apply(_, bound) => {
+            for &arg in &bound {
+                collect_head_atoms(universe, arg, out);
+            }
+        },
+        AtomKind::Tuple(elements) => {
+            for &element in &elements {
+                collect_head_atom(universe, element, out);
+            }
+        },
+        AtomKind::FnSig(params, ret) => {
+            for &param in &params {
+                collect_head_atoms(universe, param, out);
+            }
+            collect_head_atoms(universe, ret, out);
+        },
+        AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Enum(_) | AtomKind::Reserved => {},
+    }
+}
+
+/// Binds one atom (and the nested atoms its declaration carries)
+/// against the two segments: a declared default's atom names a trait
+/// variable and binds at its declared position, an impl member's atom
+/// the receiver's set holds names an impl generic and binds at its
+/// declared position, and every other named atom belongs to the
+/// member's own clause, binding positionally behind the head segment.
 fn bind_member_var(
     universe: &ds_check::Universe,
     atom: TypeId,
     generic: &GenericMember,
     args: &[Ty],
+    head_atoms: &[TypeId],
     vars: &mut HashMap<TypeId, Ty>,
 ) {
-    // a variable atom binds directly; every other atom's nested
-    // declarations may still name the variables, so the walk continues
-    // past it whatever it is
-    if let Some(name) = crate::shape::var_param_name(universe, atom)
-        && let Some(&arg) = generic
-            .generics
-            .iter()
-            .position(|param| *param == name)
-            .and_then(|at| args.get(at))
-    {
-        vars.insert(atom, arg);
+    if let Some(name) = crate::shape::var_param_name(universe, atom) {
+        let in_head = generic.default_of.is_some() || head_atoms.contains(&atom);
+        let segment = if in_head {
+            generic
+                .generics
+                .iter()
+                .position(|param| *param == name)
+                .and_then(|at| args.get(at))
+        } else {
+            generic
+                .clause
+                .iter()
+                .position(|param| *param == name)
+                .and_then(|at| args.get(generic.generics.len() + at))
+        };
+        if let Some(&arg) = segment {
+            vars.insert(atom, arg);
+        }
     }
     if let Ok(decl) = universe.atom_decl(atom) {
         match decl.kind.clone() {
             AtomKind::Apply(_, bound) => {
                 for &arg in &bound {
                     for &nested in universe.members(arg) {
-                        bind_member_var(universe, nested, generic, args, vars);
+                        bind_member_var(universe, nested, generic, args, head_atoms, vars);
                     }
                 }
             },
             AtomKind::Tuple(elements) => {
                 for &element in &elements {
-                    bind_member_var(universe, element, generic, args, vars);
+                    bind_member_var(universe, element, generic, args, head_atoms, vars);
                 }
             },
             AtomKind::FnSig(params, ret) => {
                 for &param in &params {
                     for &nested in universe.members(param) {
-                        bind_member_var(universe, nested, generic, args, vars);
+                        bind_member_var(universe, nested, generic, args, head_atoms, vars);
                     }
                 }
                 for &nested in universe.members(ret) {
-                    bind_member_var(universe, nested, generic, args, vars);
+                    bind_member_var(universe, nested, generic, args, head_atoms, vars);
                 }
             },
             AtomKind::Unit | AtomKind::Struct(_) | AtomKind::Enum(_) | AtomKind::Reserved => {},
@@ -751,22 +909,28 @@ fn bind_member_var(
 }
 
 impl FnLower<'_, '_, '_> {
-    /// The dispatch target of one call site onto a generic impl's
-    /// member body: the per-shape instance the site's receiver solved,
-    /// or the ONE Raw-word body a site still naming a variable enters —
-    /// the same target the plan's discovery planned, so a miss is the
-    /// walk and the discovery disagreeing on the site.
+    /// The dispatch target of one call site onto a generic impl's member
+    /// body: the per-shape instance the site's receiver and solved
+    /// clause picked, or the ONE Raw-word body a site still naming a
+    /// variable enters — the same target the plan's discovery planned,
+    /// so a miss is the walk and the discovery disagreeing on the site.
     pub(in crate::func) fn member_dispatch_target(
         &self,
         generic: &Rc<GenericMember>,
         recv: Ty,
+        call: Span,
         what: Span,
     ) -> Result<u32, LowerError> {
         let universe = self.universe();
         let concrete = !crate::types::has_variables(universe, recv);
         let target = if concrete {
+            // the site's solved clause through the lens: the same tail
+            // segment the discovery appended behind the head arguments,
+            // an unrecorded clause reading the empty segment a
+            // head-only instance keys
+            let clause = self.member_call_clause(call)?.unwrap_or_default();
             self.plan
-                .member_target(generic.impl_site, &generic.member, recv)
+                .member_target(generic.impl_site, &generic.member, recv, Rc::new(clause))
         } else {
             None
         };

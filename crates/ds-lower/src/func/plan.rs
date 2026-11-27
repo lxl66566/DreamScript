@@ -315,9 +315,10 @@ pub(crate) struct Plan {
     /// The instance of each generic member at one shape key: the
     /// function table's index of the body lowered over that shape.
     pub(super) member_instances: HashMap<(Span, String, Rc<InstanceKey>), u32>,
-    /// The same instances by their entering site's receiver type: what a
-    /// lowering site looks its target up by, the handle its lens reads.
-    pub(super) member_instance_args: HashMap<(Span, String, Ty), u32>,
+    /// The same instances by their entering site's receiver type and
+    /// solved clause segment: what a lowering site looks its target up
+    /// by, the handles its lens reads.
+    pub(super) member_instance_args: HashMap<MemberSiteKey, u32>,
     /// Every generic member's recorded types, in a fixed order: the
     /// declared parameters, the solved return, and every type the
     /// checker recorded inside the body's block span.
@@ -1664,7 +1665,7 @@ pub(super) fn discover_expr(
                 Expr::Field { recv, .. } => Some(recv.span()),
                 _ => None,
             };
-            member::enter_member_site(plan, found, *span, recv_span)?;
+            member::enter_member_site(plan, found, ctx, *span, recv_span)?;
             // The callee first, in the receiver-first order the walk
             // stages its arguments: a dot-call's receiver holds whole
             // call shapes (the fluent spelling `xs.map(f).len()`), and
@@ -1725,7 +1726,7 @@ pub(super) fn discover_expr(
                         StrPart::Ident { name, .. } => Some(name.span),
                         StrPart::Text { .. } => None,
                     };
-                    member::enter_member_site(plan, found, hole_span, recv_span)?;
+                    member::enter_member_site(plan, found, ctx, hole_span, recv_span)?;
                 }
             }
         },

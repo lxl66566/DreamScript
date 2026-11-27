@@ -1,9 +1,8 @@
 // The lambda-taking combinators over CALLG dispatch: map, filter, and
 // reduce stage the lambda as one Fn word (a synthesized function), the
 // VM reenters the dispatcher per element, and the block-body println
-// interleaves in element order. The @std list pair (the bodied generic
-// library fns) lands the FP surface's first members: zip and
-// enumerate over the same list.
+// interleaves in element order. The @std list pair lands the FP
+// surface's first members: zip and enumerate over the same list.
 
 fn at(xs: list[int], i: int) -> int {
   const cell = xs.get(i)
@@ -29,7 +28,7 @@ fn main() -> () {
   println("split ${big.len()} ${small.len()}")
   const partials = xs.scan(0, (a: int, b: int) => a + b)
   println("scan ${partials.len()} ${at(partials, 2)}")
-  const pairs = zip(xs, ["x", "y", "z"])
+  const pairs = xs.zip(["x", "y", "z"])
   const numbered = ["a", "b"].enumerate()
   println("zip ${pairs.len()} enum ${numbered.len()} ${xs.enumerate().len()}")
 }

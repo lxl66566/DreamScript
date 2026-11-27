@@ -73,6 +73,10 @@ impl<'a> FnLower<'a, '_, '_> {
         self.copy_record(span)?.member_params.clone()
     }
 
+    pub(super) fn copy_member_clause(&self, span: Span) -> Option<Vec<Ty>> {
+        self.copy_record(span)?.member_clause.clone()
+    }
+
     pub(super) fn copy_handler_handled(&self, span: Span) -> Option<Ty> {
         self.copy_record(span)?.handler_handled
     }
@@ -334,6 +338,28 @@ impl<'a> FnLower<'a, '_, '_> {
             .map(|ty| self.shapes.subst(*ty).map_err(|err| err.respanned(span)))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(params))
+    }
+
+    /// The solved clause types one member call's own generic parameters
+    /// took, read through the lens: under an instantiation the types name
+    /// this body's variables, and the substitution is what the plan's
+    /// discovery appended behind the head arguments at the instance's
+    /// site key.
+    pub(super) fn member_call_clause(&self, span: Span) -> Result<Option<Vec<Ty>>, LowerError> {
+        let Some(solved) = self.copy_member_clause(span).or_else(|| {
+            self.analyzed
+                .checked
+                .member_call_clauses
+                .get(&span)
+                .cloned()
+        }) else {
+            return Ok(None);
+        };
+        let solved = solved
+            .iter()
+            .map(|ty| self.shapes.subst(*ty).map_err(|err| err.respanned(span)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(solved))
     }
 
     /// The `.err`/`.ok` handler site's handled member set, read through

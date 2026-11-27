@@ -1416,10 +1416,11 @@ impl Bodies<'_> {
     /// non-lambda arguments bind variables structurally, lambda
     /// arguments check against their fn-typed parameter binding the
     /// return variables, the return solves under the substitution. The
-    /// native-backed member route derives its evidence from the receiver
-    /// alone, so no instantiation record rides the span; a declared
-    /// bound on the clause still refuses here when the solved type
-    /// carries no serving instance.
+    /// solved clause records beside the call — the site's instantiation
+    /// the lowering's discovery keys the callee's per-shape body by,
+    /// every parameter solved or no record (an unsolved site keeps the
+    /// callee's ONE body); a declared bound on the clause still refuses
+    /// here when the solved type carries no serving instance.
     pub(in crate::type_of) fn member_call_generics(
         &mut self,
         sig: &FnSig,
@@ -1560,6 +1561,26 @@ impl Bodies<'_> {
             for trait_id in arms {
                 self.trait_satisfied(trait_id, ty, span);
             }
+        }
+        // The site's solved clause records beside the call when every
+        // clause parameter solved: the instantiation the lowering's
+        // discovery keys the callee's per-shape body by. A routed lambda
+        // that fixed nothing leaves holes in the substitution — no
+        // record, and the callee's ONE body serves the site (the free
+        // call's record discipline mirrored).
+        let mut solved_clause = Vec::with_capacity(sig.generics.len());
+        for param in &sig.generics {
+            let Some(ty) = subst.get(&param.name) else {
+                solved_clause.clear();
+                break;
+            };
+            solved_clause.push(*ty);
+        }
+        if unsolved {
+            solved_clause.clear();
+        }
+        if !solved_clause.is_empty() {
+            self.record_member_clause(span, solved_clause);
         }
         // Unbound variables leaking into the result are inference
         // failures: no any fallback.

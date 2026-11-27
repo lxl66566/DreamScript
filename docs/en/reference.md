@@ -1463,6 +1463,8 @@ impl[t] list[t] {
   fn take(self, n: int) -> list[t]
   fn drop(self, n: int) -> list[t]
   fn enumerate(self) -> list[(int, t)]
+  fn fold[r](self, init: r, f: fn(r, t) -> r) -> r
+  fn zip[r](self, ys: list[r]) -> list[(t, r)]
 }
 ```
 
@@ -1649,15 +1651,6 @@ to four digits; no zone designator.
 
 ```ds
 pub fn datetime_str(t: datetime) -> string
-```
-
-#### `fold`
-
-Folds the list over the initial value through the step
-lambda.
-
-```ds
-pub fn fold[t, r](xs: list[t], init: r, f: fn(r, t) -> r) -> r
 ```
 
 #### `hex`
@@ -1934,15 +1927,6 @@ read.
 
 ```ds
 pub fn view_text(v: string_view) -> string
-```
-
-#### `zip`
-
-The positional pairs of the two lists, up to the shorter
-one's length.
-
-```ds
-pub fn zip[t, r](xs: list[t], ys: list[r]) -> list[(t, r)]
 ```
 
 ### Values

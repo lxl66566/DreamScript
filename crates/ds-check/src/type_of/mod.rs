@@ -259,6 +259,9 @@ pub struct CopyRecords {
     pub place_store: Option<PlaceStore>,
     /// The solved parameter types of a member call inside the copy.
     pub member_params: Option<Vec<Ty>>,
+    /// The solved clause types of a clause-carrying member call inside
+    /// the copy.
+    pub member_clause: Option<Vec<Ty>>,
     /// The handled member set of a handler site inside the copy.
     pub handler_handled: Option<Ty>,
     /// The inherent method a dot-call inside the copy selected.
@@ -452,6 +455,17 @@ pub struct Checked {
     /// re-span, the width guard) reads this record where a dispatch
     /// reaches a body no planned def names.
     pub member_call_params: FxHashMap<Span, Vec<Ty>>,
+    /// The solved clause types of every member call whose callee
+    /// declares its own generic clause, keyed by the call's own span in
+    /// the clause's declaration order: the site's instantiation the
+    /// plan-side discovery keys the callee's per-shape body by, the
+    /// same lens the free-fn `generic_calls` rows serve. Recorded only
+    /// when every clause parameter solved (a missing one clears, a
+    /// routed lambda that fixed nothing clears), so an unsolved site
+    /// keeps the callee's ONE body; the types may name the enclosing
+    /// body's own variables, which the entering walk's substitution
+    /// resolves.
+    pub member_call_clauses: FxHashMap<Span, Vec<Ty>>,
     /// The solved parameter types of every non-generic free fn call,
     /// keyed by the call's own span: recorded only when every parameter
     /// solves, so the call-site staging (the native widening family's
@@ -640,6 +654,7 @@ pub fn analyze_resolved(
         handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        member_call_clauses: checked.member_call_clauses,
         call_params: checked.call_params,
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
@@ -815,6 +830,7 @@ fn analyze_served_over(
         handler_handled: checked.handler_handled,
         method_selections: checked.method_selections,
         member_call_params: checked.member_call_params,
+        member_call_clauses: checked.member_call_clauses,
         call_params: checked.call_params,
         place_stores: checked.place_stores,
         comptime_records: checked.comptime_records,
@@ -870,6 +886,7 @@ where
     let mut field_calls = FxHashSet::default();
     let mut method_selections: FxHashMap<Span, MethodId> = FxHashMap::default();
     let mut member_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
+    let mut member_call_clauses: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
     let mut call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
     let mut place_stores: FxHashMap<Span, PlaceStore> = FxHashMap::default();
     let mut inherent_call_bounds: FxHashMap<Span, InherentCallBounds> = FxHashMap::default();
@@ -915,6 +932,7 @@ where
             instance: None,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            member_call_clauses: &mut member_call_clauses,
             call_params: &mut call_params,
             place_stores: &mut place_stores,
             diags: Vec::new(),
@@ -985,6 +1003,7 @@ where
             instance: None,
             method_selections: &mut method_selections,
             member_call_params: &mut member_call_params,
+            member_call_clauses: &mut member_call_clauses,
             call_params: &mut call_params,
             place_stores: &mut place_stores,
             diags: Vec::new(),
@@ -1078,6 +1097,7 @@ where
         comptime_instance_loops: instance_loops,
         method_selections,
         member_call_params,
+        member_call_clauses,
         call_params,
         place_stores,
     }))
@@ -1257,6 +1277,7 @@ fn expand_comptime_instances(
         let mut scratch_directed_tags = FxHashMap::default();
         let mut scratch_handler = FxHashMap::default();
         let mut scratch_member_params = FxHashMap::default();
+        let mut scratch_member_clauses: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
         let mut scratch_method_selections = FxHashMap::default();
         let mut scratch_place_stores = FxHashMap::default();
         let mut scratch_call_params: FxHashMap<Span, Vec<Ty>> = FxHashMap::default();
@@ -1292,6 +1313,7 @@ fn expand_comptime_instances(
             comptime_sites: sites,
             method_selections: &mut scratch_method_selections,
             member_call_params: &mut scratch_member_params,
+            member_call_clauses: &mut scratch_member_clauses,
             call_params: &mut scratch_call_params,
             place_stores: &mut scratch_place_stores,
             diags: Vec::new(),
@@ -1497,6 +1519,7 @@ struct Bodies<'a> {
     field_calls: &'a mut FxHashSet<Span>,
     method_selections: &'a mut FxHashMap<Span, MethodId>,
     member_call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
+    member_call_clauses: &'a mut FxHashMap<Span, Vec<Ty>>,
     call_params: &'a mut FxHashMap<Span, Vec<Ty>>,
     place_stores: &'a mut FxHashMap<Span, PlaceStore>,
     inherent_call_bounds: &'a mut FxHashMap<Span, InherentCallBounds>,

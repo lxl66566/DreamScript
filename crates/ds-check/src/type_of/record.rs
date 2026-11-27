@@ -258,6 +258,26 @@ impl Bodies<'_> {
         }
     }
 
+    pub(super) fn record_member_clause(&mut self, span: Span, solved: Vec<Ty>) {
+        match self.record_scope() {
+            RecordScope::Body => {
+                self.member_call_clauses.insert(span, solved);
+            },
+            RecordScope::Written(path) => {
+                self.comptime_records
+                    .entry((path, span))
+                    .or_default()
+                    .member_clause = Some(solved);
+            },
+            RecordScope::Instance(id, args, path) => {
+                self.comptime_instance_records
+                    .entry((id, args, path, span))
+                    .or_default()
+                    .member_clause = Some(solved);
+            },
+        }
+    }
+
     pub(super) fn record_place_store(&mut self, span: Span, store: PlaceStore) {
         match self.record_scope() {
             RecordScope::Body => {

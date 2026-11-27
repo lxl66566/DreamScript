@@ -86,8 +86,9 @@ fn combinators_run_their_lambdas_reentrantly() {
     // the dispatcher per element: map and filter answer fresh lists,
     // reduce folds (an empty list would answer its init), partition
     // splits into its two-list total at the call site, and the
-    // block-body println interleaves in element order; the @std list
-    // pair (zip, enumerate) answers as the bodied generic library fns,
+    // block-body println interleaves in element order; the list pair
+    // (zip, enumerate) answers at the member tier (the zip's own
+    // generic clause solving from its paired list),
     // scan the running fold over its own generic body's var binding
     assert_eq!(
         run_ok(ds().arg("run").arg(example("combinators.ds"))),
