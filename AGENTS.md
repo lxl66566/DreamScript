@@ -34,7 +34,7 @@
 - 语言：无 emoji。每个 Markdown 段落为单行（不硬换行，不限宽度）。简洁无废话。
 - `docs/en/design-decisions.md` 是每个语言决策的权威工作记录（全部 44 个决策点，包含作者补充）。实现和进一步设计工作阅读此文件。
 - `archive/` 是只读归档，仅供参照：绝不修改 `archive/` 下的文件，且除非工作记录在某点上确实不足，否则不要阅读它（此时将其视为背景，仍然绝不编辑它）。它包含阶段 1-3 研究笔记（`archive/research/`）、决策目录与决策记录（`archive/design/`）、以及 `archive/author_say.md`（作者补充，已并入工作记录）。
-- `docs/en/implementation-plan.md` 是实施计划（范围、布局、方法论、风险、边界守卫）；`docs/en/status.md` 记录当前可运行子集与里程碑边界；`docs/en/pitfalls.md` 是防回归的坑与不变式；`docs/en/memory-arc.md` 是内存终局执行契约；语言裁决在 `design-decisions.md` 与 `tutorial.md`。。
+- `docs/en/implementation-plan.md` 是实施计划（范围、布局、方法论、风险、边界守卫）；`docs/en/status.md` 记录当前可运行子集与里程碑边界；`docs/en/pitfalls.md` 是防回归的坑与不变式；`docs/en/memory-arc.md` 是内存终局执行契约；语言裁决在 `design-decisions.md` 与 `tutorial.md`。
 - 代码注释里不要引用 markdown 文档或者章节序号等。
 - 必须保留：待办与 queue、待裁决的开放问题、作者裁决（带日期与决策号）、有价值的经验与踩坑。
 - 单个文档持续加长时按关注点拆新文件，不要在一个文件里堆不同类别的条目。
