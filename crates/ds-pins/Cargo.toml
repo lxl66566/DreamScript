@@ -30,6 +30,10 @@ name    = "string_temp"
 harness = false
 name    = "arena_bypass"
 
+[[bench]]
+harness = false
+name    = "mutation_kernel"
+
 [dev-dependencies]
 # the examples/opcode_census tool lowers the benchmark kernels through the compiler chain
 ds-abi              = { path = "../ds-abi" }

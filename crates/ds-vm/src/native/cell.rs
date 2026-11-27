@@ -7,8 +7,12 @@
 //! contract. The constructor adopts the staged span under fresh counts
 //! (the staged words' own counts die at the call's window flush), the
 //! read hands the span out under fresh counts, and the store releases
-//! the held span's counts before adopting the incoming one. All three
-//! are pure natives.
+//! the held span's counts before adopting the incoming one. The
+//! constructor and the read are pure; the store reads the container's
+//! count first — a shared-count receiver copies before the store (the
+//! other holders keep the original), a unique one stores in place — and
+//! answers the receiver's post-mutation word under one count the
+//! member's call site re-stores through the receiver's window.
 
 use super::{sink::ref_arg, *};
 
@@ -55,9 +59,10 @@ pub(super) fn box_set_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let cell = ref_arg(args, 0)?;
-    // the variadic tail is the incoming value's whole word span
-    heaps.cell_set(cell, &args[1..])?;
-    // the inert unit word: the member tier re-answers the receiver's
-    // own word after this
-    Ok(NativeResult::Word(Value::I64(0)))
+    // the variadic tail is the incoming value's whole word span; the
+    // copy-before-write door answers a shared-count receiver's fresh
+    // copy, a unique one storing in place
+    let (target, answer) = heaps.cell_mutation_word(cell)?;
+    heaps.cell_set(target, &args[1..])?;
+    Ok(NativeResult::Word(answer))
 }

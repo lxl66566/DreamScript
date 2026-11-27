@@ -59,13 +59,13 @@ fn fp_ref(index: u32) -> Const {
     })
 }
 
-fn def(
+fn def<I: Into<Inst> + Copy>(
     name: &str,
     slots: &[SlotType],
     params: usize,
     args: usize,
     pool: Vec<Const>,
-    body: &[Uop],
+    body: &[I],
 ) -> FunctionDef {
     FunctionDef {
         name: name.into(),
@@ -108,80 +108,114 @@ fn map_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 11 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 7 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 11 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 7 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 7, src: 0 });
-        body.push(Uop::Kimm { dst: 8, kidx: word });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 7, src: 0 }.into());
+        body.push(Uop::Kimm { dst: 8, kidx: word }.into());
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 7 }.into());
     }
-    body.push(Uop::Mov { dst: 7, src: 0 });
-    body.push(Uop::Kconst { dst: 8, kidx: k(5) });
-    body.push(Uop::Kimm { dst: 9, kidx: k(6) });
-    body.push(Uop::Kimm {
-        dst: 10,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 7 });
-    body.push(Uop::Mov { dst: 7, src: 1 });
-    body.push(Uop::Kimm { dst: 8, kidx: k(6) });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 4, src: 7 });
+    body.push(Uop::Mov { dst: 7, src: 0 }.into());
+    body.push(Uop::Kconst { dst: 8, kidx: k(5) }.into());
+    body.push(Uop::Kimm { dst: 9, kidx: k(6) }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 10,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 7 }.into());
+    body.push(Uop::Mov { dst: 7, src: 1 }.into());
+    body.push(Uop::Kimm { dst: 8, kidx: k(6) }.into());
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 4, src: 7 }.into());
     for (slot, index) in [(2u8, 0usize), (3, elems.len() - 1)] {
         let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: 7, src: 1 });
-        body.push(Uop::Kimm { dst: 8, kidx: word });
-        body.push(Uop::Kimm { dst: 9, kidx: k(6) });
-        body.push(Uop::Callg {
-            callee: k(4),
-            nargs: 2,
-        });
-        body.push(Uop::Mov { dst: slot, src: 8 });
+        body.push(Uop::Mov { dst: 7, src: 1 }.into());
+        body.push(Uop::Kimm { dst: 8, kidx: word }.into());
+        body.push(Uop::Kimm { dst: 9, kidx: k(6) }.into());
+        body.push(
+            Uop::Callg {
+                callee: k(4),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: slot, src: 8 }.into());
     }
     let thousand = word_at(&mut pool, 1000);
     let ten = word_at(&mut pool, 10);
-    body.push(Uop::Kimm {
-        dst: 5,
-        kidx: thousand,
-    });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 2,
-        rhs: 5,
-    });
-    body.push(Uop::Mov { dst: 6, src: 5 });
-    body.push(Uop::Kimm { dst: 5, kidx: ten });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 3,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 4,
-    });
-    body.push(Uop::Ret { src: 6 });
+    body.push(
+        Uop::Kimm {
+            dst: 5,
+            kidx: thousand,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 2,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 6, src: 5 }.into());
+    body.push(Uop::Kimm { dst: 5, kidx: ten }.into());
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 3,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 4,
+        }
+        .into(),
+    );
+    body.push(Uop::Ret { src: 6 }.into());
     def(
         name,
         &[Ref, Ref, Raw, Raw, I64, I64, I64, Raw, Raw, Raw, Raw],
@@ -207,31 +241,41 @@ fn list_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 9 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 5 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 9 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 5 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 5, src: 0 });
-        body.push(Uop::Kimm { dst: 6, kidx: word });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 5, src: 0 }.into());
+        body.push(Uop::Kimm { dst: 6, kidx: word }.into());
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 5 }.into());
     }
-    body.push(Uop::Mov { dst: 5, src: 0 });
-    body.push(Uop::Kconst { dst: 6, kidx: k(3) });
-    body.push(Uop::Kimm { dst: 7, kidx: k(4) });
-    body.push(Uop::Kimm { dst: 8, kidx: k(4) });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 5 });
-    body.push(Uop::Ret { src: 1 });
+    body.push(Uop::Mov { dst: 5, src: 0 }.into());
+    body.push(Uop::Kconst { dst: 6, kidx: k(3) }.into());
+    body.push(Uop::Kimm { dst: 7, kidx: k(4) }.into());
+    body.push(Uop::Kimm { dst: 8, kidx: k(4) }.into());
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 5 }.into());
+    body.push(Uop::Ret { src: 1 }.into());
     def(
         name,
         &[Ref, Ref, Raw, Raw, Raw, Raw, Raw, Raw, Raw],
@@ -256,32 +300,42 @@ fn reduce_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 9 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 5 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 9 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 5 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 5, src: 0 });
-        body.push(Uop::Kimm { dst: 6, kidx: word });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 5, src: 0 }.into());
+        body.push(Uop::Kimm { dst: 6, kidx: word }.into());
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 5 }.into());
     }
     let init = word_at(&mut pool, 0);
-    body.push(Uop::Mov { dst: 5, src: 0 });
-    body.push(Uop::Kimm { dst: 6, kidx: init });
-    body.push(Uop::Kconst { dst: 7, kidx: k(3) });
-    body.push(Uop::Kimm { dst: 8, kidx: k(4) });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 3,
-    });
-    body.push(Uop::Mov { dst: 1, src: 5 });
-    body.push(Uop::Ret { src: 1 });
+    body.push(Uop::Mov { dst: 5, src: 0 }.into());
+    body.push(Uop::Kimm { dst: 6, kidx: init }.into());
+    body.push(Uop::Kconst { dst: 7, kidx: k(3) }.into());
+    body.push(Uop::Kimm { dst: 8, kidx: k(4) }.into());
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 3,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 5 }.into());
+    body.push(Uop::Ret { src: 1 }.into());
     def(
         name,
         &[Ref, Raw, Raw, Raw, Raw, Raw, Raw, Raw, Raw],
@@ -310,125 +364,189 @@ fn closure_main_def(name: &str, elems: &[i64], callee: u32, capture_is_word: boo
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 14 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 10 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 14 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 10 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 10, src: 0 });
-        body.push(Uop::Kimm {
-            dst: 11,
-            kidx: word,
-        });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 10, src: 0 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 11,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 10 }.into());
     }
     // the closure: one capture staged at overlay word 0 (an i64 bias, or
     // a fresh string word for the Ref-capture shape)
     if capture_is_word {
         let word = k(u16::try_from(pool.len()).expect("pool index fits u16"));
-        body.push(Uop::Kstr {
-            dst: 10,
-            kidx: word,
-        });
+        body.push(
+            Uop::Kstr {
+                dst: 10,
+                kidx: word,
+            }
+            .into(),
+        );
         pool.push(Const::Str("shared".into()));
     } else {
         let bias = word_at(&mut pool, 10);
-        body.push(Uop::Kimm {
-            dst: 10,
-            kidx: bias,
-        });
+        body.push(
+            Uop::Kimm {
+                dst: 10,
+                kidx: bias,
+            }
+            .into(),
+        );
     }
-    body.push(Uop::Kconst { dst: 7, kidx: k(5) });
-    body.push(Uop::ClosureNew {
-        dst: 6,
-        func: 7,
-        n: 1,
-    });
-    body.push(Uop::Mov { dst: 10, src: 0 });
-    body.push(Uop::Mov { dst: 11, src: 6 });
-    body.push(Uop::Kimm {
-        dst: 12,
-        kidx: k(6),
-    });
-    body.push(Uop::Kimm {
-        dst: 13,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 10 });
-    body.push(Uop::Mov { dst: 10, src: 1 });
-    body.push(Uop::Kimm {
-        dst: 11,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 8, src: 10 });
-    for (slot, index) in [(2u8, 0usize), (3, elems.len() - 1)] {
-        let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: 10, src: 1 });
-        body.push(Uop::Kimm {
-            dst: 11,
-            kidx: word,
-        });
-        body.push(Uop::Kimm {
+    body.push(Uop::Kconst { dst: 7, kidx: k(5) }.into());
+    body.push(
+        Uop::ClosureNew {
+            dst: 6,
+            func: 7,
+            n: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 10, src: 0 }.into());
+    body.push(Uop::Mov { dst: 11, src: 6 }.into());
+    body.push(
+        Uop::Kimm {
             dst: 12,
             kidx: k(6),
-        });
-        body.push(Uop::Callg {
-            callee: k(4),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: 13,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(2),
             nargs: 2,
-        });
-        body.push(Uop::Mov { dst: slot, src: 11 });
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 10 }.into());
+    body.push(Uop::Mov { dst: 10, src: 1 }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 11,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 8, src: 10 }.into());
+    for (slot, index) in [(2u8, 0usize), (3, elems.len() - 1)] {
+        let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
+        body.push(Uop::Mov { dst: 10, src: 1 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 11,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Kimm {
+                dst: 12,
+                kidx: k(6),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Callg {
+                callee: k(4),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: slot, src: 11 }.into());
     }
     let thousand = word_at(&mut pool, 1000);
     let ten = word_at(&mut pool, 10);
-    body.push(Uop::Kimm {
-        dst: 9,
-        kidx: word_at(&mut pool, 0),
-    });
-    body.push(Uop::Kimm {
-        dst: 5,
-        kidx: thousand,
-    });
-    body.push(Uop::MulI64 {
-        dst: 2,
-        lhs: 2,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 9,
-        lhs: 9,
-        rhs: 2,
-    });
-    body.push(Uop::Kimm { dst: 5, kidx: ten });
-    body.push(Uop::MulI64 {
-        dst: 3,
-        lhs: 3,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 9,
-        lhs: 9,
-        rhs: 3,
-    });
-    body.push(Uop::AddI64 {
-        dst: 9,
-        lhs: 9,
-        rhs: 8,
-    });
-    body.push(Uop::Ret { src: 9 });
+    body.push(
+        Uop::Kimm {
+            dst: 9,
+            kidx: word_at(&mut pool, 0),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: 5,
+            kidx: thousand,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::MulI64 {
+            dst: 2,
+            lhs: 2,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 9,
+            lhs: 9,
+            rhs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Kimm { dst: 5, kidx: ten }.into());
+    body.push(
+        Uop::MulI64 {
+            dst: 3,
+            lhs: 3,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 9,
+            lhs: 9,
+            rhs: 3,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 9,
+            lhs: 9,
+            rhs: 8,
+        }
+        .into(),
+    );
+    body.push(Uop::Ret { src: 9 }.into());
     def(
         name,
         &[
@@ -604,48 +722,55 @@ fn nested_fn_def() -> FunctionDef {
             Const::I64(BuiltinInstance::List as i64), // k6
         ],
         &[
-            Uop::Funcf { frame_slots: 8 },
+            Uop::Funcf { frame_slots: 8 }.into(),
             Uop::Call {
                 callee: k(0),
                 nargs: 0,
-            },
-            Uop::Mov { dst: 1, src: 4 },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Mov { dst: 5, src: 0 },
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Mov { dst: 5, src: 0 }.into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kconst { dst: 5, kidx: k(4) },
-            Uop::Kimm { dst: 6, kidx: k(6) },
-            Uop::Kimm { dst: 7, kidx: k(6) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kconst { dst: 5, kidx: k(4) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(6) }.into(),
+            Uop::Kimm { dst: 7, kidx: k(6) }.into(),
             Uop::Callg {
                 callee: k(2),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 2, src: 4 },
-            Uop::Mov { dst: 4, src: 2 },
-            Uop::Kimm { dst: 5, kidx: k(5) },
-            Uop::Kimm { dst: 6, kidx: k(6) },
+            }
+            .into(),
+            Uop::Mov { dst: 2, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 2 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(5) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(6) }.into(),
             Uop::Callg {
                 callee: k(3),
                 nargs: 2,
-            },
+            }
+            .into(),
             Uop::TagTest {
                 dst: 3,
                 src: 4,
                 tag: ds_vm::native::PLATFORM_IO_OK,
-            },
+            }
+            .into(),
             Uop::Jmpif {
                 cond: 3,
-                target: 20,
-            },
-            Uop::Kimm { dst: 0, kidx: k(5) },
-            Uop::Ret { src: 0 },
-            Uop::Mov { dst: 0, src: 5 },
-            Uop::Ret { src: 0 },
-        ],
+                target: 21,
+            }
+            .into(),
+            Uop::Kimm { dst: 0, kidx: k(5) }.into(),
+            Uop::Ret { src: 0 }.into(),
+            Uop::Mov { dst: 0, src: 5 }.into(),
+            Uop::Ret { src: 0 }.into(),
+        ] as &[Inst],
     )
 }
 
@@ -690,7 +815,7 @@ fn string_capture_def() -> FunctionDef {
             .into(),
             RcOp::Dec { src: 1 }.into(),
             Uop::Ret { src: 2 }.into(),
-        ],
+        ] as &[Inst],
     )
 }
 
@@ -991,85 +1116,122 @@ fn strings_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 11 }];
-    body.push(Uop::Call {
-        callee: k(1),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 7 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 11 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(1),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 7 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Kimm { dst: 7, kidx: word });
-        body.push(Uop::Call {
-            callee: k(0),
-            nargs: 1,
-        });
-        body.push(Uop::Mov { dst: 8, src: 7 });
-        body.push(Uop::Mov { dst: 7, src: 0 });
-        body.push(Uop::Call {
-            callee: k(2),
-            nargs: 2,
-        });
+        body.push(Uop::Kimm { dst: 7, kidx: word }.into());
+        body.push(
+            Uop::Call {
+                callee: k(0),
+                nargs: 1,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: 8, src: 7 }.into());
+        body.push(Uop::Mov { dst: 7, src: 0 }.into());
+        body.push(
+            Uop::Call {
+                callee: k(2),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 7 }.into());
     }
-    body.push(Uop::Mov { dst: 7, src: 0 });
-    body.push(Uop::Kconst { dst: 8, kidx: k(6) });
-    body.push(Uop::Kimm { dst: 9, kidx: k(7) });
-    body.push(Uop::Kimm {
-        dst: 10,
-        kidx: k(7),
-    });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 7 });
-    body.push(Uop::Mov { dst: 7, src: 1 });
-    body.push(Uop::Kimm { dst: 8, kidx: k(7) });
-    body.push(Uop::Callg {
-        callee: k(4),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 4, src: 7 });
+    body.push(Uop::Mov { dst: 7, src: 0 }.into());
+    body.push(Uop::Kconst { dst: 8, kidx: k(6) }.into());
+    body.push(Uop::Kimm { dst: 9, kidx: k(7) }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 10,
+            kidx: k(7),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 7 }.into());
+    body.push(Uop::Mov { dst: 7, src: 1 }.into());
+    body.push(Uop::Kimm { dst: 8, kidx: k(7) }.into());
+    body.push(
+        Uop::Callg {
+            callee: k(4),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 4, src: 7 }.into());
     for (slot, index) in [(2u8, 0usize), (3, elems.len() - 1)] {
         let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: 7, src: 1 });
-        body.push(Uop::Kimm { dst: 8, kidx: word });
-        body.push(Uop::Kimm { dst: 9, kidx: k(7) });
-        body.push(Uop::Callg {
-            callee: k(5),
-            nargs: 2,
-        });
-        body.push(Uop::Mov { dst: slot, src: 8 });
+        body.push(Uop::Mov { dst: 7, src: 1 }.into());
+        body.push(Uop::Kimm { dst: 8, kidx: word }.into());
+        body.push(Uop::Kimm { dst: 9, kidx: k(7) }.into());
+        body.push(
+            Uop::Callg {
+                callee: k(5),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: slot, src: 8 }.into());
     }
     let thousand = word_at(&mut pool, 1000);
     let ten = word_at(&mut pool, 10);
-    body.push(Uop::Kimm {
-        dst: 5,
-        kidx: thousand,
-    });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 2,
-        rhs: 5,
-    });
-    body.push(Uop::Mov { dst: 6, src: 5 });
-    body.push(Uop::Kimm { dst: 5, kidx: ten });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 3,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 4,
-    });
-    body.push(Uop::Ret { src: 6 });
+    body.push(
+        Uop::Kimm {
+            dst: 5,
+            kidx: thousand,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 2,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 6, src: 5 }.into());
+    body.push(Uop::Kimm { dst: 5, kidx: ten }.into());
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 3,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 4,
+        }
+        .into(),
+    );
+    body.push(Uop::Ret { src: 6 }.into());
     def(
         name,
         &[Ref, Ref, Raw, Raw, I64, I64, I64, Raw, Raw, Raw, Raw],
@@ -1101,41 +1263,49 @@ fn nested_reduce_fn_def() -> FunctionDef {
             Const::I64(BuiltinInstance::List as i64), // k8
         ],
         &[
-            Uop::Funcf { frame_slots: 8 },
+            Uop::Funcf { frame_slots: 8 }.into(),
             Uop::Call {
                 callee: k(0),
                 nargs: 0,
-            },
-            Uop::Mov { dst: 1, src: 4 },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Mov { dst: 5, src: 0 },
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Mov { dst: 5, src: 0 }.into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kimm { dst: 5, kidx: k(6) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(6) }.into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kimm { dst: 5, kidx: k(7) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(7) }.into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kimm { dst: 5, kidx: k(5) },
-            Uop::Kconst { dst: 6, kidx: k(4) },
-            Uop::Kimm { dst: 7, kidx: k(8) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(5) }.into(),
+            Uop::Kconst { dst: 6, kidx: k(4) }.into(),
+            Uop::Kimm { dst: 7, kidx: k(8) }.into(),
             Uop::Callg {
                 callee: k(2),
                 nargs: 3,
-            },
-            Uop::Mov { dst: 2, src: 4 },
-            Uop::Ret { src: 2 },
-        ],
+            }
+            .into(),
+            Uop::Mov { dst: 2, src: 4 }.into(),
+            Uop::Ret { src: 2 }.into(),
+        ] as &[Inst],
     )
 }
 
@@ -1161,63 +1331,74 @@ fn foreign_main_def(name: &str, callable: u32) -> FunctionDef {
             Const::I64(BuiltinInstance::List as i64), // k9
         ],
         &[
-            Uop::Funcf { frame_slots: 8 },
+            Uop::Funcf { frame_slots: 8 }.into(),
             Uop::Call {
                 callee: k(0),
                 nargs: 0,
-            },
+            }
+            .into(),
             Uop::Call {
                 callee: k(0),
                 nargs: 0,
-            },
+            }
+            .into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 0,
-            },
-            Uop::Mov { dst: 0, src: 4 },
-            Uop::Mov { dst: 4, src: 0 },
-            Uop::Kimm { dst: 5, kidx: k(7) },
+            }
+            .into(),
+            Uop::Mov { dst: 0, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 0 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(7) }.into(),
             Uop::Call {
                 callee: k(2),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 0 },
-            Uop::Kimm { dst: 5, kidx: k(8) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 0 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(8) }.into(),
             Uop::Call {
                 callee: k(2),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 0 },
-            Uop::Kconst { dst: 5, kidx: k(4) },
-            Uop::Kimm { dst: 6, kidx: k(9) },
-            Uop::Kimm { dst: 7, kidx: k(9) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 0 }.into(),
+            Uop::Kconst { dst: 5, kidx: k(4) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(9) }.into(),
+            Uop::Kimm { dst: 7, kidx: k(9) }.into(),
             Uop::Callg {
                 callee: k(3),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 1, src: 4 },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kimm { dst: 5, kidx: k(6) },
-            Uop::Kimm { dst: 6, kidx: k(9) },
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(6) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(9) }.into(),
             Uop::Callg {
                 callee: k(5),
                 nargs: 2,
-            },
+            }
+            .into(),
             Uop::TagTest {
                 dst: 3,
                 src: 4,
                 tag: ds_vm::native::PLATFORM_IO_OK,
-            },
+            }
+            .into(),
             Uop::Jmpif {
                 cond: 3,
-                target: 26,
-            },
-            Uop::Kimm { dst: 2, kidx: k(6) },
-            Uop::Jmp { target: 27 },
-            Uop::Jmp { target: 27 },
-            Uop::Mov { dst: 2, src: 5 },
-            Uop::Ret { src: 2 },
-        ],
+                target: 28,
+            }
+            .into(),
+            Uop::Kimm { dst: 2, kidx: k(6) }.into(),
+            Uop::Jmp { target: 29 }.into(),
+            Uop::Jmp { target: 29 }.into(),
+            Uop::Mov { dst: 2, src: 5 }.into(),
+            Uop::Ret { src: 2 }.into(),
+        ] as &[Inst],
     )
 }
 
@@ -1249,54 +1430,62 @@ fn deep_level_def(name: &str, callable: Const) -> FunctionDef {
             Const::I64(BuiltinInstance::List as i64), // k7
         ],
         &[
-            Uop::Funcf { frame_slots: 8 },
+            Uop::Funcf { frame_slots: 8 }.into(),
             Uop::Call {
                 callee: k(0),
                 nargs: 0,
-            },
-            Uop::Mov { dst: 1, src: 4 },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Mov { dst: 5, src: 0 },
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Mov { dst: 5, src: 0 }.into(),
             Uop::Call {
                 callee: k(1),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 4, src: 1 },
-            Uop::Kconst { dst: 5, kidx: k(4) },
-            Uop::Kimm { dst: 6, kidx: k(7) },
-            Uop::Kimm { dst: 7, kidx: k(7) },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 1 }.into(),
+            Uop::Kconst { dst: 5, kidx: k(4) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(7) }.into(),
+            Uop::Kimm { dst: 7, kidx: k(7) }.into(),
             Uop::Callg {
                 callee: k(2),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 2, src: 4 },
-            Uop::Mov { dst: 4, src: 2 },
-            Uop::Kimm { dst: 5, kidx: k(5) },
-            Uop::Kimm { dst: 6, kidx: k(7) },
+            }
+            .into(),
+            Uop::Mov { dst: 2, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 2 }.into(),
+            Uop::Kimm { dst: 5, kidx: k(5) }.into(),
+            Uop::Kimm { dst: 6, kidx: k(7) }.into(),
             Uop::Callg {
                 callee: k(3),
                 nargs: 2,
-            },
+            }
+            .into(),
             Uop::TagTest {
                 dst: 3,
                 src: 4,
                 tag: ds_vm::native::PLATFORM_IO_OK,
-            },
+            }
+            .into(),
             Uop::Jmpif {
                 cond: 3,
-                target: 20,
-            },
-            Uop::Kimm { dst: 0, kidx: k(5) },
-            Uop::Ret { src: 0 },
-            Uop::Mov { dst: 0, src: 5 },
-            Uop::Kimm { dst: 6, kidx: k(6) },
+                target: 21,
+            }
+            .into(),
+            Uop::Kimm { dst: 0, kidx: k(5) }.into(),
+            Uop::Ret { src: 0 }.into(),
+            Uop::Mov { dst: 0, src: 5 }.into(),
+            Uop::Kimm { dst: 6, kidx: k(6) }.into(),
             Uop::AddI64 {
                 dst: 0,
                 lhs: 0,
                 rhs: 6,
-            },
-            Uop::Ret { src: 0 },
-        ],
+            }
+            .into(),
+            Uop::Ret { src: 0 }.into(),
+        ] as &[Inst],
     )
 }
 

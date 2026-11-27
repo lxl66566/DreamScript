@@ -13,14 +13,18 @@
 //! channel, one payload word per element word with a count per `Ref`
 //! word. Construction (`list_new`, `list_concat`, and the producers
 //! `split`/`fs_list`) and reads (`list_len`, `list_get`) are pure
-//! natives. The one in-place mutation is `list_push` (index 27): the
-//! construction append list literals lower to, over a freshly built list
-//! its frame uniquely owns — its staged span is variadic (the list word
-//! plus the element's every word), the one native whose argument count
-//! varies by call site; every other mutation stays reserved for the
-//! compiler-disciplined exclusive windows, and growth is the backing
-//! buffer's amortized doubling (`list_concat` reserves the joined
-//! length up front).
+//! natives. The mutations are `list_push` (index 27, the construction
+//! append list literals lower to), `list_set`, `list_insert`,
+//! `list_remove`, and `list_clear`, all through the checker's exclusive
+//! `mut` windows: each reads the receiver object's count and answers the
+//! receiver's post-mutation word under one count — the receiver's own
+//! object at a unique count, a fresh copy at a shared one, so a
+//! mutation through one name stays invisible at the other — and the
+//! member's call site re-stores the word through the receiver's window.
+//! `list_push`'s staged span is variadic (the list word plus the
+//! element's every word), the one native whose argument count varies by
+//! call site; growth is the backing buffer's amortized doubling
+//! (`list_concat` reserves the joined length up front).
 
 use super::{
     sink::{i64_arg, ref_arg},
@@ -153,11 +157,14 @@ pub(super) fn list_push_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     let list = ref_arg(args, 0)?;
-    // the variadic tail is the element's whole inline word span; the
-    // first push fixes the list's stride, a disagreeing later push traps
-    heaps.push_list(list, &args[1..])?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    // the copy-before-write door: a shared-count receiver's append lands
+    // on a fresh copy the member answers, the other holders keeping the
+    // original; a unique one appends in place. The variadic tail is the
+    // element's whole inline word span; the first push fixes the list's
+    // stride, a disagreeing later push traps
+    let (target, answer) = heaps.list_mutation_word(list)?;
+    heaps.push_list(target, &args[1..])?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn list_set_fn(
@@ -174,9 +181,9 @@ pub(super) fn list_set_fn(
             given: args.len(),
         });
     }
-    heaps.set_list(ref_arg(args, 0)?, i64_arg(args, 1)?, &args[2..])?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.list_mutation_word(ref_arg(args, 0)?)?;
+    heaps.set_list(target, i64_arg(args, 1)?, &args[2..])?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn list_remove_fn(
@@ -184,9 +191,9 @@ pub(super) fn list_remove_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    heaps.remove_list(ref_arg(args, 0)?, i64_arg(args, 1)?)?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.list_mutation_word(ref_arg(args, 0)?)?;
+    heaps.remove_list(target, i64_arg(args, 1)?)?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn list_insert_fn(
@@ -202,9 +209,9 @@ pub(super) fn list_insert_fn(
             given: args.len(),
         });
     }
-    heaps.insert_list(ref_arg(args, 0)?, i64_arg(args, 1)?, &args[2..])?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.list_mutation_word(ref_arg(args, 0)?)?;
+    heaps.insert_list(target, i64_arg(args, 1)?, &args[2..])?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn list_clear_fn(
@@ -212,9 +219,9 @@ pub(super) fn list_clear_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    heaps.clear_list(ref_arg(args, 0)?)?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.list_mutation_word(ref_arg(args, 0)?)?;
+    heaps.clear_list(target)?;
+    Ok(NativeResult::Word(answer))
 }
 
 /// The copy natives' shared finisher: the fresh list's edge owns one

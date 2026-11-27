@@ -9,7 +9,6 @@
 // subscript-nesting: stage: run
 // nested-subscripts: stage: run
 // map-subscript: stage: run
-// bump: stage: run
 // compound-place: stage: run
 // compound-ops: stage: run
 // compound-nested: stage: run
@@ -64,12 +63,6 @@ fn map_subscript() -> int {
   m.get("one").unwrap_or(-1) + m.get("two").unwrap_or(-1) * 10 + m.len() * 100
 }
 
-// one probe call per compound store: the counter rides a second list
-fn bump(mut c: list[int]) -> int {
-  c[0] += 1
-  1
-}
-
 fn compound_place() -> int {
   var xs = [1, 2, 3]
   xs[1] += 5
@@ -120,12 +113,18 @@ fn compound_string() -> string {
   ss.get(0).unwrap_or("") + " " + ss.get(1).unwrap_or("") + " " + m.get("k").unwrap_or("")
 }
 
-// the probe evaluates exactly once and the read and the store share its slot
+// the probe evaluates exactly once and the read and the store share its
+// slot; the counter lives in the probe's own closure, the mut-param
+// copy leaving the caller's binding untouched
 fn compound_once() -> int {
-  var calls = [0]
+  var calls = 0
   var xs = [10, 20, 30]
-  xs[bump(calls)] += 1
-  xs.get(1).unwrap_or(-1) * 10 + calls.get(0).unwrap_or(-1)
+  fn bump() -> int {
+    calls = calls + 1
+    calls
+  }
+  xs[bump()] += 1
+  xs.get(1).unwrap_or(-1) * 10 + bump()
 }
 
 fn main() -> () {

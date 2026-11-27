@@ -49,8 +49,10 @@
 // `firstof` answers the first arrival; `interleave` collects in
 // arrival order. The empty race parks the zero-bound answers channel
 // with no fiber left to serve it, the stall guard answering the honest
-// deadlock, and a wider-than-one-word answer refuses at the call's
-// one-word instantiation. `sum` is the fold spelling over reduce's
+// deadlock. The thunk's answer type rides the channel's element stride,
+// so a wider answer crosses whole; a deinit-carrying answer refuses at
+// the send's staging (the payload's hook has no claim inside the
+// channel's edge retention). `sum` is the fold spelling over reduce's
 // hosted callable (the CALLG lambda seam), `fold` the two-type spelling
 // whose accumulator body instantiates over its own argument shape (a
 // `var` binding and a call through the callable-defaulted parameter

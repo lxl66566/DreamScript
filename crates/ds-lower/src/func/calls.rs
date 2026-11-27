@@ -37,13 +37,15 @@ pub(in crate::func) struct NativeMember {
 /// How a classed fallible call constructs its success value at the ok
 /// arm: the shape the union's own success member(s) dictate.
 pub(in crate::func) enum SuccessShape {
-    /// One member carrying one payload word: TagNew the member and
-    /// adopt the span's word 1 as the payload.
+    /// One member carrying its payload fields: TagNew the member and
+    /// copy each payload word off the span's flat payload words (one
+    /// field's single word for the statically-payloaded natives, the
+    /// member's whole span for the result-type-keyed ones).
     Payload {
         /// The success member's atom.
         atom: TypeId,
-        /// The member's one payload field.
-        field: MemberField,
+        /// The member's payload fields, in declaration order.
+        fields: Vec<MemberField>,
     },
     /// One bare member (a unit value over the native's inert unit word,
     /// or a bare tag): TagNew it, the span's word 1 inert.
@@ -1112,11 +1114,11 @@ impl<'a> FnLower<'a, '_, '_> {
                 if defaulted.contains(&index) {
                     self.rc.staged_native(slot, false);
                 } else if window_answer && word_arg.get(index) == Some(&0) {
-                    // a collection-mutating member's receiver: the
-                    // member re-answers a duplicate of the word after
-                    // the call, so the window's flush never decs a
-                    // dying receiver — the answer's own count keeps
-                    // the object
+                    // a collection-mutating member's receiver: the native
+                    // answers the receiver's post-mutation word, which the
+                    // re-store below adopts as the receiver's own claim,
+                    // so the window's flush never decs a dying receiver —
+                    // the replaced word's count dies at that re-store
                     self.rc.staged_native_keep(slot);
                 } else {
                     match target {
@@ -1532,16 +1534,25 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         self.rc.native_done(&mut self.code);
         let place = if let Some(recv) = window_receiver {
-            // a collection-mutating member (`xs.push(x)`, `m.set(k, v)`)
-            // answers the receiver: the native window appended in place
-            // and answered the unit word on the overlay, so the member's
-            // result is a duplicate of the receiver's own word
+            // a collection-mutating member (`xs.push(x)`, `m.set(k, v)`,
+            // `b.set(x)`) answers the receiver's post-mutation word under
+            // one count — the receiver's own object at a unique count, a
+            // fresh copy at a shared one. The word re-stores through the
+            // receiver's window — the replaced word's count dies, the
+            // slot adopting the answer's own claim — and the member's
+            // result dups the post-mutation word
             let word = single(
                 &self
                     .word_addrs(&recv.place, recv.ty)
                     .map_err(|err| err.respanned(callee_span))?,
                 callee_span,
             )?;
+            self.rc.store_over(&mut self.code, &[word.slot]);
+            self.emit(Op::Mov {
+                dst: Slot::body(word.slot),
+                src: Slot::overlay(0),
+            });
+            self.rc.produced(word.slot);
             let base = self.alloc(&[SlotType::Ref])?;
             self.emit(Op::Mov {
                 dst: Slot::body(base),

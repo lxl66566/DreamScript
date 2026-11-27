@@ -13,7 +13,12 @@
 //! the checker's exclusive `mut` window; it stores fresh pairs by
 //! acquiring one count per `Ref` word and drops the overwritten value's
 //! count, so a dying map frees with one dec per stored `Ref` word —
-//! the same retain contract the list carries.
+//! the same retain contract the list carries. Like the list mutations,
+//! `map_set` and `map_remove` read the receiver object's count first: a
+//! shared-count receiver copies before the store (a fresh copy on the
+//! map's own store, its rows' key words local to it), the answer the
+//! copy's word under one count the member's call site re-stores through
+//! the receiver's window.
 //!
 //! `list_get` is the checked read, and its bounds behavior follows the
 //! crate's checked-API convention — the same two-word span `parse_int`
@@ -133,16 +138,18 @@ pub(super) fn map_set_fn(
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
     // the variadic tail is the value's whole inline word span, the
-    // `list_push` staging shape at the value position
+    // `list_push` staging shape at the value position; the
+    // copy-before-write door answers a shared-count receiver's fresh
+    // copy, a unique one mutating in place
     if args.len() < 3 {
         return Err(Trap::ArityMismatch {
             expected: 3,
             given: args.len(),
         });
     }
-    heaps.set_map(ref_arg(args, 0)?, args[1], &args[2..])?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.map_mutation_word(ref_arg(args, 0)?)?;
+    heaps.set_map(target, args[1], &args[2..])?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn map_remove_fn(
@@ -150,9 +157,9 @@ pub(super) fn map_remove_fn(
     _out: &mut OutputSink,
     args: &[Value],
 ) -> Result<NativeResult, Trap> {
-    heaps.remove_map(ref_arg(args, 0)?, args[1])?;
-    // the inert unit word: no caller reads the overlay result
-    Ok(NativeResult::Word(Value::I64(0)))
+    let (target, answer) = heaps.map_mutation_word(ref_arg(args, 0)?)?;
+    heaps.remove_map(target, args[1])?;
+    Ok(NativeResult::Word(answer))
 }
 
 pub(super) fn map_contains_fn(

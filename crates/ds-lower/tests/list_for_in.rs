@@ -283,13 +283,11 @@ fn a_generic_tuple_element_iteration_drains_the_handed_counts() {
 
 /// A body appending to the iterable terminates: the loop's element
 /// count freezes at entry (one `list_len` read before the head), so the
-/// index walk visits exactly the entry count and the appended elements
-/// stay unvisited this loop — the live-length read looped forever with
-/// no diagnostic. The body's direct `mut` window over the iterated
-/// binding refuses at the check (DS3007), so the pin reaches the same
-/// runtime through an
-/// aliased `var`: the alias's push mutates the shared list in place,
-/// which only the frozen count keeps terminating.
+/// index walk visits exactly the entry count. The body's direct `mut`
+/// window over the iterated binding refuses at the check (DS3007), so
+/// the pin reaches the same runtime through an aliased `var`: the
+/// alias's push answers its own copy and never touches the iterated
+/// list, which only the frozen count keeps terminating.
 #[test]
 fn appending_during_iteration_terminates_at_the_entry_count() {
     let source = concat!(
@@ -324,11 +322,11 @@ fn appending_during_iteration_terminates_at_the_entry_count() {
         Ok(FrameAnswer::one(Value::I64(2))),
         "the two entry elements are the whole visit count"
     );
-    // the alias's two pushes extend the shared live list to four but
-    // never this loop
+    // the alias's two pushes land on its own copy: the iterated list
+    // answers its entry count under value semantics
     assert_eq!(
         String::from_utf8_lossy(vm.captured_output()),
-        "visits 2 len 4\n",
+        "visits 2 len 2\n",
         "the frozen count bounds the walk"
     );
     assert!(

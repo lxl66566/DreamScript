@@ -120,17 +120,18 @@ fn a_recursive_nursery_block_drains_the_interlock_iteratively() {
 
 #[test]
 fn the_timeout_surface_races_answers_and_handles_the_deadline() {
-    // the racer's one answer word re-spanned into the call's
+    // the racer's whole answer span re-spanned into the call's
     // `t | timed_out` union at the parked call across the answering
-    // shapes, and the deadline answered as the io taxonomy's own
+    // shapes (a two-field record crossing whole beside the one-word
+    // ones), and the deadline answered as the io taxonomy's own
     // member: a past deadline at once, a real one cutting a parked
     // racer with the `.err` fallback, a `?`-propagating helper, the
     // race under a nursery block, a nested race, and a looping racer
     // landing inside its deadline — run-stage, exit 0
     run_golden(
         "timeout_surface.ds",
-        "scalar 41\nclosure hello thunk\nnamed 5\none field 4\nat once -9\nfallback \
-         12\ngreen\nblock 5 6\nnested 7\nloop 1000000\n",
+        "scalar 41\nclosure hello thunk\nnamed 5\none field 4\nwhole 6 across\nat once \
+         -9\nfallback 12\ngreen\nblock 5 6\nnested 7\nloop 1000000\n",
     );
 }
 
@@ -275,12 +276,15 @@ fn the_json_width_vocabulary_round_trips_both_derive_families() {
 
 #[test]
 fn the_arena_surface_builds_traverses_and_reuses() {
-    // the read-side aliasing container: the handle-built cycle walks
-    // home through the at answers' mut windows, the removal retires the
-    // slot the reuse reanswers under the bumped generation, the handle
-    // crosses calls as a plain int word, and the dangling probe stays
-    // uncalled — its trap is the ds-cli arena_face suite's pin
-    run_golden("arena_surface.ds", "cycle 9\nreuse 0\ncrossed 7\n");
+    // the handle table: the walk over the rows the inserts seeded
+    // answers two hops, the at answers reading as counted values (a
+    // mutating native on the shared-count answer landing on its copy,
+    // cyclic building dead for reference elements until the read-side
+    // aliasing round), the removal retires the slot the reuse reanswers
+    // under the bumped generation, the handle crosses calls as a plain
+    // int word, and the dangling probe stays uncalled — its trap is the
+    // ds-cli arena_face suite's pin
+    run_golden("arena_surface.ds", "walk 2\nreuse 0\ncrossed 7\n");
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn the_place_chains_store_and_the_compound_operator_folds_through_them() {
     // miss traps are the ds-lower place_assign suite's pins)
     run_golden(
         "place_stores.ds",
-        "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 211\n",
+        "fields 30 359\nsubscripts 3201 150 304 221\ncompound 7 8606721 5084630 ax bax vw 212\n",
     );
 }
 /// The non-handle io spellings answer the io_err union: a failed write,

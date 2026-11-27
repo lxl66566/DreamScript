@@ -23,8 +23,9 @@
 //!   bound the wait with the io taxonomy's own `timed_out` loser — a past deadline answering at
 //!   once, the win door waking before the deadline with the ok span, the timed-out recv leaving the
 //!   next waiter the wake, the timed-out send's staged payload never crossing, a cut loser (the
-//!   timer race over a parked deadline send) keeping its deinit and leaving the queue clean, and
-//!   the lowering refusals (a wider element answer, a deinit-carrying payload, a bare tail).
+//!   timer race over a parked deadline send) keeping its deinit and leaving the queue clean — and a
+//!   wider element crossing both faces: the deadline send's staged payload, the deadline recv's ok
+//!   answer (the buffered read and the win door, the whole span under the ok discriminant).
 //! - lowering refusals: a deinit-carrying payload refuses at the send's staging, before any run.
 
 use std::{env, fs, path::PathBuf, process::Command};
@@ -629,23 +630,64 @@ fn main() -> () {
 }
 
 #[test]
-fn a_wider_element_answer_refuses_at_the_recv_deadlines_lowering() {
-    // the deadline recv adopts exactly one word off its element, the
-    // timer race's own boundary
-    let (status, _stdout, stderr) = run_source(
-        r#"struct pair { a: int, b: int }
+fn a_wider_element_crosses_the_deadline_faces() {
+    // the deadline send stages the record's whole span into the buffer,
+    // the deadline recv answers it under the ok discriminant (the
+    // buffered read), and the past deadline answers the wider union's
+    // failure arm
+    let (status, stdout, stderr) = run_source(
+        r#"struct pair { a: int, b: string }
 
 fn main() -> int {
   const ch = chan[pair](1)
-  const p = ch.recv_deadline(500000000).err((e) => pair { a: 0, b: 0 })
-  p.a
+  ch.send_deadline(5000000000, pair { a: 4, b: "by" }).err((e) => 0)
+  const p = ch.recv_deadline(5000000000).err((e) => pair { a: 0, b: "" })
+  println("got ${p.a} ${p.b}")
+  const missed = ch.recv_deadline(0).err((e) => pair { a: -1, b: "miss" })
+  println("miss ${missed.a} ${missed.b}")
+  0
 }
 "#,
     );
-    assert!(!status.success(), "the wider answer refuses: {stderr}");
+    assert!(status.success(), "the wider element exits clean: {stderr}");
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["got 4 by", "miss -1 miss"] as [&str; 2],
+        "the wider element crossed both deadline faces: {stdout}"
+    );
+}
+
+#[test]
+fn a_wider_element_crosses_the_deadline_recv_win_door() {
+    // the parked deadline recv wakes before its deadline: the win door
+    // hands the whole element span under the ok discriminant
+    let (status, stdout, stderr) = run_source(
+        r#"struct pair { a: int, b: string }
+
+fn main() -> int {
+  const ch = chan[pair](1)
+  const _ = nursery {
+    spawn {
+      const p = ch.recv_deadline(5000000000).err((e) => pair { a: 0, b: "" })
+      println("woke ${p.a} ${p.b}")
+    }
+    spawn {
+      sleep(30000000)
+      ch.send(pair { a: 9, b: "win" })
+    }
+  }
+  0
+}
+"#,
+    );
+    assert!(status.success(), "the win door exits clean: {stderr}");
     assert!(
-        stderr.contains("a deadline answer wider than one word"),
-        "the refusal names its reason: {stderr}"
+        stdout.contains("woke 9 win"),
+        "the wider element crossed the win door: {stdout}"
     );
 }
 

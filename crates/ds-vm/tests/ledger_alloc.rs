@@ -217,6 +217,7 @@ fn fork_main_def(name: &str, callable: u32, capture: bool) -> FunctionDef {
             }
             .into(),
         );
+        body.push(RcOp::Dec { src: 6 }.into());
     }
     // the shared word loads in both mains (the intern and the main's own
     // claim ride the baseline), the capturing closure staging it as its
@@ -309,6 +310,7 @@ fn delivered_main_def(name: &str) -> FunctionDef {
             }
             .into(),
         );
+        body.push(RcOp::Dec { src: 5 }.into());
     }
     body.push(Uop::Mov { dst: 5, src: 0 }.into());
     body.push(Uop::Kconst { dst: 6, kidx: k(3) }.into());

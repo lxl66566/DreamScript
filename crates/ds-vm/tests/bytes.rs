@@ -81,39 +81,57 @@ where
 /// finished list.
 fn mk() -> FunctionDef {
     def("mk", &[I64, I64, I64, Ref, Ref, Ref, I64], 3, 2, &[
-        Uop::Funcf { frame_slots: 7 },
+        Uop::Funcf { frame_slots: 7 }.into(),
         // the fresh empty list lands in the argument area's first slot
         Uop::Call {
             callee: k(2),
             nargs: 0,
-        },
-        Uop::Mov { dst: 3, src: 5 },
-        Uop::Mov { dst: 5, src: 3 },
-        Uop::Mov { dst: 6, src: 0 },
+        }
+        .into(),
+        Uop::Mov { dst: 3, src: 5 }.into(),
+        Uop::Mov { dst: 5, src: 3 }.into(),
+        Uop::Mov { dst: 6, src: 0 }.into(),
         Uop::Call {
             callee: k(3),
             nargs: 2,
-        },
-        Uop::Mov { dst: 5, src: 3 },
-        Uop::Mov { dst: 6, src: 1 },
+        }
+        .into(),
+        // the push answers the list's post-mutation word under one
+        // count; the construction keeps the list in slot 3, so the
+        // answer's claim releases here
+        RcOp::Dec { src: 5 }.into(),
+        Uop::Mov { dst: 5, src: 3 }.into(),
+        Uop::Mov { dst: 6, src: 1 }.into(),
         Uop::Call {
             callee: k(3),
             nargs: 2,
-        },
-        Uop::Mov { dst: 5, src: 3 },
-        Uop::Mov { dst: 6, src: 2 },
+        }
+        .into(),
+        // the push answers the list's post-mutation word under one
+        // count; the construction keeps the list in slot 3, so the
+        // answer's claim releases here
+        RcOp::Dec { src: 5 }.into(),
+        Uop::Mov { dst: 5, src: 3 }.into(),
+        Uop::Mov { dst: 6, src: 2 }.into(),
         Uop::Call {
             callee: k(3),
             nargs: 2,
-        },
-        Uop::Mov { dst: 5, src: 3 },
+        }
+        .into(),
+        // the push answers the list's post-mutation word under one
+        // count; the construction keeps the list in slot 3, so the
+        // answer's claim releases here
+        RcOp::Dec { src: 5 }.into(),
+        Uop::Mov { dst: 5, src: 3 }.into(),
         Uop::Call {
             callee: k(4),
             nargs: 1,
-        },
-        Uop::Mov { dst: 4, src: 5 },
-        Uop::Ret { src: 4 },
-    ])
+        }
+        .into(),
+        Uop::Mov { dst: 4, src: 5 }.into(),
+        Uop::Ret { src: 4 }.into(),
+    ]
+        as &[Inst])
 }
 
 /// `(b: bytes) -> i64`: `len` through CALLG, the bytes evidence staged
@@ -212,33 +230,39 @@ fn fold() -> FunctionDef {
 /// minus one append — the length-mismatch probe's shorter payload.
 fn mk2() -> FunctionDef {
     def("mk2", &[I64, I64, Ref, Ref, I64], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
+        Uop::Funcf { frame_slots: 5 }.into(),
         // the fresh empty list lands in the argument area's first slot
         Uop::Call {
             callee: k(2),
             nargs: 0,
-        },
-        Uop::Mov { dst: 2, src: 3 },
-        Uop::Mov { dst: 3, src: 2 },
-        Uop::Mov { dst: 4, src: 0 },
+        }
+        .into(),
+        Uop::Mov { dst: 2, src: 3 }.into(),
+        Uop::Mov { dst: 3, src: 2 }.into(),
+        Uop::Mov { dst: 4, src: 0 }.into(),
         Uop::Call {
             callee: k(3),
             nargs: 2,
-        },
-        Uop::Mov { dst: 3, src: 2 },
-        Uop::Mov { dst: 4, src: 1 },
+        }
+        .into(),
+        RcOp::Dec { src: 3 }.into(),
+        Uop::Mov { dst: 3, src: 2 }.into(),
+        Uop::Mov { dst: 4, src: 1 }.into(),
         Uop::Call {
             callee: k(3),
             nargs: 2,
-        },
-        Uop::Mov { dst: 3, src: 2 },
+        }
+        .into(),
+        RcOp::Dec { src: 3 }.into(),
+        Uop::Mov { dst: 3, src: 2 }.into(),
         Uop::Call {
             callee: k(4),
             nargs: 1,
-        },
-        Uop::Mov { dst: 2, src: 3 },
-        Uop::Ret { src: 2 },
-    ])
+        }
+        .into(),
+        Uop::Mov { dst: 2, src: 3 }.into(),
+        Uop::Ret { src: 2 }.into(),
+    ] as &[Inst])
 }
 
 /// `(a, b: bytes) -> bool`: `bytes_eq`'s content compare — equal
@@ -363,6 +387,7 @@ fn churn() -> FunctionDef {
             nargs: 2,
         }
         .into(),
+        RcOp::Dec { src: 2 }.into(),
         Uop::Mov { dst: 2, src: 0 }.into(),
         Uop::Call {
             callee: k(4),

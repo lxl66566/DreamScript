@@ -1,15 +1,16 @@
-//! The arena surface end to end: the read-side aliasing container as a
-//! library type over the native seams — the empty-arena constructor
-//! lowering to `arena_new`, `insert` answering the packed
-//! `(index, generation)` handle as one int word, `remove` tombstoning
-//! with the generation bumping at the removal, `at` answering the
-//! element behind a live handle (a reference element as one counted
-//! share, the arena keeping its own — the var-window answer composing
-//! the in-place node update a cyclic graph needs), and a dangling
-//! handle trapping deterministically at either member. The one-word
-//! element policy refuses at the insert's staging with the arena's own
-//! named seam (a multi-word record, a deinit-carrying value), and the
-//! free `len` counts the live slots through the arena's instance.
+//! The arena surface end to end: the handle table as a library type
+//! over the native seams — the empty-arena constructor lowering to
+//! `arena_new`, `insert` answering the packed `(index, generation)`
+//! handle as one int word, `remove` tombstoning with the generation
+//! bumping at the removal, and `at` answering the element behind a
+//! live handle as one counted share, the arena keeping its own — a
+//! mutating native on the shared-count answer copies, so building
+//! cyclic graphs through `at` answers is dead for reference elements
+//! until the read-side aliasing round. A dangling handle traps
+//! deterministically at either member. The one-word element policy
+//! refuses at the insert's staging with the arena's own named seam (a
+//! multi-word record, a deinit-carrying value), and the free `len`
+//! counts the live slots through the arena's instance.
 
 use ds_check::analyze;
 use ds_diag::{Files, human};
@@ -141,8 +142,7 @@ fn with_ambient(body: &str) -> String {
 }
 
 /// The ambient every probe shares: the arena surface over list elements
-/// — the cyclic graph's node content — with the list face the traversal
-/// reads.
+/// — the walk's row content — with the list face the traversal reads.
 const ATOMS: &str = concat!(
     "tag int\n",
     "tag string\n",
@@ -172,40 +172,41 @@ const ATOMS: &str = concat!(
     "\n",
 );
 
-/// A three-node cycle built through handles: each node's element is a
-/// list holding the successor's handle, the in-place node update
-/// composing the `at` answer's var window over the stored list, and the
-/// traversal walks the cycle three rounds — every hop reading the next
-/// handle out of the element the arena still owns.
+/// The `at` answer as a counted value read: the walk over the stored
+/// rows traverses the handles the inserts seeded (a fresh value each,
+/// the arena owning its own copy), and a mutating native on the answer
+/// lands on its copy under the shared count — the stored row keeps its
+/// seed, so building cyclic graphs through `at` answers is dead for
+/// reference elements until the read-side aliasing round.
 #[test]
-fn a_cyclic_graph_builds_and_traverses_through_the_handles() {
+fn the_at_answer_reads_as_a_value_and_a_mutation_lands_on_its_copy() {
     let out = runs(&with_ambient(concat!(
         "fn main() -> int {\n",
         "  var a = arena[list[int]]()\n",
-        "  const h0 = a.insert(list[int]())\n",
-        "  const h1 = a.insert(list[int]())\n",
-        "  const h2 = a.insert(list[int]())\n",
+        "  const h0 = a.insert([1])\n",
+        "  const h1 = a.insert([2])\n",
+        "  const h2 = a.insert([])\n",
         "  var s0 = a.at(h0)\n",
-        "  s0.push(h1)\n",
-        "  var s1 = a.at(h1)\n",
-        "  s1.push(h2)\n",
-        "  var s2 = a.at(h2)\n",
-        "  s2.push(h0)\n",
+        "  s0.push(9)\n",
+        "  if a.len() != 3 { return 1 }\n",
+        "  // the stored row keeps its seed: the push landed on the copy\n",
+        "  if s0.len() != 2 { return 2 }\n",
+        "  if a.at(h0).len() != 1 { return 3 }\n",
+        "  // the walk over the stored rows: 0 -> 1 -> 2\n",
         "  var cur = h0\n",
         "  var hops = 0\n",
-        "  while hops < 9 {\n",
+        "  while hops < 2 {\n",
         "    var links = a.at(cur)\n",
         "    const step = first(links)\n",
-        "    if step is int { cur = step } else { return 1 }\n",
+        "    if step is int { cur = step } else { return 4 }\n",
         "    hops += 1\n",
         "  }\n",
-        "  if a.len() != 3 { return 2 }\n",
-        "  if cur != h0 { return 3 }\n",
-        "  println(\"cycle ${hops}\")\n",
+        "  if cur != h2 { return 5 }\n",
+        "  println(\"walk ${hops}\")\n",
         "  0\n",
         "}\n",
     )));
-    // nine hops land back on the first node: 0 -> 1 -> 2 -> 0 ...
+    // two hops land on the third node: 0 -> 1 -> 2
     assert_eq!(out, FrameAnswer::one(Value::I64(0)));
 }
 

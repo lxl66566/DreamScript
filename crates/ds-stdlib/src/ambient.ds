@@ -494,9 +494,11 @@ impl[t] chan[t] {
 // plain copyable ints). `insert` answers the packed handle, `remove`
 // the tombstone (the slot's generation bumping at the removal, every
 // handle copy taken before it going stale at once), `at` the element
-// behind a live handle — a reference element as one counted share, the
-// arena keeping its own — and a dangling handle traps deterministically
-// at either member.
+// behind a live handle as one counted share, the arena keeping its
+// own — a mutating native on the shared-count answer copies, so
+// building cyclic graphs through `at` answers is dead for reference
+// elements until the read-side aliasing round — and a dangling handle
+// traps deterministically at either member.
 /// The arena's member tier.
 impl[t] arena[t] {
   /// Stores one element, answering its packed handle.
@@ -511,9 +513,10 @@ impl[t] arena[t] {
 
 // The owning container's member tier: the runtime seam lowers over the
 // heap application. `get` copies the held value out (the container
-// keeps its edge), `set` replaces it in place through the mut window
-// and answers the receiver; the held value's whole span stages at both
-// seams.
+// keeps its edge), `set` replaces it through the mut window — the
+// container's own object at a unique count, a fresh copy at a shared
+// one — and answers the receiver's post-mutation word; the held value's
+// whole span stages at both seams.
 /// The owning container's member tier.
 impl[t] box[t] {
   /// The held value, copied out (the container keeps its own).
@@ -729,19 +732,19 @@ extern fn cons[t] (x: t, xs: list[t]) -> list[t]
 extern fn tail[t] (xs: list[t]) -> list[t]
 extern fn box_new[t] (x: t) -> box[t]
 extern fn box_get[t] (b: box[t]) -> t
-extern fn box_set[t] (b: mut box[t], x: t) -> ()
+extern fn box_set[t] (b: mut box[t], x: t) -> box[t]
 extern fn list_new[t] () -> list[t]
 extern fn list_len[t] (xs: list[t]) -> int
 extern fn list_get[t] (xs: list[t], i: int) -> t | none
 extern fn list_contains[t] (xs: list[t], x: t) -> bool
 extern fn list_concat[t] (a: list[t], b: list[t]) -> list[t]
-extern fn list_push[t] (xs: mut list[t], x: t) -> ()
-extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> ()
-extern fn list_remove[t] (xs: mut list[t], i: int) -> ()
-extern fn list_insert[t] (xs: mut list[t], i: int, x: t) -> ()
-extern fn list_clear[t] (xs: mut list[t]) -> ()
+extern fn list_push[t] (xs: mut list[t], x: t) -> list[t]
+extern fn list_set[t] (xs: mut list[t], i: int, x: t) -> list[t]
+extern fn list_remove[t] (xs: mut list[t], i: int) -> list[t]
+extern fn list_insert[t] (xs: mut list[t], i: int, x: t) -> list[t]
+extern fn list_clear[t] (xs: mut list[t]) -> list[t]
 extern fn map_new[k, v] () -> map[k, v]
-extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()
+extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> map[k, v]
 extern fn map_get[k, v] (m: map[k, v], key: k) -> v | none
 extern fn map_len[k, v] (m: map[k, v]) -> int
 // The ordered key face: the map's entry order, one word per key — the
@@ -749,10 +752,12 @@ extern fn map_len[k, v] (m: map[k, v]) -> int
 // compose over (the value spans read back through the member route).
 extern fn map_keys[k, v] (m: map[k, v]) -> list[k]
 // The mutation and membership seams behind the member spellings above:
-// the removal's missing key a no-op, the membership read answering the
+// each mutating seam answers the receiver's post-mutation word (its own
+// object at a unique count, a fresh copy at a shared one), the removal's
+// missing key a no-op, the membership read answering the
 // bit, and the entry-order pair list one key word then the value span
 // per row (the fresh list's edge owning one count per reference word).
-extern fn map_remove[k, v] (m: mut map[k, v], key: k) -> ()
+extern fn map_remove[k, v] (m: mut map[k, v], key: k) -> map[k, v]
 extern fn map_contains[k, v] (m: map[k, v], key: k) -> bool
 extern fn map_entries[k, v] (m: map[k, v]) -> list[(k, v)]
 // The bounded channel's native face: the construction is the type

@@ -135,8 +135,10 @@ pub const BUILTIN_FIBER_RESUME: u32 = 25;
 /// flag for the rest), and answers the failed-children count (0 = all joined). Per-child outcomes
 /// union out through `join_nursery`.
 pub const BUILTIN_NURSERY_JOIN: u32 = 26;
-/// `list_push(xs: list, x: value) -> unit` — the construction append list literals lower to: one
-/// element word onto a list the constructing frame uniquely owns. The element parameter is `Raw`,
+/// `list_push(xs: list, x: value) -> list` — the construction append list literals lower to: one
+/// element word onto a list the constructing frame uniquely owns, the answer the receiver's
+/// post-mutation word (its own object at a unique count, a fresh copy at a shared one) under one
+/// count the call site re-stores through the receiver's window. The element parameter is `Raw`,
 /// the one native whose argument kind varies by call site, so it accepts every kind.
 pub const BUILTIN_LIST_PUSH: u32 = 27;
 /// `map_new -> map` (the empty map object; the `map[k, v]` constructor's runtime half).
@@ -145,8 +147,10 @@ pub const BUILTIN_MAP_NEW: u32 = 28;
 pub const BUILTIN_MAP_LEN: u32 = 29;
 /// The generic `map_get[k, v] (m: map[k, v], key: k) -> v \| none`.
 pub const BUILTIN_MAP_GET: u32 = 30;
-/// `map_set(map, key, value: value) -> unit` — the one mutation, through the checker's exclusive
-/// `mut` window. The key and value parameters are `Raw`, their kinds varying by call site like
+/// `map_set(map, key, value: value) -> map` — the one mutation, through the checker's exclusive
+/// `mut` window, answering the receiver's post-mutation word (its own object at a unique count, a
+/// fresh copy at a shared one) under one count the call site re-stores through the receiver's
+/// window. The key and value parameters are `Raw`, their kinds varying by call site like
 /// `list_push`'s element.
 pub const BUILTIN_MAP_SET: u32 = 31;
 /// The generic `cons[t] (x: t, xs: list[t]) -> list[t]`: the head element stages as one whole
@@ -347,26 +351,30 @@ pub const BUILTIN_CHAN_RECV: u32 = 89;
 /// The generic `sort[t] (xs: list[t], f: fn(t, t) -> int) -> list[t]`, its comparator staged from
 /// the solved `ord` instance.
 pub const BUILTIN_SORT: u32 = 90;
-/// `list_set (xs: list, i: int, x: element words) -> unit` — the in-place element replacement at
-/// the index, variadic at the element span (`list_push`'s staging shape), the store acquiring one
-/// count per incoming `Ref` word and the replaced span releasing its own. The member tier's
-/// `list[t].set` mut-window member routes here; an out-of-range index traps (the store carries no
-/// miss answer).
+/// `list_set (xs: list, i: int, x: element words) -> list` — the element replacement at the
+/// index, variadic at the element span (`list_push`'s staging shape), the store acquiring one
+/// count per incoming `Ref` word and the replaced span releasing its own; a shared-count receiver
+/// copies before the store and the answer carries the copy's word. The member tier's `list[t].set`
+/// mut-window member routes here; an out-of-range index traps (the store carries no miss answer).
 pub const BUILTIN_LIST_SET: u32 = 91;
-/// `list_remove (xs: list, i: int) -> unit` — the in-place element removal, the removed span
-/// releasing one count per `Ref` word. The member tier's `list[t].remove` mut-window member routes
-/// here; an out-of-range index traps.
+/// `list_remove (xs: list, i: int) -> list` — the element removal, the removed span releasing one
+/// count per `Ref` word; a shared-count receiver copies before the removal and the answer carries
+/// the copy's word. The member tier's `list[t].remove` mut-window member routes here; an
+/// out-of-range index traps.
 pub const BUILTIN_LIST_REMOVE: u32 = 92;
-/// `list_insert (xs: list, i: int, x: element words) -> unit` — the in-place splice before the
-/// index (`index == len` appends), variadic at the element span. The member tier's `list[t].insert`
-/// mut-window member routes here; an index outside `0..=len` traps.
+/// `list_insert (xs: list, i: int, x: element words) -> list` — the splice before the index
+/// (`index == len` appends), variadic at the element span; a shared-count receiver copies before
+/// the splice and the answer carries the copy's word. The member tier's `list[t].insert` mut-window
+/// member routes here; an index outside `0..=len` traps.
 pub const BUILTIN_LIST_INSERT: u32 = 93;
-/// `list_clear (xs: list) -> unit` — the in-place emptying, every element word releasing its count.
-/// The member tier's `list[t].clear` mut-window member routes here.
+/// `list_clear (xs: list) -> list` — the emptying, every element word releasing its count; a
+/// shared-count receiver copies first, so the other holders keep the emptied-over original. The
+/// member tier's `list[t].clear` mut-window member routes here.
 pub const BUILTIN_LIST_CLEAR: u32 = 94;
-/// `map_remove (m: map, key: value) -> unit` — the in-place row removal, the removed key and value
-/// span releasing their counts. The member tier's `map[k, v].remove` mut-window member routes here;
-/// a missing key is a no-op.
+/// `map_remove (m: map, key: value) -> map` — the row removal, the removed key and value span
+/// releasing their counts; a shared-count receiver copies before the removal and the answer
+/// carries the copy's word. The member tier's `map[k, v].remove` mut-window member routes here; a
+/// missing key is a no-op.
 pub const BUILTIN_MAP_REMOVE: u32 = 95;
 /// `map_contains (m: map, key: value) -> bool` — the membership read, no value handed out. The
 /// member tier's `map[k, v].contains` routes here.
@@ -427,9 +435,10 @@ pub const BUILTIN_BOX_NEW: u32 = 112;
 /// `box_get(b: box[t]) -> t` — the copy-out read: the held value's whole word span handed out
 /// under one fresh count per `Ref` word, the container keeping its own.
 pub const BUILTIN_BOX_GET: u32 = 113;
-/// `box_set(b: mut box[t], x: element words) -> ` — the in-place store: the held words'
-/// `Ref` counts release, the incoming span stores under its own counts. The member tier's
-/// `box[t].set` re-answers the receiver's word after the unit answer.
+/// `box_set(b: mut box[t], x: element words) -> box` — the store: the held words' `Ref`
+/// counts release, the incoming span stores under its own counts, and a shared-count receiver
+/// copies before the store. The member tier's `box[t].set` routes here, the answer the receiver's
+/// post-mutation word under one count the call site re-stores through the receiver's window.
 pub const BUILTIN_BOX_SET: u32 = 114;
 /// `sort_by`'s builtin slot, appended after the core run: the
 /// comparator-taking sort riding the same stable merge sort body, the
@@ -800,7 +809,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_LIST_PUSH,
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: true,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     Native {
         name: "map_new",
@@ -818,7 +827,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_MAP_SET,
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: true,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // The nursery surface's internal seams: no ambient spelling declares these, so no call site
     // resolves them by name — the `nursery`/`spawn`/`cancel` emissions synthesize the pool
@@ -1287,7 +1296,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_LIST_SET,
         params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
         variadic: true,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // the in-place element removal, the removed words releasing their counts; an out-of-range
     // index traps like `list_set`'s
@@ -1298,7 +1307,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_LIST_REMOVE,
         params: &[SlotType::Ref, SlotType::I64],
         variadic: false,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // the in-place splice before the index, `index == len` appending; the element stages variadic
     // like `list_set`'s
@@ -1309,7 +1318,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_LIST_INSERT,
         params: &[SlotType::Ref, SlotType::I64, SlotType::Raw],
         variadic: true,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // the in-place emptying, every element word releasing its count
     Native {
@@ -1319,7 +1328,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_LIST_CLEAR,
         params: &[SlotType::Ref],
         variadic: false,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // the in-place row removal, a missing key a no-op
     Native {
@@ -1329,7 +1338,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_MAP_REMOVE,
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: false,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
     // the membership read, no value handed out
     Native {
@@ -2080,7 +2089,7 @@ pub const NATIVES: &[Native] = &[
         index: BUILTIN_BOX_SET,
         params: &[SlotType::Ref, SlotType::Raw],
         variadic: true,
-        shape: NativeShape::Total(SlotType::I64),
+        shape: NativeShape::Total(SlotType::Ref),
     },
 ];
 

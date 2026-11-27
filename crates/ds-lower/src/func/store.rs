@@ -479,9 +479,11 @@ impl FnLower<'_, '_, '_> {
     /// One collection element store: the `set` native's CALL staging —
     /// the receiver word, the probe word, then the element's whole
     /// inline word span (`list_push`'s variadic shape) — exactly the
-    /// member spelling's own staging, the receiver keeping its count (no
-    /// answer dup rides a statement-position assignment) and the
-    /// element's words staging as transient borrows.
+    /// member spelling's own staging. The native answers the
+    /// collection's post-mutation word under one count, which the
+    /// store re-adopts as the receiver's own claim (the replaced
+    /// word's count dying), and the element's words stage as transient
+    /// borrows.
     fn stage_index_store(
         &mut self,
         native: StoreIndex,
@@ -508,7 +510,7 @@ impl FnLower<'_, '_, '_> {
             staged.push(addr.slot_ty);
         }
         self.guard_staged_count(staged.len())?;
-        self.overlay_site(&staged, &[SlotType::I64]);
+        self.overlay_site(&staged, &[SlotType::Ref]);
         self.rc.native_open();
         self.rc.native_reads([recv_addr.slot, probe_addr.slot]);
         for (index, slot, slot_ty) in moves {
@@ -517,8 +519,9 @@ impl FnLower<'_, '_, '_> {
                 src: Slot::body(slot),
             });
             match (index, slot_ty) {
-                // the receiver keeps its count: the window's flush never
-                // decs it, and no answer dup rides the assignment
+                // the receiver keeps its count for the window's flush: the
+                // re-store below adopts the answer and owns the replaced
+                // word's death
                 (0, SlotType::Ref | SlotType::Raw) => {
                     self.rc.staged_native_keep(slot);
                 },
@@ -534,6 +537,17 @@ impl FnLower<'_, '_, '_> {
             nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
         });
         self.rc.native_done(&mut self.code);
+        // the store answers the collection's post-mutation word under one
+        // count — its own object at a unique count, a fresh copy at a
+        // shared one: the word re-stores through the store's receiver
+        // window, the replaced word's count dying as the slot adopts
+        // the answer's claim
+        self.rc.store_over(&mut self.code, &[recv_addr.slot]);
+        self.emit(Op::Mov {
+            dst: Slot::body(recv_addr.slot),
+            src: Slot::overlay(0),
+        });
+        self.rc.produced(recv_addr.slot);
         Ok(())
     }
 }

@@ -1,11 +1,12 @@
 //! End-to-end through the `ds` binary over the real ambient: the
 //! read-side aliasing round's two library types. The arena fixture
-//! builds a three-node cycle through handles, traverses it home, and
-//! walks the retire/reuse path; the string_view fixture holds a cursor
-//! into a shared base with the bounds-validated construction, the
-//! checked char read, the composing slice, the content equality, and
-//! the one materializing door. The dangling handle traps through `ds
-//! run` with its own report and a failing exit status.
+//! walks the rows the inserts seeded over the at answers' counted
+//! value reads, and walks the retire/reuse path; the string_view
+//! fixture holds a cursor into a shared base with the bounds-validated
+//! construction, the checked char read, the composing slice, the
+//! content equality, and the one materializing door. The dangling
+//! handle traps through `ds run` with its own report and a failing
+//! exit status.
 
 use std::{
     env, fs,
@@ -33,9 +34,10 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
     out
 }
 
-/// The arena fixture's golden: nine hops land home, the removal and
-/// reuse keep the live count, and the successor list answers its own
-/// element count.
+/// The arena fixture's golden: the at answer reads as a counted value
+/// (the push landing on its copy, the stored row keeping its seed),
+/// the walk over the seeded rows lands on the third node, and the
+/// removal and reuse keep the live count.
 #[test]
 fn the_arena_face_builds_traverses_and_reuses() {
     let dir = workdir("arena");
@@ -49,7 +51,7 @@ fn the_arena_face_builds_traverses_and_reuses() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        concat!("cycle 9 home true\n", "len 3 at0 2\n", "",),
+        concat!("copy 2 kept 1\n", "walk 2 home true\n", "len 3 at0 1\n",),
         "the arena's golden stdout drifted"
     );
 }

@@ -1,0 +1,53 @@
+// purpose: the collection value semantics end to end through the `ds`
+// binary: a mutating member at a shared count copies before writing —
+// an alias's mutation invisible at the other name, the aliased for-loop
+// mutation leaving the iterated collection intact, the mutation through
+// a map value landing on the read copy (the stored row never receiving
+// anything through the read, so no reference the map reaches can enter
+// its own row — the self-referential spelling itself refusing at the
+// check), the box's store copying at its alias — while the channel and
+// the mutable-capture closure stay shared objects. The alias legs use
+// `var` binders: a var claims a counted share of the object, while a
+// `const` binding borrows the initializer's live slots and never
+// shares the count.
+
+fn main() -> () {
+  var xs = [1, 2]
+  var ys = xs
+  xs.push(3)
+  println("alias ${ys.len()} ${xs.len()}")
+
+  var looped = [1, 2]
+  var walked = looped
+  var seen = 0
+  for x in walked {
+    looped.push(x)
+    seen += 1
+  }
+  println("loop ${seen} ${walked.len()} ${looped.len()}")
+
+  var m = map[int, list[int]]()
+  m.set(1, list[int]())
+  m[1].push(5)
+  println("mapval ${m[1].len()} ${m.len()}")
+
+  var b = box[int](5)
+  var held = b
+  b.set(6)
+  println("box ${b.get()} ${held.get()}")
+
+  const ch = chan[int](4)
+  const peer = ch
+  ch.send(7)
+  println("chan ${peer.recv()}")
+
+  var counter: int = 0
+  fn bump() -> int {
+    counter = counter + 1
+    counter
+  }
+  const again = bump
+  const first = bump()
+  const second = again()
+  println("closure ${first} ${second} ${bump()} ${again()}")
+}

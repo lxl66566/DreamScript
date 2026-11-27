@@ -76,13 +76,13 @@ fn pm_ref(index: u32) -> Const {
     })
 }
 
-fn def(
+fn def<I: Into<Inst> + Copy>(
     name: &str,
     slots: &[SlotType],
     params: usize,
     args: usize,
     pool: Vec<Const>,
-    body: &[Uop],
+    body: &[I],
 ) -> FunctionDef {
     FunctionDef {
         name: name.into(),
@@ -124,150 +124,226 @@ fn par_main_def(name: &str, elems: &[i64], callable: u32, recheck_input: bool) -
         pool.push(Const::I64(word));
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
-    let mut body = vec![Uop::Funcf { frame_slots: 11 }];
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 11 }.into()];
     // the input list
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: OV });
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: OV }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: OV, src: 0 });
-        body.push(Uop::Kimm {
-            dst: OV + 1,
-            kidx: word,
-        });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: OV, src: 0 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: OV + 1,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: OV }.into());
     }
     // par_map: (list, callable) plus the two List evidence words
-    body.push(Uop::Mov { dst: OV, src: 0 });
-    body.push(Uop::Kconst {
-        dst: OV + 1,
-        kidx: k(CALLABLE),
-    });
-    body.push(Uop::Kimm {
-        dst: OV + 2,
-        kidx: k(LIST_EV),
-    });
-    body.push(Uop::Kimm {
-        dst: OV + 3,
-        kidx: k(LIST_EV),
-    });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: OV }); // the result list
+    body.push(Uop::Mov { dst: OV, src: 0 }.into());
+    body.push(
+        Uop::Kconst {
+            dst: OV + 1,
+            kidx: k(CALLABLE),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: OV + 2,
+            kidx: k(LIST_EV),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: OV + 3,
+            kidx: k(LIST_EV),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: OV }.into()); // the result list
     // list_len(result)
-    body.push(Uop::Mov { dst: OV, src: 1 });
-    body.push(Uop::Kimm {
-        dst: OV + 1,
-        kidx: k(LIST_EV),
-    });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 4, src: OV });
+    body.push(Uop::Mov { dst: OV, src: 1 }.into());
+    body.push(
+        Uop::Kimm {
+            dst: OV + 1,
+            kidx: k(LIST_EV),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 4, src: OV }.into());
     // list_get(result, 0) and list_get(result, last): the ok payload
     // rides overlay word 1
     for (slot, index) in [(2u8, 0usize), (3, elems.len().saturating_sub(1))] {
         let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: OV, src: 1 });
-        body.push(Uop::Kimm {
-            dst: OV + 1,
-            kidx: word,
-        });
-        body.push(Uop::Kimm {
-            dst: OV + 2,
-            kidx: k(LIST_EV),
-        });
-        body.push(Uop::Callg {
-            callee: k(4),
-            nargs: 2,
-        });
-        body.push(Uop::Mov {
-            dst: slot,
-            src: OV + 1,
-        });
+        body.push(Uop::Mov { dst: OV, src: 1 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: OV + 1,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Kimm {
+                dst: OV + 2,
+                kidx: k(LIST_EV),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Callg {
+                callee: k(4),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Mov {
+                dst: slot,
+                src: OV + 1,
+            }
+            .into(),
+        );
     }
     // checksum = first * 1000 + last * 10 + len (body slots 5, 6 scratch)
     let thousand = word_at(&mut pool, 1000);
     let ten = word_at(&mut pool, 10);
-    body.push(Uop::Kimm {
-        dst: 5,
-        kidx: thousand,
-    });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 2,
-        rhs: 5,
-    });
-    body.push(Uop::Mov { dst: 6, src: 5 });
-    body.push(Uop::Kimm { dst: 5, kidx: ten });
-    body.push(Uop::MulI64 {
-        dst: 5,
-        lhs: 3,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 5,
-    });
-    body.push(Uop::AddI64 {
-        dst: 6,
-        lhs: 6,
-        rhs: 4,
-    });
+    body.push(
+        Uop::Kimm {
+            dst: 5,
+            kidx: thousand,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 2,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 6, src: 5 }.into());
+    body.push(Uop::Kimm { dst: 5, kidx: ten }.into());
+    body.push(
+        Uop::MulI64 {
+            dst: 5,
+            lhs: 3,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 5,
+        }
+        .into(),
+    );
+    body.push(
+        Uop::AddI64 {
+            dst: 6,
+            lhs: 6,
+            rhs: 4,
+        }
+        .into(),
+    );
     if recheck_input {
         // the input list reads back whole: every element again via
         // list_get, summed into body slot 5
         let zero = word_at(&mut pool, 0);
         let hundred_thousand = word_at(&mut pool, 100_000);
-        body.push(Uop::Kimm { dst: 5, kidx: zero });
+        body.push(Uop::Kimm { dst: 5, kidx: zero }.into());
         for index in 0..elems.len() {
             let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-            body.push(Uop::Mov { dst: OV, src: 0 });
-            body.push(Uop::Kimm {
-                dst: OV + 1,
-                kidx: word,
-            });
-            body.push(Uop::Kimm {
-                dst: OV + 2,
-                kidx: k(LIST_EV),
-            });
-            body.push(Uop::Callg {
-                callee: k(4),
-                nargs: 2,
-            });
-            body.push(Uop::AddI64 {
-                dst: 5,
-                lhs: 5,
-                rhs: OV + 1,
-            });
+            body.push(Uop::Mov { dst: OV, src: 0 }.into());
+            body.push(
+                Uop::Kimm {
+                    dst: OV + 1,
+                    kidx: word,
+                }
+                .into(),
+            );
+            body.push(
+                Uop::Kimm {
+                    dst: OV + 2,
+                    kidx: k(LIST_EV),
+                }
+                .into(),
+            );
+            body.push(
+                Uop::Callg {
+                    callee: k(4),
+                    nargs: 2,
+                }
+                .into(),
+            );
+            body.push(
+                Uop::AddI64 {
+                    dst: 5,
+                    lhs: 5,
+                    rhs: OV + 1,
+                }
+                .into(),
+            );
         }
         // final = input_sum * 100000 + checksum
-        body.push(Uop::Kimm {
-            dst: 2,
-            kidx: hundred_thousand,
-        });
-        body.push(Uop::MulI64 {
-            dst: 5,
-            lhs: 5,
-            rhs: 2,
-        });
-        body.push(Uop::AddI64 {
-            dst: 6,
-            lhs: 6,
-            rhs: 5,
-        });
+        body.push(
+            Uop::Kimm {
+                dst: 2,
+                kidx: hundred_thousand,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::MulI64 {
+                dst: 5,
+                lhs: 5,
+                rhs: 2,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::AddI64 {
+                dst: 6,
+                lhs: 6,
+                rhs: 5,
+            }
+            .into(),
+        );
     }
-    body.push(Uop::Ret { src: 6 });
+    body.push(Uop::Ret { src: 6 }.into());
     def(
         name,
         &[Ref, Ref, Raw, Raw, I64, I64, I64, Raw, Raw, Raw, Raw],
@@ -947,144 +1023,220 @@ fn wide_main_def(name: &str, elems: &[i64], callable: u32, recheck_input: bool) 
     // body slots 0..9: 0 the input, 1 the result, 2/3 the first
     // element's words, 4/5 the last's, 6 the len, 7 the checksum, 8
     // scratch; overlay words 9..13
-    let mut body = vec![Uop::Funcf { frame_slots: 13 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 9 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 13 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 9 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 9, src: 0 });
-        body.push(Uop::Kimm {
-            dst: 10,
-            kidx: word,
-        });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 9, src: 0 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 10,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 9 }.into());
     }
     // par_map: (list, callable) plus the two List evidence words
-    body.push(Uop::Mov { dst: 9, src: 0 });
-    body.push(Uop::Kconst {
-        dst: 10,
-        kidx: k(5),
-    });
-    body.push(Uop::Kimm {
-        dst: 11,
-        kidx: k(6),
-    });
-    body.push(Uop::Kimm {
-        dst: 12,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 9 });
+    body.push(Uop::Mov { dst: 9, src: 0 }.into());
+    body.push(
+        Uop::Kconst {
+            dst: 10,
+            kidx: k(5),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: 11,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: 12,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 9 }.into());
     // list_len(result)
-    body.push(Uop::Mov { dst: 9, src: 1 });
-    body.push(Uop::Kimm {
-        dst: 10,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 6, src: 9 });
+    body.push(Uop::Mov { dst: 9, src: 1 }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 10,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 6, src: 9 }.into());
     // list_get(result, i): the ok payload spans overlay words 1 and 2
     for (a, b, index) in [(2u8, 3u8, 0usize), (4, 5, elems.len().saturating_sub(1))] {
         let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: 9, src: 1 });
-        body.push(Uop::Kimm {
-            dst: 10,
-            kidx: word,
-        });
-        body.push(Uop::Kimm {
-            dst: 11,
-            kidx: k(6),
-        });
-        body.push(Uop::Callg {
-            callee: k(4),
-            nargs: 2,
-        });
-        body.push(Uop::Mov { dst: a, src: 10 });
-        body.push(Uop::Mov { dst: b, src: 11 });
+        body.push(Uop::Mov { dst: 9, src: 1 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 10,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Kimm {
+                dst: 11,
+                kidx: k(6),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Callg {
+                callee: k(4),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: a, src: 10 }.into());
+        body.push(Uop::Mov { dst: b, src: 11 }.into());
     }
     // checksum = a0*100000 + a1*10000 + b0*100 + b1*10 + len
-    body.push(Uop::Kimm {
-        dst: 7,
-        kidx: word_at(&mut pool, 0),
-    });
+    body.push(
+        Uop::Kimm {
+            dst: 7,
+            kidx: word_at(&mut pool, 0),
+        }
+        .into(),
+    );
     for (slot, weight) in [(2u8, 100_000i64), (3, 10_000), (4, 100), (5, 10)] {
-        body.push(Uop::Kimm {
-            dst: 8,
-            kidx: word_at(&mut pool, weight),
-        });
-        body.push(Uop::MulI64 {
-            dst: slot,
-            lhs: slot,
-            rhs: 8,
-        });
-        body.push(Uop::AddI64 {
+        body.push(
+            Uop::Kimm {
+                dst: 8,
+                kidx: word_at(&mut pool, weight),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::MulI64 {
+                dst: slot,
+                lhs: slot,
+                rhs: 8,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::AddI64 {
+                dst: 7,
+                lhs: 7,
+                rhs: slot,
+            }
+            .into(),
+        );
+    }
+    body.push(
+        Uop::AddI64 {
             dst: 7,
             lhs: 7,
-            rhs: slot,
-        });
-    }
-    body.push(Uop::AddI64 {
-        dst: 7,
-        lhs: 7,
-        rhs: 6,
-    });
+            rhs: 6,
+        }
+        .into(),
+    );
     if recheck_input {
         // the input list reads back whole: every element again via
         // list_get, summed into body slot 8
-        body.push(Uop::Kimm {
-            dst: 8,
-            kidx: word_at(&mut pool, 0),
-        });
+        body.push(
+            Uop::Kimm {
+                dst: 8,
+                kidx: word_at(&mut pool, 0),
+            }
+            .into(),
+        );
         for index in 0..elems.len() {
             let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-            body.push(Uop::Mov { dst: 9, src: 0 });
-            body.push(Uop::Kimm {
-                dst: 10,
-                kidx: word,
-            });
-            body.push(Uop::Kimm {
-                dst: 11,
-                kidx: k(6),
-            });
-            body.push(Uop::Callg {
-                callee: k(4),
-                nargs: 2,
-            });
-            body.push(Uop::AddI64 {
-                dst: 8,
-                lhs: 8,
-                rhs: 10,
-            });
+            body.push(Uop::Mov { dst: 9, src: 0 }.into());
+            body.push(
+                Uop::Kimm {
+                    dst: 10,
+                    kidx: word,
+                }
+                .into(),
+            );
+            body.push(
+                Uop::Kimm {
+                    dst: 11,
+                    kidx: k(6),
+                }
+                .into(),
+            );
+            body.push(
+                Uop::Callg {
+                    callee: k(4),
+                    nargs: 2,
+                }
+                .into(),
+            );
+            body.push(
+                Uop::AddI64 {
+                    dst: 8,
+                    lhs: 8,
+                    rhs: 10,
+                }
+                .into(),
+            );
         }
         // final = input_sum * 1000000 + checksum
-        body.push(Uop::Kimm {
-            dst: 2,
-            kidx: word_at(&mut pool, 1_000_000),
-        });
-        body.push(Uop::MulI64 {
-            dst: 8,
-            lhs: 8,
-            rhs: 2,
-        });
-        body.push(Uop::AddI64 {
-            dst: 7,
-            lhs: 7,
-            rhs: 8,
-        });
+        body.push(
+            Uop::Kimm {
+                dst: 2,
+                kidx: word_at(&mut pool, 1_000_000),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::MulI64 {
+                dst: 8,
+                lhs: 8,
+                rhs: 2,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::AddI64 {
+                dst: 7,
+                lhs: 7,
+                rhs: 8,
+            }
+            .into(),
+        );
     }
-    body.push(Uop::Ret { src: 7 });
+    body.push(Uop::Ret { src: 7 }.into());
     def(
         name,
         &[
@@ -1115,31 +1267,41 @@ fn fork_main_def(name: &str, elems: &[i64], callable: u32) -> FunctionDef {
         k(u16::try_from(pool.len() - 1).expect("pool index fits u16"))
     };
     // body slots 0..5: 0 the input, 1 the result; overlay words 5..9
-    let mut body = vec![Uop::Funcf { frame_slots: 9 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 5 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 9 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 5 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 5, src: 0 });
-        body.push(Uop::Kimm { dst: 6, kidx: word });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 5, src: 0 }.into());
+        body.push(Uop::Kimm { dst: 6, kidx: word }.into());
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 5 }.into());
     }
-    body.push(Uop::Mov { dst: 5, src: 0 });
-    body.push(Uop::Kconst { dst: 6, kidx: k(3) });
-    body.push(Uop::Kimm { dst: 7, kidx: k(4) });
-    body.push(Uop::Kimm { dst: 8, kidx: k(4) });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 5 });
-    body.push(Uop::Ret { src: 1 });
+    body.push(Uop::Mov { dst: 5, src: 0 }.into());
+    body.push(Uop::Kconst { dst: 6, kidx: k(3) }.into());
+    body.push(Uop::Kimm { dst: 7, kidx: k(4) }.into());
+    body.push(Uop::Kimm { dst: 8, kidx: k(4) }.into());
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 5 }.into());
+    body.push(Uop::Ret { src: 1 }.into());
     def(
         name,
         &[Ref, Ref, Raw, Raw, Raw, Raw, Raw, Raw, Raw],
@@ -1335,62 +1497,93 @@ fn closure_main_def(name: &str, elems: &[i64], callee: u32, bias: i64, wide: boo
     // body slots 0..9: 0 the input, 1 the result, 2..5 the readback,
     // 6 the closure word, 7 the header, 8 the len, 9 the checksum;
     // overlay words 10..13
-    let mut body = vec![Uop::Funcf { frame_slots: 14 }];
-    body.push(Uop::Call {
-        callee: k(0),
-        nargs: 0,
-    });
-    body.push(Uop::Mov { dst: 0, src: 10 });
+    let mut body: Vec<Inst> = vec![Uop::Funcf { frame_slots: 14 }.into()];
+    body.push(
+        Uop::Call {
+            callee: k(0),
+            nargs: 0,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 0, src: 10 }.into());
     for &elem in elems {
         let word = word_at(&mut pool, elem);
-        body.push(Uop::Mov { dst: 10, src: 0 });
-        body.push(Uop::Kimm {
-            dst: 11,
-            kidx: word,
-        });
-        body.push(Uop::Call {
-            callee: k(1),
-            nargs: 2,
-        });
+        body.push(Uop::Mov { dst: 10, src: 0 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 11,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Call {
+                callee: k(1),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(RcOp::Dec { src: 10 }.into());
     }
     // the closure: the bias capture staged at overlay word 0
-    body.push(Uop::Kimm {
-        dst: 10,
-        kidx: word_at(&mut pool, bias),
-    });
-    body.push(Uop::Kconst { dst: 7, kidx: k(5) });
-    body.push(Uop::ClosureNew {
-        dst: 6,
-        func: 7,
-        n: 1,
-    });
+    body.push(
+        Uop::Kimm {
+            dst: 10,
+            kidx: word_at(&mut pool, bias),
+        }
+        .into(),
+    );
+    body.push(Uop::Kconst { dst: 7, kidx: k(5) }.into());
+    body.push(
+        Uop::ClosureNew {
+            dst: 6,
+            func: 7,
+            n: 1,
+        }
+        .into(),
+    );
     // par_map: (list, callable) plus the two List evidence words
-    body.push(Uop::Mov { dst: 10, src: 0 });
-    body.push(Uop::Mov { dst: 11, src: 6 });
-    body.push(Uop::Kimm {
-        dst: 12,
-        kidx: k(6),
-    });
-    body.push(Uop::Kimm {
-        dst: 13,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(2),
-        nargs: 2,
-    });
-    body.push(Uop::Mov { dst: 1, src: 10 });
+    body.push(Uop::Mov { dst: 10, src: 0 }.into());
+    body.push(Uop::Mov { dst: 11, src: 6 }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 12,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Kimm {
+            dst: 13,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(2),
+            nargs: 2,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 1, src: 10 }.into());
     // list_len(result)
-    body.push(Uop::Mov { dst: 10, src: 1 });
-    body.push(Uop::Kimm {
-        dst: 11,
-        kidx: k(6),
-    });
-    body.push(Uop::Callg {
-        callee: k(3),
-        nargs: 1,
-    });
-    body.push(Uop::Mov { dst: 8, src: 10 });
+    body.push(Uop::Mov { dst: 10, src: 1 }.into());
+    body.push(
+        Uop::Kimm {
+            dst: 11,
+            kidx: k(6),
+        }
+        .into(),
+    );
+    body.push(
+        Uop::Callg {
+            callee: k(3),
+            nargs: 1,
+        }
+        .into(),
+    );
+    body.push(Uop::Mov { dst: 8, src: 10 }.into());
     // list_get(result, i): the ok payload rides overlay word 1, the
     // wide answer's second word overlay word 2
     // (first readback slot, second for the wide answer, the index)
@@ -1401,54 +1594,78 @@ fn closure_main_def(name: &str, elems: &[i64], callee: u32, bias: i64, wide: boo
     };
     for &(a, b, index) in reads {
         let word = word_at(&mut pool, i64::try_from(index).expect("index fits i64"));
-        body.push(Uop::Mov { dst: 10, src: 1 });
-        body.push(Uop::Kimm {
-            dst: 11,
-            kidx: word,
-        });
-        body.push(Uop::Kimm {
-            dst: 12,
-            kidx: k(6),
-        });
-        body.push(Uop::Callg {
-            callee: k(4),
-            nargs: 2,
-        });
-        body.push(Uop::Mov { dst: a, src: 11 });
+        body.push(Uop::Mov { dst: 10, src: 1 }.into());
+        body.push(
+            Uop::Kimm {
+                dst: 11,
+                kidx: word,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Kimm {
+                dst: 12,
+                kidx: k(6),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::Callg {
+                callee: k(4),
+                nargs: 2,
+            }
+            .into(),
+        );
+        body.push(Uop::Mov { dst: a, src: 11 }.into());
         if wide {
-            body.push(Uop::Mov { dst: b, src: 12 });
+            body.push(Uop::Mov { dst: b, src: 12 }.into());
         }
     }
     // the checksum: each readback word scaled by its weight (the
     // weight rides overlay word 0), then the len added
-    body.push(Uop::Kimm {
-        dst: 9,
-        kidx: word_at(&mut pool, 0),
-    });
+    body.push(
+        Uop::Kimm {
+            dst: 9,
+            kidx: word_at(&mut pool, 0),
+        }
+        .into(),
+    );
     let weights: &[(u8, i64)] =
         if wide { &[(2, 100_000), (3, 10_000), (4, 100), (5, 10)] } else { &[(2, 1000), (3, 10)] };
     for (slot, weight) in weights {
-        body.push(Uop::Kimm {
-            dst: 10,
-            kidx: word_at(&mut pool, *weight),
-        });
-        body.push(Uop::MulI64 {
-            dst: *slot,
-            lhs: *slot,
-            rhs: 10,
-        });
-        body.push(Uop::AddI64 {
+        body.push(
+            Uop::Kimm {
+                dst: 10,
+                kidx: word_at(&mut pool, *weight),
+            }
+            .into(),
+        );
+        body.push(
+            Uop::MulI64 {
+                dst: *slot,
+                lhs: *slot,
+                rhs: 10,
+            }
+            .into(),
+        );
+        body.push(
+            Uop::AddI64 {
+                dst: 9,
+                lhs: 9,
+                rhs: *slot,
+            }
+            .into(),
+        );
+    }
+    body.push(
+        Uop::AddI64 {
             dst: 9,
             lhs: 9,
-            rhs: *slot,
-        });
-    }
-    body.push(Uop::AddI64 {
-        dst: 9,
-        lhs: 9,
-        rhs: 8,
-    });
-    body.push(Uop::Ret { src: 9 });
+            rhs: 8,
+        }
+        .into(),
+    );
+    body.push(Uop::Ret { src: 9 }.into());
     def(
         name,
         &[
@@ -1523,6 +1740,7 @@ fn ref_balance_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             Uop::Mov { dst: 9, src: 0 }.into(),
             Uop::Kimm {
                 dst: 10,
@@ -1534,6 +1752,7 @@ fn ref_balance_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             Uop::Mov { dst: 9, src: 0 }.into(),
             Uop::Kimm {
                 dst: 10,
@@ -1545,6 +1764,7 @@ fn ref_balance_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             // the closure: the string capture staged at overlay word 0
             Uop::Kstr { dst: 8, kidx: k(5) }.into(),
             Uop::Mov { dst: 9, src: 8 }.into(),
@@ -1628,6 +1848,7 @@ fn closure_failure_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             Uop::Mov { dst: 9, src: 0 }.into(),
             Uop::Kimm {
                 dst: 10,
@@ -1639,6 +1860,7 @@ fn closure_failure_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             Uop::Mov { dst: 9, src: 0 }.into(),
             Uop::Kimm {
                 dst: 10,
@@ -1650,6 +1872,7 @@ fn closure_failure_def() -> FunctionDef {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 9 }.into(),
             // the closure over the same interned text
             Uop::Kstr { dst: 8, kidx: k(5) }.into(),
             Uop::Mov { dst: 9, src: 8 }.into(),

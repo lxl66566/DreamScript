@@ -452,6 +452,101 @@ impl<'a> Heaps<'a> {
         self.settle(list.fiber())
     }
 
+    /// Whether object `word`'s live count is one: the copy-before-write
+    /// door's read, routed shared (a count read mutates no count and
+    /// queues nothing).
+    fn count_is_unique(&self, word: RefId) -> Result<bool, Trap> {
+        Ok(self.store_shared(word)?.rc_at(word.id())? == 1)
+    }
+
+    /// The mutating list members' door: answers the receiver word the
+    /// member's result owns (one count) beside the object to mutate —
+    /// the receiver's own object at a unique count, a fresh copy at a
+    /// shared one, the other holders keeping the original. The caller
+    /// mutates the answered word's object in place either way: the copy
+    /// is born unique, and the member's call site re-stores the word
+    /// through the receiver's window.
+    pub(crate) fn list_mutation_word(&mut self, list: RefId) -> Result<(RefId, Value), Trap> {
+        if self.count_is_unique(list)? {
+            self.inc(list)?;
+            return Ok((list, Value::Ref(list)));
+        }
+        match self.copy_list(list)? {
+            Value::Ref(word) => Ok((word, Value::Ref(word))),
+            _ => unreachable!("a fresh list is its reference word"),
+        }
+    }
+
+    /// The mutating map members' door, [`Heaps::list_mutation_word`]'s
+    /// map shape.
+    pub(crate) fn map_mutation_word(&mut self, map: RefId) -> Result<(RefId, Value), Trap> {
+        if self.count_is_unique(map)? {
+            self.inc(map)?;
+            return Ok((map, Value::Ref(map)));
+        }
+        match self.copy_map(map)? {
+            Value::Ref(word) => Ok((word, Value::Ref(word))),
+            _ => unreachable!("a fresh map is its reference word"),
+        }
+    }
+
+    /// The owning container's store door, [`Heaps::list_mutation_word`]'s
+    /// cell shape.
+    pub(crate) fn cell_mutation_word(&mut self, cell: RefId) -> Result<(RefId, Value), Trap> {
+        if self.count_is_unique(cell)? {
+            self.inc(cell)?;
+            return Ok((cell, Value::Ref(cell)));
+        }
+        match self.copy_cell(cell)? {
+            Value::Ref(word) => Ok((word, Value::Ref(word))),
+            _ => unreachable!("a fresh cell is its reference word"),
+        }
+    }
+
+    /// A fresh list over `list`'s element words on the running fiber's
+    /// store: one edge count per `Ref` element acquired on the word's
+    /// own heap, the source keeping its own. The stride carries; the
+    /// birth count is the caller's claim.
+    fn copy_list(&mut self, list: RefId) -> Result<Value, Trap> {
+        let (elems, stride) = self.list_at(list)?;
+        let elems = elems.to_vec();
+        for value in &elems {
+            if let Value::Ref(word) = *value {
+                self.inc_edge(word)?;
+            }
+        }
+        Ok(self.new_list_strided(elems, stride))
+    }
+
+    /// A fresh map over `map`'s rows on the map's own store: the rows'
+    /// key words are local to it, so the store seam's fresh-row rule
+    /// keeps holding (a copy on the running fiber's store would refuse
+    /// every foreign key). Each row re-stores through the store seam's
+    /// own acquires, one count per `Ref` word of key and value alike,
+    /// and the entry order carries.
+    fn copy_map(&mut self, map: RefId) -> Result<Value, Trap> {
+        let id = self.store(map)?.alloc_map();
+        let fresh = RefId::new(map.fiber(), id);
+        self.ledger(self.owner).acquire(fresh);
+        let keys = self.map_keys(map)?;
+        let mut row = Vec::new();
+        for key in keys {
+            if self.map_row_scratch(map, key, &mut row)? {
+                self.set_map(fresh, key, &row)?;
+            }
+        }
+        Ok(Value::Ref(fresh))
+    }
+
+    /// A fresh owning container over `cell`'s held words on the running
+    /// fiber's store: one edge count per `Ref` word acquired on the
+    /// word's own heap, the source keeping its own. The birth count is
+    /// the caller's claim.
+    fn copy_cell(&mut self, cell: RefId) -> Result<Value, Trap> {
+        let words = self.store(cell)?.cell_words(cell.id())?;
+        self.alloc_cell(&words)
+    }
+
     /// Allocates a fresh bounded channel of capacity `cap` on the
     /// running fiber's store — the creating fiber is its one owning heap —
     /// the birth count claimed for the caller's frame.

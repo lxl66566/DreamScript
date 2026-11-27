@@ -19,7 +19,7 @@
 use ds_vm::{
     Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Value, Vm,
     abi::{
-        BuiltinInstance, ConstIdx, FrameLayout, SlotType,
+        BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{Bool, I64, Raw, Ref},
         uop::Uop,
     },
@@ -62,7 +62,13 @@ fn pool() -> Vec<Const> {
     ]
 }
 
-fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
+fn def<I: Into<Inst> + Copy>(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    body: &[I],
+) -> FunctionDef {
     FunctionDef {
         name: name.into(),
         layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
@@ -106,38 +112,46 @@ fn fresh() -> FunctionDef {
 /// (the unit word lands on the overlay, read by nobody).
 fn fill() -> FunctionDef {
     def("fill", &[Ref, Raw, Raw, Raw], 1, 3, &[
-        Uop::Funcf { frame_slots: 4 },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(0) },
-        Uop::Kstr { dst: 3, kidx: k(1) },
+        Uop::Funcf { frame_slots: 4 }.into(),
+        Uop::Mov { dst: 1, src: 0 }.into(),
+        Uop::Kstr { dst: 2, kidx: k(0) }.into(),
+        Uop::Kstr { dst: 3, kidx: k(1) }.into(),
         Uop::Call {
             callee: k(5),
             nargs: 3,
-        },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(0) },
-        Uop::Kstr { dst: 3, kidx: k(2) },
+        }
+        .into(),
+        RcOp::Dec { src: 1 }.into(),
+        Uop::Mov { dst: 1, src: 0 }.into(),
+        Uop::Kstr { dst: 2, kidx: k(0) }.into(),
+        Uop::Kstr { dst: 3, kidx: k(2) }.into(),
         Uop::Call {
             callee: k(5),
             nargs: 3,
-        },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(0) },
-        Uop::Kstr { dst: 3, kidx: k(3) },
+        }
+        .into(),
+        RcOp::Dec { src: 1 }.into(),
+        Uop::Mov { dst: 1, src: 0 }.into(),
+        Uop::Kstr { dst: 2, kidx: k(0) }.into(),
+        Uop::Kstr { dst: 3, kidx: k(3) }.into(),
         Uop::Call {
             callee: k(5),
             nargs: 3,
-        },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Kstr { dst: 2, kidx: k(3) },
-        Uop::Kstr { dst: 3, kidx: k(2) },
+        }
+        .into(),
+        RcOp::Dec { src: 1 }.into(),
+        Uop::Mov { dst: 1, src: 0 }.into(),
+        Uop::Kstr { dst: 2, kidx: k(3) }.into(),
+        Uop::Kstr { dst: 3, kidx: k(2) }.into(),
         Uop::Call {
             callee: k(5),
             nargs: 3,
-        },
-        Uop::Mov { dst: 1, src: 0 },
-        Uop::Ret { src: 1 },
-    ])
+        }
+        .into(),
+        RcOp::Dec { src: 1 }.into(),
+        Uop::Mov { dst: 1, src: 0 }.into(),
+        Uop::Ret { src: 1 }.into(),
+    ] as &[Inst])
 }
 
 /// `(map) -> int`: `map_len` through CALLG, the two evidence words (one
@@ -233,47 +247,54 @@ fn fresh_key() -> FunctionDef {
         0,
         5,
         &[
-            Uop::Funcf { frame_slots: 9 },
+            Uop::Funcf { frame_slots: 9 }.into(),
             Uop::Call {
                 callee: k(4),
                 nargs: 0,
-            },
-            Uop::Mov { dst: 0, src: 4 },
+            }
+            .into(),
+            Uop::Mov { dst: 0, src: 4 }.into(),
             // the value word first: the staged key words follow it
-            Uop::Kstr { dst: 1, kidx: k(1) },
-            Uop::Kstr { dst: 2, kidx: k(8) },
-            Uop::Kstr { dst: 3, kidx: k(9) },
-            Uop::Mov { dst: 4, src: 2 },
-            Uop::Mov { dst: 5, src: 3 },
+            Uop::Kstr { dst: 1, kidx: k(1) }.into(),
+            Uop::Kstr { dst: 2, kidx: k(8) }.into(),
+            Uop::Kstr { dst: 3, kidx: k(9) }.into(),
+            Uop::Mov { dst: 4, src: 2 }.into(),
+            Uop::Mov { dst: 5, src: 3 }.into(),
             Uop::Call {
                 callee: k(10),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 2, src: 4 },
-            Uop::Mov { dst: 4, src: 0 },
-            Uop::Mov { dst: 5, src: 2 },
-            Uop::Mov { dst: 6, src: 1 },
+            }
+            .into(),
+            Uop::Mov { dst: 2, src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 0 }.into(),
+            Uop::Mov { dst: 5, src: 2 }.into(),
+            Uop::Mov { dst: 6, src: 1 }.into(),
             Uop::Call {
                 callee: k(5),
                 nargs: 3,
-            },
-            Uop::Mov { dst: 4, src: 0 },
-            Uop::Mov { dst: 5, src: 2 },
+            }
+            .into(),
+            RcOp::Dec { src: 4 }.into(),
+            Uop::Mov { dst: 4, src: 0 }.into(),
+            Uop::Mov { dst: 5, src: 2 }.into(),
             Uop::Kimm {
                 dst: 6,
                 kidx: k(11),
-            },
+            }
+            .into(),
             Uop::Kimm {
                 dst: 7,
                 kidx: k(11),
-            },
+            }
+            .into(),
             Uop::Callg {
                 callee: k(7),
                 nargs: 2,
-            },
-            Uop::Mov { dst: 1, src: 5 },
-            Uop::Ret { src: 1 },
-        ],
+            }
+            .into(),
+            Uop::Mov { dst: 1, src: 5 }.into(),
+            Uop::Ret { src: 1 }.into(),
+        ] as &[Inst],
     )
 }
 

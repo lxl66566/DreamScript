@@ -17,7 +17,11 @@
 //!   answers the sibling's tag.
 //! - a racer parked on an empty channel cut at the deadline; a nested race answering inside the
 //!   outer deadline.
-//! - the refusals: a wider-than-one-word answer and a bare tail call to the race refuse at the
+//! - the wider answer spans crossing whole: a two-field record winner (a `Ref` word beside a
+//!   scalar), a tuple winner, and a multi-atom winner (the racer's own enum span adopting into the
+//!   call's result union verbatim); the deadline arm answering over the wider union with the cut
+//!   loser's kept deinit firing.
+//! - the refusals: a deinit-carrying answer type and a bare tail call to the race refuse at the
 //!   call's lowering with DS4009.
 
 use std::{env, fs, path::PathBuf, process::Command};
@@ -359,24 +363,139 @@ fn the_nested_race_answers_inside_the_outer_deadline() {
 }
 
 #[test]
-fn the_wider_answer_refuses_at_the_calls_lowering() {
+fn a_wider_answer_crosses_whole_off_the_winner() {
+    // the winner's whole answer span rides the ok discriminant: the
+    // record's `Ref` word claims across to the caller beside its scalar
     let (status, stdout, stderr) = run_source(
-        r#"struct wide { a: int, b: int }
+        r#"struct wide { a: string, b: int }
 
 fn widened() -> wide {
-  wide { a: 1, b: 2 }
+  wide { a: "hey", b: 42 }
 }
 
 fn main() -> () {
-  const held = timeout(500000000, widened).err((e) => wide { a: 0, b: 0 })
-  println("w ${held.a}")
+  const held = timeout(500000000, widened).err((e) => wide { a: "", b: 0 })
+  println("w ${held.a} ${held.b}")
 }
 "#,
     );
-    assert!(!status.success(), "the wider answer refuses: {stdout}");
+    assert!(status.success(), "the wider answer exits clean: {stderr}");
     assert!(
-        stderr.contains("a deadline answer wider than one word"),
-        "the refusal names its reason: {stderr}"
+        stdout.contains("w hey 42"),
+        "the record winner crossed whole: {stdout}"
+    );
+}
+
+#[test]
+fn a_tuple_winner_crosses_whole() {
+    let (status, stdout, stderr) = run_source(
+        r#"fn main() -> () {
+  const held = timeout(500000000, () => (7, "seven")).err((e) => (0, "none"))
+  const (n, s) = held
+  println("t ${n} ${s}")
+}
+"#,
+    );
+    assert!(status.success(), "the tuple winner exits clean: {stderr}");
+    assert!(
+        stdout.contains("t 7 seven"),
+        "the tuple winner crossed whole: {stdout}"
+    );
+}
+
+#[test]
+fn a_multi_atom_winner_adopts_its_enum_span_verbatim() {
+    // the racer answers its own enum value, whose tag-and-region layout
+    // the call's result union shares member for member, so the whole
+    // span adopts with no re-span
+    let (status, stdout, stderr) = run_source(
+        r#"enum shaped { num { n: int }, text { s: string } }
+
+fn pick() -> shaped {
+  num(7)
+}
+
+fn main() -> () {
+  const held = timeout(500000000, pick)
+  match held {
+    num(n) => println("num ${n}")
+    text(s) => println("text ${s}")
+    timed_out => println("timeout")
+  }
+}
+"#,
+    );
+    assert!(
+        status.success(),
+        "the multi-atom winner exits clean: {stderr}"
+    );
+    assert!(
+        stdout.contains("num 7"),
+        "the enum winner adopted verbatim: {stdout}"
+    );
+}
+
+#[test]
+fn the_deadline_arm_answers_over_a_wider_union_with_the_losers_deinit_firing() {
+    // the cut loser's kept deinit fires while the call's wider union
+    // takes the failure span: the fallback answers, the winner type's
+    // dead words staying behind the tag
+    let (status, stdout, stderr) = run_source(
+        r#"struct res: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+struct wide { a: string, b: int }
+
+fn main() -> () {
+  const held = timeout(20000000, () => {
+    const r = res { id: 3 }
+    sleep(2000000000)
+    println("racer ran on")
+    wide { a: "late", b: 0 }
+  }).err((e) => wide { a: "cut", b: -1 })
+  println("w ${held.a} ${held.b}")
+}
+"#,
+    );
+    assert!(
+        status.success(),
+        "the wider deadline arm exits clean: {stderr}"
+    );
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| !line.is_empty() && *line != "0")
+        .collect();
+    assert_eq!(
+        lines,
+        ["freed 3", "w cut -1"] as [&str; 2],
+        "the loser's deinit fired and the fallback answered over the wider union: {stdout}"
+    );
+}
+
+#[test]
+fn a_deinit_carrying_answer_refuses_at_the_races_lowering() {
+    let (status, _stdout, stderr) = run_source(
+        r#"struct held: ~Copyable {
+  id: int
+  deinit { println("freed ${self.id}") }
+}
+
+fn widened() -> held {
+  held { id: 1 }
+}
+
+fn main() -> () {
+  const got = timeout(500000000, widened).err((e) => held { id: 0 })
+  println("g ${got.id}")
+}
+"#,
+    );
+    assert!(!status.success(), "the deinit-carrying answer refuses");
+    assert!(
+        stderr.contains("deinit-carrying union member"),
+        "the refusal names the union member's own walk: {stderr}"
     );
 }
 

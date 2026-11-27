@@ -14,7 +14,7 @@
 use ds_vm::{
     Const, ConstFuncRef, FunctionDef, ModuleRegistry, ModuleVersion, Trap, Value, Vm,
     abi::{
-        BuiltinInstance, ConstIdx, FrameLayout, SlotType,
+        BuiltinInstance, ConstIdx, FrameLayout, Inst, RcOp, SlotType,
         SlotType::{Bool, Raw, Ref},
         uop::Uop,
     },
@@ -55,7 +55,13 @@ fn pool() -> Vec<Const> {
     ]
 }
 
-fn def(name: &str, slots: &[SlotType], params: usize, args: usize, body: &[Uop]) -> FunctionDef {
+fn def<I: Into<Inst> + Copy>(
+    name: &str,
+    slots: &[SlotType],
+    params: usize,
+    args: usize,
+    body: &[I],
+) -> FunctionDef {
     FunctionDef {
         name: name.into(),
         layout: FrameLayout::new(slots.to_vec(), params, args).expect("valid fixture layout"),
@@ -100,16 +106,18 @@ fn empty() -> FunctionDef {
 /// fixtures with more than one element.
 fn push() -> FunctionDef {
     def("push", &[Ref, Raw, Ref, Raw, Raw], 2, 2, &[
-        Uop::Funcf { frame_slots: 5 },
-        Uop::Mov { dst: 3, src: 0 },
-        Uop::Mov { dst: 4, src: 1 },
+        Uop::Funcf { frame_slots: 5 }.into(),
+        Uop::Mov { dst: 3, src: 0 }.into(),
+        Uop::Mov { dst: 4, src: 1 }.into(),
         Uop::Call {
             callee: k(2),
             nargs: 2,
-        },
-        Uop::Mov { dst: 2, src: 0 },
-        Uop::Ret { src: 2 },
-    ])
+        }
+        .into(),
+        RcOp::Dec { src: 3 }.into(),
+        Uop::Mov { dst: 2, src: 0 }.into(),
+        Uop::Ret { src: 2 }.into(),
+    ] as &[Inst])
 }
 
 /// `(x: value, xs: list) -> list`: `cons` through CALLG, the element

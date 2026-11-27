@@ -149,6 +149,7 @@ fn a_map_of_strings_retains_and_frees_dec_per_element() {
                 nargs: 3,
             }
             .into(),
+            RcOp::Dec { src: 4 }.into(),
             RcOp::Dec { src: 1 }.into(),
             RcOp::Dec { src: 2 }.into(),
             // a checked-read hit: the payload rides out with its own
@@ -178,6 +179,7 @@ fn a_map_of_strings_retains_and_frees_dec_per_element() {
                 nargs: 3,
             }
             .into(),
+            RcOp::Dec { src: 4 }.into(),
             RcOp::Dec { src: 1 }.into(),
             RcOp::Dec { src: 2 }.into(),
             Uop::Kstr { dst: 1, kidx: k(5) }.into(),
@@ -190,6 +192,7 @@ fn a_map_of_strings_retains_and_frees_dec_per_element() {
                 nargs: 3,
             }
             .into(),
+            RcOp::Dec { src: 4 }.into(),
             RcOp::Dec { src: 1 }.into(),
             RcOp::Dec { src: 2 }.into(),
             // the entry count rides out, then the map's unique death;
@@ -306,6 +309,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
         callee: k(2),
         nargs: 2
     });
+    op!(RcOp::Dec { src: 9 });
     op!(RcOp::Dec { src: 2 });
     // the map: one stored pair
     op!(Uop::Call {
@@ -322,6 +326,7 @@ fn checked_read_spans_balance_hit_and_miss_counts_across_iterations() {
         callee: k(9),
         nargs: 3
     });
+    op!(RcOp::Dec { src: 9 });
     op!(RcOp::Dec { src: 5 });
     op!(RcOp::Dec { src: 2 });
     // the counters: i = 0, bound = 25, zero = 0
@@ -678,6 +683,7 @@ fn tail_and_collect_copies_balance_per_element() {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 6 }.into(),
             Uop::Mov { dst: 6, src: 2 }.into(),
             Uop::Mov { dst: 7, src: 1 }.into(),
             Uop::Call {
@@ -685,6 +691,7 @@ fn tail_and_collect_copies_balance_per_element() {
                 nargs: 2,
             }
             .into(),
+            RcOp::Dec { src: 6 }.into(),
             // tail: a fresh list over the elements after the first
             Uop::Mov { dst: 6, src: 2 }.into(),
             Uop::Kimm { dst: 7, kidx: k(2) }.into(),

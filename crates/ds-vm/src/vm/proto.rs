@@ -261,6 +261,16 @@ pub(super) fn ok_tagged(payload: Value) -> NativeResult {
     }
 }
 
+/// The deadline twins' wider winner answer: the element's whole word
+/// span under the ok discriminant (the recv's multi-word success
+/// member, the parked call site's span staging).
+pub(super) fn ok_spanned(payload: Vec<Value>) -> NativeResult {
+    NativeResult::Span {
+        tag: PLATFORM_IO_OK,
+        payload,
+    }
+}
+
 pub(super) fn native_head_word(result: &NativeResult) -> Value {
     match result {
         NativeResult::Word(value) => *value,

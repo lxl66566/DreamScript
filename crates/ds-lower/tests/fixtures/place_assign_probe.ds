@@ -103,12 +103,7 @@ fn ref_elements() -> bool {
   ss.get(2).unwrap_or("?").len() == 1 && ss.get(0).unwrap_or("?") == "z" && hold == "b"
 }
 
-// one probe call per compound store: the counter rides a second list
-// through a `mut` window
-fn bump(c: mut list[int]) -> int {
-  c[0] += 1
-  1
-}
+
 
 // the compound operator over every class the surface spells: the
 // arithmetic, shift, and remainder forms over an int element, the
@@ -185,28 +180,37 @@ fn compound_strings() -> bool {
 // the probe evaluates exactly once, and the read and the store land on
 // the element it named
 fn compound_once() -> bool {
-  var calls = [0]
   var xs = [10, 20, 30]
-  xs[bump(calls)] += 1
-  xs.get(1).unwrap_or(-1) == 21 && calls.get(0).unwrap_or(-1) == 1
+  var calls = 0
+  fn bump() -> int {
+    calls = calls + 1
+    calls
+  }
+  xs[bump()] += 1
+  xs.get(1).unwrap_or(-1) == 21 && bump() == 2
 }
 
 // a compound store per iteration: each read copy, concat result, and
-// probe copy dies at its own store, so the loop leaves no count behind
+// probe copy dies at its own store, so the loop leaves no count behind;
+// the counted probe's answers alternate the second store's index
 fn compound_loop() -> bool {
   var ss = ["", ""]
   var xs = [0, 0]
-  var calls = [0]
+  var calls = 0
+  fn bump() -> int {
+    calls = calls + 1
+    calls
+  }
   var i = 0
   while i < 50 {
     ss[i % 2] += "ab"
     xs[i % 2] += 1
-    xs[bump(calls) % 2] += 1
+    xs[bump() % 2] += 1
     i = i + 1
   }
-  xs.get(0).unwrap_or(-1) == 25 &&
-    xs.get(1).unwrap_or(-1) == 75 &&
-    calls.get(0).unwrap_or(-1) == 50 &&
+  xs.get(0).unwrap_or(-1) == 50 &&
+    xs.get(1).unwrap_or(-1) == 50 &&
+    bump() == 51 &&
     ss.get(0).unwrap_or("").len() == 50 &&
     ss.get(1).unwrap_or("").len() == 50
 }

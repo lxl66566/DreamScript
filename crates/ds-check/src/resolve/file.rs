@@ -1277,7 +1277,9 @@ impl FileResolver<'_> {
             // method tier here (the plain free call keeps its boundary
             // refusal at the value-name door), and the free reading
             // records only when no member answers the name, so the
-            // refusal below names the def the privacy gate reports.
+            // refusal below names the def the privacy gate reports — a
+            // dependency's own bodies resolve their own members against
+            // a dependent's same-named private helper.
             let func_decl = self.package.def(func);
             let privatized = func_decl.vis == Vis::Private && func_decl.span.file != self.file;
             if !privatized {

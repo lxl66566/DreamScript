@@ -1,36 +1,36 @@
 // source: todo item 119, the read-side aliasing round (ruled 2026-11-25)
-// purpose: the @std arena's library surface — the handle-built cycle, the in-place node update over the at answer's mut window, the retire/reuse walk under the generation bump, and the free len — with the dangling trap's probe declared but never called from main (its deterministic report is pinned in the ds-lower arena_e2e and ds-cli arena_face suites)
+// purpose: the @std arena's library surface — the walk over the rows the inserts seeded, the at answer as a counted value read (a mutating native on the shared-count answer landing on its copy, so the stored row keeps its seed and building cyclic graphs through at answers is dead for reference elements until the read-side aliasing round), the retire/reuse walk under the generation bump, and the free len — with the dangling trap's probe declared but never called from main (its deterministic report is pinned in the ds-lower arena_e2e and ds-cli arena_face suites)
 // items:
-// cycle-walk: stage: run
+// value-read-walk: stage: run
 // retire-reuse: stage: run
 // read-through: stage: run
 // handle-int-word: stage: run
 // dangling-probe: stage: run (traps deterministically at the run; the probe stays uncalled from main, exactly shift_bitwise's own trap items)
 // main: stage: run
 
-// The cyclic graph the round targets: three nodes whose element is the
-// successor list, built through handles and traversed home.
-fn cycle_walk() -> int {
+// The walk over the rows the inserts seeded (a fresh value each, the
+// arena owning its own copy), and the at answer as a counted value
+// read: a mutating native on the shared-count answer lands on its
+// copy, the stored row keeping its seed.
+fn value_read_walk() -> int {
   var a = arena[list[int]]()
-  const h0 = a.insert(list[int]())
-  const h1 = a.insert(list[int]())
-  const h2 = a.insert(list[int]())
+  const h0 = a.insert([1])
+  const h1 = a.insert([2])
+  const h2 = a.insert([])
   var s0 = a.at(h0)
-  s0.push(h1)
-  var s1 = a.at(h1)
-  s1.push(h2)
-  var s2 = a.at(h2)
-  s2.push(h0)
+  s0.push(9)
+  if a.len() != 3 { return 1 }
+  if s0.len() != 2 { return 2 }
+  if a.at(h0).len() != 1 { return 3 }
   var cur = h0
   var hops = 0
-  while hops < 9 {
+  while hops < 2 {
     var links = a.at(cur)
     const step = links.first()
-    if step is int { cur = step } else { return 1 }
+    if step is int { cur = step } else { return 4 }
     hops += 1
   }
-  if a.len() != 3 { return 2 }
-  if cur != h0 { return 3 }
+  if cur != h2 { return 5 }
   hops
 }
 
@@ -76,7 +76,7 @@ fn dangling_probe() -> int {
 }
 
 fn main() -> () {
-  println("cycle ${cycle_walk()}")
+  println("walk ${value_read_walk()}")
   println("reuse ${retire_reuse()}")
   println("crossed ${handle_int_word()}")
 }

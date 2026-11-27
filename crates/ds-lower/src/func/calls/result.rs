@@ -99,30 +99,6 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(())
     }
 
-    /// The timer race's one-word answer boundary: `timeout` adopts
-    /// exactly one word from its racer, so the answer's member set
-    /// spanning more (a tuple, a multi-field struct, a union with a
-    /// payload region) refuses at the call.
-    pub(in crate::func) fn guard_race_answer(
-        &mut self,
-        members: &[TypeId],
-    ) -> Result<(), LowerError> {
-        let wide = matches!(
-            self.shapes.member_words(members),
-            Ok(ref words) if words.len() > 1
-        );
-        if wide {
-            return Err(LowerError::unsupported(
-                no_span(), // re-pointed at the call site
-                "a deadline answer wider than one word",
-                "the deadline seams adopt exactly one word — the timer race from its racer, the \
-                 channel deadline recv off its element; a scalar, a reference, a one-field \
-                 record, or a tag-only union lowers, a wider answer type does not",
-            ));
-        }
-        Ok(())
-    }
-
     /// A local callee's parameter word count, as its own frame layout
     /// records it (params first, one region per parameter). `None` when
     /// a parameter type has no shape; those callees keep the runtime
@@ -450,7 +426,7 @@ impl<'a> FnLower<'a, '_, '_> {
             return self.classed_native_union(
                 native,
                 ty,
-                payload,
+                &[payload],
                 success,
                 fail_payload,
                 classes,
@@ -500,7 +476,7 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(match ok.fields.as_slice() {
             [field] => SuccessShape::Payload {
                 atom: ok.atom,
-                field: field.clone(),
+                fields: vec![field.clone()],
             },
             _ => SuccessShape::Bare { atom: ok.atom },
         })
@@ -651,7 +627,10 @@ impl<'a> FnLower<'a, '_, '_> {
     /// value over the native's inert unit word, `net_send`'s `()`) —
     /// except a result-type-keyed native, whose success members are the
     /// union's own non-class members (the timer race answering a
-    /// tag-only union over its deadline member). The same
+    /// tag-only union over its deadline member). The payload rides the
+    /// span channel's shape: one word per success word after the
+    /// discriminant (`slots 1 ..= n`), a statically-payloaded native's
+    /// single word or a wider answer's whole word span. The same
     /// span-to-union discipline the checked reads use
     /// ([`fn checked_native_result`](Self::checked_native_result)). A
     /// bare class member's native-born message count dies inside its
@@ -660,7 +639,7 @@ impl<'a> FnLower<'a, '_, '_> {
         &mut self,
         native: &'static Native,
         ty: Ty,
-        payload: SlotType,
+        payload_words: &[SlotType],
         success: SuccessShape,
         fail_payload: SlotType,
         classes: &'static [(u8, &'static str)],
@@ -689,7 +668,11 @@ impl<'a> FnLower<'a, '_, '_> {
                  members; a wider union has no member mapping for the native's failure classes",
             ));
         }
-        self.overlay_site(staged, &[SlotType::Tag, payload]);
+        let mut result_words = Vec::with_capacity(1 + payload_words.len());
+        result_words.push(SlotType::Tag);
+        result_words.extend_from_slice(payload_words);
+        self.guard_staged_count(staged.len().max(result_words.len()))?;
+        self.overlay_site(staged, &result_words);
         // the failure path lands its class payload in word 1 — a Ref
         // message for the io/net classes, a position I64 for the parse
         // reader — so the word's classification mixes
@@ -783,19 +766,34 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         self.bind_label(ok_lbl);
         match success {
-            SuccessShape::Payload { atom, field } => {
+            SuccessShape::Payload { atom, fields } => {
                 let tag = self.shapes.tag_id(atom)?;
                 self.emit(Op::TagNew {
                     dst: Slot::body(result.base),
                     tag,
                 });
-                self.zero_init_member(result.base, &u.words, std::slice::from_ref(&field))?;
-                self.emit(Op::Mov {
-                    dst: Slot::body(result.base + field.word),
-                    src: Slot::overlay(1),
-                });
-                if field.slot() == SlotType::Ref {
-                    self.rc.produced(result.base + field.word);
+                self.zero_init_member(result.base, &u.words, &fields)?;
+                // the payload copies from the flat overlay span into the
+                // member's claimed words (fields may claim scattered
+                // region offsets; the flat index walks the member's
+                // declaration order)
+                let mut flat = 0usize;
+                for field in &fields {
+                    for (offset, slot) in field.slots.iter().enumerate() {
+                        let word = result.base
+                            + field.word
+                            + u8::try_from(offset).expect("offset fits u8");
+                        self.emit(Op::Mov {
+                            dst: Slot::body(word),
+                            src: Slot::overlay(
+                                u8::try_from(1 + flat + offset).expect("overlay word fits u8"),
+                            ),
+                        });
+                        if *slot == SlotType::Ref {
+                            self.rc.produced(word);
+                        }
+                    }
+                    flat += field.slots.len();
                 }
             },
             SuccessShape::Bare { atom } => {
@@ -810,13 +808,20 @@ impl<'a> FnLower<'a, '_, '_> {
                 self.zero_init_member(result.base, &u.words, &[])?;
             },
             SuccessShape::Adopt => {
-                // a tag-only union answer: the racer's answer word is
+                // a multi-atom answer: the racer's answer span is
                 // already the union's own value — its tag names the
-                // member — so it crosses whole with no re-span
-                self.emit(Op::Mov {
-                    dst: Slot::body(result.base),
-                    src: Slot::overlay(1),
-                });
+                // member, its region the member's words — so every word
+                // copies verbatim with no re-span
+                for (index, slot) in u.words.iter().enumerate() {
+                    let word = result.base + u8::try_from(index).expect("span width fits u8");
+                    self.emit(Op::Mov {
+                        dst: Slot::body(word),
+                        src: Slot::overlay(u8::try_from(1 + index).expect("overlay word fits u8")),
+                    });
+                    if *slot == SlotType::Ref {
+                        self.rc.produced(word);
+                    }
+                }
             },
         }
         let arm_ok = self.rc.take();
@@ -884,17 +889,20 @@ impl<'a> FnLower<'a, '_, '_> {
         Ok(class_members)
     }
 
-    /// A result-type-keyed fallible native's union path (the timer
-    /// race): the success members are the union's own non-class members,
-    /// the payload's word kind resolving from them — exactly the
-    /// `reduce` keying's derivation over the call's result type, over a
-    /// span instead of a bare word. The one-word answer boundary guards
-    /// the members first (a wider answer refusing at the call), then the
-    /// shared classed machinery re-spans the platform span into the
-    /// union: `?`, `.err`, and match handle the deadline through the
-    /// ordinary error machinery, the `timed_out` class landing on the io
-    /// taxonomy's own member so io-handling callers absorb it by set
-    /// containment.
+    /// A result-type-keyed fallible native's union path (the timer race,
+    /// the channel deadline twins): the success members are the union's
+    /// own non-class members, the payload's word span resolving from
+    /// them — exactly the `reduce` keying's derivation over the call's
+    /// result type, over a span instead of a bare word. A deinit hook on
+    /// any member refuses at the union shape's own walk (the per-span
+    /// deinit-claim seam), so the members that reach here stage their
+    /// whole word span: one member's fields the flat payload words, a
+    /// multi-atom answer the winner's own union span crossing verbatim
+    /// behind the layout-equality check. The shared classed machinery
+    /// re-spans the winner span into the union: `?`, `.err`, and match
+    /// handle the deadline through the ordinary error machinery, the
+    /// `timed_out` class landing on the io taxonomy's own member so
+    /// io-handling callers absorb it by set containment.
     pub(in crate::func) fn keyed_native_result(
         &mut self,
         native: &'static Native,
@@ -934,27 +942,50 @@ impl<'a> FnLower<'a, '_, '_> {
             ));
         }
         let answer: Vec<TypeId> = success_members.iter().map(|member| member.atom).collect();
-        self.guard_race_answer(&answer)?;
-        let (success, payload) = match success_members.as_slice() {
-            [only] => match only.fields.as_slice() {
-                // a bare member: the unit value or a bare tag over the
-                // span's inert payload word
-                [] => (SuccessShape::Bare { atom: only.atom }, SlotType::I64),
-                [field] => (
-                    SuccessShape::Payload {
-                        atom: only.atom,
-                        field: field.clone(),
-                    },
-                    field.slot(),
-                ),
-                // the width guard refused every wider member first
-                _ => unreachable!("the answer guard bounded the success member"),
-            },
-            // a tag-only union answer: the racer's word is the union's
-            // own tagged value, adopted whole off the span's payload
-            _ => (SuccessShape::Adopt, SlotType::Tag),
-        };
-        self.classed_native_union(native, ty, payload, success, fail_payload, classes, staged)
+        let (success, payload_words): (SuccessShape, Vec<SlotType>) =
+            match success_members.as_slice() {
+                [only] => match only.fields.as_slice() {
+                    // a bare member: the unit value or a bare tag over the
+                    // span's inert payload word
+                    [] => (SuccessShape::Bare { atom: only.atom }, vec![SlotType::I64]),
+                    fields => (
+                        SuccessShape::Payload {
+                            atom: only.atom,
+                            fields: fields.to_vec(),
+                        },
+                        fields
+                            .iter()
+                            .flat_map(|field| field.slots.iter().copied())
+                            .collect(),
+                    ),
+                },
+                // a multi-atom answer: the winner's own tagged span crosses
+                // verbatim, admitted when its tag-and-region layout equals
+                // the result union's (the same atoms claiming the same
+                // region words in the same order)
+                _ => {
+                    let element = self.shapes.members_shape(&answer, 0)?;
+                    if shape_words(&element) != u.words {
+                        return Err(LowerError::unsupported(
+                            no_span(), // re-pointed at the call site
+                            "a deadline answer's span",
+                            "the answer union's own span disagrees with the call's result union; \
+                             the verbatim hand-back needs the winner's tag-and-region layout to \
+                             equal the result's, and a member the winner does not carry widened it",
+                        ));
+                    }
+                    (SuccessShape::Adopt, u.words.clone())
+                },
+            };
+        self.classed_native_union(
+            native,
+            ty,
+            &payload_words,
+            success,
+            fail_payload,
+            classes,
+            staged,
+        )
     }
 
     /// Records the words a fallible native's result span lands on: word 0

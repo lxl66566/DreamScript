@@ -1523,7 +1523,9 @@ mod tests {
             Err(Trap::UnknownObject { obj: str_obj })
         );
         // the construction append: every element word kind pushes in
-        // place, the answer is the inert unit word
+        // place over the uniquely-owned list, each answer the receiver's
+        // own word under one count the call site's re-store takes over
+        // (the raw test releases it here)
         for value in [
             Value::I64(9),
             Value::Bool(false),
@@ -1531,8 +1533,9 @@ mod tests {
         ] {
             assert_eq!(
                 list_push_fn(&mut heaps, &mut out, &[Value::Ref(empty), value]),
-                Ok(NativeResult::Word(Value::I64(0)))
+                Ok(NativeResult::Word(Value::Ref(empty)))
             );
+            heaps.dec(empty).expect("the answer's claim releases");
         }
         assert_eq!(
             heaps.list_at(empty),
@@ -1652,7 +1655,9 @@ mod tests {
                 };
                 word
             };
-            // two two-word elements: (string Ref, int) pairs
+            // two two-word elements: (string Ref, int) pairs, each
+            // answer's claim released the way the call site's re-store
+            // takes it over
             for rank in [Value::I64(1), Value::I64(2)] {
                 assert_eq!(
                     list_push_fn(&mut heaps, &mut out, &[
@@ -1660,8 +1665,9 @@ mod tests {
                         Value::Ref(left),
                         rank
                     ]),
-                    Ok(NativeResult::Word(Value::I64(0)))
+                    Ok(NativeResult::Word(Value::Ref(word)))
                 );
+                heaps.dec(word).expect("the answer's claim releases");
             }
             let stored = heaps
                 .list_at(word)

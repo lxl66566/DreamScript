@@ -160,12 +160,13 @@ impl Vm {
     }
 
     /// The deadline recv's ok answer: the element's word under the ok
-    /// discriminant (the fallible union's success member; a wider
-    /// element's span the lowering refuses at the seam, so the total
-    /// shape never lands at a lowered site)
+    /// discriminant (the fallible union's success member), a wider
+    /// element's whole span under the same discriminant (the span
+    /// channel's shape, the parked call site's own span staging)
     pub(super) fn chan_deadline_answer(&mut self, elem: ChanPop, fiber: FiberId) -> NativeResult {
         match self.chan_elem_answer(elem, fiber) {
             NativeResult::Word(word) => ok_tagged(word),
+            NativeResult::Total { words } => ok_spanned(words),
             other => other,
         }
     }
@@ -355,8 +356,9 @@ impl Vm {
             let result = if self.chan_deadline_parked(fiber) {
                 match result {
                     NativeResult::Word(word) => ok_tagged(word),
-                    // a wider element never parks a deadline recv: the
-                    // seam's one-word adoption refused it at lowering
+                    // a wider element's span rides the ok discriminant
+                    // the deadline call site overlays
+                    NativeResult::Total { words } => ok_spanned(words),
                     other => other,
                 }
             } else {

@@ -167,6 +167,10 @@ fn a_child_pushes_into_the_parent_list_and_both_heaps_drain() {
                 nargs: 2,
             }
             .into(),
+            // the push answers the list's post-mutation word under one
+            // count; the child keeps no claim of it, so the answer's
+            // claim releases here
+            RcOp::Dec { src: 2 }.into(),
             RcOp::Dec { src: 1 }.into(),
             Uop::Kimm {
                 dst: 2,
@@ -212,8 +216,12 @@ fn a_child_pushes_into_the_parent_list_and_both_heaps_drain() {
         .expect("spawn the pusher");
     vm.resume_fiber(child_id, Value::I64(0))
         .expect("the child lands");
-    // the foreign push served: the root-heap list now holds the child's
-    // word, and the child's heap carries the list's acquired count
+    // the foreign push served: the spawn's entry frame hands the word
+    // with no claim of its own, so the list reads unique at the child's
+    // push and the append lands in place — the root-heap list now holds
+    // the child's word, and the child's heap carries the list's
+    // acquired count. The push's answer word (the list's own, under
+    // the count the native acquired) releases at the frame's own dec
     let elems = vm
         .objects_of(list)
         .list_at(list.id())
@@ -237,14 +245,13 @@ fn a_child_pushes_into_the_parent_list_and_both_heaps_drain() {
         Ok(1),
         "the list's acquired count survives the child's exit dec"
     );
-    // the list's death: the cascade decs the foreign element word on the
-    // child's heap through the routing face
+    // the list's death: the root heap drains with it
     vm.run("sx", "drop", &[Value::Ref(list)])
         .expect("the drop lands");
     assert!(vm.objects_at(FIBER_ROOT).is_empty(), "the root heap drains");
     assert!(
         vm.objects_at(child_id).is_empty(),
-        "the cascade released the foreign-held count, so the child heap drains"
+        "the child heap stays drained"
     );
 }
 

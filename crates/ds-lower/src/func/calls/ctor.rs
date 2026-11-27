@@ -351,13 +351,23 @@ impl<'a> FnLower<'a, '_, '_> {
                 self.rc.staged_native(slot, false);
             }
         }
-        self.overlay_site(&staged, &[SlotType::I64]); // the unit word
+        self.overlay_site(&staged, &[SlotType::Ref]);
         let kidx = self.pool(self.funcref_const(Callee::Builtin(push)));
         self.emit(Op::Call {
             callee: kidx,
             nargs: u8::try_from(staged.len()).expect("argument count fits u8"),
         });
         self.rc.native_done(&mut self.code);
+        // the push answers the list's post-mutation word under one
+        // count: the constructing frame's list is unique, so the answer
+        // is the list's own word and the slot adopts its claim — the
+        // replaced word's count dies as the value the list already was
+        self.rc.store_over(&mut self.code, &[list]);
+        self.emit(Op::Mov {
+            dst: Slot::body(list),
+            src: Slot::overlay(0),
+        });
+        self.rc.produced(list);
         Ok(())
     }
 

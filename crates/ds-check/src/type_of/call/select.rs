@@ -4,6 +4,7 @@
 //! through.
 
 use super::super::*;
+use crate::atom::AtomKind;
 
 impl Bodies<'_> {
     /// DS2050: a call site's `as` selection where no trait dispatch
@@ -905,12 +906,56 @@ impl Bodies<'_> {
             return true;
         };
         let Some(expected) = self.solve_here(written) else {
-            return true;
+            // A written head the solve cannot finish still decides by
+            // its own shape: a nominal head whose atom covers no
+            // receiver member can never contain the receiver whatever
+            // its unsolved arguments solve to, so the same-named member
+            // candidates serve the call (the designed coexistence over
+            // disjoint receivers).
+            return self.written_head_covers(written, recv);
         };
         if self.decls.universe.is_empty(recv) {
             return true;
         }
         self.decls.universe.contains(expected, recv)
+    }
+
+    /// Whether a written parameter type with an unsolved solve could
+    /// ever contain the receiver: the head must resolve to a declared
+    /// atom that covers some receiver member (the atom itself, or an
+    /// application of it), a nominal head over disjoint atoms never
+    /// containing the receiver whatever its arguments solve to. A head
+    /// that resolves to nothing (a type variable, an unknown name) or a
+    /// non-path spelling keeps the free reading — the conservative
+    /// branch.
+    fn written_head_covers(&self, written: &Type, recv: Ty) -> bool {
+        let Type::Path { path, .. } = written else {
+            return true;
+        };
+        let [head] = path.segments.as_slice() else {
+            return true;
+        };
+        let Some(def) = self
+            .package
+            .lookup_type(&head.name)
+            .or_else(|| self.decls.foreign_type(&head.name))
+        else {
+            return true;
+        };
+        let Some(&owner) = self.decls.atoms.get(&def) else {
+            return true;
+        };
+        let universe = &self.decls.universe;
+        if universe.is_empty(recv) {
+            return true;
+        }
+        universe.members(recv).iter().any(|&member| {
+            member == owner
+                || matches!(
+                    universe.atom_decl(member),
+                    Ok(decl) if matches!(decl.kind, AtomKind::Apply(ctor, _) if ctor == owner)
+                )
+        })
     }
 
     /// Whether an inherent impl's owner accepts the receiver: every

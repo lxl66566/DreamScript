@@ -136,7 +136,7 @@ fn main() -> bool {
   const nope = m.get("nope")
   const tail = grown()
   const joined = xs.concat([3])
-  len(g) == 2 && len(xs) == 2 && len(joined) == 3 &&
+  len(g) == 1 && len(xs) == 2 && len(joined) == 3 &&
     hit.ok((x: int) => x).err((_: none) => 0) == 2 &&
     miss.ok((x: int) => x).err((_: none) => -1) == -1 &&
     one.ok((x: int) => x).err((_: none) => 0) == 1 &&

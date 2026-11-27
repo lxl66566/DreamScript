@@ -183,15 +183,16 @@ impl Vm {
     }
 
     /// A racer's death resolves its race: the slot closes, and the owner
-    /// takes the outcome at its parked call — the two-word answer span
-    /// (the racer's one answer word under the ok discriminant, a `Ref`
-    /// answer's claim crossing to the owner, the count the racer's death
-    /// left in flight), the failure span with the `timed_out` class tag
-    /// once a deadline door expired the race, or the racer's own trap
-    /// re-raised on the owner the way a nursery boundary re-raises a
-    /// child's. An unexpired cancel ends a race its owner's death
-    /// already closed: nothing is delivered, the user cancel keeping
-    /// its own `NurseryCancelled` member.
+    /// takes the outcome at its parked call — the racer's whole answer
+    /// span under the ok discriminant (one payload word the two-word
+    /// shape, a wider struct or tuple or union span the span channel's,
+    /// every `Ref` word's claim crossing to the owner, the counts the
+    /// racer's death left in flight), the failure span with the
+    /// `timed_out` class tag once a deadline door expired the race, or
+    /// the racer's own trap re-raised on the owner the way a nursery
+    /// boundary re-raises a child's. An unexpired cancel ends a race its
+    /// owner's death already closed: nothing is delivered, the user
+    /// cancel keeping its own `NurseryCancelled` member.
     pub(super) fn resolve_race(
         &mut self,
         nursery: NurseryId,
@@ -208,20 +209,23 @@ impl Vm {
             return;
         };
         let wake = match outcome {
-            ChildOutcome::Completed(span) => match span.as_slice() {
-                [word] => {
+            ChildOutcome::Completed(span) => {
+                for word in span.as_slice() {
                     if let Value::Ref(word) = word {
                         self.claims[owner.index()].acquire(*word);
                     }
-                    Some(Wake::Answer(NativeResult::Tag {
+                }
+                let wake = match span.as_slice() {
+                    [word] => NativeResult::Tag {
                         tag: PLATFORM_IO_OK,
                         payload: *word,
-                    }))
-                },
-                words => Some(Wake::Fault(Trap::RetSpanTooWide {
-                    span: u16::try_from(words.len()).expect("answer widths fit u16"),
-                    caller_area: 2,
-                })),
+                    },
+                    words => NativeResult::Span {
+                        tag: PLATFORM_IO_OK,
+                        payload: words.to_vec(),
+                    },
+                };
+                Some(Wake::Answer(wake))
             },
             ChildOutcome::Cancelled if expired => Some(Wake::Answer(timeout_failure_span())),
             ChildOutcome::Trapped(trap) => {
@@ -272,6 +276,13 @@ impl Vm {
                     ..
                 },
             ) => vec![*word],
+            Wake::Answer(NativeResult::Span { payload, .. }) => payload
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Ref(word) => Some(*word),
+                    _ => None,
+                })
+                .collect(),
             Wake::Fault(Trap::NurseryCancelled { payload }) => payload
                 .iter()
                 .filter_map(|value| match value {

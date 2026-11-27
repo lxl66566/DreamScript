@@ -55,11 +55,11 @@ fn build_vm() -> (Vm, Lowered) {
 #[test]
 fn the_member_spellings_route_to_the_native_seams() {
     // `push` answers the receiver's own word, counted: the bound `g`
-    // aliases the receiver and observes the later statement-position
-    // push (the member call copies nothing); the checked `get` reads
-    // hit and miss; `set` answers the map its own later read serves;
-    // the tail-position push in `grown` answers its caller the
-    // three-element list
+    // holds the answer as a value snapshot — the later statement-position
+    // push answers `xs`'s own copy, so `g` reads the one-element list;
+    // the checked `get` reads hit and miss; `set` answers the map its
+    // own later read serves; the tail-position push in `grown` answers
+    // its caller the three-element list
     let (mut vm, _) = build_vm();
     assert_eq!(
         vm.run("collection_members_probe", "main", &[]),

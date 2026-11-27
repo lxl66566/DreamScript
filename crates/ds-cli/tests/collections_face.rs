@@ -92,6 +92,33 @@ fn the_mutation_and_membership_members_run_over_the_ambient() {
     );
 }
 
+/// The collection value semantics end to end: a mutating member at a
+/// shared count copies before writing — the alias's mutation invisible
+/// at the other name, the aliased for-loop mutation leaving the
+/// iterated collection intact, the mutation through a map value landing
+/// on the read copy (the stored row never receiving anything through
+/// the read, so no reference the map reaches can enter its own row — the
+/// self-referential spelling itself refusing at the check), the box's
+/// store copying at its alias — while the channel and the mutable-capture
+/// closure stay shared objects.
+#[test]
+fn the_value_semantics_legs_run_over_the_ambient() {
+    let out = run(ds().arg("run").arg(fixture("value_semantics.ds")));
+    assert!(out.status.success(), "the run failed: {out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        concat!(
+            "alias 2 3\n",
+            "loop 2 2 4\n",
+            "mapval 0 1\n",
+            "box 6 5\n",
+            "chan 7\n",
+            "closure 1 2 3 4\n",
+            "",
+        )
+    );
+}
+
 /// The `.ok` handler over the receiver's `none` member runs over both
 /// word kinds the checked read answers: the checked difference collapses
 /// the result to the one flowing atom itself, so the hit arm extracts the
