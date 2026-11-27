@@ -46,7 +46,7 @@ fn main() -> () {
   fns.push((x: int) => x * 3)
   const cell = fns.get(0)
   const first = cell.ok((f: fn(int) -> int) => f(41)).err((_: none) => -1)
-  println("fns ${len(fns)} ${first}")
+  println("fns ${fns.len()} ${first}")
   const label = double_port("34")
   println("parsed ${label.err((_: parse_err) => "?")}")
   println("fallback ${"x".parse_int().err((_: parse_err) => 7) + 1}")

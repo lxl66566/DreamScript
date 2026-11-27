@@ -5,6 +5,6 @@
 struct plain { n: int }
 
 fn main() -> int {
-  const ys = sort([plain { n: 1 }, plain { n: 0 }])
+  const ys = [plain { n: 1 }, plain { n: 0 }].sort()
   0
 }

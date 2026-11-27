@@ -25,7 +25,7 @@ fn cycle_walk() -> int {
   var hops = 0
   while hops < 9 {
     var links = a.at(cur)
-    const step = first(links)
+    const step = links.first()
     if step is int { cur = step } else { return 1 }
     hops += 1
   }

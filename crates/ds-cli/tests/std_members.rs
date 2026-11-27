@@ -74,11 +74,11 @@ fn entry_of(root: &Path) -> String {
         .to_owned()
 }
 
-/// The ordering pair's program text: bare calls over the ints, the
-/// negative edges included.
+/// The ordering pair's program text: the int members beside the float
+/// pair's own tier, the negative edges included.
 const PAIR_MAIN: &str = concat!(
     "fn main() -> int {\n",
-    "  println(\"${max(3, 9)} ${min(3, 9)} ${max(-4, -2)} ${min(-4, -2)}\")\n",
+    "  println(\"${(3).max(9)} ${(3).min(9)} ${(-4).max(-2)} ${(-4).min(-2)}\")\n",
     "  0\n",
     "}\n",
 );
@@ -86,8 +86,8 @@ const PAIR_OUT: &str = "9 3 -2 -4\n";
 
 /// A bare script's session composes the @std bodied members back
 /// beside the shrunk core (the implicit resolution over the implicit
-/// `@std` graph), so the bare ordering pair runs cold and serves warm
-/// under the same answer.
+/// `@std` graph), so the ordering pair's member tier runs cold and
+/// serves warm under the same answer.
 #[test]
 fn the_bare_spellings_run_through_a_bare_script() {
     let file = script("run", PAIR_MAIN);
@@ -150,7 +150,7 @@ fn the_repl_answers_the_bare_spellings() {
         .stdin
         .as_mut()
         .expect("stdin pipes")
-        .write_all(b"max(3, 9)\nmin(3, 9)\n")
+        .write_all(b"(3).max(9)\n(3).min(9)\n")
         .expect("the input writes");
     let out = child.wait_with_output().expect("the session drains");
     assert!(out.status.success(), "the session exits cleanly");
@@ -198,8 +198,8 @@ fn std_manifest() -> String {
 /// The manifest-root boundary the migration keeps: a package compile
 /// over a std-declaring graph registers the shrunk core (the ordering
 /// pair gone from its namespace — a bare use an unknown name), while
-/// the linked import binds the bodied members through the @std surface,
-/// the package's exported call face answering over the link.
+/// the members answer over the link through the ambient band every
+/// registration carries, an @std row binding an exportable face.
 #[test]
 fn a_std_declared_root_refuses_bare_and_binds_the_link() {
     // the bare spelling refuses over the core
@@ -220,15 +220,17 @@ fn a_std_declared_root_refuses_bare_and_binds_the_link() {
     );
     fs::remove_dir_all(&bare).expect("the temp tree removes");
 
-    // the linked import binds the bodied pair: the first bodied @std
-    // members answering through the linked call surface
+    // the linked surface binds the member tier: the pair left the
+    // free namespace (an `@std (max)` row now refuses), and the pair
+    // answers through the int members over the link, the pair riding
+    // the ambient band every registration carries
     let linked = write_root("link", &std_manifest(), &[(
         "app.ds",
         concat!(
-            "import @std (max, min)\n",
+            "import @std (rand)\n",
             "\n",
             "fn main() -> int {\n",
-            "  println(\"${max(3, 9)} ${min(3, 9)}\")\n",
+            "  println(\"${(3).max(9)} ${(3).min(9)}\")\n",
             "  0\n",
             "}\n",
         ),
@@ -243,7 +245,7 @@ fn a_std_declared_root_refuses_bare_and_binds_the_link() {
     assert_eq!(
         text(&out.stdout),
         "9 3\n",
-        "the bodied pair answers over the link"
+        "the ordering pair answers over the link"
     );
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
@@ -368,19 +370,20 @@ fn a_std_declared_root_refuses_bare_strings_and_binds_the_link() {
     fs::remove_dir_all(&linked).expect("the temp tree removes");
 }
 
-/// The FP combinator round's program text: the landed list pair
-/// (`enumerate`, `zip`) through the bare spellings and the UFCS dot
-/// forms, the empty and shorter-side edges included.
+/// The FP combinator round's program text: `enumerate` at its
+/// member tier and `zip` at the free spelling its seam keeps (the
+/// member-generic body waiting on the per-shape member round), the
+/// empty and shorter-side edges included.
 const COMBINATORS_MAIN: &str = concat!(
     "fn main() -> int {\n",
     "  const xs = [1, 2, 3, 4, 5]\n",
     "  const pairs = zip(xs, [\"a\", \"b\"])\n",
     "  const shorter = zip([7, 8], [\"x\", \"y\", \"z\"])\n",
     "  const words = [\"alpha\", \"beta\", \"gamma\"]\n",
-    "  const enumd = enumerate(words)\n",
+    "  const enumd = words.enumerate()\n",
     "  println(\"zip ${pairs.len()} ${shorter.len()} enum ${enumd.len()} \
      ${xs.enumerate().len()}\")\n",
-    "  println(\"edge ${zip(xs, list[int]()).len()} ${enumerate(list[int]()).len()}\")\n",
+    "  println(\"edge ${zip(xs, list[int]()).len()} ${list[int]().enumerate().len()}\")\n",
     "  0\n",
     "}\n",
 );

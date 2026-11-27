@@ -23,5 +23,5 @@ fn main() -> () {
   println("first ${firstof(race)}")
   const all = interleave(race)
   println("arrival ${at(all, 0)} ${at(all, 1)}")
-  println("sum ${sum([1, 2, 3, 4])}")
+  println("sum ${[1, 2, 3, 4].sum()}")
 }

@@ -39,7 +39,7 @@ fn at_keyed(xs: list[keyed], i: int) -> string {
 
 fn main() -> int {
   const xs = [3, 1, 2, 1]
-  println("ints ${at(sort(xs), 0)} ${at(sort(xs), 3)}")
+  println("ints ${at(xs.sort(), 0)} ${at(xs.sort(), 3)}")
   println("ufcs ${at(xs.sort(), 0)} ${at(xs.sort(), 3)}")
   const words = ["pear", "apple", "fig"]
   const sorted_words = words.sort()
@@ -50,6 +50,6 @@ fn main() -> int {
   const items = [keyed { key: 2, label: "a" }, keyed { key: 1, label: "x" }, keyed { key: 2, label: "b" }, keyed { key: 1, label: "y" }]
   const sk = items.sort()
   println("stable ${at_keyed(sk, 0)} ${at_keyed(sk, 1)} ${at_keyed(sk, 2)} ${at_keyed(sk, 3)}")
-  println("empty ${len(sort(list[int]()))}")
+  println("empty ${list[int]().sort().len()}")
   0
 }

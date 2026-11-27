@@ -35,7 +35,7 @@ fn fingerprints() -> () {
 
 fn bridges() -> () {
   const enc = utf8_encode("héllo")
-  println("${len(enc)}")
+  println("${enc.len()}")
   match utf8_decode(enc) {
     utf8_err => println("utf8_err")
     text => println(text)

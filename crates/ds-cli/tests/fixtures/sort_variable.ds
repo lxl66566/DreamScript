@@ -3,7 +3,7 @@
 // instance, so no compare body exists to stage at the call site —
 // the per-instantiation seam the JIT specialization tier owns.
 
-fn sort_any[t: ord](xs: list[t]) -> list[t] { sort(xs) }
+fn sort_any[t: ord](xs: list[t]) -> list[t] { xs.sort() }
 
 fn main() -> int {
   const ys = sort_any([3, 1])

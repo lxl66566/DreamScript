@@ -26,7 +26,7 @@ const WRITTEN_MAIN: &str = "fn main() -> () {\n  println(\"warm as toast\")\n}\n
 
 /// An `args()`-reading entry: the verbatim process arguments, the CLI
 /// process surface's argv (the `get` member is the subset's checked read).
-const ARGS_MAIN: &str = "fn main() -> () {\n  const argv = args()\n  if len(argv) == 0 {\n    \
+const ARGS_MAIN: &str = "fn main() -> () {\n  const argv = args()\n  if argv.len() == 0 {\n    \
                          println(\"no port\")\n  } else {\n    println(\"port \
                          ${argv.get(0).ok((w: string) => w).err((_: none) => \"?\")}\")\n  }\n}\n";
 
@@ -476,7 +476,7 @@ fn an_absent_entry_names_the_module_from_the_hit_path() {
 #[test]
 fn both_writers_record_the_dep_list_a_walk_resolves() {
     const IMPORT_MAIN: &str =
-        "import @std (concat)\nimport @std (urls)\n\nfn main() -> int {\n  7\n}\n";
+        "import @std (to_upper)\nimport @std (urls)\n\nfn main() -> int {\n  7\n}\n";
     let cache = cache_dir("deps");
     let source = source_file("deps", IMPORT_MAIN);
 

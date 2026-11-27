@@ -182,8 +182,8 @@ mod tests {
          self.y * self.y) }\n}\n\nstruct wrap { v: json }\n\nfn main() -> () {\nconst p = point { \
          x: 3, y: 4 }\nconst t = warm\nconst w = wrap { v: json_null }\nconst j = \
          parse_json(\"[1,{\\\"k\\\":true}]\")\nif j is parse_err {\nprintln(\"bad\")\n} else \
-         {\nprintln(\"${to_json(j)}\")\n}\nprintln(\"${p.show()} ${p.norm()} ${t.m()} ${max(1, \
-         2)}\")\n}\n";
+         {\nprintln(\"${to_json(j)}\")\n}\nprintln(\"${p.show()} ${p.norm()} ${t.m()} \
+         ${(1).max(2)}\")\n}\n";
 
     /// The embedded artifact must byte-match a fresh generation over the
     /// current source: any grammar, checker, resolution, effects, or

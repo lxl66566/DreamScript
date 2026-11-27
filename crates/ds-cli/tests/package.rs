@@ -870,7 +870,7 @@ fn a_three_member_root_binds_a_cross_member_impl() {
                 "fn main() -> int {\n",
                 "  const c = cell { n: 3 }\n",
                 "  println(\"${c.show()}\")\n",
-                "  len(c.show())\n",
+                "  c.show().len()\n",
                 "}\n",
             ),
         ),
@@ -1025,7 +1025,7 @@ version = \"1.0.0\"
 ",
         "pub const computed = 6 * 7
 ",
-        "pub const shout = concat(\"dr\", \"eam\")
+        "pub const shout = \"dr\".concat(\"eam\")
 ",
         "pub var counter = 0
 ",
@@ -1084,7 +1084,8 @@ version = \"0.1.0\"
 ",
             "  println(\"computed = ${computed} shout = ${shout}\")
 ",
-            "  limit + step + computed + (if ready { 1 } else { 0 }) + len(bytes_of([code, code]))
+            "  limit + step + computed + (if ready { 1 } else { 0 }) + bytes_of([code, \
+             code]).len()
 ",
             "}
 ",
@@ -1143,8 +1144,8 @@ version = \"0.1.0\"
 ",
             "  println(\"computed = ${w.computed} shout = ${w.shout}\")
 ",
-            "  w.limit + w.step + w.computed + (if w.ready { 1 } else { 0 }) + \
-             len(bytes_of([w.code, w.code]))
+            "  w.limit + w.step + w.computed + (if w.ready { 1 } else { 0 }) + bytes_of([w.code, \
+             w.code]).len()
 ",
             "}
 ",
@@ -1547,13 +1548,13 @@ version = \"1.0.0\"
         "pub fn weigh(s: spread) -> int {\n",
         "  const head = match s.xs {\n",
         "    none => 0,\n",
-        "    only => len(only),\n",
+        "    only => only.len(),\n",
         "  }\n",
         "  const keyed = match s.table.get(\"k\") {\n",
         "    none => 0,\n",
         "    v => v,\n",
         "  }\n",
-        "  head + len(s.grid) + keyed\n",
+        "  head + s.grid.len() + keyed\n",
         "}\n",
         "pub struct fleet {\n",
         "  head: cell,\n",
@@ -1578,7 +1579,7 @@ version = \"1.0.0\"
         "    none => 0,\n",
         "    v => v.n,\n",
         "  }\n",
-        "  area(f.head) + len(f.tail) + picked + keyed + score(f.tint)\n",
+        "  area(f.head) + f.tail.len() + picked + keyed + score(f.tint)\n",
         "}\n",
         "pub type words = list[string]\n",
         "pub type chain = words\n",
@@ -1684,7 +1685,7 @@ fn linked_struct_facts_bind_and_run() {
             "  const c = cell { n: 3, label: \"x\", tags: [\"a\"], ratio: 0.5, on: true, initial: \
              'd', code: b'x' }\n",
             "  const made = make(10)\n",
-            "  var total = c.n + area(c) + made.n + len(made.tags) + area(make(4))\n",
+            "  var total = c.n + area(c) + made.n + made.tags.len() + area(make(4))\n",
             // the linked struct's `tags: list[string]` field crosses the
             // packages: the structural `==` chain compares it through the
             // list content compare, the linked-type facts minting exactly
@@ -1799,7 +1800,7 @@ fn linked_named_type_fields_bind_and_run() {
             "    none => 0,\n",
             "    other => other.n,\n",
             "  }\n",
-            "  total = total + own.head.n + len(own.tail) + picked\n",
+            "  total = total + own.head.n + own.tail.len() + picked\n",
             "  println(\"${total}\")\n",
             "  total\n",
             "}\n",
@@ -1856,7 +1857,7 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "  }\n",
         "}\n",
         "pub fn total(b: blob) -> int {\n",
-        "  b.n + len(b.data)\n",
+        "  b.n + b.data.len()\n",
         "}\n",
         "pub fn pick(n: int) -> tone {\n",
         "  if n > 0 {\n",
@@ -1883,7 +1884,7 @@ fn blobs_fixtures(tag: &str) -> (PathBuf, String) {
         "}\n",
         "pub fn tag_weight(tp: tagged_pair) -> int {\n",
         "  const (label, raw) = tp.t\n",
-        "  len(label) + len(raw)\n",
+        "  label.len() + raw.len()\n",
         "}\n",
     );
     let members = [("blobs.ds", member)];
@@ -1946,7 +1947,7 @@ fn linked_bytes_field_facts_bind_and_run() {
             "  var w = 0\n",
             "  const probe = pick(4)\n",
             "  if probe is loaded {\n",
-            "    w = len(probe.data)\n",
+            "    w = probe.data.len()\n",
             "  }\n",
             "  count = count + w\n",
             "  const head = match byte_at(b.data, 0) {\n",
@@ -1997,7 +1998,7 @@ fn the_tuple_fields_cross_and_run() {
             "  var total = a + b + pair_sum(made) + pair_sum(own)\n",
             "  const tagged = mk_tagged(\"hey\")\n",
             "  const (label, raw) = tagged.t\n",
-            "  total = total + len(label) + len(raw) + tag_weight(tagged)\n",
+            "  total = total + label.len() + raw.len() + tag_weight(tagged)\n",
             "  const own_tagged = tagged_pair { t: (\"hi\", [b'z', b'q']) }\n",
             "  total = total + tag_weight(own_tagged)\n",
             "  println(\"${total}\")\n",
@@ -2962,9 +2963,9 @@ fn the_alias_bodies_and_the_subset_union_cross() {
             "  const xs: cells = [make(3)]\n",
             "  total = total + head_of(xs)\n",
             "  const words: chain = [\"one\", \"two\"]\n",
-            "  total = total + len(words)\n",
+            "  total = total + words.len()\n",
             "  const e: either = \"hi\"\n",
-            "  if e is string { total = total + len(e) } else { total = total + 1000 }\n",
+            "  if e is string { total = total + e.len() } else { total = total + 1000 }\n",
             "  println(\"${total}\")\n",
             "  total\n",
             "}\n",
@@ -3940,10 +3941,10 @@ fn a_declared_std_dep_serves_the_default_install() {
         &work,
         &std_root_manifest(&ver, &std_id.to_string()),
         concat!(
-            "import @std (concat, to_upper)\n",
+            "import @std (to_upper)\n",
             "\n",
             "fn main() -> int {\n",
-            "  println(to_upper(concat(\"hi\", \"!\")))\n",
+            "  println(to_upper(\"hi\".concat(\"!\")))\n",
             "  0\n",
             "}\n",
         ),
@@ -4751,7 +4752,7 @@ const NAMED_LIB_MEMBER: &str = concat!(
     "    none => 0,\n",
     "    other => other.n,\n",
     "  }\n",
-    "  area(f.head) + len(f.tail) + picked + score(f.tint)\n",
+    "  area(f.head) + f.tail.len() + picked + score(f.tint)\n",
     "}\n",
 );
 
@@ -4812,7 +4813,7 @@ fn a_reexported_named_type_field_crosses_the_middle_package() {
         "    other => other.n,\n",
         "  }\n",
         "  const held = wrap { c: cell { n: 3, label: \"held\" } }\n",
-        "  total = total + own.head.n + len(own.tail) + picked + held.c.n\n",
+        "  total = total + own.head.n + own.tail.len() + picked + held.c.n\n",
         "  println(\"${total}\")\n",
         "  total\n",
         "}\n",

@@ -24,7 +24,7 @@ fn main() -> () {
   const port = "8080".parse_int().err((_: parse_err) => 0)
   println("port + total: ${port + total}")
 
-  const joined = concat("a", "b").concat("c").to_lower()
+  const joined = "a".concat("b").concat("c").to_lower()
   println("joined: ${joined}")
 
   var slot: int | none = none

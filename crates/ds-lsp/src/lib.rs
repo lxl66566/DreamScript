@@ -1774,26 +1774,25 @@ mod tests {
             "import @std (parse_json)\n\n"
         );
         // The ambient's own members keep their offers over the core: the
-        // composed set's ambient half. `concat` is the representative —
-        // the core string face's own seam, still core-owned after the
-        // string face's migration offered through the members' table
-        // above.
+        // composed set's ambient half. `unwrap_or` is the representative
+        // — the core option face's own seam, still core-owned and
+        // importable after the collection seam's member migration.
         let file = open(
             &mut session,
             "d.ds",
-            "fn probe() -> string {\n  conc(\"x\")\n}\n",
+            "fn probe() -> int {\n  unwrap_o(3)\n}\n",
         );
-        let items = session.completion(file, 1, 6).expect("the pass runs");
+        let items = session.completion(file, 1, 10).expect("the pass runs");
         let item = items
             .iter()
-            .find(|item| item.label == "concat")
+            .find(|item| item.label == "unwrap_or")
             .expect("the ambient member answers");
         assert_eq!(
             item.additional_text_edits
                 .as_ref()
                 .expect("the offer imports")[0]
                 .new_text,
-            "import @std (concat)\n\n"
+            "import @std (unwrap_or)\n\n"
         );
     }
 

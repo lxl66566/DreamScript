@@ -8,7 +8,6 @@ fn moved(path: string) -> () {
   const f = open_file(path)
   eat(f)
   const b = read_exact(f, 4)
-  println("${len(b)}")
 }
 
 moved("file_time_probe.txt")

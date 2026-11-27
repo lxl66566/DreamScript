@@ -14,5 +14,5 @@ impl[t] list[t] {
 fn main() -> int {
   var xs = [1, 2]
   xs.append(9)
-  return len(xs)
+  return xs.len()
 }

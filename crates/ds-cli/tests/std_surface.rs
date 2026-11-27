@@ -50,7 +50,7 @@ fn show_list(xs: &str) -> String {
         r#"fn show_list (xs: list[string]) -> () {{
   var out = ""
   var i = 0
-  while i < len(xs) {{
+  while i < xs.len() {{
     if i > 0 {{ out = "${{out}}|" }}
     out = "${{out}}${{xs.get(i).unwrap_or("")}}"
     i += 1

@@ -15,7 +15,7 @@ impl sized for int {
 }
 
 impl sized for string {
-  fn pad(self, by: int) -> int { len(self) + by }
+  fn pad(self, by: int) -> int { self.len() + by }
 }
 
 struct counter { ticks: int }

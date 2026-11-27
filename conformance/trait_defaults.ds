@@ -20,7 +20,7 @@ impl sized for int {
 }
 
 impl sized for word {
-  fn pad(self, by: int) -> int { len(self.text) + by }
+  fn pad(self, by: int) -> int { self.text.len() + by }
 }
 
 struct gauge { notches: int }

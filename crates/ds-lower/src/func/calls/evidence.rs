@@ -252,14 +252,6 @@ impl<'a> FnLower<'a, '_, '_> {
         )
     }
 
-    /// A solved inherent-method call site: the impl body the
-    /// checker-recorded method id names, reached through the declaration
-    /// tables' method-to-impl-item map. The receiver's own type picked
-    /// the body at check time — no instance word exists for an inherent
-    /// impl, so the call dispatches like a local callee; a generic body's
-    /// entering site carries the checker-recorded bounds (the serving
-    /// instance per declared bound under the receiver's substitution),
-    /// which stage the body's evidence demands.
     /// The native seam a bodiless ambient collection member routes to:
     /// `list`'s `get`/`push`/`concat` and `map`'s `get`/`set` declare no
     /// ds body
@@ -269,35 +261,57 @@ impl<'a> FnLower<'a, '_, '_> {
     /// marks the in-place mutations whose member answer re-answers the
     /// receiver after the native's unit word. A member with a ds body
     /// (the `keys` shape, or a user impl's own body) lowers that body.
+    /// `element_first` marks the member whose native takes the receiver
+    /// at its second parameter (`cons`: the element stages first, the
+    /// list `Ref` trailing it), so the member route reorders the
+    /// written arguments behind the receiver swap.
     pub(in crate::func) fn native_member_def(&self, call: Span) -> Option<NativeMember> {
         let &method = self.analyzed.checked.inherent_calls.get(&call)?;
         let MethodOwner::Inherent(target) = &self.analyzed.package.method(method).owner else {
             return None;
         };
         let member = self.analyzed.package.method(method).name.as_str();
-        let (native, window) = match (target.as_str(), member) {
-            ("list", "get") => ("list_get", false),
-            ("list", "contains") => ("list_contains", false),
-            ("list", "set") => ("list_set", true),
-            ("list", "push") => ("list_push", true),
-            ("list", "insert") => ("list_insert", true),
-            ("list", "remove") => ("list_remove", true),
-            ("list", "clear") => ("list_clear", true),
-            ("list", "concat") => ("list_concat", false),
-            ("map", "get") => ("map_get", false),
-            ("map", "set") => ("map_set", true),
-            ("map", "remove") => ("map_remove", true),
-            ("map", "contains") => ("map_contains", false),
-            ("map", "entries") => ("map_entries", false),
-            ("chan", "send") => ("chan_send", false),
-            ("chan", "recv") => ("chan_recv", false),
-            ("chan", "send_deadline") => ("chan_send_deadline", false),
-            ("chan", "recv_deadline") => ("chan_recv_deadline", false),
-            ("arena", "insert") => ("arena_insert", false),
-            ("arena", "remove") => ("arena_remove", false),
-            ("arena", "at") => ("arena_at", false),
-            ("box", "get") => ("box_get", false),
-            ("box", "set") => ("box_set", true),
+        let (native, window, element_first) = match (target.as_str(), member) {
+            ("list", "get") => ("list_get", false, false),
+            ("list", "contains") => ("list_contains", false, false),
+            ("list", "set") => ("list_set", true, false),
+            ("list", "push") => ("list_push", true, false),
+            ("list", "insert") => ("list_insert", true, false),
+            ("list", "remove") => ("list_remove", true, false),
+            ("list", "clear") => ("list_clear", true, false),
+            ("list", "concat") => ("list_concat", false, false),
+            ("map", "get") => ("map_get", false, false),
+            ("map", "set") => ("map_set", true, false),
+            ("map", "remove") => ("map_remove", true, false),
+            ("map", "contains") => ("map_contains", false, false),
+            ("map", "entries") => ("map_entries", false, false),
+            ("chan", "send") => ("chan_send", false, false),
+            ("chan", "recv") => ("chan_recv", false, false),
+            ("chan", "send_deadline") => ("chan_send_deadline", false, false),
+            ("chan", "recv_deadline") => ("chan_recv_deadline", false, false),
+            ("arena", "insert") => ("arena_insert", false, false),
+            ("arena", "remove") => ("arena_remove", false, false),
+            ("arena", "at") => ("arena_at", false, false),
+            ("box", "get") => ("box_get", false, false),
+            ("box", "set") => ("box_set", true, false),
+            // the moved list-combinator members: bodiless spellings over
+            // the retired free seams, the receiver feeding the first
+            // argument the free spelling took (cons the exception — the
+            // element stages first)
+            ("list", "map") => ("map", false, false),
+            ("list", "cons") => ("cons", false, true),
+            ("list", "tail") => ("tail", false, false),
+            ("list", "collect") => ("collect", false, false),
+            ("list", "first") => ("first", false, false),
+            ("list", "filter") => ("filter", false, false),
+            ("list", "partition") => ("partition", false, false),
+            ("list", "reduce") => ("reduce", false, false),
+            ("list", "sort_by") => ("sort_by", false, false),
+            // the collection count and the string concatenation, one
+            // member spelling per collection face over the one generic
+            // native each
+            ("list" | "map" | "string" | "bytes" | "arena", "len") => ("len", false, false),
+            ("string", "concat") => ("concat", false, false),
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;
@@ -305,7 +319,35 @@ impl<'a> FnLower<'a, '_, '_> {
             return None;
         }
         let def = self.analyzed.package.lookup_value(native)?;
-        Some(NativeMember { def, window })
+        Some(NativeMember {
+            def,
+            window,
+            element_first,
+        })
+    }
+
+    /// Whether one inherent call site names the ambient's bodiless
+    /// `sort` member: the comparator-routed sort has no plain native
+    /// seam (the call stages the solved ord instance's compare body as
+    /// the callable word), so the member site lowers through the sort
+    /// path's own staging over the checker's inherent bound record.
+    pub(in crate::func) fn sort_member_site(&self, call: Span) -> bool {
+        let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) else {
+            return false;
+        };
+        let method_decl = self.analyzed.package.method(method);
+        if method_decl.name != "sort"
+            || !matches!(
+                method_decl.owner,
+                MethodOwner::Inherent(ref target) if target == "list"
+            )
+        {
+            return false;
+        }
+        let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
+            return false;
+        };
+        self.plan.impl_body(impl_site, "sort").is_none()
     }
 
     pub(in crate::func) fn resolve_inherent_method(

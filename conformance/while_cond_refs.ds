@@ -26,7 +26,7 @@ fn dying_string() -> int {
 fn dying_list() -> int {
   const words = ["alpha", "beta", "gamma"]
   var n: int = 0
-  while len(words) == 3 && n < 2 {
+  while words.len() == 3 && n < 2 {
     n += 1
   }
   n

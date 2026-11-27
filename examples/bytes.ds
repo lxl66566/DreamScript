@@ -12,11 +12,11 @@ fn main() -> () {
   const ab = bytes_of([b'a', b'b'])
   println(ab.show())
   println(bytes_of(list[byte]()).show())
-  println("${len(ab)} ${byte_at(ab, 1).unwrap_or(b'\0') == b'b'}")
+  println("${ab.len()} ${byte_at(ab, 1).unwrap_or(b'\0') == b'b'}")
   println("${ab == utf8_encode("ab")}")
 
   const text = utf8_encode("héllo")
-  println("${len(text)}")
+  println("${text.len()}")
   match utf8_decode(text) {
     utf8_err => println("decode refused")
     s => println(s)

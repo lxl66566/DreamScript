@@ -317,7 +317,7 @@ mod tests {
          list[u] {\nfn key(self, other: cell) -> string { other.show() }\n}\n\nimpl[u: show] \
          list[u] {\nfn shout(self) -> string {\nvar acc = \"!\"\nfor x in self {\nacc = \
          \"${acc}${x.show()}\"\n}\nacc\n}\n}\n\nfn main() -> () {\nconst c = cell { n: 3, label: \
-         \"x\" }\nprintln(\"${[1, 2].shout()} ${[1, 2].key(c)} ${c.show()} ${max(1, 2)}\")\n}\n";
+         \"x\" }\nprintln(\"${[1, 2].shout()} ${[1, 2].key(c)} ${c.show()} ${(1).max(2)}\")\n}\n";
 
     /// A self-contained program (no ambient name, no primitive word —
     /// the scalars are ambient declarations): both the ambient and the

@@ -15,7 +15,7 @@ fn main() -> int {
   var total = a + b + pair_sum(made) + pair_sum(own)
   const tagged = mk_tagged("hey")
   const (label, raw) = tagged.t
-  total = total + len(label) + len(raw) + tag_weight(tagged)
+  total = total + label.len() + raw.len() + tag_weight(tagged)
   const own_tagged = tagged_pair { t: ("hi", [b'z', b'q']) }
   total = total + tag_weight(own_tagged)
   println("${total}")

@@ -1169,6 +1169,16 @@ impl Bodies<'_> {
         {
             self.check_mut_window_args(&[Some(recv)], &sig.params[..1]);
         }
+        if !sig.generics.is_empty() {
+            // A member's own generic clause solves at its call sites like
+            // a free fn's: the receiver and the impl's variables are
+            // already bound (the `vars` push above), so only the clause
+            // mints here — the call's own solving feeds the written
+            // signature's remaining names.
+            let val = self.member_call_generics(sig, skip, args, trailing, span);
+            self.type_vars.pop();
+            return val;
+        }
         if let Some(slots) = self.arg_slots(None, skip, args, trailing, &sig.params, span) {
             self.check_slots(&slots[skip..], &sig.params[skip..], &param_tys[skip..]);
         }
@@ -1182,6 +1192,181 @@ impl Bodies<'_> {
             ty: ret,
             diverges: self.decls.universe.is_empty(ret),
             poisoned: false,
+        }
+    }
+
+    /// One member call over a signature carrying its own generic
+    /// clause: the free-fn call's solving mirrored onto the member —
+    /// non-lambda arguments bind variables structurally, lambda
+    /// arguments check against their fn-typed parameter binding the
+    /// return variables, the return solves under the substitution. The
+    /// native-backed member route derives its evidence from the receiver
+    /// alone, so no instantiation record rides the span; a declared
+    /// bound on the clause still refuses here when the solved type
+    /// carries no serving instance.
+    pub(in crate::type_of) fn member_call_generics(
+        &mut self,
+        sig: &FnSig,
+        skip: usize,
+        args: &[ds_parse::CallArg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Val {
+        let var_atoms: Vec<TypeId> = sig
+            .generics
+            .iter()
+            .map(|p| self.mint_var(&p.name))
+            .collect();
+        let mut subst: FxHashMap<String, Ty> = FxHashMap::default();
+        let assumption_mark = self.assumptions.len();
+        for (index, param) in sig.generics.iter().enumerate() {
+            if let Ok(ty) = self.decls.universe.atom_ty(var_atoms[index]) {
+                if param.bound.as_ref().is_some_and(decls::linear_marker) {
+                    self.linear_vars.insert(var_atoms[index], false);
+                }
+                if let Some(bound) = &param.bound {
+                    let mut arms = Vec::new();
+                    self.bound_traits(bound, &mut arms);
+                    for trait_id in arms {
+                        self.assumptions.push((trait_id, ty));
+                    }
+                }
+            }
+        }
+        let slots = self.arg_slots(None, skip, args, trailing, &sig.params, span);
+        // Pass one: non-lambda arguments bind variables structurally,
+        // then check against the solved parameter type.
+        if let Some(slots) = &slots {
+            for (slot, param) in slots[skip..].iter().zip(sig.params[skip..].iter()) {
+                let (Some(arg), Some(param_ty)) = (slot, param.ty.as_ref()) else {
+                    continue;
+                };
+                if matches!(peel_paren(arg), Expr::Lambda { .. })
+                    && matches!(param_ty, Type::Fn { .. })
+                {
+                    continue;
+                }
+                let arg_val = self.expr(arg, None);
+                self.match_param(param_ty, arg_val.ty, &sig.generics, &mut subst);
+                if let Some(expected) = self.solve_with(param_ty, &subst, &sig.generics) {
+                    self.expect_param_contains(arg_val, param_ty, expected, arg.span());
+                }
+            }
+        }
+        // Pass two: lambda arguments check against the fn-typed
+        // parameter, their result type binding the parameter's return
+        // variables — the routed-answer settling included, exactly the
+        // free call's.
+        let mut routed: Vec<(&Type, &Type, Val, Span)> = Vec::new();
+        if let Some(slots) = &slots {
+            for (slot, param) in slots[skip..].iter().zip(sig.params[skip..].iter()) {
+                let Some(
+                    param_ty @ Type::Fn {
+                        params: fn_params,
+                        ret: fn_ret,
+                        ..
+                    },
+                ) = &param.ty
+                else {
+                    continue;
+                };
+                let Some(arg) = slot else { continue };
+                if !matches!(peel_paren(arg), Expr::Lambda { .. }) {
+                    continue;
+                }
+                let mut param_tys = Vec::with_capacity(fn_params.len());
+                for p in fn_params {
+                    let written = p.ty.clone().unwrap_or_else(|| name_type(&p.name.name));
+                    let solved = self.solve_with(&written, &subst, &sig.generics);
+                    param_tys.push(match solved {
+                        Some(ty) => ty,
+                        None => self.fresh_var(&p.name.name),
+                    });
+                }
+                let written_ret = fn_ret.as_ref();
+                let mut expected_ret = written_ret
+                    .and_then(|r| self.solve_with(r, &subst, &sig.generics))
+                    .unwrap_or_else(|| self.empty());
+                let inferred_ret = self.has_hole(expected_ret);
+                if inferred_ret {
+                    expected_ret = self.fresh_var("ret");
+                }
+                let params_boxed: Box<[Ty]> = param_tys.into();
+                let expected_ty = self
+                    .decls
+                    .universe
+                    .fn_atom(&params_boxed, expected_ret)
+                    .ok()
+                    .and_then(|a| self.decls.universe.atom_ty(a).ok())
+                    .unwrap_or_else(|| self.empty());
+                self.expected_ty_span = param.ty.as_ref().map(Type::span);
+                let val = self.expr(arg, Some(expected_ty));
+                self.expected_ty_span = None;
+                if let Some(fn_ret) = fn_ret {
+                    let result = self.decompose_fn(val.ty).map_or(val.ty, |(_, ret)| ret);
+                    self.match_param(fn_ret, result, &sig.generics, &mut subst);
+                }
+                if let (true, Some(fn_ret)) = (inferred_ret, written_ret) {
+                    routed.push((param_ty, fn_ret, val, arg.span()));
+                }
+            }
+        }
+        let mut unsolved = false;
+        for (param_ty, written_ret, val, arg_span) in routed {
+            unsolved |= self.settle_routed_return(
+                param_ty,
+                written_ret,
+                val,
+                arg_span,
+                &sig.generics,
+                &subst,
+                span,
+            );
+        }
+        let ret = sig
+            .ret
+            .as_ref()
+            .and_then(|r| self.solve_with(r, &subst, &sig.generics))
+            .unwrap_or_else(|| self.unit());
+        // A declared bound on the clause must hold for the solved type,
+        // exactly a free call's; an unsolved clause generic is the
+        // inference failure below.
+        for param in &sig.generics {
+            let Some(bound) = &param.bound else { continue };
+            let Some(ty) = subst.get(&param.name).copied() else {
+                continue;
+            };
+            if self.decls.universe.is_empty(ty) {
+                continue;
+            }
+            let mut arms = Vec::new();
+            self.bound_traits(bound, &mut arms);
+            for trait_id in arms {
+                self.trait_satisfied(trait_id, ty, span);
+            }
+        }
+        // Unbound variables leaking into the result are inference
+        // failures: no any fallback.
+        let ret_len = self.decls.universe.members(ret).len();
+        for index in 0..ret_len {
+            let atom = self.decls.universe.members(ret)[index];
+            if let Some(pos) = var_atoms.iter().position(|v| *v == atom) {
+                self.error(
+                    ErrorCode::InferenceFailed,
+                    format!(
+                        "cannot infer `{}` from this call's arguments [B2]",
+                        sig.generics[pos].name
+                    ),
+                    span,
+                    "unbound type variable",
+                );
+            }
+        }
+        self.assumptions.truncate(assumption_mark);
+        Val {
+            ty: ret,
+            diverges: self.decls.universe.is_empty(ret),
+            poisoned: unsolved,
         }
     }
 

@@ -221,16 +221,26 @@ impl string { fn default() -> string { "" } }
 impl char { fn default() -> char { '\0' } }
 impl byte { fn default() -> byte { b'\0' } }
 impl bytes { fn default() -> bytes { bytes_of(list[byte]()) } }
+// The collection count's per-type spellings, each routing through the
+// one generic native behind the private `len` seam below (the
+// instance word the receiver's own type names).
+impl string { fn len (self) -> int }
+impl bytes { fn len (self) -> int }
+// The string concatenation member, the `+`/interpolation seam's own
+// spelling: the operator lowers through the private `concat` seam
+// directly, so this member is the dot-call face over the same native.
+impl string { fn concat (self, other: string) -> string }
 
 // The collection face's member tier: the inherent members the
 // runtime seam lowers over the builtin collections. A member whose
 // parameter or answer spans the collection's own type variable has no
-// static word kind (the free generic fn's Raw-word shape is the free
-// tier's alone), so the element-carrying spellings keep their
+// static word kind, so the element-carrying spellings keep their
 // `list_*`/`map_*` native seams — private below, VM-internal names the
-// user surface never spells — while `len` answers through the free
-// generic's instance table and the ordered key face presents as a
-// member.
+// user surface never spells — and the ordered key face presents as a
+// member. The type-specific free functions this core once spelled are
+// the member tier's shape too: the combinators, the count, and the
+// checked first read are members here, their free spellings the
+// private native seams the calls route through.
 impl[k, v] map[k, v] {
   fn keys (self) -> list[k] { map_keys(self) }
   fn get (self, key: k) -> v | none
@@ -245,6 +255,7 @@ impl[k, v] map[k, v] {
   // The entry-order pair face: one `(key, value)` tuple per row, the
   // iteration seam `keys` composes with the value spans in one pass.
   fn entries (self) -> list[(k, v)]
+  fn len (self) -> int
 }
 
 impl[t] list[t] {
@@ -260,6 +271,97 @@ impl[t] list[t] {
   fn remove (mut self, i: int) -> list[t]
   fn clear (mut self) -> list[t]
   fn concat (self, other: list[t]) -> list[t]
+  // The count and the checked head read, the collection `len`/`first`
+  // family's own spellings over the free tier's retired seams.
+  fn len (self) -> int
+  fn first (self) -> t?
+  // The combinators: the hosted-lambda transforms and the folds, the
+  // callable staging beside the receiver exactly the free spellings'
+  // (the member route feeds the receiver as the native's first
+  // argument). `map` declares its answer's type parameter on the
+  // member, the call site solving it from the callable.
+  fn map[r] (self, f: fn(t) -> r) -> list[r]
+  fn filter (self, f: fn(t) -> bool) -> list[t]
+  fn partition (self, f: fn(t) -> bool) -> (list[t], list[t])
+  fn reduce (self, init: t, f: fn(t, t) -> t) -> t
+  // The sequence pair: the element-first prepend (`xs.cons(x)` stages
+  // the element ahead of the list `Ref`, the native's own order) and
+  // the tail drop.
+  fn cons (self, x: t) -> list[t]
+  fn tail (self) -> list[t]
+  // The copy and the no-op pass the identity family spells over the
+  // list's own edge.
+  fn collect (self) -> list[t]
+  // The explicit-comparator sort over the stable merge sort body: the
+  // callable stages beside the list, the body reentering it per
+  // comparison — the ord-routed spelling's surface over heads that
+  // carry no ord instance.
+  fn sort_by (self, cmp: fn(t, t) -> int) -> list[t]
+  // The sequence slice pair and the enumeration: plain ds bodies over
+  // the impl's own variable (the generic member body's one Raw-word
+  // shape, its calls the member spellings themselves).
+  fn take (self, n: int) -> list[t] {
+    var out = list[t]()
+    var i: int = 0
+    for x in self {
+      match i < n {
+        true => { out = out.concat([(x)]) }
+        _ => {}
+      }
+      i += 1
+    }
+    out
+  }
+  fn drop (self, n: int) -> list[t] {
+    var out = list[t]()
+    var i: int = 0
+    for x in self {
+      match i < n {
+        true => {}
+        _ => { out = out.concat([(x)]) }
+      }
+      i += 1
+    }
+    out
+  }
+  fn enumerate (self) -> list[(int, t)] {
+    var out = list[(int, t)]()
+    var i: int = 0
+    for x in self {
+      out = out.concat([(i, x)])
+      i += 1
+    }
+    out
+  }
+}
+
+// The ord-routed list sort: the declared bound is the routing — the
+// call site's solved element type names its serving ord instance, and
+// the lowering stages that instance's `compare` body as the callable
+// word beside the list, so the native's stable merge sort reenters
+// through it per comparison (the reduce seam's CALLG discipline).
+impl[t: ord] list[t] {
+  fn sort (self) -> list[t]
+}
+
+// The nested-list splice: one flat body over the element's own type
+// parameter, each inner list concatenated onto the answer.
+impl[r] list[list[r]] {
+  fn flatten (self) -> list[r] {
+    var out = list[r]()
+    for ys in self {
+      out = out.concat(ys)
+    }
+    out
+  }
+}
+
+// The int list's own total, the reduce seam's specialized member: the
+// hosted add folds the list from zero.
+impl list[int] {
+  fn sum (self) -> int {
+    self.reduce(0, (a: int, x: int) => a + x)
+  }
 }
 
 // The channel face: the net handle's plain receiver discipline (the
@@ -291,6 +393,7 @@ impl[t] arena[t] {
   fn insert (mut self, x: t) -> int
   fn remove (mut self, h: int) -> ()
   fn at (mut self, h: int) -> t
+  fn len (self) -> int
 }
 
 // The owning container's member tier: the runtime seam lowers over the
@@ -461,9 +564,14 @@ pub struct field { name: string, type: type, tag: string }
 pub extern fn fields (t: type) -> list[field]
 pub extern fn type_name (t: type) -> string
 
-pub extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
-pub extern fn cons[t] (x: t, xs: list[t]) -> list[t]
-pub extern fn tail[t] (xs: list[t]) -> list[t]
+// The list-combinator seams, the member tier's own natives: the
+// type-specific free spellings this core once served are the member
+// tier's now (the impls above), so these externs are the private
+// routing seams their calls lower through — same-file here, invisible
+// to every other file.
+extern fn map[t, r] (xs: list[t], f: fn(t) -> r) -> list[r]
+extern fn cons[t] (x: t, xs: list[t]) -> list[t]
+extern fn tail[t] (xs: list[t]) -> list[t]
 extern fn box_new[t] (x: t) -> box[t]
 extern fn box_get[t] (b: box[t]) -> t
 extern fn box_set[t] (b: mut box[t], x: t) -> ()
@@ -531,9 +639,11 @@ pub extern fn byte_list (b: bytes) -> list[byte]
 pub extern fn byte_at (b: bytes, i: int) -> byte | none
 pub extern fn utf8_encode (s: string) -> bytes
 pub extern fn utf8_decode (b: bytes) -> string | utf8_err
-// The generic count over the free tier's instance table: one
-// spelling for `s.len()` and `xs.len()` alike.
-pub extern fn len[t] (xs: t) -> int
+// The generic count's native seam: the collection `len` family's
+// member spellings (list, map, string, bytes, arena) each route here
+// over the instance table, the private seam the member calls lower
+// through — one body for every receiver.
+extern fn len[t] (xs: t) -> int
 // The float math family: IEEE f64 semantics over the float type, total
 // by construction — no operand shape traps (a negative sqrt or ln
 // answers NaN, a NaN or infinite operand answers
@@ -563,13 +673,12 @@ pub extern fn ln (x: float) -> float
 pub extern fn exp (x: float) -> float
 pub extern fn tan (x: float) -> float
 
-// The ordering pair on the float's own member tier: the flat
-// `max`/`min` names are the int pair's (one declaration per
-// value-namespace name — overloads refuse), so the float pair spells
-// the same comparison bodies through the dot call; the generic
-// ord-routed pair does not exist yet. The
+// The ordering pairs on the primitives' own member tiers, one
+// declaration per value-namespace name holding no more. The float
 // comparison answers the partial order: a NaN first operand poisons
-// the answer, a NaN second operand loses.
+// the answer, a NaN second operand loses. The int pair spells the
+// total order directly. The generic ord-routed pair does not exist
+// yet.
 impl float {
   fn max (self, other: float) -> float {
     if self < other { other } else { self }
@@ -578,18 +687,27 @@ impl float {
     if other < self { other } else { self }
   }
 }
+impl int {
+  fn max (self, other: int) -> int {
+    if self < other { other } else { self }
+  }
+  fn min (self, other: int) -> int {
+    if self < other { self } else { other }
+  }
+}
 
 // The core string face's own concatenation seam: the `+` and `+=`
 // spellings lower through it beside the interpolation's STRCAT, the
-// free spelling the receiver fallback routes `xs.concat(ys)`'s
-// member-name twin behind, and the bytes show body below calls it —
-// the core body's same-file call pins it here. The pure string
+// `concat` member above routes its calls here, and the bytes show body
+// below calls it — the core body's same-file call pins it here. The
+// seam is the native the operator lowers through directly, so the
+// private spelling never leaves this file. The pure string
 // operations over the face (the checked slice and char read, the
 // case pair, the separator pair, the search family, the parses) are
 // the @std string face's own source (std/strings.ds), composed back
 // after the json face for every reading that does not declare the
 // dep.
-pub extern fn concat (a: string, b: string) -> string
+extern fn concat (a: string, b: string) -> string
 // The codepoint pair, the @std json face's one native seam beside the
 // width bridges below: the scalar range and the code point's integer
 // spelling are not expressible in ds source, so the escape decoder
@@ -640,23 +758,20 @@ impl u32 {
     if w is none { trap("u32: ${str(n)} is out of range 0..4294967295") } else { w }
   }
 }
-pub extern fn collect[t] (xs: list[t]) -> list[t]
-pub extern fn first[t] (xs: list[t]) -> t?
-pub extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
-pub extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
-pub extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
-// The list sort over the `ord` trait: the declared bound is the
-// routing — the call site's solved element type names its serving ord
-// instance, and the lowering stages that instance's `compare` body as
-// the callable word beside the list, so the native's stable merge sort
-// reenters through it per comparison (the reduce seam's CALLG
-// discipline).
-pub extern fn sort[t: ord] (xs: list[t]) -> list[t]
-// The explicit-comparator sort over the same stable merge sort body:
-// the call site's callable stages beside the list (a lambda, a named
-// fn, or a closure word), the body reentering it per comparison — the
-// ord-routed spelling's surface over heads that carry no ord instance.
-pub extern fn sort_by[t] (xs: list[t], cmp: fn(t, t) -> int) -> list[t]
+// The list fold and filter seams behind the member spellings above
+// (the same privacy as the combinator family's).
+extern fn collect[t] (xs: list[t]) -> list[t]
+extern fn first[t] (xs: list[t]) -> t?
+extern fn filter[t] (xs: list[t], f: fn(t) -> bool) -> list[t]
+extern fn partition[t] (xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
+extern fn reduce[t] (xs: list[t], init: t, f: fn(t, t) -> t) -> t
+// The ord-routed list sort's native seam: the `sort` member above
+// declares no comparator parameter, so the call site routes one out of
+// the solved element type's serving ord instance — the `compare`
+// body's callable word staging beside the list.
+extern fn sort[t: ord] (xs: list[t]) -> list[t]
+// The explicit-comparator sort's native seam, `sort_by`'s own.
+extern fn sort_by[t] (xs: list[t], cmp: fn(t, t) -> int) -> list[t]
 pub extern fn str[t] (v: t) -> string
 pub extern fn total_compare (a: float, b: float) -> int
 pub extern fn str_compare (a: string, b: string) -> int

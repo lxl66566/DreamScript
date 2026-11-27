@@ -30,10 +30,10 @@ fn main() -> () {
   const head = first.ok((e: item) => e.name).err((_: none) => "?")
   const mug_cost = mug.ok((e: item) => cost(e)).err((_: none) => 0)
   const missing = miss.ok((e: item) => e.name).err((_: none) => blank.name)
-  println("count ${len(xs)} first ${head} mug ${mug_cost} miss ${missing}")
+  println("count ${xs.len()} first ${head} mug ${mug_cost} miss ${missing}")
   var total = 0
   var i = 0
-  while i < len(xs) {
+  while i < xs.len() {
     total += cost(at(xs, i))
     i += 1
   }

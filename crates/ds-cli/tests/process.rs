@@ -65,8 +65,8 @@ fn ds_run_stdin(source: &Path, stdin_text: &str) -> Output {
 fn args_reaches_the_program_verbatim() {
     let source = source_file(
         "argv",
-        "fn main() -> () {\n  const argv = args()\n  println(\"argc=${len(argv)}\")\n  var i = \
-         0\n  while i < len(argv) {\n    println(\"${argv.get(i).ok((w: string) => w).err((_: \
+        "fn main() -> () {\n  const argv = args()\n  println(\"argc=${argv.len()}\")\n  var i = \
+         0\n  while i < argv.len() {\n    println(\"${argv.get(i).ok((w: string) => w).err((_: \
          none) => \"?\")}\")\n    i = i + 1\n  }\n}\n",
     );
     // no arguments: the empty list

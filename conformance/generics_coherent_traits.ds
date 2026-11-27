@@ -19,7 +19,7 @@
 // 1. polymorphic container API over affine elements [C1, D2]
 struct stack[t] { items: list[t] }
 fn push[t: ~Copyable](s: stack[t], x: t) -> stack[t] {
-  stack { items: cons(x, s.items) }
+  stack { items: s.items.cons(x) }
 }
 fn pop[t: ~Copyable](s: stack[t]) -> (stack[t], t?) {
   (stack { items: s.items.tail() }, s.items.first())
@@ -56,5 +56,5 @@ fn schema(comptime t: type) -> string {
 // 4. execution: one body per generic fn + evidence words [H3]
 const p1 = point { x: 1, y: 2 }
 const p2 = point { x: 3, y: 4 }
-const p = point { x: max(p1.x, p2.x), y: max(p1.y, p2.y) }
+const p = point { x: p1.x.max(p2.x), y: p1.y.max(p2.y) }
 const js = p.to_json()

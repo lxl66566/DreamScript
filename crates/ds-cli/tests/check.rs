@@ -54,7 +54,9 @@ fn assert_corpus_clean(file: &str, noise: usize) {
 ///   vocabulary.
 /// * syntax_ts_heart: run items only — the `.map` chain's partition seam (partition's one-`t`
 ///   signature keeps the error members in `users`, so the later field accesses name the union that
-///   wants narrowing); the config/rows readers resolve through the file's own externs.
+///   wants narrowing), and the member-tier reduce over the poisoned chain leaves its lambda
+///   parameters unbound, so the total binder's `()` follow-ons name the chain's cascade; the
+///   config/rows readers resolve through the file's own externs.
 /// * linearity_modes_rc: run items only — the ambient's `open_file` is named apart from the file's
 ///   own `open` (the unknown-name pair), its `read_exact` answering the dot call over the file's
 ///   `file`-typed receiver with the `not contained` item (the file's face predates the ambient's;
@@ -79,7 +81,7 @@ fn the_corpus_checks_clean_under_the_stdlib_ambient() {
     assert_corpus_clean("box_surface.ds", 0);
     assert_corpus_clean("types_hybrid.ds", 0);
     assert_corpus_clean("generics_coherent_traits.ds", 2);
-    assert_corpus_clean("syntax_ts_heart.ds", 5);
+    assert_corpus_clean("syntax_ts_heart.ds", 12);
     assert_corpus_clean("linearity_modes_rc.ds", 9);
     assert_corpus_clean("effects_nursery.ds", 0);
     assert_corpus_clean("range_for.ds", 0);

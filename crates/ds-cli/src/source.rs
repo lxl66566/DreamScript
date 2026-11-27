@@ -1347,7 +1347,7 @@ mod tests {
                         -> string { v.show() }\n\nfn probe(port: int?) -> int { unwrap_or(port, \
                         7) }\n\nfn main() -> () {\nconst c = cell { n: 3, label: \"x\" }\nconst d \
                         = cell.default()\nprintln(\"${c.show()} ${c.label.hash()} ${c.compare(d)} \
-                        ${render(5)} ${[1, 2].echo()} ${probe(none)} ${max(1, 2)}\")\n}\n";
+                        ${render(5)} ${[1, 2].echo()} ${probe(none)} ${(1).max(2)}\")\n}\n";
 
     /// One compile over the gate program: the module bytes, the run
     /// output of `main` on a fresh VM (the ambient's world natives need

@@ -79,10 +79,10 @@ fn csv_line() -> string {
 // stride, and tail/collect/concat keep the source's
 fn cons_records() -> int {
   const empty = list[page]()
-  const one = cons(page { url: "a" }, empty)
-  const two = cons(page { url: "b" }, one)
-  const joined = two.concat(collect(two))
-  const rest = tail(two)
+  const one = empty.cons(page { url: "a" })
+  const two = one.cons(page { url: "b" })
+  const joined = two.concat(two.collect())
+  const rest = two.tail()
   joined.len() * 10 + rest.len()
 }
 

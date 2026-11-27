@@ -44,7 +44,7 @@ fn main() -> () {
   println(str(d1.hash() == d2.hash()))
   println(str(d1.hash() == d3.hash()))
   const encoded = utf8_encode("héllo")
-  println(str(len(encoded)))
+  println(str(encoded.len()))
   match decode(encoded) {
     utf8_err => println("decode refused"),
     text => println(text)

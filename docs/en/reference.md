@@ -649,35 +649,6 @@ pub extern fn close_raw(fd: int) -> ()
 pub extern fn code_of(c: char) -> int
 ```
 
-#### `collect`
-
-```ds
-pub extern fn collect[t](xs: list[t]) -> list[t]
-```
-
-#### `concat`
-
-The core string face's own concatenation seam: the `+` and `+=`
-spellings lower through it beside the interpolation's STRCAT, the
-free spelling the receiver fallback routes `xs.concat(ys)`'s
-member-name twin behind, and the bytes show body below calls it —
-the core body's same-file call pins it here. The pure string
-operations over the face (the checked slice and char read, the
-case pair, the separator pair, the search family, the parses) are
-the @std string face's own source (std/strings.ds), composed back
-after the json face for every reading that does not declare the
-dep.
-
-```ds
-pub extern fn concat(a: string, b: string) -> string
-```
-
-#### `cons`
-
-```ds
-pub extern fn cons[t](x: t, xs: list[t]) -> list[t]
-```
-
 #### `cos`
 
 ```ds
@@ -737,18 +708,6 @@ pub extern fn file_exists(path: string) -> bool
 pub extern fn file_size(path: string) -> int | io_err
 ```
 
-#### `filter`
-
-```ds
-pub extern fn filter[t](xs: list[t], f: fn(t) -> bool) -> list[t]
-```
-
-#### `first`
-
-```ds
-pub extern fn first[t](xs: list[t]) -> t?
-```
-
 #### `float_hash`
 
 ```ds
@@ -791,15 +750,6 @@ pub extern fn int_of_byte(b: byte) -> int
 pub extern fn int_of_u32(v: u32) -> int
 ```
 
-#### `len`
-
-The generic count over the free tier's instance table: one
-spelling for `s.len()` and `xs.len()` alike.
-
-```ds
-pub extern fn len[t](xs: t) -> int
-```
-
 #### `ln`
 
 ```ds
@@ -816,12 +766,6 @@ that), the raw seam's unknown-handle answer the inert empty string.
 
 ```ds
 pub fn local_addr(l: net_listener) -> string
-```
-
-#### `map`
-
-```ds
-pub extern fn map[t, r](xs: list[t], f: fn(t) -> r) -> list[r]
 ```
 
 #### `map_err`
@@ -940,12 +884,6 @@ folded main's tail.
 
 ```ds
 pub extern fn panic(msg: string) -> never
-```
-
-#### `partition`
-
-```ds
-pub extern fn partition[t](xs: list[t], f: fn(t) -> bool) -> (list[t], list[t])
 ```
 
 #### `pow`
@@ -1072,12 +1010,6 @@ pub extern fn read_raw(fd: int, n: int) -> bytes | io_err
 pub fn recv(h: net_handle, max_bytes: int) -> string | net_err
 ```
 
-#### `reduce`
-
-```ds
-pub extern fn reduce[t](xs: list[t], init: t, f: fn(t, t) -> t) -> t
-```
-
 #### `remove`
 
 ```ds
@@ -1128,30 +1060,6 @@ installed reactor the blocking twin sleeps the thread.
 pub extern fn sleep(nanos: int) -> ()
 ```
 
-#### `sort`
-
-The list sort over the `ord` trait: the declared bound is the
-routing — the call site's solved element type names its serving ord
-instance, and the lowering stages that instance's `compare` body as
-the callable word beside the list, so the native's stable merge sort
-reenters through it per comparison (the reduce seam's CALLG
-discipline).
-
-```ds
-pub extern fn sort[t: ord](xs: list[t]) -> list[t]
-```
-
-#### `sort_by`
-
-The explicit-comparator sort over the same stable merge sort body:
-the call site's callable stages beside the list (a lambda, a named
-fn, or a closure word), the body reentering it per comparison — the
-ord-routed spelling's surface over heads that carry no ord instance.
-
-```ds
-pub extern fn sort_by[t](xs: list[t], cmp: fn(t, t) -> int) -> list[t]
-```
-
 #### `sqrt`
 
 The float math family: IEEE f64 semantics over the float type, total
@@ -1196,12 +1104,6 @@ pub extern fn str_fixed(x: float, digits: int) -> string
 
 ```ds
 pub extern fn str_hash(s: string) -> int
-```
-
-#### `tail`
-
-```ds
-pub extern fn tail[t](xs: list[t]) -> list[t]
 ```
 
 #### `tan`
@@ -1352,6 +1254,10 @@ impl bytes { fn default() -> bytes }
 ```
 
 ```ds
+impl bytes { fn len(self) -> int }
+```
+
+```ds
 impl char { fn default() -> char }
 ```
 
@@ -1387,13 +1293,12 @@ impl clone for string { fn clone(self) -> Self }
 impl float { fn default() -> float }
 ```
 
-The ordering pair on the float's own member tier: the flat
-`max`/`min` names are the int pair's (one declaration per
-value-namespace name — overloads refuse), so the float pair spells
-the same comparison bodies through the dot call; the generic
-ord-routed pair does not exist yet. The
+The ordering pairs on the primitives' own member tiers, one
+declaration per value-namespace name holding no more. The float
 comparison answers the partial order: a NaN first operand poisons
-the answer, a NaN second operand loses.
+the answer, a NaN second operand loses. The int pair spells the
+total order directly. The generic ord-routed pair does not exist
+yet.
 
 ```ds
 impl float { fn max(self, other: float) -> float, fn min(self, other: float) -> float }
@@ -1440,6 +1345,17 @@ analogues of the int and float zeros.
 
 ```ds
 impl int { fn default() -> int }
+```
+
+```ds
+impl int { fn max(self, other: int) -> int, fn min(self, other: int) -> int }
+```
+
+The int list's own total, the reduce seam's specialized member: the
+hosted add folds the list from zero.
+
+```ds
+impl list[int] { fn sum(self) -> int }
 ```
 
 ```ds
@@ -1512,8 +1428,24 @@ impl show for int { fn show(self) -> string }
 impl show for string { fn show(self) -> string }
 ```
 
+The string concatenation member, the `+`/interpolation seam's own
+spelling: the operator lowers through the private `concat` seam
+directly, so this member is the dot-call face over the same native.
+
+```ds
+impl string { fn concat(self, other: string) -> string }
+```
+
 ```ds
 impl string { fn default() -> string }
+```
+
+The collection count's per-type spellings, each routing through the
+one generic native behind the private `len` seam below (the
+instance word the receiver's own type names).
+
+```ds
+impl string { fn len(self) -> int }
 ```
 
 The u32 width's trapping construction:
@@ -1532,12 +1464,13 @@ impl u32 { fn of(n: int) -> u32 }
 The collection face's member tier: the inherent members the
 runtime seam lowers over the builtin collections. A member whose
 parameter or answer spans the collection's own type variable has no
-static word kind (the free generic fn's Raw-word shape is the free
-tier's alone), so the element-carrying spellings keep their
+static word kind, so the element-carrying spellings keep their
 `list_*`/`map_*` native seams — private below, VM-internal names the
-user surface never spells — while `len` answers through the free
-generic's instance table and the ordered key face presents as a
-member.
+user surface never spells — and the ordered key face presents as a
+member. The type-specific free functions this core once spelled are
+the member tier's shape too: the combinators, the count, and the
+checked first read are members here, their free spellings the
+private native seams the calls route through.
 
 ```ds
 impl[k, v] map[k, v] {
@@ -1547,7 +1480,25 @@ impl[k, v] map[k, v] {
   fn remove(mut self, key: k) -> map[k, v]
   fn contains(self, key: k) -> bool
   fn entries(self) -> list[(k, v)]
+  fn len(self) -> int
 }
+```
+
+The nested-list splice: one flat body over the element's own type
+parameter, each inner list concatenated onto the answer.
+
+```ds
+impl[r] list[list[r]] { fn flatten(self) -> list[r] }
+```
+
+The ord-routed list sort: the declared bound is the routing — the
+call site's solved element type names its serving ord instance, and
+the lowering stages that instance's `compare` body as the callable
+word beside the list, so the native's stable merge sort reenters
+through it per comparison (the reduce seam's CALLG discipline).
+
+```ds
+impl[t: ord] list[t] { fn sort(self) -> list[t] }
 ```
 
 The arena face (the read-side aliasing container): every member
@@ -1565,6 +1516,7 @@ impl[t] arena[t] {
   fn insert(mut self, x: t) -> int
   fn remove(mut self, h: int) -> ()
   fn at(mut self, h: int) -> t
+  fn len(self) -> int
 }
 ```
 
@@ -1607,6 +1559,19 @@ impl[t] list[t] {
   fn remove(mut self, i: int) -> list[t]
   fn clear(mut self) -> list[t]
   fn concat(self, other: list[t]) -> list[t]
+  fn len(self) -> int
+  fn first(self) -> t?
+  fn map[r](self, f: fn(t) -> r) -> list[r]
+  fn filter(self, f: fn(t) -> bool) -> list[t]
+  fn partition(self, f: fn(t) -> bool) -> (list[t], list[t])
+  fn reduce(self, init: t, f: fn(t, t) -> t) -> t
+  fn cons(self, x: t) -> list[t]
+  fn tail(self) -> list[t]
+  fn collect(self) -> list[t]
+  fn sort_by(self, cmp: fn(t, t) -> int) -> list[t]
+  fn take(self, n: int) -> list[t]
+  fn drop(self, n: int) -> list[t]
+  fn enumerate(self) -> list[(int, t)]
 }
 ```
 
@@ -1836,28 +1801,94 @@ pub extern fn contains(haystack: string, needle: string) -> bool
 pub fn datetime_str(t: datetime) -> string
 ```
 
-#### `drop`
-
-```ds
-pub fn drop[t](xs: list[t], n: int) -> list[t]
-```
-
-#### `enumerate`
-
-```ds
-pub fn enumerate[t](xs: list[t]) -> list[(int, t)]
-```
-
 #### `firstof`
+
+The @std bodied members: the migrated declarations whose bodies are
+plain ds source over word-shaped atoms, the one shape a linked call
+surface binds (a @std bodied member binds only in word-shaped ambient
+atom signatures) and the one a session composes back beside the
+shrunk core — the bodies lower as ambient bodies, where a data member
+(a type or a const) cannot, so the bare spellings keep resolving and
+running for every entry script session while its data-shaped @std
+imports stay bound through the linked surface. The int ordering
+pair and the list family's bodied transforms live at their types'
+member tiers (the 2026-11-27 naming ruling), their bodies the same
+ds source; the flat `max`/`min` spellings are gone.
+
+The FP combinator family: the list transforms as plain generic
+library fns. A generic body stages values only through the shapes it
+can lower — tuples over the variable (a static word span) and the
+native-backed seams — never through a bare type-variable word: a var
+binding, a cons call, or a member push over the variable has no
+static runtime kind, and an indexed or first read answers a union
+member over the variable, all refusing at lowering. The builders
+append through the concat member over a one-element literal, never
+the push member: a dot-call's free tier prefers the flat name first,
+so a user's private `push` declaration shadows the member call inside
+these bodies and trips the file privacy refusal. zip pairs by the
+nested scan whose inner guard is a catchall match (an `if` guarding a
+type-variable-carrying write refuses at the branch reconcile; the
+match spelling lowers), and the slice pair guards the same write by
+the bool match, the one spelling an order comparison lowers. The
+slice pair clamps at the list's own bounds (a negative, zero, or
+past-the-end n answering the empty or whole list the bounds imply).
+flat_map does not exist: a fn-typed parameter whose return nests the
+callee's variable in a type application (`fn(t) -> list[r]`) never
+solves from a concrete fn or lambda argument (containment binds a
+bare return variable alone, and no lambda-return annotation exists),
+so `flatten` lands as the composable half — the flat spelling
+composing at call sites over map's hosted lambda. scan and compose
+wait behind the seams above (their bodies need the type variable's
+runtime word kind, the same reflection fact).
+
+The race combinators over the timer capability: the caller builds the
+thunk list (a fn-typed collection element holds the closure Ref word,
+so capturing lambdas and wrapped named fns both inhabit it), and one
+spawned child per element captures the iteration binding and calls it
+— the whole walk one linear scan: a fn-typed capture stages the
+closure word (the construction acquiring its count inside the op,
+the object's death releasing it), and the child's CALLS dispatches
+the word's runtime kind. The child races its answer
+into the bounded answers channel; the join-all boundary drains after every
+child completed — the channel's FIFO is the arrival order.
+`firstof` answers the first arrival; `interleave` collects in
+arrival order. The empty race parks the zero-bound answers channel
+with no fiber left to serve it, the stall guard answering the honest
+deadlock, and a wider-than-one-word answer refuses at the call's
+one-word instantiation. `sum` is the fold spelling over reduce's
+hosted callable (the CALLG lambda seam), `fold` the two-type spelling
+whose accumulator body instantiates over its own argument shape (a
+`var` binding and a call through the callable-defaulted parameter
+under the entering site's substitution).
+
+The fork-join engine seams: fork_map/fork_reduce are private
+bodiless generic externs, the natives the engine routes by name (the
+same engine-identity key the collection externs in the core hold).
+The user surface carries no pooled member today, so every collection
+transform keeps the sequential contract; the free generic body's
+one-word instantiation boundary binds the fold's init parameter to
+one-word element types through this spelling (the multi-word fold
+keeps its seam-level coverage until the generic-body staging seam
+widens, the same generic-body residuals).
+
+The seeded PRNG (splitmix64): the stream state is one int the caller
+holds — `rand_next` the pure state step (one wrapping add), `rand`
+the draw following a seed (the mix over the advanced state, so a
+stream reads `rand(s)` beside `s = rand_next(s)`), and `rand_seed`
+stepping the wall clock into a fresh state. The mixer's shifts are
+unsigned facts the core's `>>` cannot spell alone (the i64 shift is
+sign-propagating), so each xor operand masks the shifted word
+back to its logical bits — the mask a no-op when the shifted word
+carries no sign. The int spellings of the mixer's unsigned constants
+ride as negative literals (the i64 range the literals carry).
+The FP combinators still in the free tier (the ones whose member
+move waits on their own seams: zip and fold need a member's own
+generic body instantiating per shape — the H3.5 round's own, item
+140 — and firstof/interleave's receivers are list[fn() -> t], a
+head no impl spells yet).
 
 ```ds
 pub fn firstof[t](thunks: list[fn() -> t]) -> t
-```
-
-#### `flatten`
-
-```ds
-pub fn flatten[r](xss: list[list[r]]) -> list[r]
 ```
 
 #### `fold`
@@ -2018,96 +2049,6 @@ pub fn json_of_u32(v: u32) -> json
 pub fn local_datetime(unix_seconds: int) -> datetime
 ```
 
-#### `max`
-
-The @std bodied members: the migrated declarations whose bodies are
-plain ds source over word-shaped atoms, the one shape a linked call
-surface binds (a @std bodied member binds only in word-shaped ambient
-atom signatures) and the one a session composes back beside the
-shrunk core — the bodies lower as ambient bodies, where a data member
-(a type or a const) cannot, so the bare spellings keep resolving and
-running for every entry script session while its data-shaped @std
-imports stay bound through the linked surface. The ordering pair is
-the first family: the flat word-shaped signatures, the float and
-ord-generic spellings waiting on the linked surface.
-
-The FP combinator family: the list transforms as plain generic
-library fns. A generic body stages values only through the shapes it
-can lower — tuples over the variable (a static word span) and the
-native-backed seams — never through a bare type-variable word: a var
-binding, a cons call, or a member push over the variable has no
-static runtime kind, and an indexed or first read answers a union
-member over the variable, all refusing at lowering. The builders
-append through the concat member over a one-element literal, never
-the push member: a dot-call's free tier prefers the flat name first,
-so a user's private `push` declaration shadows the member call inside
-these bodies and trips the file privacy refusal. zip pairs by the
-nested scan whose inner guard is a catchall match (an `if` guarding a
-type-variable-carrying write refuses at the branch reconcile; the
-match spelling lowers), and the slice pair guards the same write by
-the bool match, the one spelling an order comparison lowers. The
-slice pair clamps at the list's own bounds (a negative, zero, or
-past-the-end n answering the empty or whole list the bounds imply).
-flat_map does not exist: a fn-typed parameter whose return nests the
-callee's variable in a type application (`fn(t) -> list[r]`) never
-solves from a concrete fn or lambda argument (containment binds a
-bare return variable alone, and no lambda-return annotation exists),
-so `flatten` lands as the composable half — the flat spelling
-composing at call sites over map's hosted lambda. scan and compose
-wait behind the seams above (their bodies need the type variable's
-runtime word kind, the same reflection fact).
-
-The race combinators over the timer capability: the caller builds the
-thunk list (a fn-typed collection element holds the closure Ref word,
-so capturing lambdas and wrapped named fns both inhabit it), and one
-spawned child per element captures the iteration binding and calls it
-— the whole walk one linear scan: a fn-typed capture stages the
-closure word (the construction acquiring its count inside the op,
-the object's death releasing it), and the child's CALLS dispatches
-the word's runtime kind. The child races its answer
-into the bounded answers channel; the join-all boundary drains after every
-child completed — the channel's FIFO is the arrival order.
-`firstof` answers the first arrival; `interleave` collects in
-arrival order. The empty race parks the zero-bound answers channel
-with no fiber left to serve it, the stall guard answering the honest
-deadlock, and a wider-than-one-word answer refuses at the call's
-one-word instantiation. `sum` is the fold spelling over reduce's
-hosted callable (the CALLG lambda seam), `fold` the two-type spelling
-whose accumulator body instantiates over its own argument shape (a
-`var` binding and a call through the callable-defaulted parameter
-under the entering site's substitution).
-
-The fork-join engine seams: fork_map/fork_reduce are private
-bodiless generic externs, the natives the engine routes by name (the
-same engine-identity key the collection externs in the core hold).
-The user surface carries no pooled member today, so every collection
-transform keeps the sequential contract; the free generic body's
-one-word instantiation boundary binds the fold's init parameter to
-one-word element types through this spelling (the multi-word fold
-keeps its seam-level coverage until the generic-body staging seam
-widens, the same generic-body residuals).
-
-The seeded PRNG (splitmix64): the stream state is one int the caller
-holds — `rand_next` the pure state step (one wrapping add), `rand`
-the draw following a seed (the mix over the advanced state, so a
-stream reads `rand(s)` beside `s = rand_next(s)`), and `rand_seed`
-stepping the wall clock into a fresh state. The mixer's shifts are
-unsigned facts the core's `>>` cannot spell alone (the i64 shift is
-sign-propagating), so each xor operand masks the shifted word
-back to its logical bits — the mask a no-op when the shifted word
-carries no sign. The int spellings of the mixer's unsigned constants
-ride as negative literals (the i64 range the literals carry).
-
-```ds
-pub fn max(a: int, b: int) -> int
-```
-
-#### `min`
-
-```ds
-pub fn min(a: int, b: int) -> int
-```
-
 #### `pad_left`
 
 ```ds
@@ -2179,18 +2120,6 @@ clamping and never a trap.
 
 ```ds
 pub extern fn substring(s: string, start: int, end: int) -> string | none
-```
-
-#### `sum`
-
-```ds
-pub fn sum(xs: list[int]) -> int
-```
-
-#### `take`
-
-```ds
-pub fn take[t](xs: list[t], n: int) -> list[t]
 ```
 
 #### `to_json`

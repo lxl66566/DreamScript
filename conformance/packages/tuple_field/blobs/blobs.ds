@@ -16,5 +16,5 @@ pub fn mk_tagged(label: string) -> tagged_pair {
 }
 pub fn tag_weight(tp: tagged_pair) -> int {
   const (label, raw) = tp.t
-  len(label) + len(raw)
+  label.len() + raw.len()
 }

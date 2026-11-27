@@ -506,7 +506,6 @@ mod tests {
         for name in [
             "read_file",
             "str",
-            "max",
             "total_compare",
             "str_compare",
             "char_compare",
@@ -557,7 +556,6 @@ mod tests {
             "try_wait",
             "time",
             "parse_json",
-            "enumerate",
             "zip",
             "rand",
             "rand_next",
@@ -912,18 +910,24 @@ mod tests {
             pkg_package.lookup_value("urls").is_some(),
             "`urls` lives in the @std members' source beside the core"
         );
-        for name in ["max", "min"] {
+        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
-                pkg_package.lookup_value(name).is_some(),
-                "`{name}` lives in the @std bodied file as a bodied member"
+                pkg_package.lookup_value(name).is_none(),
+                "`{name}` left the free namespace (the member tier owns it)"
             );
         }
-        for name in ["enumerate", "zip"] {
+        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
-                pkg_package.lookup_value(name).is_some(),
-                "`{name}` lives in the @std bodied file as a combinator"
+                pkg_package.method_candidates(name).next().is_some(),
+                "`{name}` registers as a member (the collection seams in the core, the pair \
+                 beside the float pair)"
             );
         }
+        assert!(
+            pkg_package.lookup_value("zip").is_some(),
+            "`zip` lives in the @std bodied file as a combinator (its member move waits on the \
+             per-shape member round)"
+        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 pkg_package.lookup_value(name).is_none(),
@@ -1069,18 +1073,29 @@ mod tests {
             session_diags.is_empty(),
             "the session composition resolves clean: {session_diags:?}"
         );
-        for name in ["max", "min"] {
+        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
-                session_package.lookup_value(name).is_some(),
-                "the session composition keeps the bare `{name}`"
+                session_package.lookup_value(name).is_none(),
+                "the session composition retires the flat `{name}` (the member tier owns it)"
             );
         }
-        for name in ["enumerate", "zip"] {
+        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
-                session_package.lookup_value(name).is_some(),
-                "the session composition keeps the bare combinator `{name}`"
+                session_package.method_candidates(name).next().is_some(),
+                "the session composition registers the `{name}` members"
             );
         }
+        for name in ["max", "min", "enumerate"] {
+            assert!(
+                session_package.method_candidates(name).next().is_some(),
+                "the session composition registers the `{name}` members"
+            );
+        }
+        assert!(
+            session_package.lookup_value("zip").is_some(),
+            "the session composition keeps the bare combinator `zip` (its member-generic body \
+             waits on the per-shape member round)"
+        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 session_package.lookup_value(name).is_none(),
@@ -1134,18 +1149,35 @@ mod tests {
             merged_package.lookup_value("urls").is_some(),
             "the merged reading keeps `urls`"
         );
-        for name in ["max", "min"] {
+        for name in ["max", "min", "enumerate", "take", "drop", "flatten", "sum"] {
             assert!(
-                merged_package.lookup_value(name).is_some(),
-                "the merged reading keeps the bodied `{name}` (namespace-identical)"
+                merged_package.lookup_value(name).is_none(),
+                "the merged reading retires the flat `{name}` (the member tier owns it)"
             );
         }
-        for name in ["enumerate", "zip"] {
+        for name in [
+            "max",
+            "min",
+            "enumerate",
+            "take",
+            "drop",
+            "flatten",
+            "sum",
+            "len",
+            "cons",
+            "first",
+            "sort",
+            "concat",
+        ] {
             assert!(
-                merged_package.lookup_value(name).is_some(),
-                "the merged reading keeps the combinator `{name}` (namespace-identical)"
+                merged_package.method_candidates(name).next().is_some(),
+                "the merged reading registers the `{name}` members (namespace-identical)"
             );
         }
+        assert!(
+            merged_package.lookup_value("zip").is_some(),
+            "the merged reading keeps the combinator `zip` (namespace-identical)"
+        );
         for name in ["par_map", "par_reduce"] {
             assert!(
                 merged_package.lookup_value(name).is_none(),

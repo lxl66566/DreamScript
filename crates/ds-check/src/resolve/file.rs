@@ -486,9 +486,21 @@ impl FileResolver<'_> {
                 "map_get" => "; the member spelling is `m.get(k)`",
                 "map_set" => "; the member spelling is `m.set(k, v)`",
                 "map_keys" => "; the member spelling is `m.keys()`",
-                "list_len" => "; the member spelling is `xs.len()`",
+                "list_len" | "len" => "; the member spelling is `xs.len()`",
                 "list_concat" => "; the member spelling is `xs.concat(ys)`",
                 "map_len" => "; the member spelling is `m.len()`",
+                // the member-tier migration's retired seams: the free
+                // spelling is gone, the member one receiver-qualified
+                "cons" => "; the member spelling is `xs.cons(x)`",
+                "tail" => "; the member spelling is `xs.tail()`",
+                "collect" => "; the member spelling is `xs.collect()`",
+                "first" => "; the member spelling is `xs.first()`",
+                "filter" => "; the member spelling is `xs.filter(f)`",
+                "partition" => "; the member spelling is `xs.partition(f)`",
+                "reduce" => "; the member spelling is `xs.reduce(init, f)`",
+                "sort" => "; the member spelling is `xs.sort()`",
+                "sort_by" => "; the member spelling is `xs.sort_by(cmp)`",
+                "concat" => "; the member spelling is `s.concat(t)`",
                 _ => "",
             };
             self.diags.push(
@@ -1259,15 +1271,35 @@ impl FileResolver<'_> {
             return;
         }
         if let Some(func) = self.package.lookup_value(&name.name) {
-            // Capability parameters have no syntax yet, so the receiver
-            // feeds parameter 0 — the first data parameter.
-            self.enforce_vis(name.span, func);
-            self.uses
-                .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
-            return;
+            // A free fn private to another file cannot claim the dot
+            // position: the receiver fallback would never reach the
+            // members it shadows. The private def falls through to the
+            // method tier here (the plain free call keeps its boundary
+            // refusal at the value-name door), and the free reading
+            // records only when no member answers the name, so the
+            // refusal below names the def the privacy gate reports.
+            let func_decl = self.package.def(func);
+            let privatized = func_decl.vis == Vis::Private && func_decl.span.file != self.file;
+            if !privatized {
+                // Capability parameters have no syntax yet, so the receiver
+                // feeds parameter 0 — the first data parameter.
+                self.enforce_vis(name.span, func);
+                self.uses
+                    .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
+                return;
+            }
         }
         let candidates: Vec<MethodId> = self.package.method_candidates(&name.name).collect();
         if candidates.is_empty() {
+            // No member answers the name: a privatized free fn keeps
+            // its free reading so the privacy gate's refusal names it;
+            // with no def at all the dot has no callable behind it.
+            if let Some(func) = self.package.lookup_value(&name.name) {
+                self.enforce_vis(name.span, func);
+                self.uses
+                    .push((name.span, Res::Dot(DotRes::Free { func, fed_param: 0 })));
+                return;
+            }
             let mut diag = Diagnostic::error(
                 ErrorCode::UnresolvedName,
                 format!("no name `{}` behind the dot", name.name),

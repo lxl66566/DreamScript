@@ -27,6 +27,11 @@ pub(in crate::func) struct EvidenceSite {
 pub(in crate::func) struct NativeMember {
     def: DefId,
     window: bool,
+    /// The native takes the receiver at its second parameter: the
+    /// member route stages the first written argument ahead of the
+    /// receiver (cons — the element stages first, the list `Ref`
+    /// trailing it).
+    element_first: bool,
 }
 
 /// How a classed fallible call constructs its success value at the ok
@@ -53,6 +58,32 @@ pub(in crate::func) enum SuccessShape {
 }
 
 impl<'a> FnLower<'a, '_, '_> {
+    /// The argument order one native-routed member call stages: the
+    /// receiver first, the written arguments behind it — an
+    /// `element_first` member's native takes the receiver at its
+    /// second parameter (cons: the element ahead of the list `Ref`,
+    /// the free spelling's own order, its evidence word naming the
+    /// element's instance).
+    fn member_native_args<'x>(
+        &self,
+        recv: &'x Expr,
+        args: &'x [CallArg],
+        member: NativeMember,
+    ) -> Vec<&'x Expr> {
+        if !member.element_first {
+            return std::iter::once(recv)
+                .chain(args.iter().map(|arg| &arg.value))
+                .collect();
+        }
+        let mut staged: Vec<&Expr> = Vec::with_capacity(args.len() + 1);
+        if let Some(first) = args.first() {
+            staged.push(&first.value);
+        }
+        staged.push(recv);
+        staged.extend(args.iter().skip(1).map(|arg| &arg.value));
+        staged
+    }
+
     pub(super) fn call_value(&mut self, e: &Expr, ty: Ty) -> Result<Place, LowerError> {
         self.call_impl(e, ty, false)
     }
@@ -196,11 +227,11 @@ impl<'a> FnLower<'a, '_, '_> {
                             (
                                 Some(member.def),
                                 name.span,
-                                std::iter::once(&**recv)
-                                    .chain(args.iter().map(|arg| &arg.value))
-                                    .collect(),
+                                self.member_native_args(recv, args, member),
                                 None,
                             )
+                        } else if self.sort_member_site(call_span) {
+                            return self.sort_member_call(recv, ty, call_span, name.span);
                         } else {
                             let candidates: Vec<_> = self
                                 .analyzed
@@ -238,11 +269,11 @@ impl<'a> FnLower<'a, '_, '_> {
                         (
                             Some(member.def),
                             name.span,
-                            std::iter::once(&**recv)
-                                .chain(args.iter().map(|arg| &arg.value))
-                                .collect(),
+                            self.member_native_args(recv, args, member),
                             None,
                         )
+                    } else if self.sort_member_site(call_span) {
+                        return self.sort_member_call(recv, ty, call_span, name.span);
                     } else {
                         let dispatch = self.resolve_method_dispatch(
                             call_span,

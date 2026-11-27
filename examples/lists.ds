@@ -7,14 +7,14 @@ fn main() -> () {
   const xs = [1, 2, 3]
   const words = ["alpha", "beta", "gamma"]
   const empty = list[int]()
-  println("ints ${walk_total(xs)} ${len(empty)}")
-  println("words ${len(words)} ${head_word(words)}")
+  println("ints ${walk_total(xs)} ${empty.len()}")
+  println("words ${words.len()} ${head_word(words)}")
 }
 
 fn walk_total(xs: list[int]) -> int {
   var total: int = 0
   var i: int = 0
-  while i < len(xs) {
+  while i < xs.len() {
     const cell = xs.get(i)
     total += cell.ok((x: int) => x).err((_: none) => 0)
     i += 1

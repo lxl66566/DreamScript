@@ -1,7 +1,7 @@
-//! End-to-end generic calls through the `ds` binary: the
-//! ambient `len[t]` runs in source mode over both receiver shapes with
-//! distinct outputs, and the `ds build` round trip reproduces the source
-//! run's output byte for byte.
+//! End-to-end member calls through the `ds` binary: the collection
+//! `len` members run in source mode over the string, list, and bytes
+//! shapes with distinct outputs, and the `ds build` round trip
+//! reproduces the source run's output byte for byte.
 
 use std::{env, fs, path::PathBuf, process::Command};
 
@@ -30,14 +30,14 @@ fn run_ok(command: &mut Command) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The acceptance: `len` over a string counts chars and over a list
-/// counts elements, in both call spellings — the unit entry's trailing
-/// `0` line is the script-mode convention.
+/// The acceptance: the `len` member counts chars over a string,
+/// elements over a list, and bytes over a bytes receiver — the unit
+/// entry's trailing `0` line is the script-mode convention.
 #[test]
 fn len_prints_distinct_outputs_per_receiver_shape() {
     assert_eq!(
         run_ok(ds().arg("run").arg(fixture())),
-        "string 11 11\nlist 3 3\n"
+        "string 11\nlist 3\nbytes 6\n"
     );
 }
 
@@ -56,7 +56,7 @@ fn built_module_reproduces_the_source_run() {
     assert!(out.status.success(), "the build failed: {out:?}");
     assert_eq!(
         run_ok(ds().arg("run").arg(&module)),
-        "string 11 11\nlist 3 3\n"
+        "string 11\nlist 3\nbytes 6\n"
     );
     let _ = fs::remove_file(&module);
 }

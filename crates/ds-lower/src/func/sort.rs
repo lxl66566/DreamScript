@@ -26,8 +26,6 @@ impl FnLower<'_, '_, '_> {
         call: Span,
         span: Span,
     ) -> Result<Place, LowerError> {
-        let generic = crate::native::lookup_generic("sort")
-            .ok_or_else(|| mismatch("the sort seam's native mirror"))?;
         let [xs] = args else {
             return Err(mismatch("a sort call's arguments"));
         };
@@ -63,6 +61,69 @@ impl FnLower<'_, '_, '_> {
                  specialization tier's, never the interpreter's",
             ));
         };
+        self.sort_stage(xs, instance, ty, span)
+    }
+
+    /// One `xs.sort()` member site (the bodiless `sort` member of the
+    /// list impl, its element bound `ord`): the checker's inherent
+    /// bound record answers the ord instance the element type solves,
+    /// and the staging is the free spelling's own — the callable word
+    /// the instance's compare body supplies, the receiver's
+    /// list-instance evidence word trailing it.
+    pub(in crate::func) fn sort_member_call(
+        &mut self,
+        recv: &Expr,
+        ty: Ty,
+        call: Span,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let Some(ord) = self.universe().trait_by_name("ord") else {
+            return Err(mismatch("the ord trait's declaration"));
+        };
+        let Some(record) = self
+            .analyzed
+            .checked
+            .inherent_call_bounds
+            .get(&call)
+            .cloned()
+        else {
+            return Err(LowerError::unsupported(
+                span,
+                "a sort call",
+                "the checker recorded no ord answer for the element type; report the construct",
+            ));
+        };
+        let Some((_, _, served)) = record.iter().find(|(_, bound, _)| *bound == ord) else {
+            return Err(mismatch("a sort call's bound record"));
+        };
+        let Some(instance) = served else {
+            return Err(LowerError::unsupported(
+                span,
+                "a sort call",
+                "the element type's ord instance solved only through an in-scope assumption (the \
+                 element type is this frame's own type variable); the comparator word needs the \
+                 instance's own compare body, and per-instantiation frames are the JIT \
+                 specialization tier's, never the interpreter's",
+            ));
+        };
+        self.sort_stage(recv, *instance, ty, span)
+    }
+
+    /// The shared staging of both sort spellings: the solved ord
+    /// instance's `compare` body mints as the callable word beside the
+    /// list `Ref`, the receiver's list-instance evidence word trailing
+    /// them, and the native's stable merge sort reenters the dispatcher
+    /// through that word per comparison (the reduce seam's CALLG
+    /// discipline).
+    fn sort_stage(
+        &mut self,
+        xs: &Expr,
+        instance: InstanceId,
+        ty: Ty,
+        span: Span,
+    ) -> Result<Place, LowerError> {
+        let generic = crate::native::lookup_generic("sort")
+            .ok_or_else(|| mismatch("the sort seam's native mirror"))?;
         let impl_site = self
             .analyzed
             .decls

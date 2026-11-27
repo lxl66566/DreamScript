@@ -257,14 +257,14 @@ club.push(user { name: "ada", age: 45 })                       // the whole span
 club.push(user { name: "bob", age: 15 })
 const cell = club.get(0)                                      // user | none, the checked read
 const who = cell.ok((u: user) => u.name).err((_) => "?")  // fields project out
-const grown = cons(user { name: "eve", age: 30 }, tail(club))   // cons and tail move whole spans
-const roster = collect(grown)                                   // the whole-list copy
+const grown = club.tail().cons(user { name: "eve", age: 30 })   // cons and tail move whole spans
+const roster = grown.collect()                                 // the whole-list copy
 for u in roster { println("user ${u.name}") }
 ```
 
 The mutation and membership members share the same exclusive window: `xs.insert(i, x)` splices, `xs.remove(i)` and `m.remove(k)` delete one element or row (a missing map key a no-op), `xs.clear()` empties, `xs.contains(x)` and `m.contains(k)` read membership, and `m.entries()` answers the entry-order `list[(k, v)]`; assignment sugar writes places in place over a `var` root — `p.x = v`, `xs[i] = v`, and nestings of both (`xs[i].x.y = v`) — with an out-of-range store trapping rather than answering a miss, a `const` receiver refusing (DS3006), and a compound operator over a place chain keeping the plain-binding refusal this round (DS2002).
 
-Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the free generic's List and Map instances.
+Iteration is combinators plus `for`, over one hidden linear cursor that linearity lets the compiler strip bounds checks from; chains fuse into loops. Subscripts are single-element (`xs[0]`) with no slicing sugar. String slices are library calls: checked `substring(s, 0, 2)` answers `string | none` on char boundaries, `char_at(s, i)` answers `char | none`, and `split`/`join` take one `char` separator. `xs.len()` and `m.len()` answer through the collection members' own type tiers.
 
 ```ts
 // rows: list[entry]
@@ -325,7 +325,7 @@ Generics carry one clause — `[t: c]` on functions, `[t]` on types — and ever
 
 ```ts
 struct stack[t] { items: list[t] }
-fn push[t: ~Copyable](s: stack[t], x: t) -> stack[t] { stack { items: cons(x, s.items) } }
+fn push[t: ~Copyable](s: stack[t], x: t) -> stack[t] { stack { items: s.items.cons(x) } }
 ```
 
 Trait dispatch, generic impls, and transitively chained nested dispatch are legal, while a substituted type spanning more than one word refuses at the entering site, the runtime-evidence seam being one word; a generic fn used as a value, a generic lambda value, a user-declared generic application's values, and a builtin generic native (`cons`, `first`) over a bare variable refuse at lowering.

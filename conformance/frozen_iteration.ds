@@ -14,7 +14,7 @@ fn grow_while_iterating() -> int {
     visits += 1
     xs.push(x + 10)
   }
-  visits * 10 + len(xs)
+  visits * 10 + xs.len()
 }
 
 fn aliased_grow_visits_the_entry_count() -> int {
@@ -27,7 +27,7 @@ fn aliased_grow_visits_the_entry_count() -> int {
     visits += 1
     ys.push(x + 10)
   }
-  visits * 10 + len(xs)
+  visits * 10 + xs.len()
 }
 
 fn main() -> () {

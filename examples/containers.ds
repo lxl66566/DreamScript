@@ -5,16 +5,16 @@
 // spellings riding the later linked-surface rounds).
 
 fn first_int(xs: list[int]) -> int {
-  const cell = first(xs)
+  const cell = xs.first()
   cell.ok((x: int) => x).err((_: none) => -1)
 }
 
 fn main() -> () {
-  const ints = cons(1, cons(2, list[int]()))
+  const ints = list[int]().cons(2).cons(1)
   const rest = ints.tail()
-  println("cons ${len(ints)} ${first_int(ints)} ${len(rest)} ${first_int(rest)}")
-  const blank = collect(list[int]())
-  const blank_first = first(blank)
+  println("cons ${ints.len()} ${first_int(ints)} ${rest.len()} ${first_int(rest)}")
+  const blank = list[int]().collect()
+  const blank_first = blank.first()
   println("empty ${first_int(blank)} ${blank_first.ok((x: int) => x).err((_: none) => -1)}")
-  println("max ${max(3, 9)} ${min(3, 9)}")
+  println("max ${(3).max(9)} ${(3).min(9)}")
 }

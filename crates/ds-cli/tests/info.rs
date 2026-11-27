@@ -39,7 +39,7 @@ const LIB_MEMBER: &str = concat!(
     "  2\n",
     "}\n",
     "pub fn open_api(mut xs: list[int]) -> int | none {\n",
-    "  first(xs)\n",
+    "  xs.first()\n",
     "}\n",
     "pub extern fn fields(t: type) -> list[field]\n",
     "pub struct rec[t] {\n",

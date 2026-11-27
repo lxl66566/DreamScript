@@ -35,7 +35,7 @@ fn fetch_all(urls: list[string]) -> int | net_err {
       }
     }
   }
-  const kept = len(bodies)
+  const kept = bodies.len()
   kept
 }
 

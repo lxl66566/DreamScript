@@ -13,21 +13,21 @@ fn at(xs: list[int], i: int) -> int {
 fn main() -> () {
   const xs = [1, 2, 3, 4, 5]
   const doubled = xs.map((x: int) => x * 2)
-  println("doubled ${len(doubled)} ${at(doubled, 0)} ${at(doubled, 4)}")
+  println("doubled ${doubled.len()} ${at(doubled, 0)} ${at(doubled, 4)}")
   const evens = xs.filter((x: int) => x % 2 == 0)
-  println("evens ${len(evens)} ${at(evens, 0)} ${at(evens, 1)}")
+  println("evens ${evens.len()} ${at(evens, 0)} ${at(evens, 1)}")
   const traced = xs.map((x: int) -> int {
     println("visiting ${x}")
     x * 10
   })
   println("traced ${at(traced, 0)} ${at(traced, 4)}")
-  const sum = reduce(xs, 0, (a: int, b: int) => a + b)
+  const sum = xs.reduce(0, (a: int, b: int) => a + b)
   const words = ["alpha", "beta"]
-  const joined = reduce(words, "", (a: string, b: string) => "${a}${b}")
+  const joined = words.reduce("", (a: string, b: string) => "${a}${b}")
   println("sum ${sum} joined ${joined}")
   const (big, small) = xs.partition((x: int) => x > 2)
-  println("split ${len(big)} ${len(small)}")
+  println("split ${big.len()} ${small.len()}")
   const pairs = zip(xs, ["x", "y", "z"])
-  const numbered = enumerate(["a", "b"])
+  const numbered = ["a", "b"].enumerate()
   println("zip ${pairs.len()} enum ${numbered.len()} ${xs.enumerate().len()}")
 }

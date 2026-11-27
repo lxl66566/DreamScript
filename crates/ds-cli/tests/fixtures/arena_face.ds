@@ -18,7 +18,7 @@ fn main() -> () {
   var hops = 0
   while hops < 9 {
     var links = a.at(cur)
-    const step = first(links)
+    const step = links.first()
     if step is int { cur = step } else { println("no successor") }
     hops += 1
   }
