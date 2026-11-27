@@ -101,10 +101,10 @@ fn evidence_slot(lowered: &Lowered, body: &str) -> u32 {
         .unwrap_or_else(|| panic!("{body} dispatches through its evidence slot"))
 }
 
-/// The spawned children run for both instantiations of the one body:
-/// each child's `x.show()` answers through the entry-area evidence word
-/// (the join drives children in spawn order over the shared captured
-/// list), and the Ref words of the string run balance (the heap drains).
+/// The spawned children run for both element shapes: each child's
+/// `x.show()` answers through the entry-area evidence word (the join
+/// drives children in spawn order over the shared captured list), and
+/// the Ref words of the string run balance (the heap drains).
 #[test]
 fn spawned_children_run_the_evidence_shape() {
     let lowered = lower_probe("spawn_evidence_probe.ds", SPAWN_PROBE);
@@ -117,22 +117,25 @@ fn spawned_children_run_the_evidence_shape() {
     assert_eq!(
         vm.captured_output(),
         "n=1;n=2\na!;b!\n".as_bytes(),
-        "both instantiations answer through the one spawned child body"
+        "both element shapes answer through their spawned child bodies"
     );
     assert!(
         vm.objects().is_empty(),
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    // the member body and its spawned child enter the table exactly once
+    // the member enters the table once per element shape, each
+    // instance minting its own spawned child — plus the demanded ONE
+    // Raw-word body and its own child, the bodies the runtime-evidence
+    // chains name, inert at the run (every site here enters an instance)
     assert_eq!(
         lowered
             .functions()
             .iter()
             .filter(|name| name.starts_with("shows#list[t]#show"))
             .count(),
-        2,
-        "one member body plus one spawned child, no per-instantiation copies"
+        6,
+        "the ONE body and its child plus one body and child per element shape"
     );
 }
 

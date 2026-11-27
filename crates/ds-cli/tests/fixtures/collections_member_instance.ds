@@ -1,0 +1,18 @@
+// The member shape the per-shape instances land: a ds-bodied inherent
+// member over a builtin collection whose parameter spans the
+// collection's own type variable instantiates per entering site over
+// the receiver's solved element shape (the ambient's own `get`/`push`/
+// `set` members declare no body and route to the collection natives
+// directly, so a ds body over the same head is the user-side spelling).
+
+impl[t] list[t] {
+  fn append(mut self, x: t) -> list[t] {
+    self
+  }
+}
+
+fn main() -> int {
+  var xs = [1, 2]
+  xs.append(9)
+  return xs.len()
+}

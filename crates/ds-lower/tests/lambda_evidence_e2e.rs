@@ -125,11 +125,16 @@ fn two_instantiations_run_the_lambda_evidence_shape() {
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    // the member body and its lambda each enter the table exactly once
+    // the member enters the table once per element shape (an I64
+    // element and a Ref element differ as shapes), each instance
+    // minting its own lambda — plus the demanded ONE Raw-word body and
+    // its own lambda, the bodies the runtime-evidence chains name,
+    // inert at the run (every site here enters an instance)
     assert_eq!(
         table_names(&lowered, "shows#list[t]#show").len(),
-        2,
-        "one member body plus one lambda, no per-instantiation copies"
+        6,
+        "the ONE body and its lambda plus one body and lambda per element shape (table: {:?})",
+        lowered.functions()
     );
 }
 
@@ -268,7 +273,19 @@ fn a_filter_predicate_demands_evidence_through_its_own_lambda() {
     );
     // both lambdas dispatch from the same recorded pair: one evidence
     // slot per member frame, shared by the filter and the map lambda
-    let mut slots = table_names(&lowered, "keeps#list[t]#long$")
+    let lambdas: Vec<String> = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.starts_with("keeps#list[t]#long") && name.contains('$'))
+        .cloned()
+        .collect();
+    assert_eq!(
+        lambdas.len(),
+        4,
+        "one filter predicate and one map lambda per element shape (table: {:?})",
+        lowered.functions()
+    );
+    let mut slots = lambdas
         .iter()
         .map(|lambda| evidence_slot(&lowered, lambda))
         .collect::<Vec<u32>>();
@@ -277,7 +294,7 @@ fn a_filter_predicate_demands_evidence_through_its_own_lambda() {
     assert_eq!(
         slots,
         vec![1],
-        "both sibling lambdas read their own trailing capture slot (the raw parameter at word 0, \
+        "every sibling lambda reads its own trailing capture slot (the raw parameter at word 0, \
          the evidence word at word 1)"
     );
 }

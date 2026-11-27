@@ -278,8 +278,9 @@ fn main() -> () {
 /// projects only per concrete entering shape, none existing here.
 const RUN_PINS: &[(&str, &str)] = &[(
     "struct box2[t] { item: t }
-
+struct pt {}
 trait shows { fn show(self) -> string }
+impl shows for pt { fn show(self) -> string { \"pt\" } }
 
 impl [t: shows] shows for box2[t] {
   fn show(self) -> string {
@@ -291,8 +292,11 @@ impl [t: shows] shows for box2[t] {
   }
 }
 
+fn enter[t: shows] (b: box2[t]) -> string { b.show() }
+
 fn main() -> () {
-  println(\"0\")
+  const b: box2[pt] = box2 { item: pt {} }
+  println(enter(b))
 }
 ",
     "only a concrete entering shape projects the loop's fields",

@@ -221,28 +221,25 @@ fn the_retired_prefix_spellings_refuse_naming_the_member() {
     );
 }
 
-/// The refused shape: a ds-bodied member over the collection's own type
-/// variables checks clean (exit 0, empty stderr) and refuses only at
-/// lowering, naming the member-body seam exactly.
+/// The ds-bodied member over the collection's own type variable runs
+/// through its per-shape instance: the entering site's receiver solved
+/// the impl's variable to a concrete element shape, so the member's
+/// parameter and answer read the substituted concrete words — the shape
+/// the declaration-time refusal guarded, landed by the per-shape
+/// instantiation round. The ONE Raw-word body keeps its own door: the
+/// mut clause refuses there, pinned in ds-lower's
+/// `generic_impl_refusals.rs`.
 #[test]
-fn the_ds_bodied_member_refuses_at_lowering() {
+fn the_ds_bodied_member_lands_through_its_instance() {
     let check = run(ds()
         .arg("check")
-        .arg(fixture("collections_member_refusal.ds")));
+        .arg(fixture("collections_member_instance.ds")));
     assert_eq!(check.status.code(), Some(0), "{check:?}");
     assert_eq!(check.stdout, [] as [u8; 0]);
     assert_eq!(check.stderr, [] as [u8; 0]);
     let run = run(ds()
         .arg("run")
-        .arg(fixture("collections_member_refusal.ds")));
-    assert_ne!(run.status.code(), Some(0), "the shape must refuse: {run:?}");
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        stderr.contains("a member parameter over the impl's type variable"),
-        "the refusal names the member-body seam: {stderr}"
-    );
-    assert!(
-        stderr.contains("outside the M3 runtime contract"),
-        "the refusal names the runtime contract: {stderr}"
-    );
+        .arg(fixture("collections_member_instance.ds")));
+    assert_eq!(run.status.code(), Some(0), "the shape runs: {run:?}");
+    assert_eq!(run.stdout, [] as [u8; 0]);
 }

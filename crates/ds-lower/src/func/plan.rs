@@ -255,6 +255,10 @@ pub(crate) struct Plan {
     pub(super) default_index: HashMap<(DefId, String), u32>,
     /// The function-table indexes of every planned trait default body.
     pub(super) default_bodies: HashSet<u32>,
+    /// The per-shape instances of a trait's declared default bodies:
+    /// their Self-keyed demands stage through the default chain
+    /// resolution, exactly the ONE body's own path.
+    pub(super) default_instances: HashSet<u32>,
     /// The trait default bodies a link surface may carry, keyed by
     /// mangled name: exactly the rows staging no runtime evidence, so
     /// a consumer enters them staging the true arguments and the
@@ -298,6 +302,26 @@ pub(crate) struct Plan {
     /// that holds no table entry of its own and lowers once per shape
     /// its entering sites solve (the discovery plans the instances).
     pub(super) generics: HashMap<DefId, Rc<GenericFn>>,
+    /// Every member body of a generic impl, keyed by the impl item's
+    /// span and the member name: a body that holds no table entry of
+    /// its own until a site enters it or a runtime-evidence demand
+    /// names its member (the discovery plans the instances and the
+    /// ONE Raw-word bodies).
+    pub(super) generic_members: HashMap<(Span, String), Rc<GenericMember>>,
+    /// A trait's declared default bodies, keyed by the trait's
+    /// definition and member: the same per-shape instantiation story an
+    /// impl's generic members run, over the trait's `Self` variable.
+    pub(super) generic_defaults: HashMap<(DefId, String), Rc<GenericMember>>,
+    /// The instance of each generic member at one shape key: the
+    /// function table's index of the body lowered over that shape.
+    pub(super) member_instances: HashMap<(Span, String, Rc<InstanceKey>), u32>,
+    /// The same instances by their entering site's receiver type: what a
+    /// lowering site looks its target up by, the handle its lens reads.
+    pub(super) member_instance_args: HashMap<(Span, String, Ty), u32>,
+    /// Every generic member's recorded types, in a fixed order: the
+    /// declared parameters, the solved return, and every type the
+    /// checker recorded inside the body's block span.
+    pub(super) member_types: HashMap<(Span, String), Rc<[Ty]>>,
     /// The instance of each generic fn at one shape key: the function
     /// table's index of the body lowered over that shape.
     pub(super) instances: HashMap<(DefId, Rc<InstanceKey>), u32>,
@@ -344,6 +368,7 @@ impl Plan {
             impl_index: HashMap::new(),
             default_index: HashMap::new(),
             default_bodies: HashSet::new(),
+            default_instances: HashSet::new(),
             carried_defaults: HashMap::new(),
             deinits: HashMap::new(),
             declared_deinits: HashSet::new(),
@@ -353,6 +378,11 @@ impl Plan {
             mints: HashMap::new(),
             const_defs: HashSet::new(),
             generics: HashMap::new(),
+            generic_members: HashMap::new(),
+            generic_defaults: HashMap::new(),
+            member_instances: HashMap::new(),
+            member_instance_args: HashMap::new(),
+            member_types: HashMap::new(),
             instances: HashMap::new(),
             instance_args: HashMap::new(),
             body_types: HashMap::new(),
@@ -716,6 +746,13 @@ impl Plan {
     /// body.
     pub(crate) fn is_default_body(&self, index: u32) -> bool {
         self.default_bodies.contains(&index)
+    }
+
+    /// Whether one table entry is a trait default body's per-shape
+    /// instance: the Self-keyed demands stage through the default chain
+    /// resolution like the ONE body's.
+    pub(crate) fn is_default_instance(&self, index: u32) -> bool {
+        self.default_instances.contains(&index)
     }
 
     /// The trait default bodies a link surface may carry, keyed by
@@ -1508,6 +1545,17 @@ pub(super) fn discover_expr(
             // before anything lowers: the instance over the site's solved
             // shape, or the ONE body of a site still naming a variable.
             instance::enter_site(plan, found, ctx, callee, *span)?;
+            // A dispatch the checker solved onto a generic impl's member
+            // body plans that body the same way: an instance over the
+            // receiver's solved shape, the ONE body where the site still
+            // names a variable. An interpolation hole's implicit `show`
+            // dispatch carries its records at the hole's own span, so the
+            // text arm below feeds those sites here too.
+            let recv_span = match &**callee {
+                Expr::Field { recv, .. } => Some(recv.span()),
+                _ => None,
+            };
+            member::enter_member_site(plan, found, *span, recv_span)?;
             // The callee first, in the receiver-first order the walk
             // stages its arguments: a dot-call's receiver holds whole
             // call shapes (the fluent spelling `xs.map(f).len()`), and
@@ -1552,6 +1600,23 @@ pub(super) fn discover_expr(
             for part in parts {
                 if let StrPart::Expr { expr, .. } = part {
                     discover_expr(plan, found, ctx, expr)?;
+                }
+                // An interpolation hole's implicit `show` dispatch is a
+                // member site the checker recorded at the hole's own span:
+                // plan the body it enters like any call site.
+                let hole_span = match part {
+                    StrPart::Expr { span, .. } | StrPart::Ident { span, .. } => Some(*span),
+                    StrPart::Text { .. } => None,
+                };
+                if let Some(hole_span) = hole_span
+                    && found.analyzed.checked.hole_show_dispatches.contains_key(&hole_span)
+                {
+                    let recv_span = match part {
+                        StrPart::Expr { expr, .. } => Some(expr.span()),
+                        StrPart::Ident { name, .. } => Some(name.span),
+                        StrPart::Text { .. } => None,
+                    };
+                    member::enter_member_site(plan, found, hole_span, recv_span)?;
                 }
             }
         },

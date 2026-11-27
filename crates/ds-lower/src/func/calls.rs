@@ -914,8 +914,13 @@ impl<'a> FnLower<'a, '_, '_> {
             // the annotated binding's widening write, so the staged
             // words match the callee's parameter span
             let arg_val = match param_types.as_ref().and_then(|types| types.get(index)) {
+                // a variable parameter never re-spans — the ONE Raw-word
+                // body takes the argument's single word — and the union
+                // probe must not consult the shape layer on a written
+                // variable under the caller's lens (its belt would fire)
                 Some(&param_ty)
-                    if self.is_union_ty(param_ty)?
+                    if !self.is_var_ty(param_ty)
+                        && self.is_union_ty(param_ty)?
                         && (param_ty != arg_val.ty
                             || !self.place_layout_matches(&arg_val.place, param_ty)?) =>
                 {
@@ -1239,37 +1244,38 @@ impl<'a> FnLower<'a, '_, '_> {
             let pairs = self.plan.functions()[*index as usize].evidence.clone();
             self.guard_staged_count(staged.len() + pairs.len() + 1)?;
             for pair in pairs.iter() {
-                let words = if self.plan.is_default_body(*index) {
-                    // the entered body is the trait's declared default:
-                    // every demand keys by the trait's own variables —
-                    // `Self` names the receiver (the chain starts at its
-                    // member set under the site's own solved instance),
-                    // every other names a trait generic the impl behind
-                    // that instance substitutes through its trait
-                    // reference — the declared bounds record answers
-                    // neither shape
-                    vec![EvidenceSrc::Const(self.default_pair_chain(
-                        call.method,
-                        call.instance,
-                        Some(self.members(call.recv)),
-                        pair,
-                        "a trait-method call into a declared default body",
-                        callee_span,
-                    )?)]
-                } else {
-                    self.evidence_words(
-                        pair,
-                        &call.bounds,
-                        EvidenceSite {
-                            entered: Some(call.instance),
-                            inherent_site: None,
-                            recv: Some(call.recv),
-                            written_recv: self.written_trait_call(call_span).map(|tc| tc.recv),
-                        },
-                        "a trait-method call into a generic impl body",
-                        callee_span,
-                    )?
-                };
+                let words =
+                    if self.plan.is_default_body(*index) || self.plan.is_default_instance(*index) {
+                        // the entered body is the trait's declared default:
+                        // every demand keys by the trait's own variables —
+                        // `Self` names the receiver (the chain starts at its
+                        // member set under the site's own solved instance),
+                        // every other names a trait generic the impl behind
+                        // that instance substitutes through its trait
+                        // reference — the declared bounds record answers
+                        // neither shape
+                        vec![EvidenceSrc::Const(self.default_pair_chain(
+                            call.method,
+                            call.instance,
+                            Some(self.members(call.recv)),
+                            pair,
+                            "a trait-method call into a declared default body",
+                            callee_span,
+                        )?)]
+                    } else {
+                        self.evidence_words(
+                            pair,
+                            &call.bounds,
+                            EvidenceSite {
+                                entered: Some(call.instance),
+                                inherent_site: None,
+                                recv: Some(call.recv),
+                                written_recv: self.written_trait_call(call_span).map(|tc| tc.recv),
+                            },
+                            "a trait-method call into a generic impl body",
+                            callee_span,
+                        )?
+                    };
                 trait_evidence.extend(words);
             }
             // The instance word is a per-branch id: a union-receiver

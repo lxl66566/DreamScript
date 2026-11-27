@@ -2,10 +2,15 @@
 //! whose runtime dispatch or runtime word has no contract refuse naming
 //! exactly the seam they need — an overwrite
 //! contract for a type-variable's word (a var binding, a var destructuring
-//! element, a lambda's mut parameter), a checked read whose union
-//! payload spans the variable's runtime word, and the free-generic-fn
-//! door (a mut parameter over a type variable inside a free generic fn
-//! refuses at the body's own planning, so the declaration is not inert).
+//! element, a lambda's mut parameter, a member's mut parameter), a checked
+//! read whose union payload spans the variable's runtime word, and the
+//! free-generic-fn door (a mut parameter over a type variable inside a
+//! free generic fn refuses at the ONE body's own lowering, which the
+//! enter drive reaches). Every door fires where the ONE Raw-word body
+//! lowers — the free generic `enter` fn naming the impl's variable —
+//! while a concrete site's per-shape instance lowers the same written
+//! shapes over the substituted concrete words and runs (the member
+//! parameter over the impl's variable lands in every non-mut mode).
 //! A receiver unioning the
 //! variable (or concrete members) across match branches refuses earlier,
 //! at checking, through the surface's uniform coherence rule — no single
@@ -63,15 +68,20 @@ fn loop_body(body: &str) -> String {
     TRAIT_STORY.replace("BODY", body)
 }
 
-/// One loop-body story plus its `main` drive (the story alone has no
-/// lowerable entry).
+/// One loop-body story plus the drive reaching the body's ONE Raw-word
+/// lowering: a free generic fn's site names the impl's own variable, so
+/// the member body lowers over its variables' Raw words and the
+/// probe's doors fire. A concrete main-site drive (`[1].show()`) enters
+/// a per-shape instance instead, where the same written shapes lower
+/// over the substituted concrete words and run.
 fn driven_story(body: &str) -> String {
     format!(
         "{}\n{}",
         loop_body(body),
         concat!(
+            "fn enter[t: shows] (xs: list[t]) -> string { xs.show() }\n",
             "fn main() -> int {\n",
-            "  println([1].show())\n",
+            "  println(enter([1]))\n",
             "  0\n",
             "}\n",
         )
@@ -115,24 +125,19 @@ fn refuses_with(source: &str, expected: &str) {
 
 /// A mutable binding over the impl's type variable: a reassignment would
 /// drop the previous word's count by runtime kind, and the placement has
-/// no overwrite contract for that yet.
+/// no overwrite contract for that yet — the door fires where the ONE
+/// Raw-word body lowers (the enter drive), while a concrete site's
+/// instance lowers the binding over the substituted words.
 #[test]
 fn a_mutable_binding_over_the_type_variable_refuses() {
-    let source = format!(
-        "{}\n{}",
-        loop_body(concat!(
+    refuses_with(
+        &driven_story(concat!(
             "      var y = x\n",
             "      y = x\n",
             "      acc = \"${acc}\"\n",
         )),
-        concat!(
-            "fn main() -> int {\n",
-            "  println([1].show())\n",
-            "  0\n",
-            "}\n",
-        )
+        "no overwrite contract",
     );
-    refuses_with(&source, "no overwrite contract");
 }
 
 /// A multi-word instantiation at a generic-impl dispatch (the P0 review
@@ -186,17 +191,10 @@ fn a_multi_word_instantiated_pair_variable_refuses() {
 /// it.
 #[test]
 fn a_checked_read_spanning_the_variable_word_refuses() {
-    let source = format!(
-        "{}\n{}",
-        loop_body("      const y = self.first()\n      acc = \"${acc}\""),
-        concat!(
-            "fn main() -> int {\n",
-            "  println([1].show())\n",
-            "  0\n",
-            "}\n",
-        )
+    refuses_with(
+        &driven_story("      const y = self.first()\n      acc = \"${acc}\""),
+        "a union member over a type variable",
     );
-    refuses_with(&source, "a union member over a type variable");
 }
 
 /// A call into a generic inherent member from inside another generic
@@ -408,8 +406,12 @@ fn a_map_checked_read_over_a_type_variable_value_refuses() {
             "    \"m\"\n",
             "  }\n",
             "}\n",
+            "extern fn map_set[k, v] (m: mut map[k, v], key: k, value: v) -> ()\n",
+            "fn enter[v: shows] (m: map[int, v]) -> string { m.show() }\n",
             "fn main() -> int {\n",
-            "  println(1.show())\n",
+            "  var m = map[int, int]()\n",
+            "  map_set(m, 1, 2)\n",
+            "  println(enter(m))\n",
             "  0\n",
             "}\n",
         ),
@@ -468,12 +470,43 @@ fn a_mut_parameter_over_the_type_variable_refuses() {
     );
 }
 
-/// An impl member's parameter over the bare variable refuses in every
-/// mode (a concrete parameter word is the covered shape), so
-/// the mut clause for member parameters is shadowed here — the lambda
-/// above is where the overwrite-contract refusal is reachable.
+/// An impl member's parameter over the bare variable lands in every
+/// non-mut mode: a concrete site's per-shape instance binds the
+/// parameter's substituted words, and the ONE Raw-word body a
+/// variable-written receiver enters carries the parameter as one Raw
+/// word — the free-generic shape. The mut clause keeps the
+/// overwrite-contract refusal in the ONE body (the reassignment has no
+/// contract for a variable's runtime word), while a concrete site's
+/// instance re-stores the substituted concrete words and runs.
 #[test]
-fn an_impl_member_parameter_over_the_variable_refuses_in_every_mode() {
+fn an_impl_member_parameter_over_the_variable_lands_in_every_non_mut_mode() {
+    lands_and_runs(
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct list[t]\n",
+            "extern fn println (s: string) -> ()\n",
+            "trait shows {\n",
+            "  fn show(self) -> string\n",
+            "}\n",
+            "impl shows for int {\n",
+            "  fn show(self) -> string { \"n\" }\n",
+            "}\n",
+            "impl [t: shows] shows for list[t] {\n",
+            "  fn show(self) -> string { \"l\" }\n",
+            "}\n",
+            "impl [t: shows] list[t] {\n",
+            "  fn pick(self, x: t, y: t) -> t { y }\n",
+            "}\n",
+            "fn enter[t: shows] (xs: list[t], x: t, y: t) -> t { xs.pick(x, y) }\n",
+            "fn main() -> int {\n",
+            "  println([1].pick(2, 3).show())\n",
+            "  println(enter([1], 2, 3).show())\n",
+            "  0\n",
+            "}\n",
+        ),
+        b"n\nn\n",
+    );
     refuses_with(
         concat!(
             "tag int\n",
@@ -495,12 +528,41 @@ fn an_impl_member_parameter_over_the_variable_refuses_in_every_mode() {
             "    x\n",
             "  }\n",
             "}\n",
+            "fn enter[t: shows] (xs: list[t], x: t, y: t) -> t { xs.bump(x, y) }\n",
             "fn main() -> int {\n",
-            "  println([1].show())\n",
+            "  enter([1], 2, 3)\n",
             "  0\n",
             "}\n",
         ),
-        "a member parameter over the impl's type variable",
+        "no overwrite contract",
+    );
+    lands_and_runs(
+        concat!(
+            "tag int\n",
+            "tag string\n",
+            "struct list[t]\n",
+            "extern fn println (s: string) -> ()\n",
+            "trait shows {\n",
+            "  fn show(self) -> string\n",
+            "}\n",
+            "impl shows for int {\n",
+            "  fn show(self) -> string { \"n\" }\n",
+            "}\n",
+            "impl [t: shows] shows for list[t] {\n",
+            "  fn show(self) -> string { \"l\" }\n",
+            "}\n",
+            "impl [t: shows] list[t] {\n",
+            "  fn bump(self, mut x: t, y: t) -> t {\n",
+            "    x = y\n",
+            "    x\n",
+            "  }\n",
+            "}\n",
+            "fn main() -> int {\n",
+            "  println([1].bump(2, 3).show())\n",
+            "  0\n",
+            "}\n",
+        ),
+        b"n\n",
     );
 }
 
@@ -573,8 +635,9 @@ fn a_mut_parameter_over_a_variable_in_the_one_body_refuses_at_lowering() {
         "    \"l\"\n",
         "  }\n",
         "}\n",
+        "fn enter[t: shows] (xs: list[t]) -> string { xs.show() }\n",
         "fn main() -> int {\n",
-        "  println(\"m\")\n",
+        "  println(enter([1]))\n",
         "  0\n",
         "}\n",
     );

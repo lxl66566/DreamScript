@@ -260,7 +260,8 @@ const VAR_STORY: &str = concat!(
     "    acc\n",
     "  }\n",
     "}\n",
-    "fn main() -> () { }\n",
+    "fn enter[t: shows] (xs: list[t]) -> string { xs.show() }\n",
+    "fn main() -> () { const s = enter([1]) }\n",
 );
 
 fn var_story(body: &str) -> String {

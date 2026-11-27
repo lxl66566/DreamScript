@@ -118,7 +118,7 @@ impl<'a> FnLower<'a, '_, '_> {
             )
         }) && !candidates.is_empty();
         if let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) {
-            return self.resolve_inherent_method(method, call, what);
+            return self.resolve_inherent_method(method, call, what, recv);
         }
         let Some(tc) = self.trait_call(call)? else {
             // A bound-variable receiver inside a generic body: the
@@ -196,15 +196,39 @@ impl<'a> FnLower<'a, '_, '_> {
             });
         }
         if let Some(impl_site) = tc.impl_site {
+            // a generic impl's member body holds no unconditional table
+            // entry: the site's written receiver picked the body the
+            // plan's discovery planned — the per-shape instance a
+            // concrete written receiver solved, or the ONE Raw-word body
+            // a receiver still naming a variable enters (the decision
+            // reads the written receiver, never the lens: an instance
+            // serves shapes the entering sites' chain words tell apart,
+            // so a body's own sites bake no shape a shared instance
+            // could disagree with)
+            if let Some(generic) = self.plan.generic_member(impl_site, &member) {
+                let written = self.written_trait_call(call).map_or(tc.recv, |tc| tc.recv);
+                let index = self.member_dispatch_target(&generic, written, what)?;
+                return Ok(TraitDispatch::Static { index, call: tc });
+            }
             if let Some(index) = self.plan.impl_body(impl_site, &member) {
                 return Ok(TraitDispatch::Static { index, call: tc });
             }
             // A defaulted member is omittable exactly because the
             // trait's declaration carries the dispatch target: an impl
             // spelling no member dispatches into the declared default
-            // body, the same staged shape (evidence demands trailing
-            // the true arguments, the solved instance word trailing
-            // them).
+            // body, the same per-shape story an impl's generic member
+            // runs (the written receiver picks the instance, a variable
+            // one the ONE Raw-word body — whose Raw `Self` claims the
+            // receiver's single runtime word), the evidence demands
+            // trailing the true arguments and the solved instance word
+            // trailing them.
+            if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
+                && let Some(generic) = self.plan.generic_default(def, &member)
+            {
+                let written = self.written_trait_call(call).map_or(tc.recv, |tc| tc.recv);
+                let index = self.member_dispatch_target(&generic, written, what)?;
+                return Ok(TraitDispatch::Static { index, call: tc });
+            }
             if let MethodOwner::Trait(def) = self.analyzed.package.method(tc.method).owner
                 && let Some(index) = self.plan.default_body(def, &member)
             {
@@ -315,7 +339,7 @@ impl<'a> FnLower<'a, '_, '_> {
             _ => return None,
         };
         let &impl_site = self.analyzed.decls.inherent_impls.get(&method)?;
-        if self.plan.impl_body(impl_site, member).is_some() {
+        if self.plan.member_planned(impl_site, member) {
             return None;
         }
         let def = self.analyzed.package.lookup_value(native)?;
@@ -347,7 +371,7 @@ impl<'a> FnLower<'a, '_, '_> {
         let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
             return false;
         };
-        self.plan.impl_body(impl_site, "sort").is_none()
+        !self.plan.member_planned(impl_site, "sort")
     }
 
     pub(in crate::func) fn resolve_inherent_method(
@@ -355,6 +379,7 @@ impl<'a> FnLower<'a, '_, '_> {
         method: MethodId,
         call: Span,
         what: Span,
+        recv: Option<&Expr>,
     ) -> Result<TraitDispatch, LowerError> {
         // A linked member body addresses the linked module directly
         // (the type-keyed receiver seam): the method id's member link
@@ -379,6 +404,49 @@ impl<'a> FnLower<'a, '_, '_> {
             ));
         };
         let member = self.analyzed.package.method(method).name.clone();
+        // a generic impl's member body holds no unconditional table
+        // entry: the site's written receiver picked the body the plan's
+        // discovery planned — the per-shape instance a concrete written
+        // receiver solved, or the ONE Raw-word body a receiver still
+        // naming a variable enters (the decision reads the written
+        // receiver, never the lens, exactly the trait path's rule). A
+        // type-keyed static call carries no receiver value, so its
+        // site keeps the ONE body the declaration-side planning holds.
+        if let Some(generic) = self.plan.generic_member(impl_site, &member) {
+            let Some(val) = recv.and_then(|recv| self.written_val(recv.span()).ok()) else {
+                let Some(index) = self.plan.impl_body(impl_site, &member) else {
+                    return Err(LowerError::unsupported(
+                        what,
+                        "an inherent method call",
+                        "the plan's discovery planned no body for this site; the walk and the \
+                         discovery disagree — report the construct",
+                    ));
+                };
+                return Ok(TraitDispatch::Inherent {
+                    index,
+                    bounds: self
+                        .analyzed
+                        .checked
+                        .inherent_call_bounds
+                        .get(&call)
+                        .cloned()
+                        .unwrap_or_default(),
+                    method,
+                });
+            };
+            let index = self.member_dispatch_target(&generic, val.ty, what)?;
+            return Ok(TraitDispatch::Inherent {
+                index,
+                bounds: self
+                    .analyzed
+                    .checked
+                    .inherent_call_bounds
+                    .get(&call)
+                    .cloned()
+                    .unwrap_or_default(),
+                method,
+            });
+        }
         let Some(index) = self.plan.impl_body(impl_site, &member) else {
             return Err(LowerError::unsupported(
                 what,

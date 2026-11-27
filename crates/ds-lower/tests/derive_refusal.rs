@@ -433,38 +433,6 @@ fn a_unit_only_generic_enum_derive_lands() {
     ));
 }
 
-/// One lift probe through the whole pipeline: the source checks clean
-/// and lowering refuses, asserting the refusal text names the
-/// contract — the boundary the lifted families' products meet.
-fn lift_mirror_refuses_at_lowering(source: &str) {
-    let mut files = Files::new();
-    let id = files.add_source("mirror.ds", source);
-    let asts = [parse(&files, id).expect("the probe parses")];
-    let analyzed = analyze(&files, &asts);
-    assert!(
-        analyzed.checked.diags.is_empty(),
-        "the mirror checks clean: {}",
-        analyzed
-            .checked
-            .diags
-            .iter()
-            .map(|diag| human(diag, &files))
-            .collect::<String>()
-    );
-    let Err(err) = lower(
-        "mirror",
-        Hash128::compute(source.as_bytes()),
-        &analyzed.asts,
-        &analyzed,
-    ) else {
-        panic!("the mirror's product must refuse under the M3 contract")
-    };
-    assert!(
-        err.to_string().contains("outside the M3 runtime contract"),
-        "the refusal names the runtime value seam, never the derive: {err}"
-    );
-}
-
 /// The struct-application door the receiver frames ride: the mirror checks
 /// clean and lowers, the ONE body's receiver laying out over the
 /// application's solved field signature — a part still naming the impl's
@@ -615,7 +583,13 @@ fn the_admitted_generic_families_meet_their_runtime_doors() {
         "struct gen[t] { n: int }\n",
         "fn main() -> int { 0 }\n",
     ));
-    lift_mirror_refuses_at_lowering(concat!(
+    // the to_json family keeps its door where a drive reaches it: an
+    // uncalled synthesized member plans nothing (the uncalled generic
+    // member is inert exactly like an uncalled free generic fn), and
+    // the first site entering it meets the abstract `set` member's own
+    // refusal — the door the family's product meets, no longer forced
+    // by a declaration nobody calls
+    lift_mirror_lowers(concat!(
         "tag int\n",
         "tag string\n",
         "struct map[k, v]\n",

@@ -1,13 +1,13 @@
 // purpose: the generic inherent impl runtime-evidence seam — a generic
-// inherent impl's member bodies lower once per impl under the mangled
-// `<target>#<member>` identity; the entering dot-call stages the serving
+// inherent impl's member bodies instantiate per shape under the mangled
+// `<target>#<member>@<digest>` identity; the entering dot-call stages the serving
 // member bodies' table indexes per the checker-recorded bounds, one word
 // per the body's runtime demands, and the words ride the call as trailing
 // parameters (an inherent impl has no instance id, so no dispatch uop
 // exists). The body's nested calls on the bound variable dispatch at
 // runtime through the staged slot, and a lambda lexically inside the
 // body carries its demand's evidence word in its capture block. Two
-// instantiations of one body run: int elements and string elements.
+// element shapes run: int elements and string elements.
 // items:
 // int: stage: run
 // string: stage: run

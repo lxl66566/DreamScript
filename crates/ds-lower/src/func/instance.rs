@@ -50,11 +50,11 @@ pub(crate) struct Instance {
 /// code, so they share one body.
 pub(crate) type InstanceKey = [ShapeKey];
 
-/// The most instances one generic fn plans. A body entering itself over
-/// an argument shape that keeps growing (a tuple over its own variable)
-/// never reaches a fixed point; the cap refuses it typed, where the
-/// frame width alone would never.
-const MAX_INSTANCES_OF_ONE_BODY: usize = 256;
+/// The most instances one generic body plans. A body entering itself
+/// over an argument shape that keeps growing (a tuple over its own
+/// variable) never reaches a fixed point; the cap refuses it typed,
+/// where the frame width alone would never.
+pub(super) const MAX_INSTANCES_OF_ONE_BODY: usize = 256;
 
 /// Walks one planned entry's body: its lambda and spawn sites mint their
 /// records and its calls entering a free generic fn plan their targets.
@@ -508,7 +508,7 @@ impl Plan {
 /// The shape key of one generic body under one substitution: every
 /// recorded type's shape, over the substituted type the discovery
 /// resolved it to.
-fn instance_key(
+pub(super) fn instance_key(
     found: &mut Discovery<'_, '_>,
     subst: &Subst,
     body: &[Ty],

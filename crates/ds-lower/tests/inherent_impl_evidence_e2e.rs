@@ -1,6 +1,7 @@
 //! Generic inherent impls end to end: a generic impl's member bodies
-//! lower once per impl under the `<target>#<member>` mangle, and every
-//! solved dot-call entering them stages the per-demand evidence words —
+//! instantiate per shape under the `<target>#<member>@<digest>` name,
+//! and every solved dot-call entering them stages the per-demand
+//! evidence words —
 //! the serving member body's table index per the checker-recorded
 //! bounds — trailing the arguments, where the body claims them as its
 //! trailing evidence parameters. An inherent impl has no instance id,
@@ -78,10 +79,10 @@ fn shape(lowered: &Lowered, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The generic member shape runs for both instantiations of the one
-/// body: the loop's `x.show()` answers through the frame's evidence
-/// slot, the render lambda's demand rides its capture block, and the
-/// Ref elements of the string run balance — the heap drains.
+/// The generic member shape runs for both element shapes: the loop's
+/// `x.show()` answers through the frame's evidence slot, the render
+/// lambda's demand rides its capture block, and the Ref elements of the
+/// string run balance — the heap drains.
 #[test]
 fn two_instantiations_run_the_generic_member_shape() {
     let (source, lowered) = lower_probe();
@@ -94,27 +95,37 @@ fn two_instantiations_run_the_generic_member_shape() {
     assert_eq!(
         vm.captured_output(),
         "list:n=1;n=2;\nlist:a!;b!;\nn=1;n=2\na!;b!\n".as_bytes(),
-        "both members answer through the one body per member"
+        "both members answer through their per-shape bodies"
     );
     assert!(
         vm.objects().is_empty(),
         "the heap drains when the run ends ({} live)",
         vm.objects().len()
     );
-    // one body per member plus the render lambda, never per instantiation
-    assert!(
-        lowered.functions().contains(&"list[t]#describe".to_owned()),
-        "the describe body plans under its mangle (table: {:?})",
+    // the member bodies instantiate per element shape: describe over the
+    // int element and the string element lower as two bodies (an I64 word
+    // and a Ref word differ as shapes), each render body minting its own
+    // lambda — equal shapes still share (the transitive probe pins that)
+    let describes = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.starts_with("list[t]#describe@"))
+        .count();
+    assert_eq!(
+        describes,
+        2,
+        "one describe body per element shape (table: {:?})",
         lowered.functions()
     );
-    assert!(
-        lowered
-            .functions()
-            .iter()
-            .filter(|name| name.starts_with("list[t]#render"))
-            .count()
-            == 2,
-        "the render body plus its one lambda, no per-instantiation copies (table: {:?})",
+    let renders = lowered
+        .functions()
+        .iter()
+        .filter(|name| name.starts_with("list[t]#render"))
+        .count();
+    assert_eq!(
+        renders,
+        4,
+        "one render body plus its lambda per element shape (table: {:?})",
         lowered.functions()
     );
 }
@@ -192,8 +203,14 @@ fn entering_sites_stage_the_evidence_words_ahead_of_plain_call() {
 #[test]
 fn the_member_body_claims_its_evidence_parameter() {
     let (_, lowered) = lower_probe();
+    let name = lowered
+        .functions()
+        .iter()
+        .find(|name| name.starts_with("list[t]#describe@"))
+        .expect("a describe instance body is planned")
+        .clone();
     let index = lowered
-        .function_index("list[t]#describe")
+        .function_index(&name)
         .expect("the describe body is planned");
     let function = &lowered.module().functions()[index as usize];
     assert_eq!(
@@ -207,7 +224,7 @@ fn the_member_body_claims_its_evidence_parameter() {
             .all(|slot| *slot == SlotType::I64),
         "the evidence word binds as the trailing I64 parameter"
     );
-    let placed = lowered.placed("list[t]#describe").expect("the body lowers");
+    let placed = lowered.placed(&name).expect("the body lowers");
     let pool = &lowered.module().functions()[index as usize].constants();
     let dispatched: Vec<u32> = placed
         .iter()

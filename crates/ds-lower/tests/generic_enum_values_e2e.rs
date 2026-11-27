@@ -299,9 +299,10 @@ fn qualified_case_spellings_read_the_application() {
 /// variable standing as the argument), the payload binder reads the
 /// region's Raw word, and the synthesized body lowers — while a call
 /// dispatching that body over an application receiver keeps its
-/// refusal: the body's tag tests read the body's own minted tags while
-/// the site's value carries its application's, so the receiver needs a
-/// cross-mint tag re-keying this slice does not grow.
+/// refusal: the per-shape instance would discriminate the receiver
+/// through case tags the lens derives per mint, and the plan does not
+/// prove the body's tags align with the entering site's own mint, so
+/// the queued tag re-keying seam keeps the door.
 #[test]
 fn a_generic_impl_lands_its_payloaded_arms() {
     let source = concat!(
@@ -371,7 +372,7 @@ fn a_generic_impl_lands_its_payloaded_arms() {
             "  0\n",
             "}\n",
         ),
-        "a union member write",
+        "a member dispatch over a generic enum's application",
     );
 }
 

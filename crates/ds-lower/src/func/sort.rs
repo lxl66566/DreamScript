@@ -138,12 +138,15 @@ impl FnLower<'_, '_, '_> {
                 )
             })?;
         let Some(compare) = self.plan.impl_body(impl_site, "compare") else {
-            return Err(LowerError::unsupported(
-                span,
-                "a sort call",
+            let reason = if self.plan.generic_member(impl_site, "compare").is_some() {
+                "the solving impl's compare body is a generic impl member: its callable word would \
+                 have to carry the body's runtime-evidence demands, and the comparator word needs \
+                 a monomorphic body"
+            } else {
                 "the solving impl's compare body did not plan (it spells no compare member, or a \
-                 linked impl's member body is outside this round's seam); report the construct",
-            ));
+                 linked impl's member body is outside this round's seam); report the construct"
+            };
+            return Err(LowerError::unsupported(span, "a sort call", reason));
         };
         if !self.plan.functions()[compare as usize].evidence.is_empty() {
             return Err(LowerError::unsupported(

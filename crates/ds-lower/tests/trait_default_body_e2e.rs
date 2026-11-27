@@ -161,23 +161,26 @@ fn dispatches_stage_serving_bodies_and_the_instance_word() {
         None,
     ];
     let expected_instances = [0i64, 1, 2, 2, 3];
+    // the first site's receiver is a scalar literal the staging writes
+    // straight into the overlay, so its own Kimm rides the span ahead of
+    // the evidence words; every span ends chain-word-then-instance
+    let expected_lens = [3usize, 2, 2, 2, 2];
     for (site, span) in evidence.iter().enumerate() {
         assert_eq!(
             span.last(),
             Some(&expected_instances[site]),
             "the declared instance trails site {site}"
         );
+        assert_eq!(
+            span.len(),
+            expected_lens[site],
+            "site {site} stages its receiver word, then the evidence words"
+        );
         let Some(&expected) = expected_bodies[site].as_ref() else {
-            assert_eq!(
-                span.len(),
-                1,
-                "the demand-less default stages the instance alone"
-            );
             continue;
         };
-        assert_eq!(span.len(), 2, "the chain word then the instance");
         let chain = chains
-            .get(usize::try_from(span[0]).expect("chain index fits usize"))
+            .get(usize::try_from(span[span.len() - 2]).expect("chain index fits usize"))
             .expect("the staged word names a chain object");
         assert_eq!(
             i64::from(chain.func),
@@ -266,11 +269,47 @@ fn the_dispatch_targets_the_planned_default_body() {
             _ => None,
         })
         .collect();
+    let names = |targets: &[u32]| {
+        targets
+            .iter()
+            .map(|&index| {
+                lowered.module().functions()[index as usize]
+                    .name()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(targets.len(), 5, "one dispatch per defaulted call in main");
     assert_eq!(
-        targets,
-        vec![default, default, default, default, reset_default],
-        "every omitted-member dispatch names the trait's declared default body"
+        targets.iter().filter(|&&t| t == default).count(),
+        0,
+        "no omitted-member dispatch needs the ONE body: every written receiver is concrete"
     );
+    let show_names = names(&targets[..4]);
+    assert!(
+        show_names
+            .iter()
+            .all(|name| name.starts_with("shows#show@")),
+        "every show dispatch names its per-shape default instance: {show_names:?}"
+    );
+    assert_eq!(
+        show_names[2], show_names[3],
+        "the two list shapes share the default's list instance: the body bakes only the Raw \
+         receiver word (every shape decision rides the staged evidence)"
+    );
+    assert_ne!(
+        show_names[0], show_names[1],
+        "the int and string shapes take distinct instances"
+    );
+    assert!(
+        show_names[0] != show_names[2],
+        "the scalar shapes take their own instances"
+    );
+    assert!(
+        names(&targets[4..])[0].starts_with("resets#reset@"),
+        "the reset dispatch names the default's int instance"
+    );
+    assert_ne!(reset_default, default);
 }
 
 /// A tail dispatch into the declared default body transfers through
@@ -289,14 +328,16 @@ fn a_tail_dispatch_into_a_default_body_transfers() {
     );
 }
 
-/// A multi-word receiver refuses at the entering site: the default body
-/// lowers its `Self` receiver as the variable's single Raw word, so a
-/// two-word struct receiver would slide a staged evidence rider into the
-/// missing field word — the one-word instantiation boundary the free
-/// generic bodies already guard, refused here where the type is
-/// concrete.
+/// A two-word receiver enters its default body's per-shape instance:
+/// the body lays out over the receiver's whole span, where the ONE
+/// Raw-word body refused it at the one-word boundary.
 #[test]
-fn a_multiword_receiver_refuses_at_the_one_word_boundary() {
+fn a_multiword_receiver_enters_its_default_instance() {
+    // the per-shape instance lifted the ONE body's one-word receiver
+    // boundary: a two-word receiver lowers and runs over its whole span,
+    // a default body demanding a sibling on `self` still refusing at the
+    // chain's one-word boundary (the demand's serving body receives the
+    // receiver as one Raw word)
     let source = concat!(
         "tag int\n",
         "struct point { x: int, y: int }\n",
@@ -323,18 +364,18 @@ fn a_multiword_receiver_refuses_at_the_one_word_boundary() {
             .map(|diag| human(diag, &files))
             .collect::<String>()
     );
-    let Err(err) = lower(
+    let lowered = lower(
         "multiword_default",
         Hash128::compute(source.as_bytes()),
         &asts,
         &analyzed,
-    ) else {
-        panic!("the two-word receiver must refuse at the entering site")
-    };
-    assert!(
-        err.to_string()
-            .contains("the substituted type spans more than one word"),
-        "the refusal names the one-word instantiation boundary: {err}"
+    )
+    .expect("the two-word receiver enters its default instance");
+    let mut vm = run_lowered(&lowered, source);
+    assert_eq!(
+        vm.run("multiword_default", "main", &[]),
+        Ok(FrameAnswer::one(Value::I64(0))),
+        "main returns the default body's area"
     );
 }
 

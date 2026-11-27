@@ -639,7 +639,7 @@ fn a_multiword_element_substitution_refuses_at_the_sources_shape() {
     refuse_lowering(
         "multiword_element_substitution.ds",
         source,
-        "a multi-word tuple element is outside the M3 runtime contract",
+        "a multi-word tuple member element is outside the M3 runtime contract",
     );
 }
 

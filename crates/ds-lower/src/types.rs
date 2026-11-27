@@ -140,6 +140,14 @@ impl<'a> Types<'a> {
         &self.minted
     }
 
+    /// The solved type of one member set, minted through the lens's own
+    /// registry when the package's shared registry holds no handle for
+    /// it: the generic-member discovery re-derives a substitution's
+    /// solved types at its entering sites.
+    pub(crate) fn set_of(&mut self, members: &[TypeId]) -> Ty {
+        self.universe_mut().set_ty(members)
+    }
+
     /// A fresh substitution over the given variable bindings.
     pub(crate) fn subst(&mut self, vars: HashMap<TypeId, Ty>) -> Rc<Subst> {
         let id = self.next_id;
@@ -313,7 +321,7 @@ impl<'a> Types<'a> {
         expr.unwrap_or(TypeExpr::Empty)
     }
 
-    fn universe_mut(&mut self) -> &mut Universe {
+    pub(crate) fn universe_mut(&mut self) -> &mut Universe {
         if let Uni::Analyzed(universe) = &self.uni {
             self.uni = Uni::Owned(Box::new((*universe).clone()));
         }

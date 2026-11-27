@@ -1055,14 +1055,40 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             pairs,
             bounds: bounds.clone(),
         };
-        let mut name = format!("{}#{}#{}", only.name, render_type(&imp.target), f.name.name);
-        // A named impl's body carries its vocabulary in the mangle:
-        // two impls of one trait over one head name distinct bodies
-        // (the two-impls escape), and `#` stays outside the
-        // identifier charset, so no user-declared name collides.
-        if let Some(impl_name) = &imp.name {
-            name.push('#');
-            name.push_str(&impl_name.name);
+        let name = mangled_name(
+            &only.name,
+            &render_type(&imp.target),
+            &f.name.name,
+            imp.name.as_ref().map(|name| name.name.as_str()),
+        );
+        // A generic impl's member bodies hold no table entry of their
+        // own: every entering site plans the body it needs (an instance
+        // over the receiver's solved shape, or the ONE Raw-word body a
+        // site still naming a variable enters), and a member any body's
+        // runtime evidence demands plans its ONE body here — the
+        // demand's chain names the serving body under some instance of
+        // this trait, and the site baking the chain may sit in any item.
+        if !imp.generics.is_empty() {
+            plan.register_generic_member(func::GenericMember {
+                name,
+                impl_site: item.span,
+                member: f.name.name.clone(),
+                generics: imp
+                    .generics
+                    .iter()
+                    .map(|param| param.name.name.clone())
+                    .collect(),
+                params: Rc::new(f.params.clone()),
+                body: body_expr,
+                decl_span: f.span,
+                pairs: evidence.pairs,
+                bounds: evidence.bounds,
+                default_of: None,
+            });
+            if plan.member_is_demanded(&only.name, &f.name.name, analyzed) {
+                plan.member_one_body_named(analyzed, item.span, &f.name.name);
+            }
+            continue;
         }
         plan.push_declared(
             name,
@@ -1074,6 +1100,19 @@ fn plan_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &Analyzed) 
             evidence,
         );
     }
+}
+
+/// The mangled table name of one impl member body:
+/// `<trait>#<target>#<member>`, plus `#name` for a named impl's
+/// vocabulary — `#` sits outside the identifier charset, so no
+/// user-declared name collides.
+fn mangled_name(trait_name: &str, target: &str, member: &str, impl_name: Option<&str>) -> String {
+    let mut name = format!("{trait_name}#{target}#{member}");
+    if let Some(impl_name) = impl_name {
+        name.push('#');
+        name.push_str(impl_name);
+    }
+    name
 }
 
 /// Collects one inherent impl's member bodies into the plan: each member
@@ -1102,6 +1141,32 @@ fn plan_inherent_impl(item: &Item, imp: &ImplDecl, plan: &mut Plan, analyzed: &A
             member: f.name.name.clone(),
         });
         let name = format!("{}#{}", render_type(&imp.target), f.name.name);
+        // A generic impl's member bodies hold no table entry of their
+        // own, exactly the trait form's: every entering site plans the
+        // body it needs (an instance over the receiver's solved shape,
+        // or the ONE Raw-word body a site still naming a variable
+        // enters). An inherent member never serves a runtime-evidence
+        // demand (a demand names a trait member alone), so no
+        // declaration-side ONE body plans here.
+        if !imp.generics.is_empty() {
+            plan.register_generic_member(func::GenericMember {
+                name,
+                impl_site: item.span,
+                member: f.name.name.clone(),
+                generics: imp
+                    .generics
+                    .iter()
+                    .map(|param| param.name.name.clone())
+                    .collect(),
+                params: Rc::new(f.params.clone()),
+                body: body_expr,
+                decl_span: f.span,
+                pairs,
+                bounds: bounds.clone(),
+                default_of: None,
+            });
+            continue;
+        }
         plan.push_declared(
             name,
             item.span,
@@ -1153,17 +1218,49 @@ fn plan_trait_defaults(t: &ds_parse::TraitDecl, plan: &mut Plan, analyzed: &Anal
             member: f.name.name.clone(),
         });
         let name = format!("{}#{}", t.name.name, f.name.name);
-        plan.push_default_body(
-            name,
+        let index = plan.push_default_body(
+            name.clone(),
             def,
             f.name.name.clone(),
             Rc::new(f.params.clone()),
-            body_expr,
+            Rc::clone(&body_expr),
             Some(ret),
             EvidenceEnv {
-                pairs,
+                pairs: Rc::clone(&pairs),
                 bounds: bounds.clone(),
             },
+        );
+        // the default body runs the members' per-shape story over the
+        // trait's `Self` variable: the dispatch site's receiver shape
+        // instantiates it, the trait's own span keying the shared
+        // instance tables, and the ONE Raw-word body this planning
+        // pushed serving the sites a variable-written receiver enters
+        plan.register_generic_default(
+            def,
+            t.name.span,
+            func::GenericMember {
+                name,
+                impl_site: t.name.span,
+                member: f.name.name.clone(),
+                generics: std::iter::once("Self".to_owned())
+                    .chain(
+                        analyzed
+                            .decls
+                            .trait_generics
+                            .get(&def)
+                            .map(|names| names.iter().cloned())
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .collect(),
+                params: Rc::new(f.params.clone()),
+                body: body_expr,
+                decl_span: f.span,
+                pairs,
+                bounds: bounds.clone(),
+                default_of: Some(def),
+            },
+            index,
         );
     }
 }

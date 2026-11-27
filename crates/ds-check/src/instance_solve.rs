@@ -336,7 +336,8 @@ fn head_substitution(
 /// Also serves the inherent side directly: a call site into a generic
 /// inherent impl substitutes the head pattern's variables into the
 /// member's written signature from these pairs.
-pub(crate) fn pattern_substitution(
+#[must_use]
+pub fn pattern_substitution(
     universe: &Universe,
     head: Ty,
     recv: Ty,

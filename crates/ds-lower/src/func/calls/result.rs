@@ -120,6 +120,32 @@ impl<'a> FnLower<'a, '_, '_> {
         }
         let decl = planned.decl.clone()?;
         let mut words = Vec::with_capacity(decl.params.len());
+        if planned.free_generic {
+            // a ONE Raw-word body's parameters keep the caller's runtime
+            // fact: a parameter over the body's own variable is the
+            // wildcard word, and the kinds read from the written facts —
+            // never the caller's lens, which would substitute the
+            // variables away and leave the site staging its concrete
+            // words against the Raw formals the slide refuses
+            for param in decl.params.iter() {
+                let fact = self
+                    .analyzed
+                    .checked
+                    .binders
+                    .get(&param.name.span)
+                    .copied()?;
+                let [only] = self.universe().members(fact.ty) else {
+                    words.extend_from_slice(&self.shapes.words(fact.ty).ok()?);
+                    continue;
+                };
+                if self.shapes.is_var_atom(*only) {
+                    words.push(SlotType::Raw);
+                } else {
+                    words.extend_from_slice(&self.shapes.words(fact.ty).ok()?);
+                }
+            }
+            return Some(words);
+        }
         for param in decl.params.iter() {
             // the belt cannot fire on this path — a declared body other
             // than an instance lowers over no substitution — so the
@@ -141,6 +167,28 @@ impl<'a> FnLower<'a, '_, '_> {
         // handles the call site re-spans its arguments against.
         if let Some(instance) = &planned.instance {
             return Some(instance.params.to_vec());
+        }
+        // A ONE Raw-word body's parameter types read as written, never
+        // through the caller's lens: the body lowers over the written
+        // variables' Raw words, so a variable parameter keeps its
+        // variable type (the site's one-word boundary and Raw staging
+        // own it) while a wider written parameter — a union head —
+        // re-spans the member argument into its whole region
+        if planned.free_generic {
+            return planned
+                .decl
+                .as_ref()?
+                .params
+                .iter()
+                .map(|param| {
+                    self.analyzed
+                        .checked
+                        .binders
+                        .get(&param.name.span)
+                        .copied()
+                        .map(|fact| fact.ty)
+                })
+                .collect();
         }
         if let Some(decl) = &planned.decl {
             return decl
