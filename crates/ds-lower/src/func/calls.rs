@@ -229,12 +229,8 @@ impl<'a> FnLower<'a, '_, '_> {
                     // the call span owns the lowering — the native
                     // member seam first, then the resolved method body.
                     let member_routed = native_member.is_some()
-                        || self
-                            .analyzed
-                            .checked
-                            .inherent_calls
-                            .contains_key(&call_span)
-                        || self.analyzed.checked.trait_calls.contains_key(&call_span);
+                        || self.has_inherent_record(call_span)
+                        || self.has_trait_record(call_span);
                     if member_routed {
                         if let Some(member) = native_member {
                             (
@@ -338,17 +334,9 @@ impl<'a> FnLower<'a, '_, '_> {
                 // runtime evidence below), and the method-name
                 // candidates come from the registry by the synthetic
                 // name.
-                _ if self.analyzed.checked.trait_calls.contains_key(&call_span)
-                    || self
-                        .analyzed
-                        .checked
-                        .inherent_calls
-                        .contains_key(&call_span)
-                    || self
-                        .analyzed
-                        .checked
-                        .hole_show_dispatches
-                        .contains_key(&call_span) =>
+                _ if self.has_trait_record(call_span)
+                    || self.has_inherent_record(call_span)
+                    || self.hole_show_method(call_span).is_some() =>
                 {
                     let candidates: Vec<_> = self
                         .analyzed

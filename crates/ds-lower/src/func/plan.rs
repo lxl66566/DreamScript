@@ -1321,6 +1321,15 @@ pub(crate) struct Discovery<'a, 't> {
     pub(crate) analyzed: &'a Analyzed,
     pub(crate) types: &'t mut crate::types::Types<'a>,
     pub(crate) deinits: &'a HashSet<DefId>,
+    /// The active `for comptime` copy path while the walk descends one
+    /// copy's body, outer-to-inner copy indices; empty outside one.
+    /// Every span-keyed record read routes through it: inside a copy
+    /// the checker's facts live in the per-copy tables.
+    pub(crate) comptime_path: Vec<u32>,
+    /// The per-instance expansion the walk descends (the walked fn's
+    /// definition and solved arguments), set from the planned entry
+    /// `walk_entry` lowers; `None` outside one.
+    pub(crate) comptime_instance: Option<Rc<ds_check::type_of::InstanceScope>>,
 }
 
 /// One planned entry's body expression: a declared body lowers its
@@ -1408,7 +1417,7 @@ pub(super) fn captures_under(
 /// node itself never mints. The routing reads the same resolution rows
 /// and declaration tables the call walk reads.
 pub(super) fn inlines_lambda_arg(
-    analyzed: &Analyzed,
+    found: &Discovery<'_, '_>,
     plan: &Plan,
     res: &Resolutions,
     callee: &Expr,
@@ -1426,8 +1435,7 @@ pub(super) fn inlines_lambda_arg(
         },
         Expr::Field { name, .. } => match res.get(name.span) {
             Some(Res::Dot(DotRes::Free { func, fed_param: 0 }))
-                if !analyzed.checked.inherent_calls.contains_key(&call_span)
-                    && !analyzed.checked.trait_calls.contains_key(&call_span) =>
+                if !member_routed(found, call_span) =>
             {
                 Some(*func)
             },
@@ -1436,7 +1444,7 @@ pub(super) fn inlines_lambda_arg(
         },
         _ => None,
     };
-    extraction_lambda_taker(analyzed, plan, def)
+    extraction_lambda_taker(found.analyzed, plan, def)
 }
 
 /// Whether `def` is the extraction family's lambda-taking shape: the
@@ -1467,6 +1475,107 @@ pub(super) fn extraction_lambda_taker(
         Extraction::of_name(&analyzed.package.def(def).name),
         Some(Extraction::UnwrapOrElse | Extraction::MapErr)
     )
+}
+
+/// The copy record at one span for the plan-side walks: inside an
+/// active `for comptime` copy the checker's facts live in the
+/// per-copy tables — the active expansion's instance records first,
+/// the once-check's copies second. The lowering's own lens reads the
+/// same precedence, so the plan and the walk hold one truth.
+pub(super) fn copy_record_at<'a>(
+    checked: &'a ds_check::type_of::Checked,
+    instance: Option<&ds_check::type_of::InstanceScope>,
+    path: &[u32],
+    span: Span,
+) -> Option<&'a ds_check::type_of::CopyRecords> {
+    if path.is_empty() {
+        return None;
+    }
+    if let Some((def, args)) = instance
+        && let Some(rec) =
+            checked
+                .comptime_instance_records
+                .get(&(*def, Rc::clone(args), path.to_vec(), span))
+    {
+        return Some(rec);
+    }
+    checked.comptime_records.get(&(path.to_vec(), span))
+}
+
+/// The copy count of the `for comptime` loop at `span`, the same
+/// precedence the lowering's `comptime_loop_info` reads: the active
+/// expansion's instance record first, the once-check's table second.
+/// `None` walks the body once with no copy path — a per-instance loop
+/// at a body lowering over its own variables, whose facts no plan
+/// record carries (the lowering refuses the loop loudly there).
+pub(super) fn loop_copy_count(
+    checked: &ds_check::type_of::Checked,
+    instance: Option<&ds_check::type_of::InstanceScope>,
+    span: Span,
+) -> Option<usize> {
+    if let Some((def, args)) = instance
+        && let Some(info) = checked
+            .comptime_instance_loops
+            .get(&(*def, Rc::clone(args), span))
+    {
+        return Some(info.fields.len());
+    }
+    let info = checked.comptime_loops.get(&span)?;
+    if info.per_instance.is_some() {
+        return None;
+    }
+    Some(info.fields.len())
+}
+
+/// The plan-side dispatch reads over the active copy view: a
+/// copy-local site's records are per-copy facts the body-wide tables
+/// never hold.
+fn copy_trait_call<'a>(found: &Discovery<'a, '_>, span: Span) -> Option<TraitCall> {
+    copy_record_at(
+        &found.analyzed.checked,
+        found.comptime_instance.as_deref(),
+        &found.comptime_path,
+        span,
+    )
+    .and_then(|rec| rec.trait_call.clone())
+    .or_else(|| found.analyzed.checked.trait_calls.get(&span).cloned())
+}
+
+fn copy_inherent_call(found: &Discovery<'_, '_>, span: Span) -> Option<MethodId> {
+    copy_record_at(
+        &found.analyzed.checked,
+        found.comptime_instance.as_deref(),
+        &found.comptime_path,
+        span,
+    )
+    .and_then(|rec| rec.inherent_call)
+    .or_else(|| found.analyzed.checked.inherent_calls.get(&span).copied())
+}
+
+fn copy_hole_show(found: &Discovery<'_, '_>, span: Span) -> Option<MethodId> {
+    copy_record_at(
+        &found.analyzed.checked,
+        found.comptime_instance.as_deref(),
+        &found.comptime_path,
+        span,
+    )
+    .and_then(|rec| rec.hole_show)
+    .or_else(|| {
+        found
+            .analyzed
+            .checked
+            .hole_show_dispatches
+            .get(&span)
+            .copied()
+    })
+}
+
+/// Whether the checker routed one dot-call onto the member tier: a
+/// trait or inherent dispatch record answers at the call span (the
+/// copy's own record inside a copy). The F3 free-tier fallback reads
+/// the same test, so a routed dot-call never plans a free fn body.
+pub(super) fn member_routed(found: &Discovery<'_, '_>, call_span: Span) -> bool {
+    copy_trait_call(found, call_span).is_some() || copy_inherent_call(found, call_span).is_some()
 }
 
 /// The pre-order discovery walk itself.
@@ -1540,7 +1649,7 @@ pub(super) fn discover_expr(
             trailing,
             ..
         } => {
-            let inlines = inlines_lambda_arg(found.analyzed, plan, ctx.res, callee, *span);
+            let inlines = inlines_lambda_arg(found, plan, ctx.res, callee, *span);
             // A call entering a free generic fn plans the body it enters
             // before anything lowers: the instance over the site's solved
             // shape, or the ONE body of a site still naming a variable.
@@ -1609,7 +1718,7 @@ pub(super) fn discover_expr(
                     StrPart::Text { .. } => None,
                 };
                 if let Some(hole_span) = hole_span
-                    && found.analyzed.checked.hole_show_dispatches.contains_key(&hole_span)
+                    && copy_hole_show(found, hole_span).is_some()
                 {
                     let recv_span = match part {
                         StrPart::Expr { expr, .. } => Some(expr.span()),
@@ -1669,8 +1778,30 @@ pub(super) fn discover_expr(
             discover_expr(plan, found, ctx, cond)?;
             discover_block(plan, found, ctx, body)?;
         },
-        Expr::For { iter, body, .. } => {
+        Expr::For {
+            span, iter, body, comptime, ..
+        } => {
             discover_expr(plan, found, ctx, iter)?;
+            // The comptime expansion loop descends one copy per
+            // projected field, the copy path keying every record read
+            // inside — the same expansion the lowering runs, so a
+            // copy-local site plans the body it enters from the copy's
+            // own records. A per-instance loop at a body lowering over
+            // its own variables walks once: its facts are a
+            // per-instance record no plan carries there.
+            if *comptime
+                && let Some(copies) =
+                    loop_copy_count(&found.analyzed.checked, found.comptime_instance.as_deref(), *span)
+            {
+                for index in 0..copies {
+                    found
+                        .comptime_path
+                        .push(u32::try_from(index).expect("copy index fits u32"));
+                    discover_expr(plan, found, ctx, body)?;
+                    found.comptime_path.pop();
+                }
+                return Ok(());
+            }
             discover_expr(plan, found, ctx, body)?;
         },
         Expr::Return { expr, .. } => {
@@ -1771,6 +1902,7 @@ pub(crate) fn runtime_pairs(
         demands,
         seen: HashSet::new(),
         out: Vec::new(),
+        comptime_path: Vec::new(),
     };
     walk.expr(body);
     walk.out
@@ -1842,9 +1974,29 @@ pub(super) struct PairWalk<'a> {
     pub(super) demands: &'a Demands,
     pub(super) seen: HashSet<(String, MethodId)>,
     pub(super) out: Vec<RuntimePair>,
+    /// The active written `for comptime` copy path while the walk
+    /// descends one copy's body: the demand reads route through the
+    /// per-copy tables, or a copy-local bound receiver's fact is
+    /// invisible and the frame never stages its evidence slot.
+    pub(super) comptime_path: Vec<u32>,
 }
 
 impl PairWalk<'_> {
+    /// The copy record at one span over the walk's active written-copy
+    /// path (the demand pass runs at declaration and mint sites, never
+    /// inside a per-instance expansion, so the instance tables take no
+    /// part here).
+    fn copy_record(&self, span: Span) -> Option<&ds_check::type_of::CopyRecords> {
+        copy_record_at(&self.analyzed.checked, None, &self.comptime_path, span)
+    }
+
+    /// The checked receiver type at one span, the copy-routed read.
+    fn recv_val(&self, span: Span) -> Option<Val> {
+        self.copy_record(span)
+            .and_then(|rec| rec.val)
+            .or_else(|| self.analyzed.checked.expr_types.get(&span).copied())
+    }
+
     /// One dot-call whose receiver covers a bounded type variable demands
     /// one evidence word: the member it calls, recorded once. The receiver
     /// is the variable itself (a nested runtime site) or a constructor
@@ -1866,7 +2018,7 @@ impl PairWalk<'_> {
         let Some(Res::Dot(DotRes::Methods { candidates })) = self.res.get(name.span) else {
             return;
         };
-        let Some(val) = self.analyzed.checked.expr_types.get(&recv.span()) else {
+        let Some(val) = self.recv_val(recv.span()) else {
             return;
         };
         let [only] = self.analyzed.decls.universe.members(val.ty) else {
@@ -1904,15 +2056,28 @@ impl PairWalk<'_> {
     /// instance or an inherent owner records beside the hole record and
     /// stages its own words, so those demand nothing.
     fn hole_demand(&mut self, span: Span, recv: Span) {
-        let Some(&method) = self.analyzed.checked.hole_show_dispatches.get(&span) else {
+        let Some(method) = self
+            .copy_record(span)
+            .and_then(|rec| rec.hole_show)
+            .or_else(|| {
+                self.analyzed
+                    .checked
+                    .hole_show_dispatches
+                    .get(&span)
+                    .copied()
+            })
+        else {
             return;
         };
-        if self.analyzed.checked.trait_calls.contains_key(&span)
-            || self.analyzed.checked.inherent_calls.contains_key(&span)
-        {
+        let routed = self
+            .copy_record(span)
+            .is_some_and(|rec| rec.trait_call.is_some() || rec.inherent_call.is_some())
+            || self.analyzed.checked.trait_calls.contains_key(&span)
+            || self.analyzed.checked.inherent_calls.contains_key(&span);
+        if routed {
             return;
         }
-        let Some(val) = self.analyzed.checked.expr_types.get(&recv) else {
+        let Some(val) = self.recv_val(recv) else {
             return;
         };
         let [only] = self.analyzed.decls.universe.members(val.ty) else {
@@ -1960,7 +2125,11 @@ impl PairWalk<'_> {
                 // (only a generic impl body has one) finds no variable and
                 // contributes nothing, matching the checker's refusal
                 Some(Res::Dot(DotRes::Methods { .. } | DotRes::Static { .. })) => {
-                    let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) else {
+                    let Some(method) = self
+                        .copy_record(call)
+                        .and_then(|rec| rec.inherent_call)
+                        .or_else(|| self.analyzed.checked.inherent_calls.get(&call).copied())
+                    else {
                         return;
                     };
                     let Some(&impl_site) = self.analyzed.decls.inherent_impls.get(&method) else {
@@ -1994,42 +2163,60 @@ impl PairWalk<'_> {
             // carries the solved type itself; the inherent record carries
             // none, and the receiver's checked type peels the same frame
             // variable the staging's slot lookup reads
+            // The per-call bounds record, the copy-routed read: a
+            // copy-local site's answers live in the per-copy tables.
+            let free_record = || {
+                self.copy_record(call)
+                    .and_then(|rec| rec.generic_bounds.clone())
+                    .or_else(|| {
+                        self.analyzed
+                            .checked
+                            .generic_call_bounds
+                            .get(&call)
+                            .cloned()
+                    })
+            };
+            let member_record = || {
+                self.copy_record(call)
+                    .and_then(|rec| rec.inherent_bounds.clone())
+                    .or_else(|| {
+                        self.analyzed
+                            .checked
+                            .inherent_call_bounds
+                            .get(&call)
+                            .cloned()
+                    })
+            };
             let solved = match &id {
                 BodyId::Free(_) => {
-                    let Some((_, _, served, solved)) = self
-                        .analyzed
-                        .checked
-                        .generic_call_bounds
-                        .get(&call)
-                        .and_then(|record| {
-                            record.iter().find(|(var, bound, ..)| {
+                    let Some((_, _, served, solved)) = free_record().and_then(|record| {
+                        record
+                            .iter()
+                            .find(|(var, bound, ..)| {
                                 crate::shape::var_param_name(universe, *var).as_deref()
                                     == Some(pair.var.as_str())
                                     && *bound == trait_id
                             })
-                        })
-                    else {
+                            .copied()
+                    }) else {
                         continue;
                     };
                     if served.is_some() {
                         continue;
                     }
-                    *solved
+                    solved
                 },
                 BodyId::Member { .. } => {
-                    let Some((_, _, served)) = self
-                        .analyzed
-                        .checked
-                        .inherent_call_bounds
-                        .get(&call)
-                        .and_then(|record| {
-                            record.iter().find(|(var, bound, _)| {
+                    let Some((_, _, served)) = member_record().and_then(|record| {
+                        record
+                            .iter()
+                            .find(|(var, bound, _)| {
                                 crate::shape::var_param_name(universe, *var).as_deref()
                                     == Some(pair.var.as_str())
                                     && *bound == trait_id
                             })
-                        })
-                    else {
+                            .copied()
+                    }) else {
                         continue;
                     };
                     if served.is_some() {
@@ -2038,7 +2225,7 @@ impl PairWalk<'_> {
                     let Some(recv) = recv else {
                         continue;
                     };
-                    let Some(val) = self.analyzed.checked.expr_types.get(&recv.span()) else {
+                    let Some(val) = self.recv_val(recv.span()) else {
                         continue;
                     };
                     val.ty
@@ -2205,8 +2392,27 @@ impl PairWalk<'_> {
                 self.expr(cond);
                 self.block(body);
             },
-            Expr::For { iter, body, .. } => {
+            Expr::For {
+                span, iter, body, comptime, ..
+            } => {
                 self.expr(iter);
+                // A written copy's bound-receiver site demands its
+                // evidence word per copy: the walk descends each copy
+                // so the reads route through the per-copy tables. A
+                // per-instance loop (the once-check's marker, no
+                // fields) walks once — its sites solve per concrete
+                // instance, never a declared-body demand.
+                if *comptime
+                    && let Some(copies) = loop_copy_count(&self.analyzed.checked, None, *span)
+                {
+                    for index in 0..copies {
+                        self.comptime_path
+                            .push(u32::try_from(index).expect("copy index fits u32"));
+                        self.expr(body);
+                        self.comptime_path.pop();
+                    }
+                    return;
+                }
                 self.expr(body);
             },
             Expr::Return { expr, .. } => {

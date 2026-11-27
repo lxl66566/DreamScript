@@ -17,9 +17,11 @@
 //! shape refusing at its expansion), the record binder is no runtime
 //! value and projects only its `name` and `tag` members (its `type`
 //! member a comptime fact), the keyed access keys only a record's
-//! name, member and generic dispatch plus lambda values inside a copy
-//! queue with the walker round (their records are per-copy facts), a
-//! per-instance loop over a generic impl member's own variable lowers
+//! name, member and generic dispatch inside a copy lowers from the
+//! copy's own records (the plan-side demand and discovery walks read
+//! them) while lambda values inside a copy queue with their round (a
+//! per-copy fact), a per-instance loop over a generic impl member's
+//! own variable lowers
 //! only per shape (the ONE body refuses), and the loop lives only in
 //! runtime code over a resolvable projection (a comptime fn and a
 //! non-`fields` iterable refuse).
@@ -59,7 +61,14 @@ fn run(command: &mut Command, dir: &PathBuf) -> Output {
 /// the composed caller's shared instance (3*2), one shape's name and
 /// tag rows, the written loop nested inside a per-instance copy (3
 /// fields x the pair's sum 3), and the per-instance loops nested in
-/// each other (2 copies x the pair's sum 3). The trailing `0` is the
+/// each other (2 copies x the pair's sum 3). The dispatch rows pin the
+/// dispatch-in-copy residuals: the copy-local generic call plans its
+/// instance at the copy site (3+4), the concrete trait call stages per
+/// copy (`tt`), the bound-receiver trait call rides the frame's
+/// runtime evidence slot (`t,t,`), the inherent member call lowers its
+/// native seam (4+4), the interpolation hole's implicit show answers
+/// inside the copy (v=5, v=6), and the per-instance copies carry their
+/// own dispatch (2+3, and the field count 2). The trailing `0` is the
 /// run's own answer line, as every golden pins.
 const GOLDEN: &str = concat!(
     "12\n",
@@ -78,6 +87,14 @@ const GOLDEN: &str = concat!(
     "9\n",
     "6\n",
     "6\n",
+    "7\n",
+    "tt\n",
+    "t,t,\n",
+    "8\n",
+    "v=5\n",
+    "v=6\n",
+    "5\n",
+    "2\n",
     "",
 );
 
@@ -172,18 +189,6 @@ fn main() -> () {
 }
 ",
         "its `type` member is a comptime fact",
-    ),
-    (
-        "struct pair { l: int, r: int }
-
-fn main() -> () {
-  var p = pair { l: 1, r: 2 }
-  for comptime f in fields(pair) {
-    println(p.[f.name].show())
-  }
-}
-",
-        "a member or generic dispatch inside a `for comptime` copy",
     ),
     (
         "struct pair { l: int, r: int }

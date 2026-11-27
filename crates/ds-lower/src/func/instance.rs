@@ -65,7 +65,7 @@ pub(super) fn walk_entry(
     at: u32,
 ) -> Result<(), LowerError> {
     let analyzed = found.analyzed;
-    let (name, bounds, subst, file, body) = {
+    let (name, bounds, subst, file, body, comptime_instance) = {
         let entry = &plan.functions[at as usize];
         (
             entry.name.clone(),
@@ -73,8 +73,17 @@ pub(super) fn walk_entry(
             entry.subst.clone(),
             entry.lambda.span().file,
             entry_body(entry).clone(),
+            entry.comptime_instance.clone(),
         )
     };
+    // The walked entry's expansion scope rides the walk: a per-instance
+    // `for comptime` loop inside descends the instance tables' copies,
+    // and a lambda or spawned child minted inside one inherits the
+    // scope exactly as it inherits the substitution. The body's own
+    // copy path starts empty — nested loops push their own indices.
+    let saved_path = std::mem::take(&mut found.comptime_path);
+    let saved_scope = found.comptime_instance.take();
+    found.comptime_instance = comptime_instance;
     let ctx = MintCtx {
         enclosing: at,
         enclosing_name: name,
@@ -82,7 +91,10 @@ pub(super) fn walk_entry(
         subst,
         res: &analyzed.resolutions[file.as_u32() as usize],
     };
-    discover_expr(plan, found, &ctx, &body)
+    let walked = discover_expr(plan, found, &ctx, &body);
+    found.comptime_path = saved_path;
+    found.comptime_instance = saved_scope;
+    walked
 }
 
 /// One call site entering a free generic fn: the instance over the
@@ -96,19 +108,30 @@ pub(super) fn enter_site(
     callee: &Expr,
     call_span: Span,
 ) -> Result<(), LowerError> {
-    let Some(def) = free_callee_def(found.analyzed, ctx.res, callee, call_span) else {
+    let Some(def) = free_callee_def(found, ctx.res, callee, call_span) else {
         return Ok(());
     };
     let Some(generic) = plan.generic_fn(def) else {
         return Ok(());
     };
-    let solved = found
-        .analyzed
-        .checked
-        .generic_calls
-        .get(&call_span)
-        .cloned()
-        .unwrap_or_default();
+    // The site's solved arguments, the copy-routed read: inside a
+    // `for comptime` copy the record lives in the per-copy tables.
+    let solved = copy_record_at(
+        &found.analyzed.checked,
+        found.comptime_instance.as_deref(),
+        &found.comptime_path,
+        call_span,
+    )
+    .and_then(|rec| rec.generic_call.clone())
+    .or_else(|| {
+        found
+            .analyzed
+            .checked
+            .generic_calls
+            .get(&call_span)
+            .cloned()
+    })
+    .unwrap_or_default();
     let args = match &ctx.subst {
         Some(subst) => solved
             .iter()
@@ -132,7 +155,7 @@ pub(super) fn enter_site(
 /// call walk applies: a plain name, a UFCS dot-call the method tier did
 /// not claim, or a module alias's qualified call.
 fn free_callee_def(
-    analyzed: &Analyzed,
+    found: &Discovery<'_, '_>,
     res: &Resolutions,
     callee: &Expr,
     call_span: Span,
@@ -144,8 +167,7 @@ fn free_callee_def(
         },
         Expr::Field { name, .. } => match res.get(name.span) {
             Some(Res::Dot(DotRes::Free { func, fed_param: 0 }))
-                if !analyzed.checked.inherent_calls.contains_key(&call_span)
-                    && !analyzed.checked.trait_calls.contains_key(&call_span) =>
+                if !member_routed(found, call_span) =>
             {
                 Some(*func)
             },

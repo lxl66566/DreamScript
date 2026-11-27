@@ -246,7 +246,18 @@ pub(super) fn enter_member_site(
     recv_span: Option<Span>,
 ) -> Result<(), LowerError> {
     let analyzed = found.analyzed;
-    let (generic, recv, site) = if let Some(tc) = analyzed.checked.trait_calls.get(&call_span)
+    // The dispatch records, the copy-routed read: inside a `for
+    // comptime` copy the checker's facts live in the per-copy tables,
+    // the active expansion's instance records first.
+    let copy_record = copy_record_at(
+        &analyzed.checked,
+        found.comptime_instance.as_deref(),
+        &found.comptime_path,
+        call_span,
+    );
+    let (generic, recv, site) = if let Some(tc) = copy_record
+        .and_then(|rec| rec.trait_call.clone())
+        .or_else(|| analyzed.checked.trait_calls.get(&call_span).cloned())
         && let Some(impl_site) = tc.impl_site
     {
         let member = analyzed.package.method(tc.method).name.clone();
@@ -270,7 +281,9 @@ pub(super) fn enter_member_site(
         } else {
             return Ok(());
         }
-    } else if let Some(&method) = analyzed.checked.inherent_calls.get(&call_span)
+    } else if let Some(method) = copy_record
+        .and_then(|rec| rec.inherent_call)
+        .or_else(|| analyzed.checked.inherent_calls.get(&call_span).copied())
         && let Some(&impl_site) = analyzed.decls.inherent_impls.get(&method)
     {
         let member = analyzed.package.method(method).name.clone();
@@ -281,7 +294,11 @@ pub(super) fn enter_member_site(
             return Ok(());
         };
         let Some(recv) = recv_span
-            .and_then(|span| analyzed.checked.expr_types.get(&span))
+            .and_then(|span| {
+                copy_record
+                    .and_then(|rec| rec.val)
+                    .or_else(|| analyzed.checked.expr_types.get(&span).copied())
+            })
             .map(|val| val.ty)
         else {
             // no receiver value (a type-keyed static call): the site

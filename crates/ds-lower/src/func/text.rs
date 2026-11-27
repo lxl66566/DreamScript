@@ -158,8 +158,8 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
     /// resolves through.
     pub(super) fn hole_show_dispatch(&self, span: Span) -> bool {
         self.hole_show_method(span).is_some()
-            || self.analyzed.checked.trait_calls.contains_key(&span)
-            || self.analyzed.checked.inherent_calls.contains_key(&span)
+            || self.has_trait_record(span)
+            || self.has_inherent_record(span)
     }
 
     /// One hole's `show` dispatch: the receiver wrapped as the

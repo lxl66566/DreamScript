@@ -117,7 +117,7 @@ impl<'a> FnLower<'a, '_, '_> {
                 MethodOwner::Inherent(_)
             )
         }) && !candidates.is_empty();
-        if let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) {
+        if let Some(method) = self.inherent_call(call) {
             return self.resolve_inherent_method(method, call, what, recv);
         }
         let Some(tc) = self.trait_call(call)? else {
@@ -290,7 +290,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// list `Ref` trailing it), so the member route reorders the
     /// written arguments behind the receiver swap.
     pub(in crate::func) fn native_member_def(&self, call: Span) -> Option<NativeMember> {
-        let &method = self.analyzed.checked.inherent_calls.get(&call)?;
+        let method = self.inherent_call(call)?;
         let MethodOwner::Inherent(target) = &self.analyzed.package.method(method).owner else {
             return None;
         };
@@ -356,7 +356,7 @@ impl<'a> FnLower<'a, '_, '_> {
     /// the callable word), so the member site lowers through the sort
     /// path's own staging over the checker's inherent bound record.
     pub(in crate::func) fn sort_member_site(&self, call: Span) -> bool {
-        let Some(&method) = self.analyzed.checked.inherent_calls.get(&call) else {
+        let Some(method) = self.inherent_call(call) else {
             return false;
         };
         let method_decl = self.analyzed.package.method(method);

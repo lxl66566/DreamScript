@@ -25,49 +25,11 @@ impl Bodies<'_> {
         };
         let callee = peel_paren(callee);
         let selection = selection.as_ref();
-        // Inside a `for comptime` copy the plan-time dispatch records
-        // are copy-dependent facts: member and generic dispatch queue
-        // with the walker round, while free monomorphic calls (whose
-        // records the copy shares) keep lowering.
-        if !self.comptime_path.is_empty() {
-            let dispatch = match peel_paren(callee) {
-                Expr::Field { .. } => true,
-                Expr::Path { path, .. } => match path.segments.as_slice() {
-                    [only] => match self.res.get(only.span) {
-                        Some(Res::Def(def)) => self
-                            .decls
-                            .fns
-                            .get(def)
-                            .is_some_and(|sig| !sig.generics.is_empty()),
-                        Some(Res::TraitMethod(_) | Res::Dot(_)) => true,
-                        _ => false,
-                    },
-                    _ => true,
-                },
-                _ => true,
-            };
-            if dispatch {
-                self.error(
-                    ErrorCode::InferenceFailed,
-                    "a member or generic dispatch inside a `for comptime` copy queues with the \
-                     walker round; its per-copy evidence has no plan record yet"
-                        .to_owned(),
-                    callee.span(),
-                    "dispatch inside a comptime copy",
-                );
-                for arg in args {
-                    self.expr(&arg.value, None);
-                }
-                if let Some(tail) = trailing {
-                    self.expr(tail, None);
-                }
-                return Val {
-                    ty: self.empty(),
-                    diverges: false,
-                    poisoned: true,
-                };
-            }
-        }
+        // Member and generic dispatch inside a `for comptime` copy
+        // checks and records like any site: the record writers route
+        // per-copy, and the plan-side demand and discovery walks read
+        // the active copy's tables, so the dispatch lowers from the
+        // copy's own records.
         if let Expr::Field { recv, name, .. } = callee {
             return self.dot_call(
                 callee,

@@ -81,6 +81,31 @@ impl<'a, 'p, 's> FnLower<'a, 'p, 's> {
         self.copy_record(span)?.place_store.clone()
     }
 
+    /// The inherent dispatch one call site carries, the copy-routed
+    /// read: a copy-local site's record lives in the per-copy tables.
+    pub(super) fn inherent_call(&self, span: Span) -> Option<MethodId> {
+        if let Some(method) = self.copy_record(span).and_then(|rec| rec.inherent_call) {
+            return Some(method);
+        }
+        self.analyzed.checked.inherent_calls.get(&span).copied()
+    }
+
+    /// Whether a trait dispatch record answers at one span, the
+    /// copy-routed routing test.
+    pub(super) fn has_trait_record(&self, span: Span) -> bool {
+        self.copy_record(span)
+            .is_some_and(|rec| rec.trait_call.is_some())
+            || self.analyzed.checked.trait_calls.contains_key(&span)
+    }
+
+    /// Whether an inherent dispatch record answers at one span, the
+    /// copy-routed routing test.
+    pub(super) fn has_inherent_record(&self, span: Span) -> bool {
+        self.copy_record(span)
+            .is_some_and(|rec| rec.inherent_call.is_some())
+            || self.analyzed.checked.inherent_calls.contains_key(&span)
+    }
+
     /// The directed label's atom at one span, the copy-active read: a
     /// generic enum's case record maps to the active instance's own
     /// minted atom under an instantiation.

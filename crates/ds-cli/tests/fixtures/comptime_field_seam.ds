@@ -10,7 +10,17 @@
 // fn and inside a generic fn (one instance per entering shape, the
 // concrete loop riding each), and the loop inside a member body; every
 // row prints twice through the same helper to pin the served and fresh
-// agreement.
+// agreement. The dispatch rows pin the walker round's residuals:
+// member, generic, and trait dispatch inside a copy lowers from the
+// copy's own records — a generic call plans its instance at the
+// copy-local site (the sum doubles through `idd`), a concrete-receiver
+// trait call stages statically per copy, a bound-receiver trait call
+// dispatches through the frame's runtime evidence slot (the demand
+// walk reads the copies), an inherent member call lowers its native
+// seam per copy, and the interpolation hole's implicit show dispatch
+// answers inside the copy. The per-instance rows carry dispatch too:
+// a generic call and a concrete trait call inside a per-instance copy
+// read the expansion's instance records.
 struct nums { a: int, b: int, c: int }
 
 struct rec { name: string, unit: string }
@@ -126,6 +136,84 @@ fn per_grid[t] (p: t) -> int {
 
 struct pair { l: int, r: int }
 
+trait renders { fn render(self) -> string }
+
+impl renders for bool { fn render(self) -> string { if self { "t" } else { "f" } } }
+
+impl renders for pair { fn render(self) -> string { "p" } }
+
+// A generic call inside a written copy: the plan's discovery reads the
+// copy's own record and plans the instance the site enters.
+fn disp_generic (p: pair) -> int {
+  var total = 0
+  for comptime f in fields(pair) {
+    total += idd(p.[f.name])
+  }
+  total
+}
+
+fn idd[t] (x: t) -> t { x }
+
+// A concrete-receiver trait call inside a written copy: the copy's
+// solved dispatch stages statically, once per copy.
+fn disp_concrete () -> string {
+  var out = ""
+  for comptime f in fields(pair) {
+    out += true.render()
+  }
+  out
+}
+
+// A bound-receiver trait call inside a written copy: the site records
+// no instance (the body's own bound satisfies it), so the dispatch
+// rides the frame's runtime evidence slot the demand walk collected
+// per copy.
+fn disp_runtime[t: renders] (x: t) -> string {
+  var out = ""
+  for comptime f in fields(pair) {
+    out += x.render()
+    out += ","
+  }
+  out
+}
+
+// An inherent member call inside a written copy: the copy's record
+// names the native member seam, staged per copy.
+fn disp_inherent () -> int {
+  var total = 0
+  for comptime f in fields(rec) {
+    total += f.name.len()
+  }
+  total
+}
+
+// The interpolation hole's implicit show dispatch inside a written
+// copy: the hole record is a per-copy fact, the text arm and the
+// demand walk both reading it there.
+fn disp_hole (p: pair) -> () {
+  for comptime f in fields(pair) {
+    println("v=${p.[f.name]}")
+  }
+}
+
+// Dispatch inside per-instance copies: the generic call and the
+// concrete trait call read the expansion's instance records.
+fn per_disp[t] (p: t) -> int {
+  var total = 0
+  for comptime f in fields(t) {
+    total += idd(p.[f.name])
+  }
+  total
+}
+
+fn per_disp2[t: renders] (p: t) -> int {
+  var count = 0
+  for comptime f in fields(t) {
+    count += 1
+  }
+  count
+}
+
 fn main() -> () {
   println(sum_keyed(nums { a: 3, b: 4, c: 5 }).show())
   println(write_all(nums { a: 1, b: 2, c: 3 }).show())
@@ -142,4 +230,11 @@ fn main() -> () {
   println(mixed(nums { a: 1, b: 2, c: 3 }).show())
   println(mixed(pair { l: 5, r: 6 }).show())
   println(per_grid(pair { l: 1, r: 2 }).show())
+  println(disp_generic(pair { l: 3, r: 4 }).show())
+  println(disp_concrete())
+  println(disp_runtime(true))
+  println(disp_inherent().show())
+  disp_hole(pair { l: 5, r: 6 })
+  println(per_disp(nums2 { a: 2, b: 3 }).show())
+  println(per_disp2(pair { l: 1, r: 2 }).show())
 }

@@ -391,6 +391,8 @@ where
         analyzed,
         types: &mut types,
         deinits: &deinits,
+        comptime_path: Vec::new(),
+        comptime_instance: None,
     };
     for tree in asts {
         let ast = tree.borrow();
